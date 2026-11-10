@@ -12,20 +12,15 @@ import {
   X,
 } from 'lucide-react';
 
-function computeClientHashPreview(filesMap: Record<string, string>): string {
+async function computeClientSha256(filesMap: Record<string, string>): Promise<string> {
   const keys = Object.keys(filesMap).sort();
   if (keys.length === 0) return 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
-  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
-  const str = keys.map((k) => `${k}:${filesMap[k].length}`).join('|');
-  for (let i = 0; i < str.length; i++) {
-    const ch = str.charCodeAt(i);
-    h1 = Math.imul(h1 ^ ch, 2654435761);
-    h2 = Math.imul(h2 ^ ch, 1597334677);
-  }
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-  const hex = (h2 >>> 0).toString(16).padStart(8, '0') + (h1 >>> 0).toString(16).padStart(8, '0');
-  return `${hex}${hex}${hex}${hex}`;
+  const concatenated = keys.map((k) => `${k}:${filesMap[k]}`).join('\n--WINHOOD-ENTRY--\n');
+  const encoder = new TextEncoder();
+  const data = encoder.encode(concatenated);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 const PROJECT_CATEGORIES = [
@@ -142,7 +137,17 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
     (acc, text) => acc + text.split(/\r?\n/).length,
     0
   );
-  const packageHash = computeClientHashPreview(filesMap);
+  const [packageHash, setPackageHash] = useState<string>('');
+
+  React.useEffect(() => {
+    let active = true;
+    computeClientSha256(filesMap).then((hash) => {
+      if (active) setPackageHash(hash);
+    });
+    return () => {
+      active = false;
+    };
+  }, [filesMap]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

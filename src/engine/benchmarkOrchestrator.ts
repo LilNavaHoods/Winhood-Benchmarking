@@ -1,10 +1,12 @@
 import crypto from 'node:crypto';
 import type {
   ArchitectureGraphData,
+  AssessmentMode,
   BenchmarkCategoryKey,
   BenchmarkProfileConfig,
   BenchmarkRun,
   BenchmarkRunProgress,
+  DataOrigin,
   EvidenceRecord,
   FunctionalEquivalenceRow,
   NormalizedFinding,
@@ -338,6 +340,9 @@ export function createInitialRunningBenchmark(params: {
   weights: Record<BenchmarkCategoryKey, number>;
   enablePenaltyCaps: boolean;
   equivalenceEnvironment: BenchmarkProfileConfig['equivalenceEnvironment'];
+  assessmentMode?: AssessmentMode;
+  environmentMode?: 'PRODUCTION' | 'DEMO' | 'TEST';
+  dataOrigin?: DataOrigin;
 }): BenchmarkRun {
   const runId = params.runId || `run-${crypto.randomUUID().slice(0, 8)}`;
   const startedAt = new Date().toISOString();
@@ -358,6 +363,9 @@ export function createInitialRunningBenchmark(params: {
     startedAt,
     completedAt: '',
     algorithmVersion: ALGORITHM_VERSION,
+    assessmentMode: params.assessmentMode || (params.softwares.length === 1 ? 'INDIVIDUAL' : 'AB_COMPARE'),
+    environmentMode: params.environmentMode || 'PRODUCTION',
+    dataOrigin: params.dataOrigin || params.softwares[0]?.dataOrigin || 'USER_SOURCE',
     weightsUsed: params.weights,
     equivalenceEnvironment: params.equivalenceEnvironment,
     environmentEquivalent: eqValidation.equivalent,
@@ -391,6 +399,9 @@ export function executeBenchmarkRunOrchestration(params: {
   weights: Record<BenchmarkCategoryKey, number>;
   enablePenaltyCaps: boolean;
   equivalenceEnvironment: BenchmarkProfileConfig['equivalenceEnvironment'];
+  assessmentMode?: 'INDIVIDUAL' | 'AB_COMPARE' | 'MARKET_COMPETITOR';
+  environmentMode?: 'PRODUCTION' | 'DEMO' | 'TEST';
+  dataOrigin?: any;
   onProgress?: (progress: BenchmarkRunProgress) => void;
 }): BenchmarkRun {
   const runId = params.runId || `run-${crypto.randomUUID().slice(0, 8)}`;
@@ -616,6 +627,8 @@ export function executeBenchmarkRunOrchestration(params: {
         hasCleanSandboxUninstall: !hasResidualRisk,
         hasCompleteDocumentation: bundle.hasCompleteDocumentation,
         environmentEquivalent,
+        runtimeMetrics: bundle.runtimeMetrics,
+        staticMetrics: bundle.staticMetrics,
       },
       params.weights,
       params.enablePenaltyCaps
@@ -695,10 +708,15 @@ export function executeBenchmarkRunOrchestration(params: {
   const runnerUp = sortedCards[1] || null;
 
   const completedAt = new Date().toISOString();
+  const mode = params.assessmentMode || (params.softwares.length === 1 ? 'INDIVIDUAL' : 'AB_COMPARE');
   const executiveSummary =
-    winner && runnerUp
-      ? `Benchmark concluído sob o algoritmo determinístico ${ALGORITHM_VERSION}. O software "${winner.softwareName} (${winner.softwareVersion})" obteve a maior pontuação geral (${winner.groupedScores.overallScore.toFixed(2)} / 5.00 — ${winner.classificationLabel}), superando "${runnerUp.softwareName} (${runnerUp.softwareVersion})" (${runnerUp.groupedScores.overallScore.toFixed(2)} / 5.00 — ${runnerUp.classificationLabel}). Foram registradas ${evidenceChain.length} evidências criptográficas encadeadas por SHA-256 e acionadas ${scoreCards.reduce((acc, s) => acc + s.penaltyCapsTriggered.length, 0)} travas matemáticas (Penalty Caps).`
-      : `Execução concluída com ${scoreCards.length} software(s) analisado(s).`;
+    mode === 'INDIVIDUAL' && winner
+      ? `Avaliação individual concluída sob o algoritmo determinístico ${ALGORITHM_VERSION}. O software "${winner.softwareName} (${winner.softwareVersion})" obteve pontuação geral ${winner.groupedScores.overallScore.toFixed(2)} / 5.00 (${winner.classificationLabel}). Foram validadas ${evidenceChain.length} evidências criptográficas rastreáveis SHA-256 e acionadas ${winner.penaltyCapsTriggered.length} travas matemáticas.`
+      : mode === 'MARKET_COMPETITOR' && winner && runnerUp
+        ? `Comparação de Mercado com concorrente concluída sob ${ALGORITHM_VERSION}. Software alvo "${winner.softwareName}" (${winner.groupedScores.overallScore.toFixed(2)} / 5.00) vs Concorrente "${runnerUp.softwareName}" (${runnerUp.groupedScores.overallScore.toFixed(2)} / 5.00). Cobertura e limitações públicas estritamente diferenciadas.`
+        : winner && runnerUp
+          ? `Benchmark comparativo A/B concluído sob o algoritmo determinístico ${ALGORITHM_VERSION}. O software "${winner.softwareName} (${winner.softwareVersion})" obteve a maior pontuação geral (${winner.groupedScores.overallScore.toFixed(2)} / 5.00 — ${winner.classificationLabel}), superando "${runnerUp.softwareName} (${runnerUp.softwareVersion})" (${runnerUp.groupedScores.overallScore.toFixed(2)} / 5.00 — ${runnerUp.classificationLabel}). Foram registradas ${evidenceChain.length} evidências criptográficas encadeadas por SHA-256.`
+          : `Execução concluída com ${scoreCards.length} software(s) analisado(s).`;
 
   const finalResult: BenchmarkRun = {
     id: runId,
@@ -713,6 +731,9 @@ export function executeBenchmarkRunOrchestration(params: {
     weightsUsed: params.weights,
     equivalenceEnvironment: params.equivalenceEnvironment,
     environmentEquivalent,
+    assessmentMode: mode,
+    environmentMode: params.environmentMode || 'PRODUCTION',
+    dataOrigin: params.dataOrigin || 'USER_SOURCE',
     progress: {
       percent: 100,
       stageLabel: 'Execução e validação de veracidade finalizadas com sucesso.',

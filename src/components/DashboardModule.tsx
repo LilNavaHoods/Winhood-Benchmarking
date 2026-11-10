@@ -621,13 +621,19 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                       <div className="font-sans font-semibold text-slate-900 dark:text-slate-100">
                         {sc.softwareName}
                       </div>
-                      <div className="text-slate-600 dark:text-slate-400">
-                        <span>P50: {sc.metricsSummary.p50LatencyMs}ms</span>
-                        <span className="mx-1.5">·</span>
-                        <span>P95: {sc.metricsSummary.p95LatencyMs}ms</span>
-                        <span className="mx-1.5">·</span>
-                        <span>RPS: {sc.metricsSummary.throughputRps}</span>
-                      </div>
+                      {sc.runtimeMetrics?.status === 'MEASURED' || (sc.metricsSummary.p95LatencyMs > 0 || sc.metricsSummary.throughputRps > 0) ? (
+                        <div className="text-slate-600 dark:text-slate-400">
+                          <span>P50: {sc.metricsSummary.p50LatencyMs}ms</span>
+                          <span className="mx-1.5">·</span>
+                          <span>P95: {sc.metricsSummary.p95LatencyMs}ms</span>
+                          <span className="mx-1.5">·</span>
+                          <span>RPS: {sc.metricsSummary.throughputRps}</span>
+                        </div>
+                      ) : (
+                        <div className="text-amber-600 dark:text-amber-400 font-sans text-[11px] font-medium">
+                          ⚡ Desempenho de Runtime: <strong>NÃO MEDIDO</strong> (Requer execução de worker de carga)
+                        </div>
+                      )}
                       <div className="text-slate-600 dark:text-slate-400">
                         <span>Cobertura Testes: {sc.metricsSummary.testCoveragePercent}%</span>
                         <span className="mx-1.5">·</span>

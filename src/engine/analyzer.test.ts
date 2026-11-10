@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
 import {
   DEFAULT_CATEGORY_WEIGHTS,
   calculateDeterministicScoreCard,
@@ -16,6 +17,7 @@ import {
   KEESAFE_OPEN_FILES,
   VAULTCORE_INTERNAL_FILES,
 } from './realSampleRepositories';
+import { MarketCompetitorDiscoveryEngine } from './marketCompetitorDiscoveryEngine';
 import type { Software } from '../types/benchmark';
 
 test('validateCategoryWeights validates exact 100% mathematical sum and rejects invalid totals', () => {
@@ -455,5 +457,92 @@ test('ToolCacheManager computes deterministic SHA-256 keys and invalidates cache
   const cached = cacheManager.get<{ sampleMetric: number }>(input1);
   assert.deepEqual(cached?.payload, { sampleMetric: 42 });
   assert.equal(cacheManager.get(input2), null);
+});
+
+test('MarketCompetitorDiscoveryEngine discovers competitors with weighted similarity breakdown', () => {
+  const candidates = MarketCompetitorDiscoveryEngine.discoverCompetitors({
+    category: 'Password & Secrets Management',
+    purpose: 'VaultCore Pro Password Manager and Secrets Safe',
+    features: ['AES-256-GCM', 'PBKDF2', 'Zero-Knowledge', 'CLI', 'Web Extension'],
+    audience: 'Enterprise & Security Teams',
+    platform: 'Cross-platform',
+    distribution: 'Self-hosted and Cloud',
+  });
+
+  assert.ok(candidates.length >= 2);
+  const topCandidate = candidates[0];
+  assert.ok(topCandidate.similarityScore > 50);
+  assert.ok(topCandidate.similarityBreakdown.purposeMatch >= 0);
+  assert.ok(topCandidate.similarityBreakdown.featuresMatch >= 0);
+  assert.ok(topCandidate.similarityBreakdown.audienceMatch >= 0);
+  assert.ok(topCandidate.similarityBreakdown.platformMatch >= 0);
+  assert.ok(topCandidate.similarityBreakdown.distributionMatch >= 0);
+  assert.ok(topCandidate.similarityBreakdown.integrationsMatch >= 0);
+
+  // Closed vs Open source distinction
+  const openSourceCount = candidates.filter((c: any) => c.openSource).length;
+  const closedSourceCount = candidates.filter((c: any) => !c.openSource).length;
+  assert.ok(openSourceCount >= 1);
+  assert.ok(closedSourceCount >= 1);
+});
+
+test('Static analysis strictly enforces Zero Fabricated Runtime Metrics (P50/P95/RPS = NOT_MEASURED)', () => {
+  const analysis = executeRealStaticAnalysisOnSource({
+    runId: 'run-zero-fake-01',
+    softwareId: 'sw-vaultcore',
+    softwareName: 'VaultCore Internal',
+    softwareVersion: '2.4.0',
+    filesMap: VAULTCORE_INTERNAL_FILES,
+  });
+
+  // Zero fabricated latency or throughput in static analysis
+  assert.equal(analysis.runtimeMetrics.status, 'NOT_MEASURED');
+  assert.equal(analysis.computedMetrics.p50LatencyMs, 0);
+  assert.equal(analysis.computedMetrics.p95LatencyMs, 0);
+  assert.equal(analysis.computedMetrics.throughputRps, 0);
+
+  // ScoreCard generation marks performance category as NOT_ASSESSED when unmeasured
+  const scoreCard = calculateDeterministicScoreCard(
+    {
+      softwareId: 'sw-vaultcore',
+      softwareName: 'VaultCore Internal',
+      softwareVersion: '2.4.0',
+      veracityClassification: 'SUCCESS_VALIDATED',
+      coveragePercent: 100,
+      essentialFeaturesMissing: 0,
+      visualOnlyFeaturesCount: 0,
+      metrics: analysis.computedMetrics,
+      hasEncryptionAtRest: true,
+      hasAuditTrail: true,
+      hasCleanSandboxUninstall: true,
+      hasCompleteDocumentation: true,
+      environmentEquivalent: true,
+      runtimeMetrics: analysis.runtimeMetrics,
+    },
+    DEFAULT_CATEGORY_WEIGHTS,
+    true
+  );
+
+  assert.equal(scoreCard.categoryDetails?.performance.status, 'NOT_ASSESSED');
+  assert.ok(
+    scoreCard.categoryDetails?.performance.limitations.some((l) => l.includes('não medidas'))
+  );
+});
+
+test('Canonical Path Traversal is blocked deterministically without escaping workspace directory', () => {
+  const targetDir = path.resolve('/tmp/isolated-target');
+  const maliciousPaths = [
+    '../../etc/passwd',
+    '..\\..\\windows\\system32\\cmd.exe',
+    'foo/../../../root/.ssh/id_rsa',
+    '/etc/shadow',
+  ];
+
+  for (const relPath of maliciousPaths) {
+    const normalizedRel = relPath.replace(/\\/g, '/');
+    const resolved = path.resolve(targetDir, normalizedRel);
+    const isInside = resolved.startsWith(targetDir + path.sep);
+    assert.equal(isInside, false, `Path "${relPath}" must not escape isolated sandbox.`);
+  }
 });
 

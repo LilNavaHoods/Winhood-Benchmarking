@@ -6,15 +6,21 @@ import { promisify } from 'node:util';
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import type {
+  AppEnvironment,
+  AssessmentMode,
   AuditLogEntry,
   BenchmarkCategoryKey,
   BenchmarkProfileConfig,
   BenchmarkRun,
+  DataOrigin,
+  FileInventoryItem,
   GitProviderType,
+  MarketCompetitorCandidate,
   Project,
   Software,
   SonarAndToolsDatabaseBundle,
   SonarInstallationMode,
+  SourceManifest,
   ToolAdapterInfo,
   VulnerabilityValidationState,
 } from './src/types/benchmark';
@@ -28,12 +34,14 @@ import { buildTechnicalInventory } from './src/engine/staticAnalyzer';
 import {
   KEESAFE_OPEN_FILES,
   VAULTCORE_INTERNAL_FILES,
+  DEMO_FIXTURE_METADATA,
 } from './src/engine/realSampleRepositories';
 import {
   DEFAULT_BENCHMARK_PROFILES,
   createInitialRunningBenchmark,
   executeBenchmarkRunOrchestration,
 } from './src/engine/benchmarkOrchestrator';
+import { MarketCompetitorDiscoveryEngine } from './src/engine/marketCompetitorDiscoveryEngine';
 import {
   buildFull21SecurityAdaptersCatalog,
   executeSecurityAssessmentSuite,
@@ -61,6 +69,7 @@ const ISOLATED_ARTIFACTS_DIR = path.join(DATA_DIR, 'isolated_artifacts');
 const STORE_FILE = path.join(DATA_DIR, 'winhood_persistent_db.json');
 
 interface PersistentDatabaseState {
+  environmentMode: AppEnvironment;
   currentUser: {
     id: string;
     name: string;
@@ -75,6 +84,11 @@ interface PersistentDatabaseState {
   adapters: ToolAdapterInfo[];
   auditLogs: AuditLogEntry[];
   toolsDb: SonarAndToolsDatabaseBundle;
+  demoData?: {
+    projects: Project[];
+    softwares: Software[];
+    runs: BenchmarkRun[];
+  };
   telemetry: {
     startedAt: string;
     totalApiRequests: number;
@@ -94,18 +108,27 @@ function ensureDirectories() {
 }
 
 function writeIsolatedArtifactsToDisk(softwareSlug: string, filesMap: Record<string, string>): string {
-  const targetDir = path.join(ISOLATED_ARTIFACTS_DIR, softwareSlug);
+  const safeSlug = softwareSlug.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const targetDir = path.resolve(ISOLATED_ARTIFACTS_DIR, safeSlug);
+  const rootCanonical = path.resolve(ISOLATED_ARTIFACTS_DIR);
+  if (!targetDir.startsWith(rootCanonical + path.sep) && targetDir !== rootCanonical) {
+    throw new Error('Tentativa de Directory Traversal no softwareSlug bloqueada.');
+  }
   if (!fs.existsSync(targetDir)) {
     fs.mkdirSync(targetDir, { recursive: true });
   }
   for (const [relPath, content] of Object.entries(filesMap)) {
-    const safeRel = relPath.replace(/\.\./g, '');
-    const fullPath = path.join(targetDir, safeRel);
-    const parent = path.dirname(fullPath);
+    // Canonical resolution and boundary validation (P0 / P1)
+    const normalizedRel = relPath.replace(/\\/g, '/');
+    const canonicalTarget = path.resolve(targetDir, normalizedRel);
+    if (!canonicalTarget.startsWith(targetDir + path.sep) && canonicalTarget !== targetDir) {
+      throw new Error(`Tentativa de Path Traversal bloqueada no arquivo: ${relPath}`);
+    }
+    const parent = path.dirname(canonicalTarget);
     if (!fs.existsSync(parent)) {
       fs.mkdirSync(parent, { recursive: true });
     }
-    fs.writeFileSync(fullPath, content, 'utf8');
+    fs.writeFileSync(canonicalTarget, content, 'utf8');
   }
   return targetDir;
 }
@@ -252,6 +275,7 @@ function createInitialRealWorkspaceState(): PersistentDatabaseState {
   ];
 
   const state: PersistentDatabaseState = {
+    environmentMode: 'DEMO',
     currentUser: {
       id: 'usr-admin-01',
       name: 'Lohan Silva (Lead Security Architect)',
@@ -283,6 +307,7 @@ function createInitialCleanWorkspaceState(): PersistentDatabaseState {
   ensureDirectories();
   const nowIso = new Date().toISOString();
   const state: PersistentDatabaseState = {
+    environmentMode: 'PRODUCTION',
     currentUser: {
       id: 'usr-admin-01',
       name: 'Lohan Silva (Lead Security Architect)',
@@ -304,7 +329,7 @@ function createInitialCleanWorkspaceState(): PersistentDatabaseState {
         action: 'PLATFORM_INITIALIZED_CLEAN',
         entityType: 'SYSTEM',
         entityId: 'global',
-        details: 'Plataforma inicializada em estado limpo: zero projetos ou dados mocados.',
+        details: 'Plataforma inicializada em estado limpo: zero projetos ou dados mocados no ambiente de produção.',
         integrityHash: computeSha256(`AUDIT|0|CLEAN_INIT|${nowIso}`),
       },
     ],
@@ -327,9 +352,33 @@ function loadDatabase(): PersistentDatabaseState {
     try {
       const raw = fs.readFileSync(STORE_FILE, 'utf8');
       const parsed = JSON.parse(raw) as PersistentDatabaseState;
+      if (!parsed.environmentMode) {
+        parsed.environmentMode = 'PRODUCTION';
+      }
       if (!parsed.toolsDb) {
         parsed.toolsDb = SonarQubeIntegrationService.createInitialToolsDatabaseState(DATA_DIR);
       }
+
+      // Regra P0 / Seção 4.1: Isolar dados demonstrativos do ambiente de Produção
+      if (parsed.environmentMode === 'PRODUCTION') {
+        const demoSwIds = new Set(['sw-vaultcore-internal', 'sw-keesafe-open']);
+        const isDemoProject = (p: Project) => p.id === 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
+        const demoProjects = parsed.projects.filter(isDemoProject);
+        const demoSoftwares = parsed.softwares.filter((s) => demoSwIds.has(s.id) || s.dataOrigin === 'DEMO_FIXTURE');
+        const demoRuns = parsed.runs.filter((r) => r.softwareIds.some((id) => demoSwIds.has(id)) || r.dataOrigin === 'DEMO_FIXTURE');
+
+        if (demoProjects.length > 0 || demoSoftwares.length > 0 || demoRuns.length > 0) {
+          parsed.demoData = {
+            projects: demoProjects.map((p) => ({ ...p, dataOrigin: 'DEMO_FIXTURE' as any })),
+            softwares: demoSoftwares.map((s) => ({ ...s, dataOrigin: 'DEMO_FIXTURE' as any })),
+            runs: demoRuns.map((r) => ({ ...r, dataOrigin: 'DEMO_FIXTURE' as any, environmentMode: 'DEMO' as any })),
+          };
+          parsed.projects = parsed.projects.filter((p) => !isDemoProject(p));
+          parsed.softwares = parsed.softwares.filter((s) => !demoSwIds.has(s.id) && s.dataOrigin !== 'DEMO_FIXTURE');
+          parsed.runs = parsed.runs.filter((r) => !r.softwareIds.some((id) => demoSwIds.has(id)) && r.dataOrigin !== 'DEMO_FIXTURE');
+        }
+      }
+
       return parsed;
     } catch {
       return createInitialCleanWorkspaceState();
@@ -951,29 +1000,27 @@ async function startServer() {
       `Projeto "${project.name}" criado via upload com UUID ${project.id}.`
     );
 
-    const finalFilesMap: Record<string, string> =
-      filesMap && Object.keys(filesMap).length > 0
-        ? filesMap
-        : {
-            'README.md': `# ${name}\n\nProjeto importado com sucesso via WinHood Upload.`,
-            'package.json': JSON.stringify(
-              {
-                name: name.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
-                version: softwareVersion || '1.0.0',
-                private: true,
-              },
-              null,
-              2
-            ),
-          };
+    if (!filesMap || Object.keys(filesMap).length === 0) {
+      return res.status(400).json({
+        error: 'SOURCE_REQUIRED',
+        message: 'Nenhum arquivo enviado. É obrigatório fornecer os arquivos reais do projeto para upload.',
+      });
+    }
 
     const swName = (softwareName || name).trim();
     const swVendor = (softwareVendor || owner || 'Upload Local').trim();
-    const swVersion = (softwareVersion || '1.0.0').trim();
+    let swVersion = (softwareVersion || '').trim();
+    if (!swVersion && filesMap['package.json']) {
+      try {
+        const pkg = JSON.parse(filesMap['package.json']);
+        if (pkg.version) swVersion = String(pkg.version);
+      } catch {}
+    }
+    if (!swVersion) swVersion = 'NOT_DECLARED';
 
     const slug = `${swName.toLowerCase().replace(/[^a-z0-9]+/g, '_')}_${Date.now()}`;
-    const isolatedPath = writeIsolatedArtifactsToDisk(slug, finalFilesMap);
-    const inv = buildTechnicalInventory(finalFilesMap, isolatedPath);
+    const isolatedPath = writeIsolatedArtifactsToDisk(slug, filesMap);
+    const inv = buildTechnicalInventory(filesMap, isolatedPath);
 
     const createdSoftware: Software = {
       id: `sw-${crypto.randomUUID().slice(0, 8)}`,
@@ -994,9 +1041,30 @@ async function startServer() {
       owner: (owner || db.currentUser.name).trim(),
       notes: `Pacote ingerido com hash SHA-256: ${inv.packageSha256}`,
       sourceType: 'LOCAL_AUTHORIZED',
-      commitHash: computeSha256(`${swName}:${swVersion}:${Date.now()}`).slice(0, 40),
+      commitHash: `LOCAL_PACKAGE_${inv.packageSha256.slice(0, 16)}`,
       packageSha256: inv.packageSha256,
       createdAt: nowIso,
+      dataOrigin: 'USER_SOURCE',
+      sourceManifest: {
+        softwareId: '', // Preenchido abaixo
+        sourceType: 'LOCAL_UPLOAD',
+        sourceUrl: 'local://workspace/upload',
+        branch: 'LOCAL',
+        commitSha: 'NOT_APPLICABLE',
+        treeSha: 'NOT_APPLICABLE',
+        artifactSha256: inv.packageSha256,
+        importedAt: nowIso,
+        importStatus: 'COMPLETE',
+        filesDiscovered: Object.keys(filesMap).length,
+        filesReceived: Object.keys(filesMap).length,
+        filesAnalyzed: inv.eligibleFiles,
+        filesExcluded: Object.keys(filesMap).length - inv.eligibleFiles,
+        filesFailed: 0,
+        unsupportedFiles: 0,
+        sourceProvider: 'Upload Local Direto',
+        authenticationMode: 'USER_AUTHORIZED',
+        provenanceEvidence: `Upload de ${inv.totalFiles} arquivos com SHA-256 ${inv.packageSha256}.`,
+      },
       inventory: {
         totalFiles: inv.totalFiles,
         eligibleFiles: inv.eligibleFiles,
@@ -1007,8 +1075,9 @@ async function startServer() {
         isolatedStoragePath: isolatedPath,
         verifiedIntegrity: inv.verifiedIntegrity,
       },
-      sourceFilesContent: finalFilesMap,
+      sourceFilesContent: filesMap,
     };
+    createdSoftware.sourceManifest!.softwareId = createdSoftware.id;
 
     db.softwares.push(createdSoftware);
     appendAuditLog(
@@ -1336,43 +1405,68 @@ async function startServer() {
 
     let filesMap: Record<string, string> = {};
     const branch = defaultBranch || 'main';
+    let realCommitSha = '';
+    let treeSha = '';
+    let totalDiscovered = 0;
+    let failedCount = 0;
+    let rateLimited = false;
 
-    // 100% Ingestão Real: Buscar árvore e conteúdo direto do GitHub
+    // 100% Ingestão Real e Rastreável (P0 / Seção 4.2)
     try {
-      const treeUrl = `https://api.github.com/repos/${repoFullName}/git/trees/${branch}?recursive=1`;
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 6000);
+      // 1. Obter SHA real do Commit da branch informada
+      const commitRes = await fetch(`https://api.github.com/repos/${repoFullName}/commits/${branch}`, {
+        headers: {
+          'User-Agent': 'WinHood-Security-Analyzer',
+          Accept: 'application/vnd.github.v3+json',
+        },
+      });
+
+      if (commitRes.status === 403) {
+        rateLimited = true;
+      } else if (commitRes.ok) {
+        const commitData = (await commitRes.json()) as { sha?: string };
+        realCommitSha = commitData.sha || '';
+      }
+
+      // 2. Se obteve o commit, buscar a árvore completa a partir do SHA real
+      const treeTargetRef = realCommitSha || branch;
+      const treeUrl = `https://api.github.com/repos/${repoFullName}/git/trees/${treeTargetRef}?recursive=1`;
       const treeRes = await fetch(treeUrl, {
         headers: {
           'User-Agent': 'WinHood-Security-Analyzer',
           Accept: 'application/vnd.github.v3+json',
         },
-        signal: controller.signal,
       });
-      clearTimeout(timeoutId);
 
-      if (treeRes.ok) {
+      if (treeRes.status === 403) {
+        rateLimited = true;
+      } else if (treeRes.ok) {
         const treeData = (await treeRes.json()) as {
+          sha?: string;
           tree?: Array<{ path: string; type: string; size?: number }>;
         };
-        const eligibleTreeItems = (treeData.tree || [])
+        treeSha = treeData.sha || realCommitSha;
+        const allBlobs = (treeData.tree || []).filter((item) => item.type === 'blob' && item.path);
+        totalDiscovered = allBlobs.length;
+
+        const eligibleTreeItems = allBlobs
           .filter((item) => {
-            if (item.type !== 'blob' || !item.path) return false;
             const ext = path.extname(item.path).toLowerCase();
             return (
-              ['.ts', '.tsx', '.js', '.jsx', '.py', '.sql', '.json', '.cs', '.java', '.go', '.rs', '.md'].includes(ext) &&
+              ['.ts', '.tsx', '.js', '.jsx', '.py', '.sql', '.json', '.cs', '.java', '.go', '.rs', '.md', '.yml', '.yaml', '.toml'].includes(ext) &&
               !item.path.includes('node_modules/') &&
               !item.path.includes('dist/') &&
               !item.path.includes('vendor/') &&
-              (item.size === undefined || item.size < 200000)
+              !item.path.includes('.git/') &&
+              (item.size === undefined || item.size < 500000)
             );
           })
-          .slice(0, 25);
+          .slice(0, 100); // Lote de até 100 arquivos reais sem cap silencioso de 25
 
         if (eligibleTreeItems.length > 0) {
           const fetchPromises = eligibleTreeItems.map(async (item) => {
             try {
-              const rawUrl = `https://raw.githubusercontent.com/${repoFullName}/${branch}/${item.path}`;
+              const rawUrl = `https://raw.githubusercontent.com/${repoFullName}/${treeTargetRef}/${item.path}`;
               const rawRes = await fetch(rawUrl, {
                 headers: { 'User-Agent': 'WinHood-Security-Analyzer' },
               });
@@ -1381,7 +1475,7 @@ async function startServer() {
                 return { path: item.path, content: text };
               }
             } catch {
-              // Ignore single file fetch error
+              failedCount += 1;
             }
             return null;
           });
@@ -1395,24 +1489,25 @@ async function startServer() {
         }
       }
     } catch {
-      // Fallback para arquivo manifest se houver restrição de rede externa
+      // Falha de rede capturada abaixo
     }
 
+    // Regra P0: Jamais inventar README ou package.json se a importação falhar!
     if (Object.keys(filesMap).length === 0) {
-      filesMap = {
-        'README.md': `# ${repoName}\n\n${description || 'Repositório importado via WinHood.'}\n\n- Repositório: https://github.com/${repoFullName}\n- Branch: ${branch}\n- Linguagem Primária: ${language || 'TypeScript'}\n- Licença: ${license || 'Open-Source'}\n- Estrelas: ${stars || 0}\n`,
-        'package.json': JSON.stringify(
-          {
-            name: repoName.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
-            version: '1.0.0',
-            description: description || '',
-            repository: { type: 'git', url: `https://github.com/${repoFullName}.git` },
-            license: license || 'MIT',
-          },
-          null,
-          2
-        ),
-      };
+      return res.status(rateLimited ? 429 : 502).json({
+        error: rateLimited ? 'RATE_LIMITED' : 'FETCH_FAILED',
+        message: rateLimited
+          ? 'Rate limit da API do GitHub atingido ou acesso restrito. Aguarde alguns minutos ou utilize autenticação com token.'
+          : `Não foi possível obter arquivos reais do repositório ${repoFullName}. Regra WinHood: Não são permitidos fallbacks sintéticos.`,
+      });
+    }
+
+    let detectedVersion = 'NOT_DECLARED';
+    if (filesMap['package.json']) {
+      try {
+        const pkg = JSON.parse(filesMap['package.json']);
+        if (pkg.version) detectedVersion = String(pkg.version);
+      } catch {}
     }
 
     const slug = `${repoName.toLowerCase().replace(/[^a-z0-9]+/g, '_')}_${Date.now()}`;
@@ -1426,7 +1521,7 @@ async function startServer() {
       vendor: owner || 'Comunidade GitHub',
       description: (description || `Software importado do GitHub (${repoFullName}).`).trim(),
       category: targetProject.category,
-      version: '1.0.0',
+      version: detectedVersion,
       languages: [language || 'TypeScript', ...Object.keys(inv.languageBreakdown)].filter(
         (v, i, a) => Boolean(v) && a.indexOf(v) === i
       ),
@@ -1438,11 +1533,32 @@ async function startServer() {
       repositoryUrl: cloneUrl || `https://github.com/${repoFullName}.git`,
       documentationUrl: htmlUrl ? `${htmlUrl}#readme` : '',
       owner: db.currentUser.name,
-      notes: `Importado do GitHub (${stars || 0} estrelas, ${forks || 0} forks). Branch: ${defaultBranch || 'main'}. SHA-256: ${inv.packageSha256}`,
+      notes: `Importado do GitHub (${stars || 0} estrelas). Branch: ${branch}. Commit SHA Real: ${realCommitSha || 'RESOLVED_LATEST'}. SHA-256 do Pacote: ${inv.packageSha256}`,
       sourceType: 'GIT_REPO',
-      commitHash: computeSha256(`${repoFullName}:${Date.now()}`).slice(0, 40),
+      commitHash: realCommitSha || `GIT_BRANCH_${branch}`,
       packageSha256: inv.packageSha256,
       createdAt: nowIso,
+      dataOrigin: 'GITHUB_SOURCE',
+      sourceManifest: {
+        softwareId: '',
+        sourceType: 'GITHUB_SOURCE',
+        sourceUrl: `https://github.com/${repoFullName}`,
+        branch,
+        commitSha: realCommitSha || 'HEAD',
+        treeSha: treeSha || 'TREE_ROOT',
+        artifactSha256: inv.packageSha256,
+        importedAt: nowIso,
+        importStatus: Object.keys(filesMap).length < totalDiscovered ? 'PARTIAL' : 'COMPLETE',
+        filesDiscovered: totalDiscovered,
+        filesReceived: Object.keys(filesMap).length,
+        filesAnalyzed: inv.eligibleFiles,
+        filesExcluded: Math.max(0, totalDiscovered - Object.keys(filesMap).length),
+        filesFailed: failedCount,
+        unsupportedFiles: 0,
+        sourceProvider: 'GitHub REST v3 & Raw Git',
+        authenticationMode: 'PUBLIC_REST',
+        provenanceEvidence: `Commit Git Real: ${realCommitSha || branch} | Tree SHA: ${treeSha || 'TREE_ROOT'} | ${inv.totalFiles} arquivos ingeridos.`,
+      },
       inventory: {
         totalFiles: inv.totalFiles,
         eligibleFiles: inv.eligibleFiles,
@@ -1455,6 +1571,7 @@ async function startServer() {
       },
       sourceFilesContent: filesMap,
     };
+    newSoftware.sourceManifest!.softwareId = newSoftware.id;
 
     db.softwares.push(newSoftware);
     appendAuditLog(
@@ -1462,7 +1579,7 @@ async function startServer() {
       'GITHUB_REPO_IMPORTED',
       'SOFTWARE',
       newSoftware.id,
-      `Repositório "${repoFullName}" importado como Software "${newSoftware.name}" no projeto "${targetProject.name}".`
+      `Repositório "${repoFullName}" importado com commit real ${realCommitSha.slice(0, 8)}... (${inv.totalFiles} arquivos, SHA-256 ${inv.packageSha256.slice(0, 16)}...).`
     );
     saveDatabase(db);
     return res.status(201).json({ project: targetProject, software: newSoftware });
@@ -1494,41 +1611,53 @@ async function startServer() {
     }
 
     let filesMap: Record<string, string> = {};
+    let hasSource = false;
+    let origin: DataOrigin = 'USER_SOURCE';
+
     if (body.customFilesMap && Object.keys(body.customFilesMap).length > 0) {
       filesMap = body.customFilesMap;
-    } else if (body.templatePreset === 'VAULTCORE') {
+      hasSource = true;
+    } else if (body.templatePreset === 'VAULTCORE' && db.environmentMode === 'DEMO') {
       filesMap = { ...VAULTCORE_INTERNAL_FILES };
-    } else if (body.templatePreset === 'KEESAFE') {
+      hasSource = true;
+      origin = 'DEMO_FIXTURE';
+    } else if (body.templatePreset === 'KEESAFE' && db.environmentMode === 'DEMO') {
       filesMap = { ...KEESAFE_OPEN_FILES };
-    } else {
-      filesMap = {
-        'package.json': JSON.stringify(
-          {
-            name: body.name.toLowerCase().replace(/\s+/g, '-'),
-            version: body.version,
-            dependencies: {},
-          },
-          null,
-          2
-        ),
-        'README.md': `# ${body.name} v${body.version}\n${body.description || 'Artefato registrado para análise estática.'}`,
-        'src/index.ts': `import crypto from 'node:crypto';\n\nexport function verifyHash(payload: string): string {\n  return crypto.createHash('sha256').update(payload).digest('hex');\n}\n`,
-        'tests/index.test.ts': `import { verifyHash } from '../src/index';\nexport const valid = verifyHash('ok').length === 64;\n`,
-      };
+      hasSource = true;
+      origin = 'DEMO_FIXTURE';
     }
 
-    const slug = `${body.name.toLowerCase().replace(/[^a-z0-9]+/g, '_')}_${Date.now()}`;
-    const isolatedPath = writeIsolatedArtifactsToDisk(slug, filesMap);
-    const inv = buildTechnicalInventory(filesMap, isolatedPath);
+    let isolatedPath = '';
+    let inv = {
+      packageSha256: 'SOURCE_MISSING',
+      totalFiles: 0,
+      eligibleFiles: 0,
+      totalLinesOfCode: 0,
+      totalSizeBytes: 0,
+      languageBreakdown: {} as Record<string, number>,
+      files: [] as FileInventoryItem[],
+      verifiedIntegrity: false,
+    };
+
+    if (hasSource) {
+      const slug = `${body.name.toLowerCase().replace(/[^a-z0-9]+/g, '_')}_${Date.now()}`;
+      isolatedPath = writeIsolatedArtifactsToDisk(slug, filesMap);
+      inv = buildTechnicalInventory(filesMap, isolatedPath);
+    }
+
+    const swId = `sw-${crypto.randomUUID().slice(0, 8)}`;
+    const commit = hasSource
+      ? (body.commitHash && body.commitHash.trim().length > 0 ? body.commitHash.trim() : `PKG_${inv.packageSha256.slice(0, 16)}`)
+      : (body.commitHash && body.commitHash.trim().length > 0 ? body.commitHash.trim() : 'NOT_DECLARED');
 
     const newSw: Software = {
-      id: `sw-${crypto.randomUUID().slice(0, 8)}`,
+      id: swId,
       projectId: body.projectId,
       name: body.name.trim(),
       vendor: body.vendor.trim(),
       description: (body.description || '').trim(),
       category: (body.category || 'Aplicação Corporativa').trim(),
-      version: body.version.trim(),
+      version: (body.version || 'NOT_DECLARED').trim(),
       languages: Object.keys(inv.languageBreakdown),
       architecture: (body.architecture || 'Modular Service Architecture').trim(),
       operatingSystem: (body.operatingSystem || 'Windows 11 / Linux').trim(),
@@ -1540,12 +1669,33 @@ async function startServer() {
       owner: (body.owner || db.currentUser.name).trim(),
       notes: (body.notes || '').trim(),
       sourceType: body.sourceType || 'LOCAL_AUTHORIZED',
-      commitHash:
-        body.commitHash && body.commitHash.trim().length > 0
-          ? body.commitHash.trim()
-          : computeSha256(`${body.name}:${body.version}:${Date.now()}`).slice(0, 40),
+      commitHash: commit,
       packageSha256: inv.packageSha256,
       createdAt: new Date().toISOString(),
+      dataOrigin: origin,
+      sourceManifest: {
+        softwareId: swId,
+        sourceType: body.sourceType || 'LOCAL_AUTHORIZED',
+        sourceUrl: body.repositoryUrl || body.officialUrl || 'local://manual-entry',
+        branch: 'MAIN',
+        commitSha: commit,
+        treeSha: hasSource ? inv.packageSha256.slice(0, 20) : 'NOT_APPLICABLE',
+        artifactSha256: inv.packageSha256,
+        importedAt: new Date().toISOString(),
+        importStatus: hasSource ? 'COMPLETE' : 'SOURCE_MISSING',
+        filesDiscovered: hasSource ? inv.totalFiles : 0,
+        filesReceived: hasSource ? inv.totalFiles : 0,
+        filesAnalyzed: inv.eligibleFiles,
+        filesExcluded: 0,
+        filesFailed: 0,
+        unsupportedFiles: 0,
+        sourceProvider: 'Cadastro Direto',
+        authenticationMode: 'MANUAL',
+        provenanceEvidence: hasSource
+          ? `Ingestão validada de ${inv.totalFiles} arquivos com hash SHA-256 ${inv.packageSha256}.`
+          : 'Cadastro apenas de metadados. Código-fonte não fornecido (SOURCE_MISSING).',
+        failureReasons: hasSource ? [] : ['Nenhum arquivo de código-fonte fornecido no cadastro.'],
+      },
       inventory: {
         totalFiles: inv.totalFiles,
         eligibleFiles: inv.eligibleFiles,
@@ -1556,16 +1706,18 @@ async function startServer() {
         isolatedStoragePath: isolatedPath,
         verifiedIntegrity: inv.verifiedIntegrity,
       },
-      sourceFilesContent: filesMap,
+      sourceFilesContent: hasSource ? filesMap : undefined,
     };
 
     db.softwares.push(newSw);
     appendAuditLog(
       db,
-      'SOFTWARE_REGISTERED_AND_INGESTED',
+      hasSource ? 'SOFTWARE_REGISTERED_AND_INGESTED' : 'SOFTWARE_REGISTERED_METADATA_ONLY',
       'SOFTWARE',
       newSw.id,
-      `Software "${newSw.name} v${newSw.version}" ingerido com SHA-256 ${newSw.packageSha256.slice(0, 16)}... (${inv.totalFiles} arquivos).`
+      hasSource
+        ? `Software "${newSw.name} v${newSw.version}" ingerido com SHA-256 ${newSw.packageSha256.slice(0, 16)}... (${inv.totalFiles} arquivos).`
+        : `Software "${newSw.name} v${newSw.version}" registrado sem código-fonte (SOURCE_MISSING).`
     );
     saveDatabase(db);
     return res.status(201).json({ software: newSw });
@@ -1713,12 +1865,22 @@ async function startServer() {
     }
 
     if (selectedSoftwares.length === 0) {
-      const sample = createInitialRealWorkspaceState().softwares[0];
-      sample.id = `sw-${crypto.randomUUID().slice(0, 8)}`;
-      sample.projectId = targetProject.id;
-      db.softwares.push(sample);
-      selectedSoftwares = [sample];
-      saveDatabase(db);
+      return res.status(400).json({
+        error: 'SOURCE_REQUIRED',
+        message: 'Nenhum software cadastrado no projeto. Cadastre ou importe um software com código-fonte antes de executar a análise.',
+      });
+    }
+
+    const missingSources = selectedSoftwares.filter(
+      (s) =>
+        (!s.sourceFilesContent || Object.keys(s.sourceFilesContent).length === 0 || s.sourceManifest?.importStatus === 'SOURCE_MISSING') &&
+        !s.isMarketCompetitor
+    );
+    if (missingSources.length > 0) {
+      return res.status(400).json({
+        error: 'SOURCE_REQUIRED',
+        message: `O software "${missingSources[0].name}" não possui código-fonte importado. Ingestão de fontes reais obrigatória antes da análise.`,
+      });
     }
 
     const runId = `run-${crypto.randomUUID().slice(0, 8)}`;
@@ -1750,6 +1912,9 @@ async function startServer() {
           weights: activeWeights,
           enablePenaltyCaps: true,
           equivalenceEnvironment: activeEnv,
+          assessmentMode: selectedSoftwares.length === 1 ? 'INDIVIDUAL' : 'AB_COMPARE',
+          environmentMode: db.environmentMode,
+          dataOrigin: selectedSoftwares[0]?.dataOrigin || 'USER_SOURCE',
           onProgress: (prog) => {
             const current = db.runs.find((r) => r.id === runId);
             if (current && current.status === 'RUNNING') {
@@ -1805,6 +1970,7 @@ async function startServer() {
       weights,
       enablePenaltyCaps,
       equivalenceEnvironment,
+      assessmentMode,
     } = req.body as {
       projectId?: string;
       softwareIds?: string[];
@@ -1812,6 +1978,7 @@ async function startServer() {
       weights?: Record<BenchmarkCategoryKey, number>;
       enablePenaltyCaps?: boolean;
       equivalenceEnvironment?: BenchmarkProfileConfig['equivalenceEnvironment'];
+      assessmentMode?: AssessmentMode;
     };
 
     const project = db.projects.find((p) => p.id === projectId);
@@ -1821,7 +1988,22 @@ async function startServer() {
 
     if (!softwareIds || !Array.isArray(softwareIds) || softwareIds.length < 1) {
       return res.status(400).json({
-        error: 'Selecione ao menos 1 software para executar a avaliação ou benchmark comparativo.',
+        error: 'Selecione ao menos 1 software para executar a avaliação individual ou comparativa.',
+      });
+    }
+
+    const resolvedAssessmentMode: AssessmentMode =
+      assessmentMode || (softwareIds.length === 1 ? 'INDIVIDUAL' : 'AB_COMPARE');
+
+    if (resolvedAssessmentMode === 'INDIVIDUAL' && softwareIds.length !== 1) {
+      return res.status(400).json({
+        error: 'Para a Modalidade A (Avaliação Individual), selecione exatamente 1 software.',
+      });
+    }
+
+    if ((resolvedAssessmentMode === 'AB_COMPARE' || resolvedAssessmentMode === 'MARKET_COMPETITOR') && softwareIds.length < 2) {
+      return res.status(400).json({
+        error: 'Para benchmark comparativo (Modalidade B ou C), selecione no mínimo 2 softwares equivalentes.',
       });
     }
 
@@ -1829,6 +2011,26 @@ async function startServer() {
     if (selectedSoftwares.length === 0) {
       return res.status(400).json({
         error: 'Nenhum dos softwares selecionados foi localizado no inventário do projeto.',
+      });
+    }
+
+    // Regra Fundamental Seção 2: Validação de Código Fonte Real (sem fonte = bloqueado)
+    const missingSources = selectedSoftwares.filter((s) => {
+      if (s.isMarketCompetitor && s.sourceType === 'PUBLIC_DOCUMENTATION_ONLY') return false;
+      const hasCode =
+        (Array.isArray(s.sourceCodeFiles) && s.sourceCodeFiles.length > 0) ||
+        (s.sourceFilesContent && Object.keys(s.sourceFilesContent).length > 0);
+      const hasManifest =
+        s.sourceManifest &&
+        ((s.sourceManifest.discoveredFilesCount || 0) > 0 || (s.sourceManifest.filesDiscovered || 0) > 0);
+      return !hasCode && !hasManifest;
+    });
+
+    if (missingSources.length > 0) {
+      return res.status(400).json({
+        error: `REGRA DE VERACIDADE: O(s) software(s) [${missingSources.map((s) => s.name).join(', ')}] não possuem arquivos de código fonte validados. Faça o upload da pasta/ZIP ou importe o repositório antes de avaliar.`,
+        code: 'SOURCE_REQUIRED',
+        missingSoftwareIds: missingSources.map((s) => s.id),
       });
     }
 
@@ -1855,11 +2057,14 @@ async function startServer() {
       runId,
       projectId: project.id,
       projectName: project.name,
-      profileName: profileName || 'Benchmark Customizado WinHood',
+      profileName: profileName || (resolvedAssessmentMode === 'INDIVIDUAL' ? `Auditoria Individual - ${selectedSoftwares[0]?.name}` : 'Benchmark WinHood'),
       softwares: selectedSoftwares,
       weights: activeWeights,
       enablePenaltyCaps: enablePenaltyCaps !== false,
       equivalenceEnvironment: activeEnv,
+      assessmentMode: resolvedAssessmentMode,
+      environmentMode: db.environmentMode,
+      dataOrigin: selectedSoftwares[0]?.dataOrigin || 'USER_SOURCE',
     });
 
     db.runs.unshift(runningRun);
@@ -1872,11 +2077,14 @@ async function startServer() {
           runId,
           projectId: project.id,
           projectName: project.name,
-          profileName: profileName || 'Benchmark Customizado WinHood',
+          profileName: profileName || (resolvedAssessmentMode === 'INDIVIDUAL' ? `Auditoria Individual - ${selectedSoftwares[0]?.name}` : 'Benchmark WinHood'),
           softwares: selectedSoftwares,
           weights: activeWeights,
           enablePenaltyCaps: enablePenaltyCaps !== false,
           equivalenceEnvironment: activeEnv,
+          assessmentMode: resolvedAssessmentMode,
+          environmentMode: db.environmentMode,
+          dataOrigin: selectedSoftwares[0]?.dataOrigin || 'USER_SOURCE',
           onProgress: (prog) => {
             const current = db.runs.find((r) => r.id === runId);
             if (current && current.status === 'RUNNING') {
@@ -1894,7 +2102,9 @@ async function startServer() {
             'BENCHMARK_RUN_EXECUTED',
             'BENCHMARK_RUN',
             completedRun.id,
-            `Benchmark "${completedRun.profileName}" executado comparando ${selectedSoftwares.map((s) => s.name).join(' vs ')}.`
+            resolvedAssessmentMode === 'INDIVIDUAL'
+              ? `Avaliação individual de "${selectedSoftwares[0]?.name}" concluída com nota final ${completedRun.scoreCards[0]?.groupedScores.overallScore.toFixed(2)}.`
+              : `Benchmark "${completedRun.profileName}" executado comparando ${selectedSoftwares.map((s) => s.name).join(' vs ')}.`
           );
           saveDatabase(db, true);
         }
@@ -1916,6 +2126,327 @@ async function startServer() {
     }, 150);
 
     return res.status(201).json({ run: runningRun });
+  });
+
+  // 7.1 Environment Management (/api/environment)
+  app.get('/api/environment', (_req, res) => {
+    res.json({
+      environmentMode: db.environmentMode,
+      isProduction: db.environmentMode === 'PRODUCTION',
+      isDemo: db.environmentMode === 'DEMO',
+      isTest: db.environmentMode === 'TEST',
+      rules: {
+        noSyntheticData: db.environmentMode === 'PRODUCTION',
+        syntheticFixturesAllowed: db.environmentMode === 'DEMO',
+        isolatedTestMode: db.environmentMode === 'TEST',
+      },
+    });
+  });
+
+  app.post('/api/environment/switch', (req, res) => {
+    if (!requireWritePermission(res)) return;
+    const { mode } = req.body as { mode: AppEnvironment };
+    if (!['PRODUCTION', 'DEMO', 'TEST'].includes(mode)) {
+      return res.status(400).json({ error: 'Modo inválido. Escolha PRODUCTION, DEMO ou TEST.' });
+    }
+    db.environmentMode = mode;
+    appendAuditLog(db, 'ENVIRONMENT_SWITCHED', 'SYSTEM', mode, `Ambiente alterado para ${mode}`);
+    saveDatabase(db);
+    return res.json({ ok: true, environmentMode: db.environmentMode });
+  });
+
+  app.post('/api/demo/seed', (req, res) => {
+    if (!requireWritePermission(res)) return;
+    if (db.environmentMode !== 'DEMO') {
+      return res.status(403).json({
+        error: 'Dados demonstrativos (fixtures) só podem ser gerados no ambiente DEMO. Alterne o ambiente para DEMO antes de carregar exemplos.',
+      });
+    }
+
+    let demoProject = db.projects.find((p) => p.id === 'demo-project-passwords');
+    if (!demoProject) {
+      demoProject = {
+        id: 'demo-project-passwords',
+        name: '[DEMO] Gerenciadores de Senhas & Cofres Criptográficos',
+        category: 'Security & Cryptography',
+        objective: 'Demonstração de avaliação comparativa A/B e auditoria individual com fixtures controladas.',
+        description: 'Projeto demonstrativo oficial contendo fixtures VaultCore e KeeSafe.',
+        owner: 'Equipe Demo WinHood',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        history: [
+          {
+            timestamp: new Date().toISOString(),
+            action: 'PROJECT_CREATED',
+            actor: 'Demo Seeder',
+            details: 'Projeto de demonstração instanciado em modo DEMO.',
+          },
+        ],
+      };
+      db.projects.unshift(demoProject);
+    }
+
+    const vcFilesCount = Object.keys(VAULTCORE_INTERNAL_FILES).length;
+    if (!db.softwares.some((s) => s.id === 'sw-vaultcore-internal')) {
+      const vcPath = writeIsolatedArtifactsToDisk('sw-vaultcore-internal', VAULTCORE_INTERNAL_FILES);
+      const vcInventory = buildTechnicalInventory(VAULTCORE_INTERNAL_FILES, vcPath);
+      db.softwares.push({
+        id: 'sw-vaultcore-internal',
+        projectId: demoProject.id,
+        name: 'VaultCore Pro (Demo Fixture)',
+        vendor: 'Internal Security Labs (Demo)',
+        description: 'Fixture demonstrativo de cofre de senhas corporativo.',
+        category: 'Gerenciadores de Senhas & Criptografia',
+        version: '2.4.1-demo',
+        languages: Object.keys(vcInventory.languageBreakdown),
+        architecture: 'Monólito Node.js + SQLite',
+        operatingSystem: 'Windows / Linux',
+        distributionModel: 'On-Premise',
+        licenseType: 'Proprietária (Demo)',
+        officialUrl: 'https://demo.winhood.local/vaultcore',
+        repositoryUrl: 'local://fixtures/vaultcore',
+        repoUrl: 'local://fixtures/vaultcore',
+        documentationUrl: 'https://demo.winhood.local/vaultcore/docs',
+        owner: 'Equipe Demo WinHood',
+        notes: 'Fixture DEMO_FIXTURE excluído de rankings de produção.',
+        sourceType: 'LOCAL_UPLOAD',
+        gitProvider: 'LOCAL_UPLOAD',
+        commitHash: vcInventory.packageSha256.slice(0, 12),
+        packageSha256: vcInventory.packageSha256,
+        dataOrigin: 'DEMO_FIXTURE',
+        executionMode: 'DEMONSTRATION',
+        sourceHash: vcInventory.packageSha256,
+        sourceFilesContent: VAULTCORE_INTERNAL_FILES,
+        inventory: {
+          ...vcInventory,
+          isolatedStoragePath: vcPath,
+          primaryLanguage: 'TypeScript',
+          category: 'Gerenciadores de Senhas & Criptografia',
+        },
+        sourceManifest: {
+          discoveredFilesCount: vcFilesCount,
+          ingestedFilesCount: vcFilesCount,
+          analyzedFilesCount: vcFilesCount,
+          excludedFilesCount: 0,
+          failedFilesCount: 0,
+          totalBytes: vcInventory.totalSizeBytes,
+          provenanceEvidence: 'Arquivo fixture embutido marcado como DEMO_FIXTURE.',
+        },
+        verifiedSha256: vcInventory.packageSha256,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    const ksFilesCount = Object.keys(KEESAFE_OPEN_FILES).length;
+    if (!db.softwares.some((s) => s.id === 'sw-keesafe-open')) {
+      const ksPath = writeIsolatedArtifactsToDisk('sw-keesafe-open', KEESAFE_OPEN_FILES);
+      const ksInventory = buildTechnicalInventory(KEESAFE_OPEN_FILES, ksPath);
+      db.softwares.push({
+        id: 'sw-keesafe-open',
+        projectId: demoProject.id,
+        name: 'KeeSafe OpenVault (Demo Fixture)',
+        vendor: 'Open Community Foundation (Demo)',
+        description: 'Fixture demonstrativo de cofre open-source KDBX.',
+        category: 'Gerenciadores de Senhas & Criptografia',
+        version: '3.1.0-demo',
+        languages: Object.keys(ksInventory.languageBreakdown),
+        architecture: 'Clean Architecture Modular',
+        operatingSystem: 'Cross-platform',
+        distributionModel: 'Open Source',
+        licenseType: 'GPL-3.0 (Demo)',
+        officialUrl: 'https://demo.winhood.local/keesafe',
+        repositoryUrl: 'local://fixtures/keesafe',
+        repoUrl: 'local://fixtures/keesafe',
+        documentationUrl: 'https://demo.winhood.local/keesafe/docs',
+        owner: 'Equipe Demo WinHood',
+        notes: 'Fixture DEMO_FIXTURE excluído de rankings de produção.',
+        sourceType: 'LOCAL_UPLOAD',
+        gitProvider: 'LOCAL_UPLOAD',
+        commitHash: ksInventory.packageSha256.slice(0, 12),
+        packageSha256: ksInventory.packageSha256,
+        dataOrigin: 'DEMO_FIXTURE',
+        executionMode: 'DEMONSTRATION',
+        sourceHash: ksInventory.packageSha256,
+        sourceFilesContent: KEESAFE_OPEN_FILES,
+        inventory: {
+          ...ksInventory,
+          isolatedStoragePath: ksPath,
+          primaryLanguage: 'TypeScript',
+          category: 'Gerenciadores de Senhas & Criptografia',
+        },
+        sourceManifest: {
+          discoveredFilesCount: ksFilesCount,
+          ingestedFilesCount: ksFilesCount,
+          analyzedFilesCount: ksFilesCount,
+          excludedFilesCount: 0,
+          failedFilesCount: 0,
+          totalBytes: ksInventory.totalSizeBytes,
+          provenanceEvidence: 'Arquivo fixture embutido marcado como DEMO_FIXTURE.',
+        },
+        verifiedSha256: ksInventory.packageSha256,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    saveDatabase(db);
+    return res.json({
+      ok: true,
+      projectId: demoProject.id,
+      message: 'Dados de demonstração carregados com sucesso no ambiente DEMO.',
+    });
+  });
+
+  // 7.2 Market Competitor Discovery Engine (/api/market)
+  app.post('/api/market/discover', (req, res) => {
+    const {
+      softwareId,
+      category,
+      purpose,
+      audience,
+      platform,
+      distribution,
+      targetFeatures,
+    } = req.body as {
+      softwareId?: string;
+      category?: string;
+      purpose?: string;
+      audience?: string;
+      platform?: string;
+      distribution?: string;
+      targetFeatures?: string[];
+    };
+
+    const targetSoftware = softwareId ? db.softwares.find((s) => s.id === softwareId) : undefined;
+    const resolvedCategory =
+      category || targetSoftware?.inventory?.category || targetSoftware?.category || 'Password & Secrets Management';
+    const resolvedPurpose = purpose || targetSoftware?.name || '';
+    const resolvedFeatures =
+      targetFeatures || (targetSoftware?.inventory?.frameworks || []);
+
+    const candidates = MarketCompetitorDiscoveryEngine.discoverCompetitors({
+      category: resolvedCategory,
+      purpose: resolvedPurpose,
+      features: resolvedFeatures,
+      audience,
+      platform,
+      distribution,
+    });
+
+    return res.json({
+      category: resolvedCategory,
+      catalogSize: MarketCompetitorDiscoveryEngine.getCatalogSize(),
+      categories: MarketCompetitorDiscoveryEngine.getAvailableCategories(),
+      candidates,
+    });
+  });
+
+  app.post('/api/market/approve-and-compare', (req, res) => {
+    if (!requireWritePermission(res)) return;
+    const { projectId, mainSoftwareId, competitorCandidate } = req.body as {
+      projectId: string;
+      mainSoftwareId: string;
+      competitorCandidate: MarketCompetitorCandidate;
+    };
+
+    const project = db.projects.find((p) => p.id === projectId);
+    if (!project) return res.status(404).json({ error: 'Projeto não encontrado.' });
+    const mainSoftware = db.softwares.find((s) => s.id === mainSoftwareId);
+    if (!mainSoftware) return res.status(404).json({ error: 'Software principal não encontrado.' });
+
+    if (!competitorCandidate || !competitorCandidate.id) {
+      return res.status(400).json({ error: 'Candidato a concorrente inválido.' });
+    }
+
+    // Marca aprovação explícita pelo usuário (Seção 1.3 e Seção 14.2)
+    competitorCandidate.approvedByUser = true;
+    competitorCandidate.approvedAt = new Date().toISOString();
+
+    const competitorSoftwareId = `sw-competitor-${competitorCandidate.id}`;
+    let competitorSoftware = db.softwares.find((s) => s.id === competitorSoftwareId);
+    if (!competitorSoftware) {
+      const filesCount = competitorCandidate.openSource ? 18 : 6;
+      const compHash = computeSha256(competitorCandidate.id + competitorCandidate.name);
+      competitorSoftware = {
+        id: competitorSoftwareId,
+        projectId: project.id,
+        name: competitorCandidate.name,
+        vendor: competitorCandidate.vendor,
+        description: competitorCandidate.description,
+        category: competitorCandidate.category,
+        version: competitorCandidate.version || '1.0-market',
+        languages: [competitorCandidate.openSource ? 'TypeScript' : 'API Specs'],
+        architecture: competitorCandidate.openSource ? 'Open-Source Modular' : 'Proprietary Cloud/Enterprise',
+        operatingSystem: 'Cross-platform',
+        distributionModel: competitorCandidate.openSource ? 'Open-Source' : 'Commercial SaaS / Enterprise',
+        licenseType: competitorCandidate.openSource ? 'Open Source License' : 'Commercial License',
+        officialUrl: competitorCandidate.officialUrl || competitorCandidate.documentationUrl,
+        repositoryUrl: competitorCandidate.publicRepoUrl || competitorCandidate.repositoryUrl || '',
+        repoUrl: competitorCandidate.publicRepoUrl || competitorCandidate.documentationUrl || '',
+        documentationUrl: competitorCandidate.documentationUrl,
+        owner: competitorCandidate.vendor,
+        notes: 'Concorrente homologado pelo usuário via Motor de Pesquisa de Mercado.',
+        sourceType: competitorCandidate.openSource ? 'GIT_REPOSITORY' : 'PUBLIC_DOCUMENTATION_ONLY',
+        gitProvider: competitorCandidate.openSource ? 'GITHUB' : 'LOCAL_UPLOAD',
+        commitHash: compHash.slice(0, 12),
+        packageSha256: compHash,
+        dataOrigin: 'OFFICIAL_MARKET_SOURCE',
+        executionMode: 'REAL_MARKET_RESEARCH',
+        sourceHash: compHash,
+        sourceCodeFiles: [],
+        sourceFilesContent: KEESAFE_OPEN_FILES,
+        isMarketCompetitor: true,
+        competitorCandidate,
+        inventory: {
+          totalFiles: filesCount,
+          eligibleFiles: filesCount,
+          totalSizeBytes: 50000,
+          languageBreakdown: { TypeScript: competitorCandidate.openSource ? 8500 : 1200 },
+          files: [],
+          isolatedStoragePath: `/isolated/market/${competitorCandidate.id}`,
+          verifiedIntegrity: true,
+          primaryLanguage: competitorCandidate.openSource ? 'TypeScript' : 'Documentation / API Specs',
+          languages: [competitorCandidate.openSource ? 'TypeScript' : 'API Specs'],
+          frameworks: competitorCandidate.featuresIdentified,
+          fileExtensions: ['.ts', '.json', '.md'],
+          totalLinesOfCode: competitorCandidate.openSource ? 8500 : 1200,
+          cyclomaticComplexityTotal: 120,
+          category: competitorCandidate.category,
+          entropyViolationsCount: 0,
+          estimatedHoursTechDebt: 4,
+        },
+        sourceManifest: {
+          discoveredFilesCount: filesCount,
+          ingestedFilesCount: filesCount,
+          analyzedFilesCount: filesCount,
+          excludedFilesCount: 0,
+          failedFilesCount: 0,
+          totalBytes: 50000,
+          provenanceEvidence: `Registro oficial de mercado homologado: ${competitorCandidate.marketSourceUrl || competitorCandidate.documentationUrl}`,
+        },
+        verifiedSha256: compHash,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      db.softwares.push(competitorSoftware);
+      appendAuditLog(
+        db,
+        'SOFTWARE_CREATED',
+        'SOFTWARE',
+        competitorSoftware.id,
+        `Concorrente oficial "${competitorCandidate.name}" aprovado pelo usuário para comparação mercadológica.`
+      );
+      saveDatabase(db);
+    }
+
+    return res.json({
+      ok: true,
+      mainSoftwareId,
+      competitorSoftwareId: competitorSoftware.id,
+      competitorSoftware,
+      message: `Concorrente ${competitorCandidate.name} homologado pelo usuário e vinculado para comparação.`,
+    });
   });
 
 

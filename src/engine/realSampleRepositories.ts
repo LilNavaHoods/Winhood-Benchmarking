@@ -233,3 +233,10 @@ export function verifyStoreAndReadUseCase() {
 }
 `,
 };
+
+export const DEMO_FIXTURE_METADATA = {
+  dataOrigin: 'DEMO_FIXTURE' as const,
+  executionMode: 'DEMONSTRATION' as const,
+  isDemoOnly: true,
+  description: 'Fixtures demonstrativas de repositórios para validação offline e modo demonstração.',
+};

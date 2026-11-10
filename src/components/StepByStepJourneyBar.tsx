@@ -17,6 +17,7 @@ export type AppNavSection =
   | 'dashboard'
   | 'projects'
   | 'wizard'
+  | 'market_discovery'
   | 'sonar_hub'
   | 'tools_integrations'
   | 'security_suite'

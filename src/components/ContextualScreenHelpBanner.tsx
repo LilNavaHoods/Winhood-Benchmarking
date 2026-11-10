@@ -113,6 +113,31 @@ const SCREEN_HELP_CATALOG: Record<Exclude<AppNavSection, 'user_guide'>, ScreenGu
       },
     ],
   },
+  market_discovery: {
+    stepBadge: 'MODALIDADE C — PESQUISA DE MERCADO',
+    screenTitle: 'Como descobrir e homologar o Concorrente de Mercado mais próximo',
+    plainSummary:
+      'O Motor de Descoberta de Concorrentes analisa o propósito, funcionalidades e arquitetura do seu software contra o catálogo de referência de mercado, calculando a similaridade ponderada em 6 eixos e exigindo aprovação humana antes da comparação.',
+    howToSteps: [
+      '1. Selecione a Modalidade C (Descobrir Concorrente de Mercado) no Passo 1 do Wizard.',
+      '2. Selecione o seu software principal no Passo 2 e avance para o Passo 3 para visualizar os candidatos do mercado ranqueados por similaridade.',
+      '3. Revise o detalhamento de similaridade (Propósito 30%, Funcionalidades 25%, Público 15%, Plataforma 10%, Distribuição 10%, Integrações 10%) e clique em "Homologar e Aprovar Concorrente".',
+    ],
+    abInterpretationTip:
+      'O motor diferencia concorrentes Open-Source (varredura completa de código fonte) de concorrentes Closed-Source / Proprietários (avaliação baseada em documentação pública e APIs oficiais).',
+    guideChapterId: 'benchmark-weights',
+    guideChapterLabel: 'Pesquisa de Mercado & Equivalência',
+    glossaryTerms: [
+      {
+        term: 'Similaridade Ponderada (6 Eixos)',
+        meaning: 'Algoritmo determinístico que cruza finalidade (30%), recursos (25%), público (15%), plataforma (10%), distribuição (10%) e integrações (10%).',
+      },
+      {
+        term: 'Homologação Humana (HITL)',
+        meaning: 'Regra mandatória que impede comparações automáticas de mercado sem aprovação explícita do analista.',
+      },
+    ],
+  },
   sonar_hub: {
     stepBadge: 'SONAR HUB & DOCKER',
     screenTitle: 'Como usar SonarQube Local via Docker, SonarCloud e Hardware Multi-Core',
