@@ -574,7 +574,7 @@ export type SonarConnectionState =
   | 'RUNNING'
   | 'ERROR';
 
-export type SonarInstallationMode = 'LOCAL' | 'REMOTE' | 'CLOUD';
+export type SonarInstallationMode = 'LOCAL' | 'REMOTE' | 'CLOUD' | 'DOCKER';
 
 export type SonarScannerType =
   | 'SONAR_SCANNER_MAVEN'

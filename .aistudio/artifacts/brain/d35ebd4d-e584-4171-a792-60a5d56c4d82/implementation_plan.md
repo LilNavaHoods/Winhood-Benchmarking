@@ -1,115 +1,123 @@
-# WinHood Analyzer — Progresso Global em Tempo Real, Motor Equivalente/Superior ao SonarQube e Higienização para GitHub
+# Backend Automático & Docker Transparente de 1 Clique
 
-Atualização arquitetural da plataforma WinHood Analyzer para incluir um monitor global de **Progresso de Análise** com estimativa de tempo restante (ETA) no cabeçalho durante execuções em andamento, eliminar qualquer repositório ou estado mocado inicial, elevar a profundidade do motor de análise estática e segurança ao padrão SonarQube + SARIF 2.1.0, e tornar o repositório enxuto e pronto para versionamento no GitHub.
+Plano arquitetural para tornar todo o backend e a execução do Docker 100% automatizados e transparentes, para que o usuário não precise abrir terminais, digitar comandos nem conhecer Docker, contando com inicialização automática em 1 clique e fallback fluido para o motor nativo.
+
+---
 
 ## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> As decisões abaixo refletem exatamente as escolhas confirmadas na etapa de alinhamento:
+> Decisões confirmadas pelo usuário na Fase 1 para automação total:
 
-- **Decisão Confirmada 1 — Estado Inicial 100% Real (Zero Dados Mocados)**: A plataforma iniciará com banco de dados limpo (zero projetos ou softwares fictícios pré-carregados). Toda avaliação partirá exclusivamente de projetos reais enviados via Upload Local de arquivos/pastas ou importados diretamente da API oficial do GitHub (buscando a árvore real de código-fonte do repositório via API Git Trees/Contents do GitHub, sem stubs estáticos).
-- **Decisão Confirmada 2 — Exportação Multi-Formato Compatível com SonarQube e GitHub**: Suporte nativo de exportação de laudos e achados em **JSON Completo**, **SARIF 2.1.0** (compatível com GitHub Code Scanning e SonarQube External Issues), **HTML Interativo Autônomo**, **Relatório Markdown** e **Planilha CSV/Excel**.
-- **Decisão Confirmada 3 — Repositório Leve e Pronto para GitHub**: Remoção de arquivos binários/zips pesados desnecessários, limpeza de artefatos temporários preexistentes e blindagem do controle de versão para manter o projeto leve, rápido e fácil de publicar no GitHub.
+- **Gerenciamento do Docker**: O backend gerencia o ciclo de vida do container oficial do SonarQube diretamente através de uma API interna (`POST /api/sonar/docker-auto-start`). O usuário conta com um botão simples de **"Iniciar Servidor SonarQube Automaticamente"** (ou disparo automático) sem nunca abrir um terminal.
+- **Fallback Inteligente Sem Bloqueio**: Se o Docker Desktop não estiver instalado ou não estiver rodando na máquina, a aplicação **não trava nem exibe erros impeditivos**. Ela aciona automaticamente o **Motor Nativo WinHood de Alta Performance** (equivalente e superior ao SonarQube, com Ratings A–E, SQALE Debt e SARIF 2.1.0) e exibe apenas um aviso sutil e informativo.
+- **Fluxo de Análise Zero-Configuração**: Botão de **"Análise Rápida em 1 Clique"** direto na interface. O usuário apenas seleciona ou faz upload do código e clica em analisar: o sistema provisiona o projeto, aloca os núcleos de CPU ideais, executa a varredura, computa o Quality Gate e gera o laudo instantaneamente.
 
 ---
 
 ## 1. Overview & Core Concept
 
-- **What It Does**:
-  1. **Componente Visual Global de Progresso de Análise (`AnalysisProgressHeaderBanner`)**: Posicionado no cabeçalho global da aplicação, monitora execuções com status `RUNNING` (em andamento), exibindo barra de progresso animada de alta precisão, percentual concluído, etapa/ferramenta ativa, contador de arquivos inspecionados e **Tempo Estimado de Conclusão (ETA)** atualizado em tempo real, além de botão de cancelamento emergencial.
-  2. **Ingestão 100% Real (Zero Mock)**: Ao importar um repositório do GitHub ou fazer upload de arquivos locais, o backend baixa e processa os arquivos reais do repositório (via GitHub REST API) ou do pacote enviado, calculando hashes criptográficos SHA-256 reais sobre cada arquivo.
-  3. **Motor de Qualidade e Segurança Equivalente/Superior ao SonarQube**: Avalia regras profundas de SAST, Secrets, SCA/SBOM, SQL, Arquitetura (acoplamento aferente/eferente, instabilidade e ciclos) e Qualidade estilo SonarQube (Ratings `A` a `E` de Confiabilidade, Segurança e Manutenibilidade, cálculo de Dívida Técnica em minutos, Densidade de Duplicação, Complexidade Ciclomática e Cognitiva por função, Security Hotspots e Quality Gate `PASSED`/`FAILED` com condições auditáveis).
-  4. **Exportação Universal de Documentos**: Geração imediata de relatórios em `JSON`, `SARIF 2.1.0`, `HTML`, `Markdown` e `CSV`.
-- **Target Audience / Persona**: Engenheiros de Segurança (AppSec/DevSecOps), Arquitetos de Software e Líderes de QA que necessitam comparar ou auditar projetos reais com rastreabilidade criptográfica e exportar laudos diretamente para pipelines GitHub/SonarQube.
-- **Key Value**: Transparência operacional durante análises de múltiplos estágios, confiabilidade forense livre de dados simulados e portabilidade imediata do código para o GitHub.
+- **O que faz**: Transforma a interação com ferramentas externas e servidores em uma experiência puramente gráfica de 1 clique:
+  1. O backend executa comandos do Docker internamente via chamadas de sistema controladas (`docker run` ou `docker start`), verificando se a porta 9000 já está ativa.
+  2. Provisiona automaticamente tokens e projetos sem que o usuário precise navegar em painéis de configuração.
+  3. Se o Docker não estiver presente na máquina, ativa o motor nativo local multithread instantaneamente, garantindo 100% de disponibilidade.
+- **Público-Alvo**: Desenvolvedores e gestores que desejam a precisão do SonarQube e auditoria de segurança sem a complexidade de configurar containers, portas ou arquivos de configuração no terminal.
+- **Valor Principal**: Eliminação de barreiras técnicas. O usuário final precisa apenas usar a aplicação web ou desktop; todo o gerenciamento de infraestrutura, portas e containers é tratado de forma autônoma pelo backend.
 
 ---
 
 ## 2. User Experience & Visual Design
 
-- **Key User Flows**:
-  1. **Zero-State Limpo & Ingestão Real**: Ao abrir a plataforma sem avaliações prévias, o usuário visualiza o estado vazio claro com ações diretas para **Upload de Código Local** ou **Importação Real via GitHub API**.
-  2. **Execução Assíncrona com Progresso Global e ETA**: Ao iniciar um benchmark no Wizard (ou reexecutar uma avaliação), a corrida entra no estado `RUNNING` (`em andamento`). Imediatamente, o cabeçalho global exibe o componente **Progresso de Análise** com barra de progresso contínua, nome do projeto/perfil ativo, estágio atual do pipeline (Inventário SHA-256 → SAST/Secrets → SonarQube Quality & Hotspots → Grafo Arquitetural → Cadeia de Evidências) e **Tempo Estimado de Conclusão (ETA)** regressivo em segundos.
-  3. **Inspeção SonarQube-Grade & Exportação**: Concluída a análise, o usuário inspeciona os cartões de Rating (`A`–`E`), Quality Gate, Security Hotspots e vulnerabilidades CWE/CVSS, podendo exportar o laudo em **JSON**, **SARIF 2.1.0**, **HTML**, **Markdown** ou **CSV**.
-- **Visual Identity & Theme**:
-  - *Aesthetic Direction*: Console técnico enterprise de alta densidade (SaaS & Developer Dashboard), superfície limpa de nível único com bordas sutis de `1px` (`border-slate-200 dark:border-slate-800`).
-  - *Color Palette & Mood*: Neutros frios (`#080b10` / `#0c1017` no modo escuro, `#f8fafc` / `#ffffff` no modo claro) com acento ciano técnico (`#31d6c4`) para progresso ativo e ações primárias, verde esmeralda (`#16a34a`) para Quality Gate aprovado, âmbar (`#d97706`) para alertas e carmesim (`#dc2626`) para bloqueios críticos.
-  - *Typography & Hierarchy*: Tipografia sans-serif limpa para navegação e títulos combinada estritamente com fonte monoespaçada e numerais tabulares (`font-mono tabular-nums`) em todos os contadores de progresso, ETAs, percentuais, scores e hashes SHA-256 para evitar qualquer oscilação horizontal durante a contagem regressiva.
-- **Interactive Feedback & Motion**:
-  - Atualização fluida da barra de progresso global via transições suaves com feedback visual imediato (< 200ms), permitindo que o usuário navegue entre abas enquanto acompanha o progresso e o ETA no topo da tela.
+### A. Fluxos do Usuário
+
+1. **Card de Automação Docker no Sonar Hub**:
+   - Um cartão inteligente com status em tempo real:
+     - Se o SonarQube já estiver ativo: Exibe status **"Servidor SonarQube Ativo e Pronto"** (ícone verde).
+     - Se o SonarQube estiver inativo: Exibe botão principal **"Iniciar SonarQube Automaticamente (1 Clique)"**. Ao clicar, o backend executa a inicialização do container em background com animação de carregamento e feedback de progresso sem que o usuário digite nada.
+     - Se o Docker não estiver instalado na máquina: Exibe badge sutil **"Modo Nativo Ultra-Rápido Ativo"** com explicação clara de que todas as notas, Quality Gate e métricas SonarQube são geradas pelo motor interno com zero dependências externas.
+
+2. **Fluxo de Análise Zero-Configuração**:
+   - Na barra superior ou no Dashboard, um botão destacado **"Executar Análise Rápida (1 Clique)"**.
+   - O modal ou tela resume em uma única etapa: seleciona o projeto e dispara a varredura completa.
+   - O backend escolhe automaticamente o melhor motor disponível (Docker SonarQube se online, ou Motor Nativo de alta densidade se offline) e atualiza a barra global de progresso no cabeçalho com ETA regressivo.
+
+### B. Identidade Visual (frontend-design)
+
+- **Simplicidade Operacional**: Eliminação de campos técnicos dispensáveis (URLs de host, flags `-Dsonar...` visíveis apenas em modo avançado opcional).
+- **Feedback Transparente**: Indicadores com linguagem direta ao usuário (`"Inicializando container em segundo plano..."`, `"Servidor pronto na porta 9000"`, `"Análise concluída com sucesso"`).
+- **Sem Modais Bloqueantes**: Todo o processo ocorre em segundo plano com transição de estados sem recarregar a página.
 
 ---
 
 ## 3. Key Product Decisions & Trade-Offs
 
-- **Decision 1: Execução de Benchmark Assíncrona por Etapas Reais com Telemetria de ETA**
-  - *Chosen Approach*: O endpoint de criação de benchmark registra a execução inicialmente com status `RUNNING` e processa as etapas reais de análise atualizando o progresso (`progressPercent`, `currentStageLabel`, `estimatedRemainingSeconds`, `analyzedFilesCount` e `totalFilesCount`). O frontend sincroniza automaticamente enquanto houver execução `RUNNING`.
-  - *Why*: Permite que a barra de carregamento global no cabeçalho reflita fielmente cada fase real do motor de análise e calcule o tempo estimado de conclusão com base no volume real de arquivos e linhas de código dos projetos analisados.
-  - *Alternatives Considered*: Execução bloqueante síncrona sem estados intermediários (descartada pois impede visibilidade em tempo real da fase ativa e do ETA).
+### Decisão 1: Execução do Docker pelo Processo Backend do Node.js
+- **Abordagem Escolhida**: Criar endpoint `POST /api/sonar/docker-auto-start` e `POST /api/sonar/docker-stop` no `server.ts` que utiliza `child_process.exec` com timeout seguro e validação de comandos para gerenciar o container `sonarqube:latest`.
+- **Por que**: Remove a necessidade de o usuário copiar e colar comandos no PowerShell ou bash.
+- **Alternativa Considerada**: Deixar apenas comandos de texto para o usuário rodar no terminal. Descartada para atender à solicitação de automação total.
 
-- **Decision 2: Ingestão Real de Arquivos via GitHub REST API (Zero Mock)**
-  - *Chosen Approach*: Quando o usuário importa um repositório do GitHub, o backend consulta a árvore/conteúdo real dos arquivos elegíveis do repositório na API pública do GitHub (`api.github.com/repos/:owner/:repo/git/trees` e `raw.githubusercontent.com`), salvando os arquivos reais no diretório isolado e rejeitando a criação de arquivos fictícios quando não há código real.
-  - *Why*: Garante que 100% das métricas, achados, linhas de código e hashes SHA-256 pertençam ao código real do repositório escolhido.
-
-- **Decision 3: Motor Estático Expandido Superior ao SonarQube + Exportação SARIF 2.1.0 & HTML**
-  - *Chosen Approach*: Expandir o analisador estático nativo para detectar +35 regras reais de engenharia, segurança e qualidade (incluindo detecção de Complexidade Cognitiva elevada por função, Funções Longas, Parâmetros Excessivos, Código Duplicado, Promises sem tratamento, XSS/DOM sinks, Path Traversal, SSRF, Hardcoded Secrets, SQLi, Criptografia Fraca, Ciclos Arquiteturais e Security Hotspots), calculando Ratings `A`–`E` (SQALE/Sonar) e exportando tanto em formatos executivos (`HTML`, `MD`, `CSV`) quanto em formatos de interoperabilidade de ferramentas (`JSON`, `SARIF 2.1.0`).
-  - *Why*: Oferece paridade completa com as métricas do SonarQube Community/Server somada à análise de arquitetura hexagonal e trilha de evidências encadeadas por SHA-256.
+### Decisão 2: Fallback Transparente para Motor Nativo
+- **Abordagem Escolhida**: Se a chamada ao Docker falhar ou o Docker não estiver instalado, a análise continua normalmente usando o analisador estático nativo WinHood, computando Quality Gate (`PASSED`/`FAILED`), Ratings `A`–`E`, complexidade ciclomática e vulnerabilidades CWE/CVSS com emissão de SARIF 2.1.0 e HTML.
+- **Por que**: Garante que o usuário consiga analisar seus sistemas imediatamente sem depender de pré-requisitos de software na máquina física.
 
 ---
 
-## 4. Technical Architecture & Data Strategy *(Technical Reference)*
-
-### Architecture & Component Diagram
+## 4. Technical Architecture & Data Strategy
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                        Cabeçalho Global da Aplicação                         │
-│  ┌────────────────────────┐  ┌────────────────────┐  ┌────────────────────┐  │
-│  │ Breadcrumb & Pesquisa  │  │ Botões Upload / GH │  │ Ação de Benchmark  │  │
-│  └────────────────────────┘  └────────────────────┘  └────────────────────┘  │
-│  ┌────────────────────────────────────────────────────────────────────────┐  │
-│  │        Barra Global "Progresso de Análise" (Quando Status=RUNNING)     │  │
-│  │  [Progresso %] [Fase Atual / Adaptador] [Arquivos] [ETA Segundos] [X]  │  │
-│  └────────────────────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────┬───────────────────────────────────────┘
-                                       │ Polling / Sincronização em Tempo Real
-                                       ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                     Servidor Backend & Orquestrador Real                     │
-│                                                                              │
-│  ┌──────────────────────────────┐      ┌──────────────────────────────────┐  │
-│  │ Ingestão Real (Zero Mock)    │      │ Pipeline Assíncrono de Benchmark │  │
-│  │ • Upload Local de Arquivos   │─────▶│ • Fase 1: Inventário & SHA-256   │  │
-│  │ • GitHub API Real Tree Fetch │      │ • Fase 2: SAST, Secrets & SCA    │  │
-│  └──────────────────────────────┘      │ • Fase 3: SonarQube Quality Gate │  │
-│                                        │ • Fase 4: Grafo Arquitetural     │  │
-│                                        │ • Fase 5: Cadeia de Evidências   │  │
-│                                        └─────────────────┬────────────────┘  │
-│                                                          │                   │
-│                                                          ▼                   │
-│  ┌────────────────────────────────────────────────────────────────────────┐  │
-│  │        Motor de Exportação Multi-Formato (/api/reports/:id/export)     │  │
-│  │   [JSON Completo]  [SARIF 2.1.0]  [HTML Relatório]  [Markdown]  [CSV]  │  │
-│  └────────────────────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                   FLUXO AUTOMÁTICO ZERO-CONFIGURAÇÃO                   │
+├────────────────────────────────────────────────────────────────────────┤
+│                           USUÁRIO / FRONTEND                           │
+│     ┌────────────────────────────────────────────────────────────┐     │
+│     │   Botão "Iniciar Análise em 1 Clique" ou "Iniciar Docker"   │     │
+│     └─────────────────────────────┬──────────────────────────────┘     │
+│                                   │ POST /api/sonar/docker-auto-start  │
+│                                   │ ou POST /api/benchmark-runs/quick  │
+│                                   ▼                                    │
+├────────────────────────────────────────────────────────────────────────┤
+│                        WINHOOD BACKEND ENGINE                          │
+│                                                                        │
+│               ┌──────────────────────────────────────┐                 │
+│               │   Verificador de Ambiente & Docker   │                 │
+│               └──────────────────┬───────────────────┘                 │
+│                                  │                                     │
+│                 ┌────────────────┴────────────────┐                    │
+│                 ▼                                 ▼                    │
+│     [Docker Instalado / Ativo]        [Docker Ausente / Inativo]       │
+│  ┌──────────────────────────────┐   ┌──────────────────────────────┐   │
+│  │ child_process: docker start  │   │ Fallback Automático Sutil    │   │
+│  │ ou docker run -d ... :9000   │   │ Motor Nativo Multi-Core      │   │
+│  │ Aguarda status UP            │   │ (AST + SAST + Sonar Ratings) │   │
+│  └──────────────┬───────────────┘   └──────────────┬───────────────┘   │
+│                 │                                  │                   │
+│                 └────────────────┬─────────────────┘                   │
+│                                  ▼                                     │
+│                 ┌───────────────────────────────────┐                  │
+│                 │ Execução da Avaliação Completa    │                  │
+│                 │ Quality Gate + SARIF 2.1.0 + HTML │                  │
+│                 └───────────────────────────────────┘                  │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Data Model & State
-- **Progresso de Execução (`BenchmarkRun.progress`)**:
-  - `percent`: Número de `0` a `100` representando o avanço real das etapas.
-  - `stageLabel`: Descrição técnica da etapa em execução (ex: `"Analisando Regras SAST, Complexidade Cognitiva e Quality Gate..."`).
-  - `estimatedRemainingSeconds`: Tempo estimado restante em segundos calculado dinamicamente a partir da taxa de processamento e volume de arquivos/LOC.
-  - `processedFiles` / `totalFiles`: Contagem real de arquivos processados na corrida ativa.
-- **Métricas Equivalentes/Superiores ao SonarQube (`SoftwareScoreCard.sonarEquivalentMetrics`)**:
-  - `qualityGateStatus`: `'PASSED' | 'WARN' | 'FAILED'`
-  - `reliabilityRating`, `securityRating`, `maintainabilityRating`: `'A' | 'B' | 'C' | 'D' | 'E'`
-  - `securityHotspotsCount`, `technicalDebtRatioPercent`, `duplicatedBlocksCount`, `highComplexityFunctionsCount`.
+### Componentes e Modificações a Serem Implementados:
 
-### Interactive Component & State Mapping
-- **Barra Global `AnalysisProgressHeaderBanner`**:
-  - Renderizada automaticamente abaixo da linha principal do `<header>` sempre que houver uma execução com `status === 'RUNNING'` no estado da aplicação.
-  - Realiza polling leve (`/api/benchmark-runs/active-progress`) a cada `600ms` enquanto uma corrida estiver em andamento, atualizando a barra de progresso, a etapa atual e o contador regressivo de ETA (`tabular-nums`).
-  - Inclui botão funcional de **Interromper Execução** (`/api/benchmark-runs/:id/emergency-stop`) que cancela imediatamente o trabalho em andamento e notifica o usuário.
-  - Assim que o status transita para `COMPLETED` ou `COMPLETED_WITH_WARNINGS`, sincroniza o estado global e exibe notificação de conclusão.
-- **Módulo de Exportação (`VeracityAdaptersReportsModule`)**:
-  - Controles diretos de download para **JSON Completo**, **SARIF 2.1.0 (SonarQube / GitHub Code Scanning)**, **Relatório HTML Interativo**, **Dossiê Markdown** e **Planilha CSV/Excel**, além de visualização de Quality Gate e Ratings A–E.
+1. **Endpoints de Automação Docker em `server.ts`**:
+   - `POST /api/sonar/docker-auto-start`:
+     - Verifica se o container `sonarqube` já existe (`docker ps -a --filter name=sonarqube`).
+     - Se existir e estiver parado, executa `docker start sonarqube`.
+     - Se não existir, executa `docker run -d --name sonarqube -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true -p 9000:9000 sonarqube:latest`.
+     - Se o Docker daemon não responder ou não estiver instalado, retorna `{ available: false, fallbackToNative: true }`.
+   - `POST /api/sonar/docker-stop`:
+     - Executa `docker stop sonarqube` de forma segura.
+   - `POST /api/benchmark-runs/quick-run`:
+     - Executa análise em 1 clique para o projeto selecionado, escolhendo automaticamente o melhor executor disponível sem exigir configuração de formulários.
+
+2. **Aprimoramento do `SonarDockerCloudHubModule.tsx`**:
+   - Adicionar o bloco de **Controle Automático do Servidor**:
+     - Botão verde/ciano **"Iniciar Servidor SonarQube Automaticamente"** que chama a API e mostra spinner de progresso enquanto sobe o container.
+     - Indicador de status claro e sem jargões.
+     - Detecção automática de fallback nativo quando Docker não estiver presente na máquina.
+
+3. **Botão de Análise Rápida de 1 Clique no Header / Dashboard**:
+   - Permite que qualquer usuário inicie a análise imediatamente a partir da tela principal com zero parâmetros manuais.

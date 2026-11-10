@@ -113,6 +113,35 @@ const SCREEN_HELP_CATALOG: Record<Exclude<AppNavSection, 'user_guide'>, ScreenGu
       },
     ],
   },
+  sonar_hub: {
+    stepBadge: 'SONAR HUB & DOCKER',
+    screenTitle: 'Como usar SonarQube Local via Docker, SonarCloud e Hardware Multi-Core',
+    plainSummary:
+      'Guia oficial para executar o SonarQube via container Docker sem necessidade de rodar localmente no sistema, conectar ao SonarCloud na nuvem e configurar a aceleração por múltiplos núcleos de CPU para testes pesados.',
+    howToSteps: [
+      '1. Na aba "Opção A: SonarQube Local", copie o comando oficial Docker e suba o container na porta 9000 com 1 clique.',
+      '2. Acesse http://localhost:9000, faça login inicial com admin / admin e crie seu projeto para obter o token de acesso.',
+      '3. Na aba "Gerador SonarScanner", selecione sua stack (Node.js, Maven, Gradle, .NET) e copie o comando pronto para execução.',
+    ],
+    abInterpretationTip:
+      'Utilizar o Docker oficial isola o SonarQube em container descartável, permitindo atingir notas altas de Quality Gate sem sujar a máquina física com arquivos zip gigantes ou JDK 17 manual.',
+    guideChapterId: 'sonarqube-guide',
+    guideChapterLabel: 'SonarQube Docker & Cloud',
+    glossaryTerms: [
+      {
+        term: 'Docker Oficial SonarQube',
+        meaning: 'Container oficial (sonarqube:latest) que roda isoladamente na porta 9000 sem downloads manuais pesados no SO.',
+      },
+      {
+        term: 'SonarCloud',
+        meaning: 'Plataforma oficial da Sonar em nuvem que analisa commits e pull requests diretamente via GitHub/GitLab sem usar recursos locais.',
+      },
+      {
+        term: 'Worker Threads Multi-Core',
+        meaning: 'Distribuição paralela das análises em múltiplos núcleos de CPU para acelerar testes pesados em grandes bases de código.',
+      },
+    ],
+  },
   tools_integrations: {
     stepBadge: 'PASSO 3 DA JORNADA',
     screenTitle: 'Como usar SonarQube, SonarScanner, SARIF e Gitar AI',

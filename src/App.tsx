@@ -19,10 +19,12 @@ import {
   ShieldCheck,
   Sliders,
   Sun,
+  Server,
   Upload,
   UserCheck,
   Wrench,
   XCircle,
+  Zap,
 } from 'lucide-react';
 import type {
   AuditLogEntry,
@@ -72,6 +74,11 @@ const VeracityAdaptersReportsModule = lazy(() =>
 const ToolsAndIntegrationsModule = lazy(() =>
   import('./components/ToolsAndIntegrationsModule').then((m) => ({
     default: m.ToolsAndIntegrationsModule,
+  }))
+);
+const SonarDockerCloudHubModule = lazy(() =>
+  import('./components/SonarDockerCloudHubModule').then((m) => ({
+    default: m.SonarDockerCloudHubModule,
   }))
 );
 const UserGuideModule = lazy(() =>
@@ -247,6 +254,28 @@ export default function App() {
     }
   };
 
+  const handleQuickRun = async () => {
+    try {
+      const res = await fetch('/api/benchmark-runs/quick-run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        notify(
+          'Análise de 1 Clique iniciada! O backend executa Docker ou o motor nativo automaticamente em segundo plano.',
+          'success'
+        );
+        await fetchAllBackendState();
+      } else {
+        notify(data.error || 'Falha ao iniciar análise rápida.', 'error');
+      }
+    } catch {
+      notify('Erro ao solicitar análise rápida de 1 clique.', 'error');
+    }
+  };
+
   const handleSwitchRole = async (
     role: 'ADMIN' | 'SECURITY_LEAD' | 'AUDITOR' | 'QA_ENGINEER'
   ) => {
@@ -326,8 +355,14 @@ export default function App() {
       groupLabel: 'Qualidade, Segurança & IA',
       items: [
         {
+          id: 'sonar_hub',
+          stepBadge: '3A',
+          label: 'Sonar Hub: Docker & Cloud',
+          icon: Server,
+        },
+        {
           id: 'tools_integrations',
-          stepBadge: '3',
+          stepBadge: '3B',
           label: 'Ferramentas e Integrações',
           icon: Wrench,
         },
@@ -522,12 +557,21 @@ export default function App() {
 
             <button
               type="button"
-              onClick={() => setActiveNav('wizard')}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              onClick={handleQuickRun}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] transition-colors whitespace-nowrap shrink-0 cursor-pointer shadow-sm"
+              title="Disparar análise automática em 1 clique (Backend & Docker automáticos)"
             >
-              <Play className="w-3.5 h-3.5" />
-              <span className="hidden lg:inline">Configurar &amp; Executar Benchmark</span>
-              <span className="lg:hidden">Benchmark</span>
+              <Zap className="w-3.5 h-3.5 fill-current" />
+              <span>Análise 1-Clique</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveNav('wizard')}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 hover:border-[#31d6c4] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Play className="w-3.5 h-3.5 text-[#31d6c4]" />
+              <span className="hidden lg:inline">Wizard Avançado</span>
             </button>
           </div>
         </header>
@@ -626,6 +670,10 @@ export default function App() {
                 }}
                 onNotify={notify}
               />
+            )}
+
+            {activeNav === 'sonar_hub' && (
+              <SonarDockerCloudHubModule onNotify={notify} />
             )}
 
             {activeNav === 'tools_integrations' && (

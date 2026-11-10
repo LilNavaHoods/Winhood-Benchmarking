@@ -17,6 +17,7 @@ export type AppNavSection =
   | 'dashboard'
   | 'projects'
   | 'wizard'
+  | 'sonar_hub'
   | 'tools_integrations'
   | 'security_suite'
   | 'findings'
@@ -103,13 +104,13 @@ export const StepByStepJourneyBar: React.FC<StepByStepJourneyBarProps> = ({
     },
     {
       stepNumber: 3,
-      title: '3. SonarQube & Gitar AI',
-      subtitle: 'Comparação A/B Sonar, SARIF e revisão PR',
-      targetNav: 'tools_integrations',
-      relatedNavs: ['tools_integrations'],
+      title: '3. SonarQube & Docker Hub',
+      subtitle: 'Docker Oficial, SonarCloud, Scanner CLI e Hardware Multi-Core',
+      targetNav: 'sonar_hub',
+      relatedNavs: ['sonar_hub', 'tools_integrations'],
       completed: step3Done,
       icon: Wrench,
-      badgeText: 'Qualidade & IA',
+      badgeText: 'Qualidade & Docker',
     },
     {
       stepNumber: 4,

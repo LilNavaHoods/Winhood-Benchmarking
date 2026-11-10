@@ -7,6 +7,9 @@
     "dev": "tsx server.ts",
     "start": "tsx server.ts",
     "build": "vite build",
+    "desktop": "tsx electron-main.ts",
+    "pack:win": "electron-builder --dir",
+    "dist:win": "electron-builder --win nsis",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"

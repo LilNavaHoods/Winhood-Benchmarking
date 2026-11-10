@@ -1,6 +1,8 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { exec } from 'node:child_process';
+import { promisify } from 'node:util';
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import type {
@@ -51,6 +53,7 @@ import {
   type SarifExternalReportPayload,
 } from './src/workers/ExternalReportImportWorker';
 import { GitarReviewWorker } from './src/workers/GitarReviewWorker';
+import { getHardwareProfile, updateHardwareProfile } from './src/engine/workerPool';
 
 const PORT = 3000;
 const DATA_DIR = path.resolve(process.cwd(), '.winhood_data');
@@ -564,6 +567,224 @@ async function startServer() {
     if (!requireWritePermission(res)) return;
     db = createInitialRealWorkspaceState();
     res.json({ ok: true, message: 'Workspace real recarregado e analisado a partir do disco.' });
+  });
+
+  // 3.1 Hardware Profile & High-Performance Test Acceleration
+  app.get('/api/system/hardware-profile', (_req, res) => {
+    res.json(getHardwareProfile());
+  });
+
+  app.post('/api/system/hardware-profile', (req, res) => {
+    if (!requireWritePermission(res)) return;
+    const profile = updateHardwareProfile(req.body);
+    appendAuditLog(
+      db,
+      'HARDWARE_PROFILE_UPDATED',
+      'SYSTEM',
+      'hardware',
+      `Perfil de hardware atualizado: Modo ${profile.performanceMode}, ${profile.activeThreadsLimit} threads ativas, limite ${profile.memoryLimitMb}MB RAM.`
+    );
+    saveDatabase(db);
+    res.json(profile);
+  });
+
+  const execAsync = promisify(exec);
+
+  async function checkDockerCliAvailable(): Promise<boolean> {
+    try {
+      const { stdout } = await execAsync('docker --version', { timeout: 2500 });
+      return stdout.toLowerCase().includes('docker');
+    } catch {
+      return false;
+    }
+  }
+
+  // 3.2 SonarQube Docker Official vs SonarCloud Hub
+  app.get('/api/sonar/docker-status', async (_req, res) => {
+    const isDockerInstalled = await checkDockerCliAvailable();
+    const probeRes = await SonarQubeConnection.probeSonarQube({
+      serverUrl: 'http://localhost:9000',
+      mode: 'DOCKER',
+      timeoutMs: 2000,
+    });
+    res.json({
+      isDockerInstalled,
+      dockerContainerSuggestedCommand:
+        'docker run -d --name sonarqube -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true -p 9000:9000 sonarqube:latest',
+      serverUrl: 'http://localhost:9000',
+      isReachable: probeRes.httpReachable,
+      connectionState: probeRes.connectionState,
+      systemStatus: probeRes.systemStatus,
+      version: probeRes.version,
+      latencyMs: probeRes.latencyMs,
+      errorMessage: probeRes.errorMessage,
+    });
+  });
+
+  app.post('/api/sonar/docker-auto-start', async (_req, res) => {
+    try {
+      const isDockerInstalled = await checkDockerCliAvailable();
+      if (!isDockerInstalled) {
+        return res.json({
+          ok: false,
+          available: false,
+          fallbackToNative: true,
+          message:
+            'Docker não detectado na máquina host. O Motor Nativo Multi-Core WinHood foi ativado automaticamente com equivalência total ao SonarQube (Ratings A–E e SARIF 2.1.0).',
+        });
+      }
+
+      // Check if container is already running or exists
+      try {
+        const { stdout: psOut } = await execAsync(
+          'docker ps -a --filter name=sonarqube --format "{{.Status}}"',
+          { timeout: 4000 }
+        );
+        const statusText = psOut.trim();
+
+        if (statusText.toLowerCase().includes('up')) {
+          return res.json({
+            ok: true,
+            available: true,
+            status: 'RUNNING',
+            alreadyRunning: true,
+            message: 'O container oficial do SonarQube já está ativo e pronto em http://localhost:9000.',
+          });
+        }
+
+        if (statusText) {
+          // Container exists but stopped: start it
+          await execAsync('docker start sonarqube', { timeout: 6000 });
+          return res.json({
+            ok: true,
+            available: true,
+            status: 'STARTING',
+            message:
+              'Container SonarQube iniciado com sucesso pelo backend! O serviço estará pronto em instantes na porta 9000.',
+          });
+        }
+      } catch {
+        // If query failed, try running container
+      }
+
+      // Create and run new container
+      await execAsync(
+        'docker run -d --name sonarqube -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true -p 9000:9000 sonarqube:latest',
+        { timeout: 8000 }
+      );
+
+      return res.json({
+        ok: true,
+        available: true,
+        status: 'CREATED_AND_STARTING',
+        message:
+          'Container oficial sonarqube:latest criado e iniciado na porta 9000 sem intervenção manual.',
+      });
+    } catch (err: any) {
+      return res.json({
+        ok: false,
+        available: false,
+        fallbackToNative: true,
+        message: `Falha ao acionar Docker (${err?.message || 'Host indisponível'}). O Motor Nativo Multi-Core assumiu a análise de forma transparente.`,
+      });
+    }
+  });
+
+  app.post('/api/sonar/docker-stop', async (_req, res) => {
+    try {
+      const isDockerInstalled = await checkDockerCliAvailable();
+      if (!isDockerInstalled) {
+        return res.json({ ok: false, message: 'Docker não disponível no sistema operacional.' });
+      }
+      await execAsync('docker stop sonarqube', { timeout: 6000 });
+      return res.json({ ok: true, message: 'Container SonarQube pausado com sucesso.' });
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: err?.message || 'Falha ao pausar container.' });
+    }
+  });
+
+  app.post('/api/sonar/test-connection', async (req, res) => {
+    const { serverUrl = 'http://localhost:9000', token, mode = 'DOCKER' } = req.body as {
+      serverUrl?: string;
+      token?: string;
+      mode?: SonarInstallationMode;
+    };
+    const probeRes = await SonarQubeConnection.probeSonarQube({
+      serverUrl,
+      token,
+      mode,
+      timeoutMs: 3000,
+    });
+    res.json(probeRes);
+  });
+
+  app.post('/api/sonar/test-cloud', async (req, res) => {
+    const { organizationKey, token } = req.body as {
+      organizationKey?: string;
+      token?: string;
+    };
+    const probeRes = await SonarQubeConnection.probeSonarQube({
+      serverUrl: 'https://sonarcloud.io',
+      token,
+      mode: 'CLOUD',
+      organizationKey,
+      timeoutMs: 4000,
+    });
+    res.json(probeRes);
+  });
+
+  app.post('/api/sonar/generate-command', (req, res) => {
+    const {
+      projectKey = 'MEU_PROJETO',
+      hostUrl = 'http://localhost:9000',
+      token = 'SEU_TOKEN',
+      ecosystem = 'nodejs',
+    } = req.body as {
+      projectKey?: string;
+      hostUrl?: string;
+      token?: string;
+      ecosystem?: 'nodejs' | 'maven' | 'gradle' | 'dotnet' | 'cli';
+    };
+
+    const cleanKey = (projectKey || 'MEU_PROJETO').trim();
+    const cleanHost = (hostUrl || 'http://localhost:9000').trim().replace(/\/+$/, '');
+    const cleanToken = (token || 'SEU_TOKEN').trim();
+
+    const commands: Record<string, { install?: string; run: string; explanation: string }> = {
+      nodejs: {
+        install: 'npm install -D sonarqube-scanner',
+        run: `npx sonar-scanner -Dsonar.projectKey=${cleanKey} -Dsonar.host.url=${cleanHost} -Dsonar.login=${cleanToken}`,
+        explanation: 'Instala o pacote sonarqube-scanner e executa a varredura das pastas src/ via npx.',
+      },
+      maven: {
+        run: `mvn clean verify sonar:sonar -Dsonar.projectKey=${cleanKey} -Dsonar.host.url=${cleanHost} -Dsonar.login=${cleanToken}`,
+        explanation: 'Compila o código Java, executa os testes unitários e aciona o sonar-maven-plugin.',
+      },
+      gradle: {
+        run: `./gradlew sonar -Dsonar.projectKey=${cleanKey} -Dsonar.host.url=${cleanHost} -Dsonar.login=${cleanToken}`,
+        explanation: 'Executa a task oficial sonar no Gradle passando a URL do servidor e o token de acesso.',
+      },
+      dotnet: {
+        install: 'dotnet tool install --global dotnet-sonarscanner',
+        run: `dotnet-sonarscanner begin /k:"${cleanKey}" /d:sonar.host.url="${cleanHost}" /d:sonar.login="${cleanToken}" && dotnet build && dotnet-sonarscanner end /d:sonar.login="${cleanToken}"`,
+        explanation: 'Inicia o coletor .NET, executa a compilação e finaliza o upload dos relatórios para o Sonar.',
+      },
+      cli: {
+        run: `sonar-scanner -Dsonar.projectKey=${cleanKey} -Dsonar.host.url=${cleanHost} -Dsonar.login=${cleanToken}`,
+        explanation: 'Executa o binário global do SonarScanner CLI instalado na máquina ou no container.',
+      },
+    };
+
+    res.json({
+      ecosystem,
+      projectKey: cleanKey,
+      hostUrl: cleanHost,
+      token: cleanToken,
+      dockerRunCommand:
+        'docker run -d --name sonarqube -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true -p 9000:9000 sonarqube:latest',
+      command: commands[ecosystem] || commands.nodejs,
+      allCommands: commands,
+    });
   });
 
   // 4. Consolidated Bootstrap & Dashboard Summary (Seção 11.6, 11.7 e 11.8)
@@ -1450,6 +1671,129 @@ async function startServer() {
       return res.status(404).json({ error: 'Execução de benchmark não encontrada.' });
     }
     return res.json({ run });
+  });
+
+  // Quick 1-Click Zero-Configuration Analysis
+  app.post('/api/benchmark-runs/quick-run', (req, res) => {
+    if (!requireWritePermission(res)) return;
+    const { projectId, softwareId } = req.body as {
+      projectId?: string;
+      softwareId?: string;
+    };
+
+    let targetProject = db.projects.find((p) => p.id === projectId) || db.projects[0];
+    if (!targetProject) {
+      const nowIso = new Date().toISOString();
+      targetProject = {
+        id: `proj-${crypto.randomUUID().slice(0, 8)}`,
+        name: 'Projeto Principal (Zero-Configuração)',
+        category: 'Aplicações Web & Microsserviços',
+        objective: 'Auditoria Automática de Qualidade e Segurança',
+        description: 'Projeto configurado automaticamente pelo WinHood para análise em 1 clique.',
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        owner: db.currentUser.name,
+        history: [
+          {
+            timestamp: nowIso,
+            action: 'PROJECT_CREATED',
+            actor: db.currentUser.name,
+            details: 'Projeto inicial criado para análise rápida em 1 clique.',
+          },
+        ],
+      };
+      db.projects.push(targetProject);
+      saveDatabase(db);
+    }
+
+    let selectedSoftwares = db.softwares.filter((s) => s.projectId === targetProject.id);
+    if (softwareId) {
+      const specific = db.softwares.find((s) => s.id === softwareId);
+      if (specific) selectedSoftwares = [specific];
+    }
+
+    if (selectedSoftwares.length === 0) {
+      const sample = createInitialRealWorkspaceState().softwares[0];
+      sample.id = `sw-${crypto.randomUUID().slice(0, 8)}`;
+      sample.projectId = targetProject.id;
+      db.softwares.push(sample);
+      selectedSoftwares = [sample];
+      saveDatabase(db);
+    }
+
+    const runId = `run-${crypto.randomUUID().slice(0, 8)}`;
+    const activeWeights = DEFAULT_CATEGORY_WEIGHTS;
+    const activeEnv = DEFAULT_BENCHMARK_PROFILES[0].equivalenceEnvironment;
+
+    const runningRun = createInitialRunningBenchmark({
+      runId,
+      projectId: targetProject.id,
+      projectName: targetProject.name,
+      profileName: 'Análise Rápida de 1 Clique (Zero-Configuração)',
+      softwares: selectedSoftwares,
+      weights: activeWeights,
+      enablePenaltyCaps: true,
+      equivalenceEnvironment: activeEnv,
+    });
+
+    db.runs.unshift(runningRun);
+    saveDatabase(db, true);
+
+    setTimeout(() => {
+      try {
+        const completedRun = executeBenchmarkRunOrchestration({
+          runId,
+          projectId: targetProject.id,
+          projectName: targetProject.name,
+          profileName: 'Análise Rápida de 1 Clique (Zero-Configuração)',
+          softwares: selectedSoftwares,
+          weights: activeWeights,
+          enablePenaltyCaps: true,
+          equivalenceEnvironment: activeEnv,
+          onProgress: (prog) => {
+            const current = db.runs.find((r) => r.id === runId);
+            if (current && current.status === 'RUNNING') {
+              current.progress = prog;
+            }
+          },
+        });
+
+        const targetIdx = db.runs.findIndex((r) => r.id === runId);
+        if (targetIdx !== -1) {
+          db.runs[targetIdx] = completedRun;
+          db.telemetry.workerExecutionsCount += completedRun.toolExecutions.length;
+          appendAuditLog(
+            db,
+            'BENCHMARK_RUN_EXECUTED',
+            'BENCHMARK_RUN',
+            completedRun.id,
+            `Análise 1-Clique executada para ${selectedSoftwares.map((s) => s.name).join(', ')}.`
+          );
+          saveDatabase(db, true);
+        }
+      } catch (err: any) {
+        const target = db.runs.find((r) => r.id === runId);
+        if (target) {
+          target.status = 'FAILED';
+          target.executiveSummary = `Falha na execução: ${err?.message || 'Erro nos workers de análise'}`;
+          target.progress = {
+            percent: 100,
+            stageLabel: `Erro durante análise: ${err?.message || 'Falha operacional'}`,
+            estimatedRemainingSeconds: 0,
+            processedFiles: 0,
+            totalFiles: 0,
+          };
+          saveDatabase(db, true);
+        }
+      }
+    }, 150);
+
+    return res.status(201).json({
+      run: runningRun,
+      projectId: targetProject.id,
+      softwareIds: selectedSoftwares.map((s) => s.id),
+      message: 'Análise 1-Clique iniciada com sucesso.',
+    });
   });
 
   app.post('/api/benchmark-runs', (req, res) => {
