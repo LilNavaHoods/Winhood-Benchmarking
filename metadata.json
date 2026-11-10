@@ -1,0 +1,6 @@
+{
+  "name": "WinHood — Software Benchmark & Quality Analyzer",
+  "description": "Plataforma técnica de benchmarking comparativo de softwares com análise estática real, DevSecOps, motor de veracidade, evidências SHA-256 e pontuação determinística.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,6 @@
+{
+  "summary":  "Plano arquitetural e de experiência do usuário para adicionar a barra global de Progresso de Análise com ETA em tempo real no cabeçalho, eliminar dados pré-carregados/mocados garantindo ingestão real via GitHub API e Upload Local, aprofundar o motor de análise estática em nível equivalente/superior ao SonarQube (Quality Gate, ratings A-E, Security Hotspots, complexidade cognitiva/ciclomática, acoplamento e CWE/CVSS), expandir a exportação multi-formato (JSON, SARIF 2.1.0, HTML interativo, Markdown e CSV) e higienizar o repositório para envio leve ao GitHub.",
+  "updatedAt":  "2026-11-10T13:23:55.012031057Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

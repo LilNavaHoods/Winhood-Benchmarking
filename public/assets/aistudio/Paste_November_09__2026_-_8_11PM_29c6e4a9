@@ -1,0 +1,1255 @@
+# PROMPT COMPLEMENTAR — INTEGRAÇÃO SONARQUBE COMMUNITY BUILD, GITAR AI E OTIMIZAÇÃO DE RECURSOS
+
+## 1. OBJETIVO
+
+Evoluir o Software Benchmark & Quality Analyzer por meio da integração real do SonarQube Community Build e das tecnologias complementares da plataforma Sonar, além de avaliar a integração com Gitar AI.
+
+O objetivo é aumentar a capacidade de análise de código, qualidade, segurança, manutenibilidade e revisão automatizada dos softwares A e B.
+
+Além de agregar essas ferramentas, é obrigatório otimizar a arquitetura do projeto para evitar consumo desnecessário de memória, processamento, armazenamento e recursos em segundo plano.
+
+A aplicação deverá continuar leve, modular e independente das ferramentas externas.
+
+**Não quero uma cópia da interface do SonarQube. Quero integrar sua capacidade de análise à minha plataforma, aproveitar seus resultados e construir uma camada própria de comparação entre softwares.**
+
+---
+
+# 2. SONARQUBE COMMUNITY BUILD — DOWNLOAD E INSTALAÇÃO REAL
+
+## 2.1 Fonte oficial
+
+Utilizar exclusivamente as fontes oficiais:
+
+Download:
+https://www.sonarsource.com/products/sonarqube/downloads/?modal=sonarqube-community-build-modal-form
+
+Documentação Community Build:
+https://docs.sonarsource.com/sonarqube-community-build/
+
+Documentação SonarQube Server:
+https://docs.sonarsource.com/sonarqube-server
+
+Documentação SonarQube Cloud:
+https://docs.sonarsource.com/sonarqube-cloud
+
+Documentação SonarQube for VS Code:
+https://docs.sonarsource.com/sonarqube-for-vs-code/
+
+Documentação SonarScanner:
+https://docs.sonarsource.com/sonarqube-community-build/analyzing-source-code/scanners/sonarscanner
+
+Documentação da Web API:
+https://docs.sonarsource.com/sonarqube-community-build/extension-guide/web-api
+
+Não utilizar repositórios de terceiros para obter os binários.
+
+## 2.2 Identificar a versão
+
+Antes de realizar o download:
+
+1. Consultar a página oficial.
+2. Identificar a versão mais recente do SonarQube Community Build.
+3. Identificar os sistemas operacionais suportados.
+4. Identificar a arquitetura correspondente.
+5. Verificar a disponibilidade de ZIP, Docker ou outro método oficial de instalação.
+6. Consultar as notas de lançamento.
+7. Verificar os requisitos de execução.
+8. Registrar a versão selecionada.
+
+Não fixar permanentemente uma versão antiga no código.
+
+Utilizar a versão estável oficial disponível no momento da instalação.
+
+Registrar:
+
+- Nome do produto.
+- Versão.
+- Arquitetura.
+- Sistema operacional.
+- Origem do download.
+- Data.
+- Tamanho.
+- Hash SHA-256 calculado.
+- Resultado da validação.
+
+Se a página oficial disponibilizar um checksum ou assinatura, validar o arquivo baixado.
+
+Se não houver checksum oficial disponível, não inventar um. Informar que foi calculado apenas o hash local para verificar a integridade posterior.
+
+## 2.3 Download do SonarQube
+
+Realizar o download da distribuição oficial do Community Build.
+
+Não baixar versões Developer ou Enterprise para simular funcionalidades pagas.
+
+Não utilizar recursos licenciados que não estejam disponíveis na edição Community Build.
+
+O processo deverá:
+
+- Detectar o sistema operacional.
+- Detectar a arquitetura.
+- Consultar a disponibilidade da distribuição.
+- Baixar a versão adequada.
+- Validar o arquivo.
+- Preparar o diretório de instalação.
+- Extrair os arquivos.
+- Preparar a configuração.
+- Verificar dependências.
+- Validar permissões.
+- Registrar a instalação.
+
+Não colocar os binários do SonarQube dentro do código-fonte versionado da aplicação.
+
+Armazenar as ferramentas em um diretório externo de dependências, por exemplo:
+
+`%LOCALAPPDATA%/SoftwareBenchmarkAnalyzer/tools/sonarqube/`
+
+A localização deverá ser configurável.
+
+Não baixar ou instalar novamente a mesma versão quando já existir uma instalação validada.
+
+## 2.4 Compatibilidade com o ambiente do Google AI Studio
+
+Verificar se o ambiente de desenvolvimento realmente permite:
+
+- Acesso à internet.
+- Download dos arquivos oficiais.
+- Execução de processos.
+- Instalação de serviços.
+- Persistência de arquivos.
+- Inicialização de aplicações Java.
+- Disponibilidade de memória e armazenamento suficientes.
+
+Se o Google AI Studio não permitir a instalação e execução persistente do servidor, não simular a instalação.
+
+Nesse caso:
+
+1. Implementar o gerenciador de instalação no projeto.
+2. Criar scripts de instalação para o sistema operacional de destino.
+3. Criar scripts de verificação.
+4. Criar documentação de configuração.
+5. Criar o adaptador de integração.
+6. Informar claramente o que depende da execução no computador ou servidor do usuário.
+
+Não apresentar uma instalação apenas planejada como instalação concluída.
+
+---
+
+# 3. SONARSCANNER — EXECUÇÃO DAS ANÁLISES
+
+O SonarQube Community Build deverá ser utilizado junto ao scanner apropriado para cada tecnologia.
+
+Não confundir o SonarQube Server com o SonarScanner CLI.
+
+Consultar as versões oficiais:
+
+https://docs.sonarsource.com/sonarqube-community-build/analyzing-source-code/scanners/sonarscanner
+
+Implementar seleção automática do scanner mais adequado.
+
+Priorizar os scanners específicos para:
+
+- Maven.
+- Gradle.
+- .NET.
+- NPM.
+- Python.
+
+Utilizar SonarScanner CLI para projetos sem scanner específico apropriado.
+
+O sistema deverá detectar a linguagem e as ferramentas de construção do projeto.
+
+Não instalar scanners desnecessários.
+
+## 3.1 Gerenciador de scanners
+
+Criar um componente chamado:
+
+`SonarScannerManager`
+
+Responsabilidades:
+
+- Detectar scanners instalados.
+- Identificar versões.
+- Consultar compatibilidade.
+- Baixar versões oficiais quando necessário.
+- Validar os arquivos.
+- Manter cache.
+- Executar análises.
+- Controlar processos.
+- Coletar logs.
+- Capturar códigos de saída.
+- Coletar evidências.
+- Informar erros.
+
+Cada scanner deverá possuir seu próprio adaptador.
+
+## 3.2 Importação dos repositórios
+
+Para projetos provenientes do GitHub ou GitLab:
+
+- Analisar o conteúdo original.
+- Registrar branch.
+- Registrar commit.
+- Registrar versão.
+- Utilizar o conteúdo efetivamente importado.
+- Evitar análises sobre arquivos substitutos.
+- Preservar o vínculo com a revisão analisada.
+
+Quando os dados de SCM e blame forem necessários, preferir clonagem completa do repositório. Uma clonagem superficial pode impedir a recuperação dessas informações e comprometer parte da análise.
+
+A plataforma deverá registrar essa limitação se não possuir histórico completo.
+
+## 3.3 Preparação do projeto
+
+Gerar a configuração necessária para cada análise.
+
+Utilizar as propriedades oficiais do SonarScanner.
+
+Entre os parâmetros que devem ser avaliados estão:
+
+- `sonar.projectKey`
+- `sonar.projectName`
+- `sonar.projectBaseDir`
+- `sonar.sources`
+- `sonar.tests`
+- `sonar.exclusions`
+- `sonar.coverage.exclusions`
+- `sonar.host.url`
+- `sonar.token`
+
+Não aplicar exclusões automaticamente sem registrar seus motivos.
+
+Não excluir arquivos de produção ou testes apenas para melhorar artificialmente os resultados.
+
+Armazenar a configuração utilizada junto à execução para garantir reprodutibilidade.
+
+## 3.4 Segurança dos tokens
+
+Os tokens do SonarQube devem permanecer exclusivamente no backend ou no mecanismo seguro de segredos.
+
+Utilizar autenticação Bearer, conforme documentação oficial.
+
+Não:
+
+- Expor tokens no frontend.
+- Salvar tokens no banco sem proteção.
+- Imprimir tokens em logs.
+- Inserir tokens no código-fonte.
+- Colocar tokens diretamente na linha de comando.
+- Enviar tokens em parâmetros de URL.
+
+Utilizar variáveis de ambiente ou mecanismo de segredos seguro, como `SONAR_TOKEN`, conforme suporte do scanner.
+
+Registrar e acompanhar os vencimentos dos tokens quando a API disponibilizar essa informação.
+
+---
+
+# 4. ARQUITETURA DE INTEGRAÇÃO SONARQUBE
+
+Criar uma camada independente denominada:
+
+`SonarQubeIntegrationService`
+
+Ela deverá conectar o Software Benchmark & Quality Analyzer à instância do SonarQube.
+
+Arquitetura:
+
+Frontend
+↓
+Backend API
+↓
+Benchmark Orchestrator
+↓
+SonarQube Adapter
+↓
+SonarScanner
+↓
+SonarQube Community Build
+↓
+Web API
+↓
+Normalização dos resultados
+↓
+Banco de dados
+↓
+Dashboard comparativo
+
+O frontend nunca deverá executar diretamente comandos do SonarScanner ou acessar tokens de integração.
+
+## 4.1 Modos de instalação
+
+Disponibilizar dois modos principais:
+
+**Modo 1 — Servidor local**
+
+Conectar a uma instalação local do SonarQube Community Build.
+
+Exemplo de configuração:
+
+`http://localhost:9000`
+
+A porta deverá ser configurável.
+
+**Modo 2 — Servidor remoto**
+
+Permitir conectar a uma instância SonarQube já instalada em outro servidor.
+
+Campos:
+
+- URL do servidor.
+- Token.
+- Identificação da instância.
+- Nome.
+- Estado de conexão.
+- Versão.
+- Compatibilidade.
+- Data da última verificação.
+
+Não exigir uma instalação local quando o usuário já possuir uma instância remota.
+
+## 4.2 Verificação da integração
+
+Criar a função:
+
+`probeSonarQube()`
+
+Ela deverá verificar:
+
+- Disponibilidade do servidor.
+- Conexão HTTP.
+- Autenticação.
+- Versão.
+- Permissões.
+- Estado operacional.
+- Compatibilidade da API.
+
+Criar os estados:
+
+- NOT_INSTALLED.
+- NOT_CONFIGURED.
+- CONNECTING.
+- CONNECTED.
+- AUTH_FAILED.
+- SERVER_UNAVAILABLE.
+- VERSION_UNSUPPORTED.
+- READY.
+- RUNNING.
+- ERROR.
+
+Não mostrar `CONNECTED` apenas porque a URL foi cadastrada.
+
+Exigir uma resposta válida do servidor.
+
+---
+
+# 5. UTILIZAÇÃO DA WEB API DO SONARQUBE
+
+Documentação obrigatória:
+
+https://docs.sonarsource.com/sonarqube-community-build/extension-guide/web-api
+
+A Web API deverá ser utilizada para recuperar os resultados reais das análises.
+
+Não depender de scraping da interface web do SonarQube.
+
+Não criar números manualmente.
+
+Consultar a documentação da API disponibilizada pela própria instância para verificar os endpoints suportados pela versão instalada.
+
+Considerar a evolução da Web API V2 e evitar utilizar endpoints já descontinuados.
+
+Implementar adaptador para:
+
+- Projetos.
+- Análises.
+- Issues.
+- Medidas.
+- Quality Gates.
+- Regras.
+- Perfis de qualidade.
+- Histórico.
+- Status de execução.
+
+O endpoint de medidas, por exemplo, deverá permitir recuperar métricas documentadas por projeto, como complexidade e code smells, respeitando as permissões de acesso.
+
+## 5.1 Processamento assíncrono
+
+Não presumir que o scanner concluiu a análise simplesmente porque o processo terminou.
+
+Implementar o acompanhamento da tarefa enviada ao SonarQube.
+
+Registrar:
+
+- ID da execução.
+- ID da tarefa no SonarQube.
+- Horário de envio.
+- Estado de processamento.
+- Resultado.
+- Horário de conclusão.
+- Código de erro.
+- Evidências.
+
+Aguardar o processamento terminar antes de consultar os resultados finais.
+
+Utilizar polling com intervalo controlado e backoff.
+
+Não gerar requisições contínuas desnecessárias.
+
+## 5.2 Armazenamento dos resultados
+
+Os resultados deverão ser armazenados no banco principal da aplicação.
+
+Criar tabelas ou estruturas para:
+
+- sonar_instances.
+- sonar_installations.
+- sonar_versions.
+- sonar_scanners.
+- sonar_projects.
+- sonar_analyses.
+- sonar_tasks.
+- sonar_issues.
+- sonar_measures.
+- sonar_quality_gates.
+- sonar_quality_profiles.
+- sonar_integrations.
+- sonar_execution_logs.
+
+Cada resultado deverá estar vinculado ao Software A ou B, à sua versão, ao commit e ao benchmark correspondente.
+
+Armazenar as respostas originais necessárias à auditoria, protegendo dados sensíveis.
+
+---
+
+# 6. FUNCIONALIDADES DO SONARQUBE QUE DEVEM ENRIQUECER O BENCHMARK
+
+Utilizar o SonarQube para enriquecer as seguintes análises:
+
+## 6.1 Qualidade de código
+
+- Bugs.
+- Code Smells.
+- Complexidade.
+- Duplicação.
+- Código duplicado.
+- Linhas de código.
+- Dívida técnica.
+- Manutenibilidade.
+- Confiabilidade.
+- Histórico de qualidade.
+
+## 6.2 Segurança estática
+
+- Vulnerabilidades identificadas.
+- Security Hotspots.
+- Revisão de Security Hotspots.
+- Problemas de segurança.
+- Regras de segurança.
+- Severidade.
+- Localização dos achados.
+- Evidências disponíveis.
+- Orientações de correção.
+
+Não confundir vulnerabilidades estáticas com vulnerabilidades exploradas dinamicamente.
+
+## 6.3 Cobertura de testes
+
+- Cobertura de código.
+- Linhas cobertas.
+- Linhas não cobertas.
+- Condições avaliadas.
+- Cobertura de código novo.
+- Relatórios importados de frameworks de teste.
+
+Não afirmar que o SonarQube executou os testes unitários.
+
+A cobertura deve ser proveniente de relatórios reais gerados pelos respectivos frameworks de teste e importados durante a análise.
+
+## 6.4 Quality Gates
+
+Implementar importação do resultado dos Quality Gates.
+
+Permitir apresentar:
+
+- Aprovado.
+- Reprovado.
+- Condições atendidas.
+- Condições não atendidas.
+- Métricas responsáveis pela reprovação.
+
+Não alterar silenciosamente as regras do Quality Gate entre Software A e Software B.
+
+---
+
+# 7. IMPORTAÇÃO DE RESULTADOS DE OUTRAS FERRAMENTAS PARA O SONARQUBE
+
+Utilizar o recurso de importação de relatórios externos quando compatível com a versão do Community Build.
+
+Documentação:
+
+https://docs.sonarsource.com/sonarqube-community-build/analyzing-source-code/importing-external-issues/
+
+https://docs.sonarsource.com/sonarqube-community-build/analyzing-source-code/importing-external-issues/importing-issues-from-sarif-reports
+
+Avaliar a integração de relatórios de:
+
+- Semgrep.
+- CodeQL.
+- Gitleaks.
+- Trivy.
+- Bandit.
+- Ruff.
+- ESLint.
+- SpotBugs.
+- PMD.
+- Checkstyle.
+- Outras ferramentas compatíveis.
+
+Utilizar SARIF quando suportado pelo scanner e pela versão instalada.
+
+Não transformar resultados incompatíveis em formatos fictícios.
+
+Quando não houver integração suportada, armazenar o resultado no mecanismo nativo do Benchmark Analyzer.
+
+Manter identificados:
+
+- Ferramenta de origem.
+- Versão.
+- Regra.
+- Identificador original.
+- Severidade.
+- Confiança.
+- Arquivo.
+- Linha.
+- Evidência.
+
+Evitar duplicação de achados.
+
+Importante: resultados externos importados pelo SonarQube possuem tratamento diferente de regras nativas. Não apresentar achados importados como se fossem regras próprias do SonarQube ou como se estivessem automaticamente presentes nos Quality Profiles.
+
+O sistema principal deverá manter a origem de cada achado.
+
+---
+
+# 8. DOCUMENTAÇÃO SONARQUBE SERVER, CLOUD E IDE
+
+Consultar e utilizar as quatro áreas de documentação solicitadas.
+
+## 8.1 SonarQube Server
+
+https://docs.sonarsource.com/sonarqube-server
+
+Utilizar como referência para:
+
+- Arquitetura.
+- Análise de código.
+- CI/CD.
+- Quality Gates.
+- Gestão de regras.
+- Segurança.
+- Administração.
+- APIs.
+- Integrações.
+
+Para recursos específicos da edição gratuita, priorizar sempre a documentação Community Build.
+
+Não presumir que todos os recursos do Developer ou Enterprise estão disponíveis gratuitamente.
+
+## 8.2 SonarQube Cloud
+
+https://docs.sonarsource.com/sonarqube-cloud
+
+Criar um adaptador opcional para SonarQube Cloud.
+
+Permitir:
+
+- Conexão da conta.
+- Autenticação.
+- Importação de projetos autorizados.
+- Consulta de análises.
+- Consulta de métricas.
+- Consulta de issues.
+- Consulta de Quality Gates.
+- Comparação dos resultados.
+
+Não baixar ou tentar instalar o SonarQube Cloud.
+
+Ele é um serviço SaaS.
+
+Não enviar código-fonte do usuário para a nuvem sem autorização explícita.
+
+Apresentar claramente quando a análise será realizada em ambiente externo.
+
+## 8.3 SonarQube for VS Code
+
+https://docs.sonarsource.com/sonarqube-for-vs-code
+
+Criar documentação de integração opcional com a extensão.
+
+Avaliar:
+
+- Instalação pelo marketplace.
+- Verificação de presença da extensão, mediante autorização.
+- Connected Mode.
+- Conexão com Community Build.
+- Conexão com Server.
+- Conexão com Cloud.
+- Consistência dos perfis de qualidade.
+- Compartilhamento de regras.
+- Notificações.
+
+A extensão não deve ser requisito para executar benchmarks pelo backend.
+
+Não baixar ou instalar extensões automaticamente no ambiente do usuário sem consentimento.
+
+Apresentar orientação de configuração para desenvolvedores.
+
+---
+
+# 9. INTEGRAÇÃO COM GITAR AI
+
+Documentação:
+
+https://docs.gitar.ai/introduction
+
+https://docs.gitar.ai/llms.txt
+
+Gitar deverá ser avaliado como ferramenta complementar de revisão de código e validação assistida por IA.
+
+Não confundir Gitar com SonarQube.
+
+O SonarQube é o mecanismo de análise estática e qualidade.
+
+O Gitar é um agente de revisão de Pull Requests e análise de falhas de CI, podendo sugerir e aplicar correções em branches conforme suas permissões e configurações.
+
+## 9.1 Funcionalidades a avaliar
+
+Implementar integração opcional para:
+
+- Revisão de Pull Requests.
+- Análise de alterações de código.
+- Identificação de bugs.
+- Revisão de segurança.
+- Avaliação de performance.
+- Revisão de qualidade.
+- Análise de falhas de CI.
+- Sugestões de correção.
+- Validação funcional de alterações.
+- Regras personalizadas por repositório.
+- Análise entre repositórios quando suportada.
+
+Avaliar suporte aos provedores oficialmente indicados:
+
+- GitHub.
+- GitLab.
+- Bitbucket.
+- Azure DevOps.
+
+Também avaliar integrações CI compatíveis, conforme documentação.
+
+## 9.2 Integração pela API
+
+Consultar:
+
+https://docs.gitar.ai/api-reference/overview
+
+Implementar somente operações documentadas.
+
+Quando disponível e autorizado, avaliar:
+
+- Verificação de instalação.
+- Estado da integração.
+- Onboarding de repositórios.
+- Consulta do status de Merge Requests.
+- Consulta de revisões.
+- Consulta de falhas de CI.
+
+Não inventar endpoints.
+
+Não realizar scraping do dashboard.
+
+Caso a conta Gitar não esteja conectada ou não exista credencial válida, mostrar:
+
+`NOT_CONFIGURED`
+
+Não simular análises de IA.
+
+## 9.3 Segurança das alterações propostas
+
+O Gitar pode realizar alterações em branches.
+
+Por esse motivo:
+
+- Não permitir modificações diretas nos arquivos originais dos softwares A e B.
+- Não executar correções automaticamente no projeto original.
+- Utilizar branch ou cópia de trabalho isolada.
+- Preservar o commit original.
+- Registrar as mudanças propostas.
+- Exibir diferenças antes e depois.
+- Exigir aprovação humana antes de aplicar alterações.
+- Executar novamente os testes após correções aprovadas.
+- Registrar se a correção resolveu ou introduziu problemas.
+
+Desabilitar aprovação automática, merge automático e aplicação automática de correções por padrão.
+
+Implementar essas funções somente mediante configuração explícita e permissões adequadas.
+
+Não enviar código privado a serviços externos sem autorização e transparência sobre o tratamento dos dados.
+
+## 9.4 Papel do Gitar no benchmark
+
+Criar uma seção denominada:
+
+`AI CODE REVIEW & REMEDIATION`
+
+Ela deverá apresentar separadamente:
+
+- Achados do SonarQube.
+- Achados de outros scanners.
+- Revisões do Gitar.
+- Sugestões de correção.
+- Alterações propostas.
+- Correções aprovadas.
+- Correções verificadas.
+- Falhas persistentes.
+
+Não somar automaticamente todos os achados.
+
+Deduplicar resultados quando representarem o mesmo problema.
+
+Manter a origem e a metodologia de cada identificação.
+
+O Gitar será um complemento de revisão e remediação, não a fonte principal da pontuação de qualidade.
+
+---
+
+# 10. COMPARAÇÃO A/B COM SONARQUBE
+
+Implementar comparação padronizada.
+
+Para cada benchmark:
+
+**Software A**
+- Projeto Sonar próprio.
+- Project Key exclusivo.
+- Commit.
+- Versão.
+- Profile.
+- Quality Gate.
+- Scanner.
+- Data da análise.
+
+**Software B**
+- Projeto Sonar próprio.
+- Project Key exclusivo.
+- Commit.
+- Versão.
+- Profile.
+- Quality Gate.
+- Scanner.
+- Data da análise.
+
+Ambos deverão utilizar:
+
+- Mesma versão do SonarQube.
+- Mesma versão do scanner apropriado.
+- Mesmo perfil de qualidade.
+- Mesmas condições de análise.
+- Mesmas regras.
+- Mesmas exclusões, sempre que tecnicamente aplicáveis.
+- Mesmo critério de cobertura.
+- Mesmo tratamento de código novo.
+- Mesmo ambiente de execução.
+
+Se houver diferenças técnicas inevitáveis, registrá-las.
+
+Executar preferencialmente as análises em sequência, utilizando a mesma instância e as mesmas condições, para reduzir interferência de recursos.
+
+A comparação deverá apresentar:
+
+- Bugs.
+- Vulnerabilidades.
+- Security Hotspots.
+- Code Smells.
+- Complexidade.
+- Duplicação.
+- Cobertura.
+- Dívida técnica.
+- Qualidade.
+- Confiabilidade.
+- Manutenibilidade.
+- Quality Gate.
+- Tendência histórica.
+
+A pontuação deve indicar quais indicadores são nativos do SonarQube e quais são calculados pelo Benchmark Analyzer.
+
+Não criar uma pontuação baseada em métricas que não foram efetivamente obtidas.
+
+---
+
+# 11. OTIMIZAÇÃO — DEIXAR A APLICAÇÃO MAIS LEVE
+
+Esta seção é obrigatória e deve ser aplicada ao projeto inteiro, não somente ao SonarQube.
+
+A prioridade é reduzir o consumo de recursos sem comprometer funcionalidades, integridade, segurança ou precisão das análises.
+
+## 11.1 Não embutir o SonarQube na aplicação principal
+
+Não compilar o servidor completo dentro do frontend.
+
+Não empacotar o banco do SonarQube dentro do banco principal.
+
+Não iniciar uma nova instância do SonarQube para cada software.
+
+Não iniciar SonarQube automaticamente quando o usuário abrir o dashboard.
+
+Não manter processos de análise em execução sem necessidade.
+
+Utilizar uma instância compartilhada e independente para processar as análises.
+
+Permitir conectar a uma instância remota já existente.
+
+## 11.2 Inicialização sob demanda
+
+Criar um gerenciador:
+
+`ExternalToolLifecycleManager`
+
+Ele deverá controlar:
+
+- Inicialização.
+- Estado.
+- Verificação.
+- Execução.
+- Encerramento.
+- Monitoramento.
+- Limpeza.
+- Recuperação.
+
+O SonarQube deverá iniciar somente quando necessário, quando estiver configurado para modo local e quando o usuário iniciar uma análise que dependa dele.
+
+Quando estiver em uso remoto, não iniciar processos locais.
+
+Permitir encerramento controlado após um período configurável de inatividade, desde que não existam análises em andamento ou outros usuários utilizando o serviço.
+
+## 11.3 Pré-verificação dos recursos
+
+Antes de iniciar a instância local, verificar:
+
+- RAM disponível.
+- CPU.
+- Armazenamento livre.
+- Espaço para arquivos temporários.
+- Arquitetura.
+- Sistema operacional.
+- Java e dependências exigidas.
+- Estado dos processos.
+
+A documentação oficial do Community Build aponta como referência inicial para instalações pequenas aproximadamente 4 GB de RAM, 2 núcleos e 30 GB de disco.
+
+Se o computador não atender aos requisitos, não forçar a inicialização.
+
+Oferecer conexão remota como alternativa.
+
+Não reduzir arbitrariamente a memória da JVM para mascarar falta de recursos.
+
+Não comprometer estabilidade do Elasticsearch ou processamento do SonarQube para obter um consumo artificialmente baixo.
+
+## 11.4 Cache inteligente
+
+Implementar cache para:
+
+- Binários.
+- Scanners.
+- Versões.
+- Metadados.
+- Configurações.
+- Resultados imutáveis associados a commits.
+- Consultas de métricas.
+
+O cache só poderá ser reutilizado quando:
+
+- O commit for igual.
+- A versão do scanner for igual.
+- A configuração for compatível.
+- O perfil de qualidade for igual.
+- As regras relevantes forem iguais.
+- A versão do SonarQube for compatível.
+
+Não reutilizar resultados quando o código ou as condições de análise tiverem mudado.
+
+## 11.5 Execução controlada
+
+Criar limites configuráveis:
+
+- Concorrência por ferramenta.
+- Número de workers.
+- Timeout.
+- Limite de memória.
+- Limite de CPU.
+- Limite de arquivos.
+- Limite de armazenamento temporário.
+- Tamanho máximo dos relatórios.
+
+Para máquinas de baixa capacidade, começar com uma análise SonarQube por vez.
+
+Não executar simultaneamente todos os scanners sem necessidade.
+
+Utilizar uma fila de tarefas.
+
+## 11.6 Processamento sob demanda
+
+Os painéis não devem consultar continuamente os serviços externos.
+
+Utilizar:
+
+- Polling com backoff.
+- Atualização sob demanda.
+- SSE ou WebSocket somente durante execuções ativas.
+- Cache de respostas.
+- Paginação.
+- Consultas incrementais.
+
+Armazenar os resultados normalizados no banco da aplicação e consultar o SonarQube novamente apenas quando necessário.
+
+## 11.7 Otimização do frontend
+
+Auditar:
+
+- Componentes duplicados.
+- Dependências pesadas.
+- Renderizações desnecessárias.
+- Consultas repetidas.
+- Gráficos carregados sem necessidade.
+- Componentes não utilizados.
+- Imports desnecessários.
+- Estados duplicados.
+- Listagens extensas.
+
+Aplicar:
+
+- Lazy loading.
+- Code splitting.
+- Paginação.
+- Virtualização de listas quando necessário.
+- Cache de consultas.
+- Reutilização de componentes.
+- Carregamento sob demanda de gráficos e relatórios.
+
+Não carregar todos os dashboards de uma única vez.
+
+## 11.8 Otimização do backend
+
+Auditar:
+
+- Consultas duplicadas.
+- Processamentos síncronos demorados.
+- Requisições repetidas a serviços externos.
+- Leitura desnecessária de arquivos.
+- Reprocessamento de relatórios.
+- Escritas excessivas no banco.
+- Processos filhos abandonados.
+
+Utilizar:
+
+- Fila de jobs.
+- Processamento assíncrono.
+- Consultas eficientes.
+- Índices.
+- Paginação.
+- Cache.
+- Limites de concorrência.
+- Encerramento controlado de processos.
+
+Não executar análise pesada no processo principal da API.
+
+## 11.9 Armazenamento
+
+Não duplicar arquivos de código-fonte.
+
+Não armazenar arquivos temporários indefinidamente.
+
+Não guardar cópias desnecessárias de relatórios grandes.
+
+Manter um sistema de retenção para:
+
+- Logs.
+- Relatórios originais.
+- Arquivos importados.
+- Resultados normalizados.
+- Evidências.
+- Cache.
+
+Preservar evidências necessárias à auditoria.
+
+Nunca excluir evidências obrigatórias automaticamente.
+
+---
+
+# 12. ARQUITETURA MODULAR E LEVE
+
+Criar ou adaptar a seguinte estrutura:
+
+`src/integrations/sonarqube/`
+- SonarQubeAdapter.
+- SonarQubeApiClient.
+- SonarQubeConnection.
+- SonarQubeInstallationManager.
+- SonarQubeVersionManager.
+- SonarScannerManager.
+- SonarAnalysisRunner.
+- SonarResultParser.
+- SonarMetricsMapper.
+- SonarQualityGateMapper.
+
+`src/integrations/gitar/`
+- GitarAdapter.
+- GitarApiClient.
+- GitarConnection.
+- GitarInstallationHealth.
+- GitarReviewMapper.
+- GitarCiStatusMapper.
+
+`src/services/tools/`
+- ExternalToolLifecycleManager.
+- ToolAvailabilityService.
+- ToolResourceMonitor.
+- ToolCacheManager.
+
+`src/workers/`
+- SonarAnalysisWorker.
+- ExternalReportImportWorker.
+- GitarReviewWorker.
+
+Adaptar os nomes à arquitetura existente.
+
+Não criar arquivos duplicados com funções equivalentes.
+
+---
+
+# 13. NOVA INTERFACE DE INTEGRAÇÕES
+
+Criar uma tela:
+
+`Ferramentas e Integrações`
+
+Apresentar cartões independentes para:
+
+**SonarQube Community Build**
+- Instalação.
+- Versão.
+- Estado.
+- URL.
+- Consumo de recursos.
+- Última análise.
+- Configuração.
+- Conectar.
+- Desconectar.
+- Atualizar.
+- Iniciar.
+- Parar.
+
+**SonarQube Cloud**
+- Estado da integração.
+- Conta conectada.
+- Organização.
+- Projetos.
+- Última sincronização.
+
+**SonarQube for VS Code**
+- Documentação.
+- Estado de configuração, quando verificável.
+- Guia de Connected Mode.
+
+**Gitar AI**
+- Estado da conexão.
+- Provedor Git.
+- Repositórios autorizados.
+- Revisões de PR.
+- Falhas de CI.
+- Sugestões de correção.
+- Histórico.
+
+Não exibir todas as ferramentas como instaladas por padrão.
+
+Criar estados vazios, mensagens explicativas e instruções de configuração.
+
+---
+
+# 14. TESTES DE INTEGRAÇÃO DO SONARQUBE
+
+Executar testes reais:
+
+1. Verificar se o download oficial funciona.
+2. Validar o binário recebido.
+3. Verificar a versão.
+4. Iniciar o servidor, quando houver ambiente compatível.
+5. Verificar se o servidor está operacional.
+6. Configurar autenticação.
+7. Validar o token.
+8. Criar um projeto de teste.
+9. Executar o scanner.
+10. Aguardar o processamento.
+11. Consultar os resultados pela Web API.
+12. Importar os resultados no Benchmark Analyzer.
+13. Comparar A e B.
+14. Gerar relatório.
+15. Encerrar os processos, quando apropriado.
+
+Utilizar projetos pequenos e autorizados.
+
+Não considerar a integração funcional apenas porque o servidor abriu no navegador.
+
+## Testes adicionais
+
+- Token inválido.
+- Servidor indisponível.
+- Scanner ausente.
+- Versão incompatível.
+- Projeto inexistente.
+- Permissões insuficientes.
+- Análise interrompida.
+- Timeout.
+- Erro de processamento.
+- Relatório inválido.
+- Resultado vazio.
+- Falha de conexão.
+
+Todos devem produzir estados e mensagens apropriados.
+
+---
+
+# 15. TESTES DE GITAR
+
+Executar somente quando a integração estiver autorizada e configurada.
+
+Validar:
+
+- Conexão ao provedor Git.
+- Acesso ao repositório autorizado.
+- Identificação de Pull Requests ou Merge Requests.
+- Consulta do estado de revisão.
+- Consulta das falhas de CI.
+- Importação dos resultados.
+- Identificação de sugestões.
+- Registro de correções.
+- Validação após correção.
+
+Não executar ações de escrita em repositórios originais durante os testes de benchmark.
+
+Não simular resultados do Gitar se a conta não estiver conectada.
+
+---
+
+# 16. MÉTRICAS DE OTIMIZAÇÃO
+
+Antes de alterar a arquitetura, medir a situação atual.
+
+Depois das alterações, medir novamente.
+
+Comparar:
+
+- Tempo de inicialização da aplicação.
+- Memória do frontend.
+- Memória do backend.
+- CPU em repouso.
+- CPU durante análise.
+- Quantidade de processos.
+- Tamanho do pacote frontend.
+- Tempo de build.
+- Tempo de carregamento das telas.
+- Número de requisições.
+- Consumo de disco.
+- Tamanho do cache.
+- Tempo de execução dos benchmarks.
+
+Separar o consumo do aplicativo principal do consumo do SonarQube e dos scanners.
+
+Produzir relatório antes/depois.
+
+Não criar valores estimados para simular melhorias.
+
+Se não for possível medir, informar que a métrica não foi coletada.
+
+---
+
+# 17. CRITÉRIOS DE ACEITAÇÃO
+
+A integração estará concluída somente quando:
+
+1. A plataforma conseguir detectar uma instância SonarQube real.
+2. O sistema conseguir identificar a versão instalada.
+3. O scanner correto for selecionado.
+4. Uma análise real puder ser executada.
+5. O backend conseguir recuperar os resultados pela API.
+6. Os resultados forem vinculados ao Software A ou B.
+7. A comparação utilizar critérios equivalentes.
+8. O Quality Gate for apresentado corretamente.
+9. Os achados preservarem a origem.
+10. Tokens não forem expostos.
+11. Erros de integração forem tratados.
+12. A instância não iniciar desnecessariamente.
+13. O aplicativo não carregar ferramentas externas no frontend.
+14. O Gitar for identificado como integração opcional.
+15. As operações do Gitar respeitarem aprovação humana.
+16. A aplicação conseguir funcionar sem SonarQube configurado, mantendo os demais módulos operacionais.
+17. A aplicação não gerar resultados fictícios quando a ferramenta estiver ausente.
+18. O consumo de recursos for medido antes e depois.
+
+---
+
+# 18. DOCUMENTAÇÃO OBRIGATÓRIA
+
+Criar ou atualizar:
+
+- SONARQUBE_INSTALLATION.md
+- SONARQUBE_INTEGRATION.md
+- SONARSCANNER_CONFIGURATION.md
+- SONARQUBE_API.md
+- SONARQUBE_CLOUD.md
+- SONARQUBE_IDE.md
+- GITAR_INTEGRATION.md
+- RESOURCE_OPTIMIZATION.md
+- EXTERNAL_TOOLS.md
+
+Documentar:
+
+- Origem oficial dos binários.
+- Versões utilizadas.
+- Requisitos.
+- Instalação.
+- Atualização.
+- Configuração.
+- Autenticação.
+- Execução.
+- Encerramento.
+- Limitações.
+- Licenças.
+- Erros conhecidos.
+
+---
+
+# 19. RESULTADO FINAL ESPERADO
+
+O Software Benchmark & Quality Analyzer deverá possuir um mecanismo profissional de análise estática integrado ao SonarQube Community Build.
+
+A ferramenta deverá aproveitar as métricas, issues, Quality Gates e recursos de qualidade do SonarQube para melhorar a comparação entre Software A e Software B.
+
+O Gitar deverá atuar como complemento opcional para revisão de Pull Requests, avaliação assistida por IA e análise de falhas de CI, sem misturar seus resultados com os dados nativos do SonarQube.
+
+A plataforma principal deverá permanecer independente, modular e leve.
+
+O SonarQube não poderá ser iniciado quando não estiver sendo utilizado.
+
+O frontend não poderá executar ferramentas externas.
+
+Todas as análises devem acontecer por meio de workers controlados pelo backend.
+
+Não instalar todas as ferramentas de uma vez.
+
+Não executar integrações que não foram configuradas.
+
+Não gerar indicadores artificiais para preencher dashboards.
+
+**PRINCÍPIO FINAL: utilizar o máximo possível da capacidade real do SonarQube Community Build, integrar Gitar de maneira complementar e preservar a leveza, a precisão e a independência arquitetural do Software Benchmark & Quality Analyzer.**

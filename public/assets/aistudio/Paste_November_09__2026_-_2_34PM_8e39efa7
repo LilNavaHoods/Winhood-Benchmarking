@@ -1,0 +1,1417 @@
+# DESENVOLVIMENTO COMPLETO — SOFTWARE BENCHMARK & QUALITY ANALYZER
+
+## 1. PAPEL E RESPONSABILIDADES
+
+Atue como uma equipe multidisciplinar de engenharia de software composta por:
+
+- Arquiteto de software sênior.
+- Engenheiro Full Stack.
+- Engenheiro Backend.
+- Engenheiro Frontend.
+- Especialista em DevSecOps.
+- Especialista em segurança de aplicações.
+- Engenheiro de QA e automação.
+- Especialista em bancos de dados.
+- Engenheiro de desempenho.
+- Especialista em integração de ferramentas externas.
+
+Seu objetivo é desenvolver uma aplicação profissional chamada:
+
+**SOFTWARE BENCHMARK & QUALITY ANALYZER**
+
+A aplicação será responsável por comparar dois ou mais softwares de finalidade semelhante, realizando avaliações automatizadas de qualidade de código, segurança, arquitetura, funcionalidades, desempenho, compatibilidade, confiabilidade e comportamento operacional.
+
+O sistema deverá utilizar ferramentas especializadas existentes no mercado, integrando seus resultados em uma plataforma centralizada.
+
+A aplicação não deverá ser apenas uma interface demonstrativa. Todos os módulos, controles, botões, formulários, filtros, configurações, operações e relatórios deverão possuir implementação real.
+
+Não utilize dados fictícios para representar resultados de análises.
+
+Não crie funcionalidades visuais sem implementação correspondente.
+
+Não simule integrações com ferramentas externas.
+
+---
+
+# 2. PRIMEIRA ETAPA — INSPEÇÃO E PLANEJAMENTO
+
+Antes de escrever ou modificar qualquer código:
+
+1. Analise o ambiente de desenvolvimento disponibilizado.
+2. Identifique as tecnologias disponíveis.
+3. Identifique a estrutura existente do projeto.
+4. Verifique os arquivos e dependências.
+5. Determine a arquitetura mais adequada.
+6. Identifique limitações do ambiente Google AI Studio.
+7. Elabore a estrutura de diretórios.
+8. Defina os contratos de comunicação entre frontend e backend.
+9. Defina os modelos de dados.
+10. Identifique quais funcionalidades podem ser executadas no ambiente disponível e quais dependem de serviços externos.
+
+Caso exista um projeto iniciado, preserve suas funcionalidades válidas.
+
+Não substitua arquivos funcionais sem necessidade.
+
+Não crie uma segunda implementação de funcionalidades que já estejam corretamente implementadas.
+
+Apresente um plano técnico de implementação e prossiga com o desenvolvimento, sem interromper o trabalho para solicitar aprovação a cada módulo.
+
+Se alguma capacidade depender de infraestrutura externa, implemente a interface de integração e documente precisamente o que precisa ser configurado.
+
+---
+
+# 3. OBJETIVO PRINCIPAL DA APLICAÇÃO
+
+O sistema deverá permitir:
+
+1. Cadastrar projetos de benchmarking.
+2. Cadastrar dois ou mais softwares.
+3. Importar código-fonte autorizado.
+4. Cadastrar aplicações compiladas.
+5. Selecionar ferramentas de análise.
+6. Configurar categorias de avaliação.
+7. Executar análises automatizadas.
+8. Coletar resultados das ferramentas.
+9. Verificar a integridade das análises.
+10. Comparar os softwares.
+11. Calcular pontuações.
+12. Identificar vantagens e deficiências.
+13. Registrar evidências.
+14. Gerar relatórios profissionais.
+15. Manter histórico de avaliações.
+
+Exemplo de utilização:
+
+Projeto: Comparação de cofres de senhas.
+
+- Software A: cofre de senhas desenvolvido internamente.
+- Software B: KeePass.
+- Categorias: segurança, criptografia, funcionalidades, desempenho, armazenamento e usabilidade.
+- Resultado: relatório técnico comparativo com evidências e pontuações.
+
+A comparação deverá ser adaptável a outras categorias:
+
+- VPN.
+- Gerenciadores de senhas.
+- Sistemas de chamados.
+- Ferramentas de monitoramento.
+- Aplicações desktop.
+- Aplicações web.
+- Aplicações mobile.
+- Sistemas empresariais.
+- Ferramentas de infraestrutura.
+- Softwares de segurança.
+
+---
+
+# 4. ARQUITETURA GERAL
+
+Desenvolva uma arquitetura modular, extensível e independente de fornecedores.
+
+Arquitetura recomendada:
+
+## Frontend
+
+Preferencialmente:
+
+- React.
+- TypeScript.
+- Vite.
+- Tailwind CSS.
+- Biblioteca de componentes reutilizáveis.
+- Biblioteca de gráficos.
+- Gerenciamento de estado.
+- Comunicação com backend via API REST.
+
+## Backend
+
+Preferencialmente:
+
+- Python.
+- FastAPI.
+- Pydantic.
+- SQLAlchemy.
+- Alembic.
+- API REST documentada.
+- Processamento assíncrono.
+
+## Infraestrutura
+
+- PostgreSQL.
+- Redis.
+- Workers independentes.
+- Docker.
+- Object Storage compatível com S3.
+- OpenTelemetry.
+- Sistema de logs estruturados.
+
+As tecnologias deverão ser verificadas quanto à compatibilidade com o ambiente de execução.
+
+Se o ambiente não suportar alguma tecnologia, apresente uma alternativa tecnicamente equivalente.
+
+Não tente executar todo o processamento pesado diretamente no navegador.
+
+## Organização arquitetural
+
+Divida o sistema em:
+
+1. Interface de usuário.
+2. API e autenticação.
+3. Gerenciamento de projetos.
+4. Gerenciamento de softwares.
+5. Serviço de ingestão.
+6. Orquestrador de análises.
+7. Gerenciamento de adaptadores.
+8. Workers de processamento.
+9. Motor de veracidade.
+10. Motor de normalização.
+11. Motor de comparação.
+12. Motor de pontuação.
+13. Gerador de relatórios.
+14. Armazenamento de evidências.
+15. Auditoria e monitoramento.
+
+Utilize arquitetura hexagonal (Ports and Adapters) para integrar ferramentas externas.
+
+Cada ferramenta deverá possuir seu próprio adaptador.
+
+A substituição de uma ferramenta não poderá exigir a reescrita do motor central de comparação.
+
+---
+
+# 5. IDENTIDADE VISUAL E INTERFACE
+
+Desenvolva uma interface profissional, moderna e tecnológica.
+
+Referências visuais:
+
+- SonarQube.
+- Grafana.
+- GitLab.
+- Linear.
+- Snyk.
+- Datadog.
+- GitHub.
+
+A interface deverá transmitir confiabilidade, precisão técnica e controle.
+
+## Estrutura visual
+
+Criar:
+
+- Sidebar de navegação.
+- Barra superior.
+- Dashboard principal.
+- Cards de indicadores.
+- Gráficos comparativos.
+- Tabelas técnicas.
+- Indicadores de execução.
+- Histórico de análises.
+- Painéis de evidências.
+- Central de notificações.
+
+Permitir tema claro e escuro.
+
+Utilizar hierarquia visual consistente.
+
+Não sobrecarregar a interface com informações desnecessárias.
+
+Utilizar cores semanticamente:
+
+- Verde: aprovado.
+- Amarelo: atenção.
+- Laranja: risco.
+- Vermelho: crítico.
+- Azul: informação.
+- Cinza: não avaliado.
+
+As cores nunca deverão ser o único meio de transmitir um status.
+
+Todas as telas deverão possuir estados de carregamento, erro, sucesso e ausência de dados.
+
+---
+
+# 6. MÓDULO DE DASHBOARD
+
+Criar um dashboard central com:
+
+- Total de projetos.
+- Total de softwares cadastrados.
+- Total de benchmarks executados.
+- Análises em andamento.
+- Análises concluídas.
+- Análises com falhas.
+- Vulnerabilidades identificadas.
+- Problemas de qualidade de código.
+- Média de desempenho.
+- Média de qualidade.
+- Histórico de evolução.
+
+Criar gráficos para:
+
+1. Comparação de pontuação entre softwares.
+2. Distribuição de vulnerabilidades por severidade.
+3. Qualidade de código.
+4. Desempenho.
+5. Evolução histórica.
+6. Distribuição de funcionalidades.
+7. Comparação por categoria.
+
+Os dados deverão vir exclusivamente do backend.
+
+Não apresentar números demonstrativos como se fossem resultados reais.
+
+Se não houver avaliações, exibir um estado inicial informando que ainda não existem dados.
+
+---
+
+# 7. MÓDULO DE GERENCIAMENTO DE PROJETOS
+
+Implementar:
+
+- Criar projeto.
+- Editar projeto.
+- Excluir projeto com confirmação.
+- Consultar detalhes.
+- Definir categoria.
+- Definir objetivo.
+- Definir descrição.
+- Registrar responsável.
+- Registrar data de criação.
+- Registrar histórico.
+
+Cada projeto deverá possuir identificador UUID.
+
+Categorias de projeto devem ser configuráveis.
+
+---
+
+# 8. MÓDULO DE CADASTRO DE SOFTWARES
+
+Permitir cadastrar dois ou mais softwares em um projeto.
+
+Campos:
+
+- Nome.
+- Fabricante.
+- Descrição.
+- Categoria.
+- Versão.
+- Linguagens.
+- Arquitetura.
+- Sistema operacional.
+- Modelo de distribuição.
+- Tipo de licença.
+- URL oficial.
+- Repositório.
+- Documentação.
+- Responsável.
+- Observações.
+
+Tipos de entrada:
+
+1. Repositório Git.
+2. Arquivo compactado.
+3. Código-fonte local autorizado.
+4. Aplicação compilada.
+5. Container.
+6. Ambiente de execução autorizado.
+
+Cada versão deverá possuir hash SHA-256.
+
+Registrar o commit exato do repositório, quando aplicável.
+
+Manter histórico das versões avaliadas.
+
+---
+
+# 9. MÓDULO DE IMPORTAÇÃO E INVENTÁRIO
+
+Implementar importação por:
+
+- GitHub.
+- GitLab.
+- Azure DevOps.
+- Upload de arquivos.
+- Importação local, quando suportada.
+
+Verificar:
+
+- Autorização de acesso.
+- Integridade do arquivo.
+- Extensão.
+- Tamanho.
+- Tipo de conteúdo.
+- Hash.
+- Estrutura do projeto.
+- Linguagens.
+- Quantidade de arquivos.
+- Quantidade de linhas de código.
+- Arquivos elegíveis para análise.
+
+Gerar inventário técnico.
+
+Não executar arquivos importados durante a ingestão.
+
+Armazenar artefatos originais em área isolada e protegida contra alterações.
+
+---
+
+# 10. MÓDULO DE CONFIGURAÇÃO DO BENCHMARK
+
+Permitir selecionar:
+
+- Software A.
+- Software B.
+- Software C e demais participantes.
+- Categorias de comparação.
+- Ferramentas.
+- Critérios.
+- Pesos.
+- Cenários de teste.
+- Ambiente de execução.
+
+Criar perfis de benchmark reutilizáveis.
+
+Exemplos:
+
+- Benchmark de segurança.
+- Benchmark de qualidade.
+- Benchmark de desempenho.
+- Benchmark funcional.
+- Benchmark completo.
+- Benchmark de aplicações Windows.
+- Benchmark de aplicações web.
+
+Permitir configurar pesos por categoria.
+
+Validar matematicamente os pesos.
+
+Impedir comparações de desempenho quando as condições experimentais não forem equivalentes.
+
+Registrar todas as configurações utilizadas.
+
+---
+
+# 11. MÓDULO DE QUALIDADE DE CÓDIGO
+
+Criar uma central de análise estática.
+
+Integrar inicialmente:
+
+1. SonarQube Community Build.
+2. Opengrep.
+3. Ruff.
+4. PMD.
+5. SpotBugs.
+6. Checkstyle.
+7. ESLint.
+
+Pesquisar e preparar adaptadores adicionais para:
+
+- Qodana.
+- Codacy.
+- CodeQL.
+- PVS-Studio.
+- Coverity.
+- Semgrep.
+
+Não integrar ferramentas comerciais que exijam licença sem verificar suas condições de uso.
+
+## Métricas
+
+- Bugs.
+- Code Smells.
+- Vulnerabilidades.
+- Código duplicado.
+- Código morto.
+- Complexidade ciclomática.
+- Complexidade cognitiva.
+- Dívida técnica.
+- Cobertura de testes.
+- Problemas de tipagem.
+- Problemas de manutenção.
+- Padrões de codificação.
+- Problemas de arquitetura.
+- Arquivos não analisados.
+
+Criar filtros por:
+
+- Severidade.
+- Linguagem.
+- Arquivo.
+- Regra.
+- Ferramenta.
+- Categoria.
+- Status.
+
+Cada resultado deverá possuir evidência.
+
+---
+
+# 12. MÓDULO DE SEGURANÇA
+
+Criar uma central DevSecOps.
+
+## Integrações iniciais
+
+- Opengrep.
+- Trivy.
+- Syft.
+- Grype.
+- Gitleaks.
+- TruffleHog.
+
+Preparar adaptadores para:
+
+- OWASP ZAP.
+- Burp Suite, respeitando licença e condições de integração.
+- Dependency-Track.
+- DefectDojo.
+- Snyk.
+- OWASP ASVS.
+
+## Categorias de análise
+
+- SAST.
+- SCA.
+- DAST.
+- Secret Scanning.
+- SBOM.
+- Container Security.
+- IaC Security.
+- API Security.
+- Configurações inseguras.
+- Dependências vulneráveis.
+- Exposição de dados.
+- Criptografia.
+- Autenticação.
+- Autorização.
+- Gestão de sessões.
+
+## Indicadores
+
+- Total de vulnerabilidades.
+- Críticas.
+- Altas.
+- Médias.
+- Baixas.
+- Informativas.
+- CVE.
+- CWE.
+- CVSS.
+- EPSS.
+- CISA KEV.
+- Status de validação.
+- Falsos positivos revisados.
+
+Correlacionar resultados equivalentes para evitar contabilização duplicada.
+
+Não considerar ausência de alertas como garantia de segurança.
+
+DAST deverá exigir autorização formal do proprietário do ambiente analisado.
+
+Não executar testes invasivos em sistemas de terceiros sem autorização.
+
+---
+
+# 13. MÓDULO DE ANÁLISE DE ARQUITETURA
+
+Implementar análise de:
+
+- Acoplamento.
+- Coesão.
+- Dependências circulares.
+- Componentes sem utilização.
+- Dependências externas.
+- Camadas arquiteturais.
+- Violações arquiteturais.
+- Complexidade estrutural.
+- Organização de módulos.
+- Pontos de entrada.
+
+Integrações:
+
+- ArchUnit.
+- Dependency Cruiser.
+- Madge.
+- Graphviz.
+- Doxygen.
+- NDepend, quando licenciado.
+
+Criar visualização gráfica da arquitetura.
+
+Permitir comparar a arquitetura do Software A com a do Software B.
+
+---
+
+# 14. MÓDULO DE QA E TESTES FUNCIONAIS
+
+Integrar:
+
+- pytest.
+- JUnit.
+- NUnit.
+- Playwright.
+- Selenium.
+- Cypress.
+- Newman.
+- Postman.
+- Robot Framework.
+
+Criar:
+
+- Testes unitários.
+- Testes de integração.
+- Testes de API.
+- Testes end-to-end.
+- Testes de interface.
+- Testes de regressão.
+- Testes de compatibilidade.
+
+Importar resultados em JUnit XML, JSON e formatos compatíveis.
+
+Registrar:
+
+- Testes executados.
+- Aprovados.
+- Reprovados.
+- Ignorados.
+- Tempo de execução.
+- Evidências.
+- Logs.
+- Screenshots, quando aplicável.
+
+Criar uma matriz de equivalência funcional entre os softwares.
+
+Uma funcionalidade só poderá ser considerada funcional após validação do comportamento esperado.
+
+---
+
+# 15. MÓDULO DE DESEMPENHO
+
+Integrar inicialmente:
+
+- k6.
+- Prometheus.
+- OpenTelemetry.
+- Grafana.
+- Sysinternals, em workers Windows.
+- Windows Performance Toolkit, quando disponível.
+
+Preparar integração com Apache JMeter e Locust.
+
+## Métricas
+
+- CPU.
+- RAM.
+- Disco.
+- Rede.
+- Tempo de inicialização.
+- Tempo de resposta.
+- Latência média.
+- P50.
+- P90.
+- P95.
+- P99.
+- Throughput.
+- Concorrência.
+- Estabilidade.
+- Disponibilidade.
+
+Criar gráficos comparativos.
+
+Executar testes sob condições equivalentes.
+
+Registrar hardware, sistema operacional, limites de recursos, versões e carga aplicada.
+
+Executar testes de desempenho de forma controlada, sem gerar tráfego abusivo contra terceiros.
+
+---
+
+# 16. MÓDULO DE BANCO DE DADOS
+
+Implementar ferramentas de avaliação de:
+
+- Estrutura.
+- Integridade.
+- Consultas.
+- Índices.
+- Relacionamentos.
+- Migrações.
+- Backup.
+- Restauração.
+- Segurança.
+- Criptografia.
+- Consistência.
+
+Integrar:
+
+- SQLFluff.
+- Flyway.
+- Liquibase.
+- PostgreSQL.
+- SQL Server.
+
+Criar adaptadores específicos para cada banco suportado.
+
+As conexões deverão utilizar credenciais protegidas e permissões mínimas.
+
+Para comparações, utilizar bancos de teste isolados e massas sintéticas ou anonimizadas.
+
+---
+
+# 17. MÓDULO DE INSTALAÇÃO E SISTEMA OPERACIONAL
+
+Criar uma etapa especializada para aplicações desktop e Windows.
+
+Integrar, quando disponíveis:
+
+- Windows Sandbox.
+- Windows Performance Toolkit.
+- Process Monitor.
+- Process Explorer.
+- Autoruns.
+- Windows Event Viewer.
+- WiX Toolset.
+
+Avaliar:
+
+- Instalação.
+- Arquivos criados.
+- Registro.
+- Serviços.
+- Processos.
+- Permissões.
+- Inicialização.
+- Consumo de recursos.
+- Comunicação de rede.
+- Atualização.
+- Desinstalação.
+- Resíduos.
+
+Implementar snapshots:
+
+- T0: estado anterior.
+- T1: estado após instalação.
+- T2: estado após desinstalação.
+
+Comparar os estados.
+
+Diferenciar alterações esperadas e inesperadas.
+
+A execução deverá ocorrer em ambiente Windows isolado e descartável.
+
+Não executar instaladores desconhecidos no servidor principal.
+
+---
+
+# 18. MOTOR DE ADAPTADORES
+
+Desenvolver um sistema de plugins para ferramentas externas.
+
+Cada adaptador deverá implementar um contrato comum.
+
+Informações obrigatórias:
+
+- ID.
+- Nome.
+- Fabricante.
+- Versão.
+- Categoria.
+- Tipo de análise.
+- Método de execução.
+- Configuração.
+- Dependências.
+- Autenticação.
+- Status.
+- Tempo de execução.
+- Código de saída.
+- Logs.
+- Artefatos gerados.
+- Resultado normalizado.
+
+Ciclo de execução:
+
+1. Validar configuração.
+2. Validar ferramenta.
+3. Verificar integridade e assinatura.
+4. Preparar ambiente isolado.
+5. Executar análise.
+6. Coletar saída bruta.
+7. Validar resultado.
+8. Converter para formato canônico.
+9. Registrar evidências.
+10. Encerrar ambiente.
+11. Informar resultado ao orquestrador.
+
+Criar uma interface administrativa para visualizar as ferramentas integradas, versões, status, configurações e histórico de execução.
+
+Nunca executar comandos arbitrários enviados diretamente pelo frontend.
+
+Os adaptadores deverão utilizar comandos predefinidos, argumentos validados, limites de recursos e permissões mínimas.
+
+---
+
+# 19. MOTOR DE NORMALIZAÇÃO
+
+Criar um modelo unificado de resultados.
+
+Utilizar os padrões:
+
+- SARIF.
+- CycloneDX.
+- SPDX.
+- JUnit XML.
+- JSON.
+- OpenTelemetry OTLP.
+
+Cada ferramenta poderá utilizar seu formato nativo, mas o motor central deverá converter os dados para um modelo comum.
+
+Preservar:
+
+- Identificador original.
+- Ferramenta de origem.
+- Regra original.
+- Evidência original.
+- Severidade original.
+- Arquivo.
+- Linha.
+- Componente.
+- Referências.
+- Confiança.
+- Data da coleta.
+
+Não descartar informações relevantes durante a conversão.
+
+Validar schemas e registrar falhas de parsing.
+
+---
+
+# 20. MOTOR DE VERACIDADE
+
+Este é um dos componentes mais importantes da aplicação.
+
+Desenvolver um mecanismo que confirme se os resultados apresentados pelas ferramentas são realmente válidos.
+
+Não considerar uma execução bem-sucedida somente porque o programa retornou exit code 0.
+
+Implementar verificações:
+
+1. Ferramenta realmente executada.
+2. Versão correta identificada.
+3. Artefatos recebidos.
+4. Arquivos elegíveis identificados.
+5. Arquivos efetivamente analisados.
+6. Cobertura calculada.
+7. Erros de parsing identificados.
+8. Relatório gerado.
+9. Schema validado.
+10. Evidências armazenadas.
+11. Persistência confirmada.
+12. Integridade dos resultados verificada.
+
+Classificações:
+
+- SUCCESS_VALIDATED.
+- SUCCESS_WITH_WARNINGS.
+- INCOMPLETE_COVERAGE.
+- EMPTY_ERROR.
+- EXECUTION_FAILED.
+- INVALID_OUTPUT.
+- AUTHENTICATION_FAILED.
+- TIMEOUT.
+- NOT_SUPPORTED.
+- NOT_APPLICABLE.
+
+Resultados incompletos não poderão receber pontuação equivalente a análises completas.
+
+A ausência de vulnerabilidades deverá ser apresentada como ausência de achados detectados dentro do escopo e da cobertura efetivamente analisados.
+
+## Validação de funcionalidades
+
+Criar mecanismos para verificar:
+
+- Existência do componente frontend.
+- Existência da rota de API.
+- Comunicação real.
+- Processamento backend.
+- Persistência.
+- Retorno correto.
+- Efeito observável.
+
+Uma funcionalidade que apresenta somente interface visual, sem implementação real, deverá ser classificada como VISUAL_ONLY.
+
+---
+
+# 21. MOTOR DE COMPARAÇÃO E PONTUAÇÃO
+
+Criar uma engine própria.
+
+Categorias:
+
+- Funcionalidades.
+- Qualidade de código.
+- Segurança.
+- Desempenho.
+- Arquitetura.
+- Banco de dados.
+- Confiabilidade.
+- Compatibilidade.
+- Usabilidade.
+- Instalação.
+- Privacidade.
+- Documentação.
+
+Escala:
+
+0 — Inexistente.
+1 — Crítico.
+2 — Insuficiente.
+3 — Adequado.
+4 — Muito bom.
+5 — Excelente.
+
+Implementar pesos configuráveis.
+
+Apresentar separadamente:
+
+- Nota funcional.
+- Nota de segurança.
+- Nota técnica.
+- Nota de desempenho.
+- Nota de arquitetura.
+- Nota de qualidade.
+- Nota geral.
+
+Implementar travas matemáticas (Penalty Caps / Kill Switches).
+
+Exemplos:
+
+- Funcionalidade essencial inexistente: impedir nota máxima funcional.
+- Análise de segurança incompleta: impedir classificação de segurança excelente.
+- Cobertura insuficiente: impedir aprovação integral da análise.
+- Falha crítica validada: aplicar limitação na nota da categoria correspondente.
+
+Não permitir que uma média elevada esconda falhas críticas.
+
+Diferenciar dados não avaliados de notas zero.
+
+O algoritmo deverá ser determinístico, documentado e reproduzível.
+
+Salvar a fórmula, os pesos e a versão do algoritmo utilizados em cada benchmark.
+
+---
+
+# 22. MOTOR DE EVIDÊNCIAS
+
+Cada resultado deverá possuir:
+
+1. UUID.
+2. Software analisado.
+3. Versão.
+4. Categoria.
+5. Ferramenta responsável.
+6. Versão da ferramenta.
+7. Data e hora.
+8. Resultado.
+9. Severidade.
+10. Evidência.
+11. Arquivo ou componente.
+12. Status de validação.
+13. Histórico.
+14. Referência à execução original.
+
+Cada arquivo deverá possuir hash SHA-256.
+
+Armazenar os arquivos originais e relatórios em Object Storage.
+
+Criar trilha de auditoria append-only.
+
+Não permitir que a edição de uma avaliação altere silenciosamente evidências anteriores.
+
+---
+
+# 23. MÓDULO DE RELATÓRIOS
+
+Criar relatórios profissionais:
+
+1. Relatório executivo.
+2. Relatório técnico.
+3. Relatório de qualidade de código.
+4. Relatório de segurança.
+5. Relatório funcional.
+6. Relatório de desempenho.
+7. Relatório arquitetural.
+8. Relatório de banco de dados.
+9. Relatório de compatibilidade.
+10. Relatório comparativo completo.
+
+Exportações:
+
+- PDF.
+- Excel XLSX.
+- CSV.
+- JSON.
+
+Cada relatório deverá conter:
+
+- Identificação dos softwares.
+- Versões.
+- Data da análise.
+- Ambiente.
+- Ferramentas utilizadas.
+- Métricas.
+- Pontuações.
+- Evidências.
+- Limitações.
+- Vantagens.
+- Deficiências.
+- Riscos.
+- Recomendações.
+
+Os relatórios deverão ser gerados a partir dos dados efetivamente armazenados.
+
+---
+
+# 24. SEGURANÇA DA PRÓPRIA PLATAFORMA
+
+Implementar:
+
+- Autenticação.
+- MFA, quando configurado.
+- RBAC.
+- Proteção de sessões.
+- Proteção das APIs.
+- Validação de entrada.
+- Proteção contra injeções.
+- Rate limiting.
+- Gestão segura de segredos.
+- Criptografia em trânsito.
+- Criptografia em repouso.
+- Logs de auditoria.
+- Backup.
+- Recuperação.
+- Controle de permissões.
+
+Adotar TLS 1.3 quando suportado e criptografia robusta para armazenamento.
+
+Nunca armazenar tokens em texto puro.
+
+Mascarar segredos nos resultados, logs, telas e relatórios.
+
+## Segurança dos workers
+
+Nenhum projeto desconhecido poderá ser executado no host principal.
+
+Utilizar:
+
+- MicroVMs ou VMs descartáveis para execução de código e binários não confiáveis.
+- Containers restritos para tarefas estáticas adequadas ao modelo de ameaça.
+- Limites de CPU.
+- Limites de memória.
+- Limites de disco.
+- Timeout.
+- Usuários sem privilégios.
+- Sistemas de arquivos temporários.
+- Controle de rede.
+- Destruição do ambiente após a execução.
+
+Não compartilhar credenciais do plano de controle com os workers.
+
+Validar assinatura, origem e hash das ferramentas antes de executá-las.
+
+Fixar versões e digests das imagens.
+
+Monitorar vulnerabilidades das próprias ferramentas integradas.
+
+---
+
+# 25. MODELO DE BANCO DE DADOS
+
+Criar estrutura relacional normalizada.
+
+Entidades principais:
+
+- users.
+- organizations.
+- projects.
+- softwares.
+- software_versions.
+- repositories.
+- artifacts.
+- benchmark_configs.
+- benchmark_categories.
+- benchmark_criteria.
+- benchmark_runs.
+- benchmark_tasks.
+- tool_registry.
+- tool_versions.
+- tool_adapters.
+- tool_executions.
+- normalized_findings.
+- functional_tests.
+- test_results.
+- performance_metrics.
+- evidence_files.
+- score_results.
+- score_rules.
+- audit_logs.
+- reports.
+- notifications.
+
+Utilizar:
+
+- UUID.
+- Foreign Keys.
+- NOT NULL.
+- Índices.
+- Constraints.
+- Timestamps.
+- Migrações versionadas.
+
+Manter integridade referencial.
+
+Não utilizar armazenamento local do navegador como fonte oficial dos dados.
+
+Todas as informações relevantes deverão ser persistidas no backend.
+
+---
+
+# 26. API E COMUNICAÇÃO FRONTEND/BACKEND
+
+Criar API REST documentada com OpenAPI.
+
+Separar rotas por domínio:
+
+- /api/auth
+- /api/projects
+- /api/softwares
+- /api/versions
+- /api/repositories
+- /api/artifacts
+- /api/benchmarks
+- /api/benchmark-runs
+- /api/tools
+- /api/adapters
+- /api/analyses
+- /api/findings
+- /api/tests
+- /api/metrics
+- /api/scores
+- /api/evidence
+- /api/reports
+- /api/audit
+- /api/health
+
+Implementar:
+
+- Validação.
+- Paginação.
+- Filtros.
+- Ordenação.
+- Tratamento de exceções.
+- Respostas padronizadas.
+- Autorização.
+- Logs.
+
+Para tarefas demoradas, utilizar execução assíncrona.
+
+O frontend deverá acompanhar o progresso por polling ou WebSocket/SSE.
+
+Não bloquear a interface enquanto os workers executam análises.
+
+---
+
+# 27. OBSERVABILIDADE E MONITORAMENTO
+
+Integrar OpenTelemetry.
+
+Monitorar:
+
+- API.
+- Backend.
+- Filas.
+- Workers.
+- Adaptadores.
+- Banco de dados.
+- Armazenamento.
+- Tempo de execução.
+- Taxa de falhas.
+- Disponibilidade.
+- Timeout.
+- Consumo de recursos.
+
+Criar tela administrativa para monitoramento operacional.
+
+Identificar ferramentas desatualizadas e execuções com falhas.
+
+---
+
+# 28. TESTES OBRIGATÓRIOS
+
+Desenvolver testes para a própria plataforma.
+
+## Testes unitários
+
+Validar:
+
+- Cálculos.
+- Pontuações.
+- Pesos.
+- Normalização.
+- Validação de dados.
+- Regras de negócio.
+- Tratamento de erros.
+
+## Testes de integração
+
+Validar:
+
+- Frontend/backend.
+- Backend/banco.
+- Backend/filas.
+- Backend/workers.
+- Workers/adaptadores.
+- Adaptadores/parsers.
+- Relatórios/armazenamento.
+
+## Testes E2E
+
+Validar fluxos completos:
+
+1. Criar projeto.
+2. Cadastrar dois softwares.
+3. Importar código autorizado.
+4. Configurar benchmark.
+5. Executar análise.
+6. Coletar resultados.
+7. Validar evidências.
+8. Calcular notas.
+9. Visualizar comparação.
+10. Exportar relatório.
+
+## Testes negativos
+
+Validar:
+
+- Arquivos inválidos.
+- Upload incompleto.
+- Token incorreto.
+- Ferramenta ausente.
+- Timeout.
+- Falha de banco.
+- Erro de parser.
+- Cobertura insuficiente.
+- Resultado vazio.
+- Persistência inválida.
+- Permissões insuficientes.
+
+Nenhum módulo poderá ser declarado concluído sem testes correspondentes.
+
+---
+
+# 29. ROADMAP DE IMPLEMENTAÇÃO
+
+Desenvolver em três grandes fases.
+
+## FASE 1 — MVP FUNCIONAL
+
+Prioridade máxima:
+
+1. Estrutura frontend.
+2. Backend.
+3. PostgreSQL.
+4. Autenticação básica e RBAC.
+5. Cadastro de projetos.
+6. Cadastro de softwares.
+7. Importação de repositórios.
+8. Inventário e hash.
+9. Integração SonarQube.
+10. Integração Opengrep.
+11. Integração Ruff.
+12. Integração Syft e Grype.
+13. Integração Gitleaks.
+14. Integração pytest/JUnit.
+15. Integração k6.
+16. Coleta inicial de métricas.
+17. Motor de normalização.
+18. Motor de veracidade.
+19. Motor de comparação.
+20. Pontuação.
+21. Dashboard.
+22. Relatório PDF e Excel.
+
+Entregar um fluxo completo de benchmarking funcional.
+
+Não criar apenas telas isoladas.
+
+## FASE 2 — EXPANSÃO
+
+Adicionar:
+
+- DAST.
+- OWASP ZAP.
+- Playwright.
+- Análise arquitetural.
+- Análise de banco de dados.
+- Aplicações compiladas.
+- Análise de bytecode.
+- Windows Workers.
+- Monitoramento avançado.
+- Histórico.
+- Mais ferramentas.
+- Comparações com múltiplos softwares.
+
+## FASE 3 — PLATAFORMA AVANÇADA
+
+Adicionar:
+
+- Correlação inteligente.
+- Comparação histórica.
+- Análise de evolução.
+- Recomendações técnicas.
+- Assistente de IA.
+- Análise avançada de evidências.
+- CI/CD.
+- Plugins de terceiros.
+- Relatórios executivos avançados.
+
+A IA deverá explicar os resultados e sugerir melhorias, mas não poderá inventar evidências ou alterar pontuações sem regras explícitas e rastreáveis.
+
+---
+
+# 30. REGRAS OBRIGATÓRIAS DE IMPLEMENTAÇÃO
+
+Estas regras devem ser respeitadas durante todo o desenvolvimento:
+
+1. Não desenvolver funcionalidades falsas.
+2. Não utilizar dados mockados em produção.
+3. Não criar botões sem ações.
+4. Não criar telas sem rotas funcionais.
+5. Não criar formulários sem persistência.
+6. Não criar métricas fictícias.
+7. Não simular integrações.
+8. Não ignorar erros de execução.
+9. Não esconder falhas.
+10. Não considerar uma operação concluída antes da confirmação do backend.
+11. Não utilizar credenciais fixas no código.
+12. Não executar código desconhecido no host principal.
+13. Não permitir que o frontend controle diretamente a execução de comandos do sistema.
+14. Não permitir acesso indevido a arquivos.
+15. Não armazenar segredos em texto puro.
+16. Não alterar dados históricos sem rastreabilidade.
+17. Não considerar análise incompleta como aprovada.
+18. Não calcular pontuações com dados inexistentes.
+19. Não descartar resultados brutos.
+20. Não apresentar informações não verificadas como fatos.
+
+Quando uma integração não estiver configurada, apresentar claramente:
+
+INTEGRAÇÃO NÃO CONFIGURADA.
+
+Quando uma ferramenta não estiver disponível:
+
+FERRAMENTA NÃO INSTALADA.
+
+Quando não houver permissão:
+
+ACESSO NÃO AUTORIZADO.
+
+Quando a análise não puder ser concluída:
+
+ANÁLISE INCOMPLETA.
+
+---
+
+# 31. CRITÉRIOS DE ACEITAÇÃO FINAL
+
+O MVP somente poderá ser considerado funcional quando for possível:
+
+- Criar um projeto.
+- Cadastrar dois softwares.
+- Importar seus códigos autorizados.
+- Identificar suas linguagens.
+- Gerar hashes.
+- Executar ferramentas reais.
+- Consultar resultados reais.
+- Validar a cobertura.
+- Identificar falhas de execução.
+- Armazenar evidências.
+- Comparar os resultados.
+- Calcular pontuações.
+- Consultar o histórico.
+- Exportar relatórios.
+- Reproduzir uma avaliação com as mesmas versões, configurações e condições.
+
+Todos esses fluxos deverão possuir testes automatizados e evidências de execução.
+
+A interface deverá refletir os estados reais do backend.
+
+Não aprovar o projeto apenas por compilação ou aparência visual.
+
+---
+
+# 32. DOCUMENTAÇÃO E ENTREGA
+
+Produzir:
+
+1. README.md.
+2. DOCUMENTATION.md.
+3. ARCHITECTURE.md.
+4. API_DOCUMENTATION.md.
+5. DATABASE_SCHEMA.md.
+6. SECURITY.md.
+7. INTEGRATIONS.md.
+8. INSTALLATION.md.
+9. TESTING.md.
+10. ROADMAP.md.
+
+Criar:
+
+- Arquivo de variáveis de ambiente de exemplo.
+- Docker Compose para ambiente de desenvolvimento.
+- Migrações do banco.
+- Scripts de inicialização.
+- Scripts de testes.
+- Health checks.
+- Logs.
+- Documentação de implantação.
+
+Nunca incluir tokens ou senhas reais nos arquivos de exemplo.
+
+---
+
+# 33. INSTRUÇÃO FINAL AO AGENTE DE DESENVOLVIMENTO
+
+Desenvolva o SOFTWARE BENCHMARK & QUALITY ANALYZER como um produto de software real, profissional, modular e preparado para evolução.
+
+Priorize a implementação correta da comunicação entre frontend, backend, banco de dados, filas, workers e ferramentas externas.
+
+A qualidade funcional é mais importante que a quantidade de telas.
+
+A integridade dos resultados é mais importante que a apresentação de notas elevadas.
+
+A segurança da plataforma é mais importante que a facilidade de executar ferramentas sem isolamento.
+
+O sistema deverá ser desenvolvido com código organizado, documentação, testes e validação contínua.
+
+Trabalhe por etapas, mantendo a aplicação executável ao final de cada etapa.
+
+Não substitua implementações reais por demonstrações.
+
+Não declare funcionalidades concluídas sem comprovação.
+
+Ao concluir cada fase, apresente:
+
+- Funcionalidades implementadas.
+- Arquivos criados e modificados.
+- Integrações efetivamente operacionais.
+- Testes executados.
+- Resultados dos testes.
+- Limitações existentes.
+- Dependências externas.
+- Pendências.
+- Próxima etapa.
+
+**RESULTADO FINAL ESPERADO: UMA PLATAFORMA COMPLETA DE BENCHMARKING DE SOFTWARE, CAPAZ DE ANALISAR, TESTAR, VALIDAR E COMPARAR A QUALIDADE DE DOIS OU MAIS SOFTWARES POR MEIO DE FERRAMENTAS ESPECIALIZADAS, EVIDÊNCIAS REAIS E MÉTRICAS REPRODUZÍVEIS.**
