@@ -231,6 +231,54 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const handleRunUpdated = useCallback((updatedRun: BenchmarkRun) => {
+    setDashboardData((prev) => {
+      if (!prev) return prev;
+      const allFindings = updatedRun.findings || [];
+      const activeFindings = allFindings.filter(
+        (f) => f.validationStatus !== 'ACCEPTED' && f.validationStatus !== 'FALSE_POSITIVE_REVIEWED'
+      );
+      const vulnerabilitiesCount = activeFindings.filter((f) =>
+        ['SAST', 'SCA', 'SECRETS', 'DAST', 'DATABASE'].includes(f.category)
+      ).length;
+      const codeQualityIssuesCount = activeFindings.filter((f) =>
+        ['CODE_QUALITY', 'ARCHITECTURE'].includes(f.category)
+      ).length;
+      const avgQuality =
+        updatedRun.scoreCards.length > 0
+          ? Math.round(
+              (updatedRun.scoreCards.reduce((acc, s) => acc + s.groupedScores.qualityScore, 0) /
+                updatedRun.scoreCards.length) *
+                100
+            ) / 100
+          : prev.kpis.avgQuality;
+      return {
+        ...prev,
+        kpis: {
+          ...prev.kpis,
+          vulnerabilitiesCount,
+          codeQualityIssuesCount,
+          avgQuality,
+        },
+        latestRun: updatedRun,
+        historicalRuns: prev.historicalRuns.map((hr) =>
+          hr.id === updatedRun.id
+            ? {
+                ...hr,
+                scores: updatedRun.scoreCards.map((sc) => ({
+                  softwareId: sc.softwareId,
+                  softwareName: sc.softwareName,
+                  overallScore: sc.groupedScores.overallScore,
+                  securityScore: sc.groupedScores.securityScore,
+                  qualityScore: sc.groupedScores.qualityScore,
+                })),
+              }
+            : hr
+        ),
+      };
+    });
+  }, []);
+
   // Polling leve para verificar se há alguma corrida com status RUNNING ativa
   useEffect(() => {
     const checkActiveProgress = async () => {
@@ -799,7 +847,11 @@ export default function App() {
             )}
 
             {activeNav === 'findings' && (
-              <FindingsAndDevSecOpsModule latestRun={dashboardData?.latestRun || null} />
+              <FindingsAndDevSecOpsModule
+                latestRun={dashboardData?.latestRun || null}
+                onRunUpdated={handleRunUpdated}
+                onNotify={notify}
+              />
             )}
 
             {activeNav === 'arch_qa_perf' && (

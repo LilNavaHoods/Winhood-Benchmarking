@@ -48,7 +48,8 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
   // Project Form State
   const [editingProject, setEditingProject] = useState<Project | null>(null);
   const [projName, setProjName] = useState('');
-  const [projCategory, setProjCategory] = useState(PROJECT_CATEGORIES[0]);
+  const [projDomainTags, setProjDomainTags] = useState('devsecops, sonarqube-mqr, security, clean-code');
+  const [projQualityGateId, setProjQualityGateId] = useState('qg-sonar-way-mqr');
   const [projObjective, setProjObjective] = useState('');
   const [projDescription, setProjDescription] = useState('');
   const [projOwner, setProjOwner] = useState('Engenharia de Segurança & Arquitetura');
@@ -59,7 +60,7 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
   const [swName, setSwName] = useState('');
   const [swVendor, setSwVendor] = useState('');
   const [swVersion, setSwVersion] = useState('1.0.0');
-  const [swCategory, setSwCategory] = useState('Gerenciadores de Senhas');
+  const [swDomainTags, setSwDomainTags] = useState('typescript, cryptography, zero-knowledge, kdbx');
   const [swArchitecture, setSwArchitecture] = useState('Clean / Hexagonal Architecture');
   const [swOs, setSwOs] = useState('Windows 11 / Linux');
   const [swDistribution, setSwDistribution] = useState('Open-Source Auditável');
@@ -89,6 +90,11 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
       return;
     }
 
+    const parsedTags = projDomainTags
+      .split(',')
+      .map((t) => t.trim())
+      .filter(Boolean);
+
     try {
       const url = editingProject ? `/api/projects/${editingProject.id}` : '/api/projects';
       const method = editingProject ? 'PUT' : 'POST';
@@ -97,7 +103,9 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: projName,
-          category: projCategory,
+          domainTags: parsedTags.length > 0 ? parsedTags : ['multi-category', 'sonarqube-mqr'],
+          defaultQualityGateId: projQualityGateId,
+          defaultQualityProfileIds: ['sonar-way-ts-mqr-2026', 'sonar-way-sql-mqr-2026'],
           objective: projObjective,
           description: projDescription,
           owner: projOwner,
@@ -111,7 +119,7 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
       onNotify(
         editingProject
           ? `Projeto "${projName}" atualizado com sucesso.`
-          : `Projeto "${projName}" cadastrado com UUID ${payload.project.id}.`,
+          : `Projeto "${projName}" cadastrado com UUID ${payload.project.id} (12 categorias habilitadas).`,
         'success'
       );
       setEditingProject(null);
@@ -172,6 +180,11 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
         customFilesMap[swCustomFileName.trim()] = swCustomFileContent;
       }
 
+      const parsedSwTags = swDomainTags
+        .split(',')
+        .map((t) => t.trim())
+        .filter(Boolean);
+
       const res = await fetch('/api/softwares', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -180,7 +193,7 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
           name: swName,
           vendor: swVendor,
           version: swVersion,
-          category: swCategory,
+          domainTags: parsedSwTags.length > 0 ? parsedSwTags : ['multi-category', 'sonarqube-mqr'],
           architecture: swArchitecture,
           operatingSystem: swOs,
           distributionModel: swDistribution,
@@ -356,22 +369,36 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
 
             <div>
               <label
-                htmlFor="proj-category"
+                htmlFor="proj-domain-tags"
                 className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1"
               >
-                Categoria do Benchmark *
+                Tags de Domínio Livres (Multi-Categoria MQR)
+              </label>
+              <input
+                id="proj-domain-tags"
+                type="text"
+                value={projDomainTags}
+                onChange={(e) => setProjDomainTags(e.target.value)}
+                placeholder="Ex: cryptography, api-gateway, zero-trust, kdbx"
+                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 text-xs font-mono text-slate-900 dark:text-slate-100 focus:outline-none focus:border-[#31d6c4]"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="proj-qg"
+                className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1"
+              >
+                Quality Gate Transversal (SonarQube MQR)
               </label>
               <select
-                id="proj-category"
-                value={projCategory}
-                onChange={(e) => setProjCategory(e.target.value)}
+                id="proj-qg"
+                value={projQualityGateId}
+                onChange={(e) => setProjQualityGateId(e.target.value)}
                 className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:border-[#31d6c4]"
               >
-                {PROJECT_CATEGORIES.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
+                <option value="qg-sonar-way-mqr">Sonar way (MQR — Clean as You Code + Fudge Factor)</option>
+                <option value="qg-zero-trust-strict">WinHood Zero-Trust Strict (Bloqueio CVSS &gt;= 7.0)</option>
               </select>
             </div>
 
@@ -455,14 +482,28 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
                         <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400 font-mono tabular-nums">
                           <span>UUID: {p.id}</span>
                           <span>·</span>
-                          <span>{p.category}</span>
+                          <span className="text-[#31d6c4] font-semibold">
+                            Escopo: {p.enabledCategories?.length || 12}/12 Categorias
+                          </span>
                           <span>·</span>
                           <span>Criado: {new Date(p.createdAt).toLocaleDateString('pt-BR')}</span>
                         </div>
                         <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100 mt-1">
                           {p.name}
                         </h3>
-                        <p className="text-xs text-slate-600 dark:text-slate-300 mt-1">
+                        {(p.domainTags && p.domainTags.length > 0) && (
+                          <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                            {p.domainTags.map((tag) => (
+                              <span
+                                key={tag}
+                                className="px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-[10px] font-mono text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700"
+                              >
+                                #{tag}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        <p className="text-xs text-slate-600 dark:text-slate-300 mt-1.5">
                           <strong>Objetivo:</strong> {p.objective}
                         </p>
                         {p.description && (
@@ -478,7 +519,8 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
                           onClick={() => {
                             setEditingProject(p);
                             setProjName(p.name);
-                            setProjCategory(p.category);
+                            setProjDomainTags((p.domainTags || [p.category || 'multi-category']).join(', '));
+                            setProjQualityGateId(p.defaultQualityGateId || 'qg-sonar-way-mqr');
                             setProjObjective(p.objective);
                             setProjDescription(p.description);
                             setProjOwner(p.owner);
@@ -631,6 +673,23 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
                   <option value="CONTAINER">Container OCI / Docker</option>
                 </select>
               </div>
+            </div>
+
+            <div>
+              <label
+                htmlFor="sw-domain-tags"
+                className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1"
+              >
+                Tags de Domínio do Software (separadas por vírgula)
+              </label>
+              <input
+                id="sw-domain-tags"
+                type="text"
+                value={swDomainTags}
+                onChange={(e) => setSwDomainTags(e.target.value)}
+                placeholder="Ex: typescript, cryptography, zero-knowledge, kdbx"
+                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 text-xs font-mono text-slate-900 dark:text-slate-100"
+              />
             </div>
 
             <div className="grid grid-cols-2 gap-3">

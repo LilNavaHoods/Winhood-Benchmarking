@@ -3,7 +3,7 @@ import type {
   SonarAndToolsDatabaseBundle,
   SonarIssueRecord,
 } from '../types/benchmark';
-import { computeSha256 } from '../engine/scoringEngine';
+import { computeSha256, enrichLegacyOrExternalFinding } from '../engine/scoringEngine';
 
 export interface SarifExternalReportPayload {
   toolId:
@@ -25,7 +25,7 @@ export interface SarifExternalReportPayload {
   sarifFindings: Array<{
     ruleId: string;
     message: string;
-    severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO';
+    severity: 'BLOCKER' | 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO';
     confidence: 'HIGH' | 'MEDIUM' | 'LOW';
     filePath: string;
     lineNumber: number;
@@ -36,11 +36,54 @@ export interface SarifExternalReportPayload {
 /**
  * ExternalReportImportWorker (Seção 7 e Seção 12)
  * Importa relatórios externos compatíveis (SARIF 2.1.0 / sensores nativos) para o SonarQube
- * e para o mecanismo nativo do Benchmark Analyzer.
+ * e para o mecanismo nativo do Benchmark Analyzer usando enrichLegacyOrExternalFinding.
  * CRÍTICO: Nunca apresenta achados externos importados como regras próprias do SonarQube
  * ou como integrantes automáticos dos Quality Profiles.
  */
 export class ExternalReportImportWorker {
+  public static enrichExternalSarifToNormalizedFinding(params: {
+    payload: SarifExternalReportPayload;
+    item: SarifExternalReportPayload['sarifFindings'][number];
+    runId?: string;
+  }): NormalizedFinding {
+    const { payload, item } = params;
+    const isCodeSmellTool =
+      payload.toolId === 'eslint' ||
+      payload.toolId === 'pmd' ||
+      payload.toolId === 'checkstyle' ||
+      payload.toolId === 'ruff';
+
+    const category: NormalizedFinding['category'] =
+      payload.toolId === 'gitleaks'
+        ? 'SECRETS'
+        : payload.toolId === 'trivy'
+          ? 'SCA'
+          : isCodeSmellTool
+            ? 'CODE_QUALITY'
+            : 'SAST';
+
+    return enrichLegacyOrExternalFinding({
+      runId: params.runId || 'run-external-sarif',
+      softwareId: payload.softwareId,
+      softwareName: payload.softwareName,
+      softwareVersion: '1.0.0',
+      toolId: payload.toolId,
+      toolName: payload.toolName,
+      toolVersion: payload.toolVersion,
+      category,
+      originalRuleId: item.ruleId,
+      title: `[SARIF ${payload.toolName}] ${item.ruleId}`,
+      description: item.message,
+      severity: item.severity,
+      confidence: item.confidence,
+      filePath: item.filePath,
+      lineNumber: item.lineNumber,
+      snippet: item.snippet,
+      remediation: `Achado importado via SARIF da ferramenta externa ${payload.toolName} (v${payload.toolVersion}). Aplicar correção na regra ${item.ruleId}.`,
+      validationStatus: 'VALIDATED',
+    });
+  }
+
   public static importExternalSarifFindings(params: {
     payload: SarifExternalReportPayload;
     analysisId: string;
@@ -48,10 +91,12 @@ export class ExternalReportImportWorker {
     existingNormalizedFindings: NormalizedFinding[];
   }): {
     importedToSonarIssues: SonarIssueRecord[];
+    normalizedFindingsAdded: NormalizedFinding[];
     deduplicatedSkippedCount: number;
     message: string;
   } {
     const imported: SonarIssueRecord[] = [];
+    const normalizedAdded: NormalizedFinding[] = [];
     let skipped = 0;
 
     for (const item of params.payload.sarifFindings) {
@@ -74,7 +119,7 @@ export class ExternalReportImportWorker {
       );
 
       const sonarSeverity: SonarIssueRecord['severity'] =
-        item.severity === 'CRITICAL'
+        item.severity === 'BLOCKER' || item.severity === 'CRITICAL'
           ? 'BLOCKER'
           : item.severity === 'HIGH'
             ? 'CRITICAL'
@@ -83,6 +128,12 @@ export class ExternalReportImportWorker {
               : item.severity === 'LOW'
                 ? 'MINOR'
                 : 'INFO';
+
+      const enrichedNormalized = ExternalReportImportWorker.enrichExternalSarifToNormalizedFinding({
+        payload: params.payload,
+        item,
+        runId: params.analysisId,
+      });
 
       const issueRec: SonarIssueRecord = {
         id: `sext-${evidenceSha256.slice(0, 12)}`,
@@ -109,14 +160,16 @@ export class ExternalReportImportWorker {
         filePath: item.filePath,
         lineNumber: item.lineNumber,
         message: item.message,
-        effortMinutes: 15,
+        effortMinutes: enrichedNormalized.remediationEffortMinutes,
         remediationGuidance: `Achado importado via SARIF da ferramenta externa ${params.payload.toolName} (v${params.payload.toolVersion}). Não pertence ao Quality Profile nativo do SonarQube.`,
         evidenceSnippet: item.snippet,
         evidenceSha256,
       };
 
       imported.push(issueRec);
+      normalizedAdded.push(enrichedNormalized);
       params.toolsDb.sonar_issues.unshift(issueRec);
+      params.existingNormalizedFindings.push(enrichedNormalized);
     }
 
     const toolCatalogEntry =
@@ -129,8 +182,10 @@ export class ExternalReportImportWorker {
 
     return {
       importedToSonarIssues: imported,
+      normalizedFindingsAdded: normalizedAdded,
       deduplicatedSkippedCount: skipped,
-      message: `${imported.length} achado(s) SARIF de ${params.payload.toolName} v${params.payload.toolVersion} importados com origem preservada (${skipped} duplicado(s) ignorado(s)).`,
+      message: `${imported.length} achado(s) SARIF de ${params.payload.toolName} v${params.payload.toolVersion} importados com origem e impactos MQR preservados (${skipped} duplicado(s) ignorado(s)).`,
     };
   }
 }
+

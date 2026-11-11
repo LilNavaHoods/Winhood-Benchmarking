@@ -244,7 +244,8 @@ export class MarketCompetitorDiscoveryEngine {
   public static calculateTechnicalSimilarity(
     target: {
       name: string;
-      category: string;
+      category?: string;
+      domainTags?: string[];
       description: string;
       features?: string[];
       languages?: string[];
@@ -265,15 +266,17 @@ export class MarketCompetitorDiscoveryEngine {
     const distinctFeatures: string[] = [];
 
     // 1. Finalidade Principal (Purpose - 30%)
-    const targetText = `${target.name} ${target.category} ${target.description} ${target.architecture || ''}`.toLowerCase();
+    const targetCategory = target.category || target.domainTags?.[0] || '';
+    const targetText = `${target.name} ${targetCategory} ${(target.domainTags || []).join(' ')} ${target.description} ${target.architecture || ''}`.toLowerCase();
     const candidatePurposeWords = candidate.primaryPurpose.toLowerCase().split(/\s+/).filter((w) => w.length > 4);
     let matchedPurposeWords = 0;
     for (const word of candidatePurposeWords) {
       if (targetText.includes(word)) matchedPurposeWords += 1;
     }
     const isSameCategory =
-      candidate.category.toLowerCase().includes(target.category.toLowerCase()) ||
-      target.category.toLowerCase().includes(candidate.category.toLowerCase()) ||
+      (targetCategory.length > 0 &&
+        (candidate.category.toLowerCase().includes(targetCategory.toLowerCase()) ||
+          targetCategory.toLowerCase().includes(candidate.category.toLowerCase()))) ||
       ((targetText.includes('password') || targetText.includes('senha') || targetText.includes('vault')) &&
         candidate.category.toLowerCase().includes('senha'));
 

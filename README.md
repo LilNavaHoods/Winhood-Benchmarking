@@ -1,6 +1,6 @@
 # WinHood — Software Benchmark & Quality Analyzer
 
-Plataforma técnica full-stack para benchmarking comparativo de dois ou mais softwares de finalidade semelhante, realizando avaliações automatizadas de qualidade de código, segurança DevSecOps (SAST, SCA, Segredos, SBOM), acoplamento arquitetural, banco de dados SQL, equivalência funcional (QA), desempenho controlado, snapshots de instalação (T0/T1/T2) e validação pelo **Motor de Veracidade** com trilha de evidências imutável **SHA-256**.
+Plataforma técnica full-stack para avaliação independente e benchmarking comparativo de softwares, realizando auditorias automatizadas de qualidade de código (SonarQube MQR Mode), segurança DevSecOps (SAST Taint Mode, SCA, Segredos, SBOM), acoplamento arquitetural, banco de dados SQL, equivalência funcional por domínio, validação pelo **Motor de Veracidade de 19 Pontos**, **Motor de Comparabilidade e Imparcialidade** e trilha de evidências encadeada **SHA-256** com **Manifesto Assinado Digitalmente (HMAC-SHA256)**.
 
 ---
 
@@ -8,7 +8,6 @@ Plataforma técnica full-stack para benchmarking comparativo de dois ou mais sof
 
 - **Theme Color Global:** `#000000` (Preto puro na meta tag, Dark Mode nativo `#080b10` / `#0f141c` e alternância Claro/Escuro).
 - **Accent Color (Destaque):** `#31d6c4` (`--accent: #31d6c4`).
-- **Fundo Grafite Translúcido:** `rgba(21, 27, 36, 0.7)` (`--bg-graphite-alpha`).
 - **Tipografia:** `Plus Jakarta Sans` para estrutura de interface e `JetBrains Mono` com `tabular-nums` para alinhamento vertical estrito de métricas, notas `0.00–5.00`, latências e hashes SHA-256.
 - **Scrollbars Contextuais (`.df-hover-scroll`):** Barras de rolagem globais ocultas por padrão e reveladas sob `:hover` com 6px em ciano `#31d6c4`.
 
@@ -16,22 +15,21 @@ Plataforma técnica full-stack para benchmarking comparativo de dois ou mais sof
 
 ## 2. Arquitetura Técnica e Módulos Implementados
 
-1. **Gerenciamento de Projetos (`/api/projects`):** CRUD completo com UUID v4, categoria configurável, objetivo, responsável e histórico.
-2. **Cadastro de Softwares e Ingestão Isolada (`/api/softwares`):** Armazenamento de artefatos em diretório isolado (`.winhood_data/isolated_artifacts/`), cálculo determinístico de hash SHA-256 por arquivo e por pacote, contagem real de linhas de código (LOC) e inventário por linguagem sem executar binários durante a ingestão.
-3. **Assistente Guiado de Benchmark (Wizard 4 Etapas):**
-   - Seleção de 2 ou mais softwares participantes.
-   - Perfis reutilizáveis e validação matemática estrita dos pesos das 12 categorias (`Soma = 100%`).
-   - Validação de equivalência experimental (vCPUs, RAM, SO, Concorrência e Autorização Formal DAST).
-4. **Motor de Análise Estática & DevSecOps (`src/engine/staticAnalyzer.ts`):**
-   - `opengrep-sast`: Detecção de SQL Injection, execução dinâmica (`eval`/`execSync`), criptografia fraca (`MD5`/`SHA-1`) e PRNG inseguro (`Math.random()`).
-   - `gitleaks-secrets`: Detecção de segredos hardcoded com **mascaramento automático** nas evidências e relatórios.
-   - `sonarqube-quality`: Complexidade ciclomática e cognitiva, blocos `catch` vazios, supressão de tipos (`any`), código duplicado e dívida técnica.
-   - `syft-grype-sca`: Inspeção de dependências (`package.json`) com correlação CVE/CWE/CVSS/EPSS.
-   - `archunit-cruiser`: Grafo de acoplamento aferente/eferente ($C_a, C_e$), instabilidade $I$, detecção de dependências circulares e violações de camada (`PRESENTATION -> DATABASE`).
-   - `sqlfluff-db`: Auditoria de schemas SQL, projeções `SELECT *` e colunas de credenciais sem criptografia.
-5. **Motor de Veracidade (`VeracityCheckResult`):** Executa 12 verificações obrigatórias antes de aprovar qualquer execução (`SUCCESS_VALIDATED`, `INCOMPLETE_COVERAGE`, `EMPTY_ERROR`, `VISUAL_ONLY`).
-6. **Motor de Pontuação Determinística (`WINHOOD-DET-SCORE-v2.4.0`):** Calcula notas de `0.00` a `5.00` com **Travas Matemáticas (Penalty Caps / Kill Switches)** que impedem médias elevadas quando existem falhas críticas de segurança, cobertura incompleta ou funcionalidades essenciais ausentes.
-7. **Relatórios e Exportação (`/api/reports/:runId/export`):** Geração de 10 modalidades de relatórios nos formatos JSON, CSV/Excel, Markdown e PDF imprimível.
+1. **Ingestão de Código-Fonte & Segurança de Upload (`/api/softwares`, `/api/projects/upload`):**
+   - Estados formais de ingestão (`METADATA_ONLY`, `SOURCE_IMPORTED`, `SOURCE_PARTIAL`, `SOURCE_VALIDATED`, `SOURCE_FAILED`, `DEMO_FIXTURE`, `TEST_FIXTURE`, `PUBLIC_DOCUMENTATION_ONLY`) e disponibilidade (`FULL_SOURCE`, `PARTIAL_SOURCE`, `PUBLIC_DOCUMENTATION_ONLY`, `CLOSED_SOURCE`).
+   - Validação de segurança (`validateSourceUploadSecurity`) bloqueando Path Traversal (`../`), Symlinks, arquivos binários/corrompidos (null-bytes) e arquivos acima de 2 MB.
+   - Avaliação e comparação de softwares avulsos ou inter-projetos sem dependência rígida de projeto único.
+2. **Catálogo Metodológico Versionado & 27 Perfis Oficiais (`src/engine/methodologyCatalogEngine.ts`):**
+   - `WINHOOD-CATALOG-v4.0.0` com 24 critérios formais nas 12 dimensões e distinção estrita entre `STATIC_EVIDENCE`, `DYNAMIC_EVIDENCE`, `DOCUMENTATION_ONLY`, `INFERRED_HEURISTIC` e `NOT_VERIFIED`.
+   - **12 Perfis Gerais por Dimensão + 15 Perfis Especializados por Domínio Funcional** (`DOMAIN_SPECIALIZED_PROFILES`), marcando categorias não aplicáveis (`NOT_APPLICABLE`, `score: null`) e normalizando pesos exclusivamente sobre as dimensões avaliadas (`originalWeights` vs `effectiveWeights`).
+3. **Motor de Comparabilidade, Imparcialidade & Pré-Análise (`/api/benchmarks/pre-analysis`):**
+   - Avalia paridade de escopo, disponibilidade de código-fonte e domínio funcional entre softwares.
+   - Bloqueia automaticamente a declaração de vencedor oficial (`winnerSoftwareId: null`) em comparações assimétricas (`FULL_SOURCE` vs `PUBLIC_DOCUMENTATION_ONLY` ou domínios incompatíveis).
+4. **Motor de Pontuação Determinística & 5 Indicadores Separados (`src/engine/scoringEngine.ts`):**
+   - Separa obrigatoriamente **5 Indicadores Executivos**: `1. Nota Técnica (0.00–5.00 | null)`, `2. Cobertura do Escopo (%)`, `3. Confiança da Evidência (HIGH/MEDIUM/LOW/NONE)`, `4. Decisão do Quality Gate (APPROVED/APPROVED_WITH_RESERVATIONS/BLOCKED/INCONCLUSIVE/REJECTED)` e `5. Estado de Veracidade`.
+   - Triagem DevSecOps em tempo real com **9 estados de ciclo de vida** (`CONFIRMED`, `PROBABLE`, `FALSE_POSITIVE`, `INCONCLUSIVE`, `NOT_REPRODUCIBLE`, `NOT_TESTED`, `ACCEPTED_RISK`, `FIXED_PENDING_RETEST`, `VERIFIED_RESOLVED`).
+5. **Motor de Evidências, Proveniência & Assinatura Digital HMAC-SHA256 (`src/engine/evidenceProvenanceEngine.ts`):**
+   - Cadeia sequencial imutável iniciada em `GENESIS_EVIDENCE_HASH`, manifesto assinado com `HMAC-SHA256` e endpoint de auditoria de integridade (`POST /api/evidence/:runId/verify`) que detecta qualquer adulteração de payload ou índice.
 
 ---
 
@@ -41,9 +39,10 @@ Plataforma técnica full-stack para benchmarking comparativo de dois ou mais sof
 # Instalar dependências
 npm install
 
-# Executar suíte de testes unitários e de integração dos motores (node:test)
+# Executar suíte completa de testes unitários e de integração (node:test)
 npx --yes tsx --test src/engine/analyzer.test.ts
 
 # Iniciar servidor full-stack (Express API + Vite Frontend na porta 3000)
 npm run dev
 ```
+

@@ -14,8 +14,10 @@ import type {
   BenchmarkRun,
   DataOrigin,
   FileInventoryItem,
+  FindingValidationLifecycleState,
   GitProviderType,
   MarketCompetitorCandidate,
+  NormalizedFinding,
   Project,
   Software,
   SonarAndToolsDatabaseBundle,
@@ -25,21 +27,44 @@ import type {
   VulnerabilityValidationState,
 } from './src/types/benchmark';
 import {
+  ALL_BENCHMARK_CATEGORIES,
   DEFAULT_CATEGORY_WEIGHTS,
   computeSha256,
+  enrichLegacyOrExternalFinding,
+  normalizeEnabledCategoryWeights,
   validateCategoryWeights,
   validateEquivalenceConditions,
 } from './src/engine/scoringEngine';
-import { buildTechnicalInventory } from './src/engine/staticAnalyzer';
+import {
+  buildTechnicalInventory,
+  validateSourceUploadSecurity,
+} from './src/engine/staticAnalyzer';
+import {
+  DOMAIN_SPECIALIZED_PROFILES,
+  EVALUATION_CRITERIA_CATALOG,
+  METHODOLOGY_CATALOG_VERSION,
+  buildPreAnalysisSummary,
+  determineSourceAvailability,
+  determineSourceIngestionState,
+  evaluateSoftwareComparability,
+  inferSoftwareDomainKey,
+} from './src/engine/methodologyCatalogEngine';
+import {
+  computeCanonicalEvidenceHash,
+  signEvidenceManifestHmacSha256,
+  verifyEvidenceChainAndManifest,
+} from './src/engine/evidenceProvenanceEngine';
 import {
   KEESAFE_OPEN_FILES,
   VAULTCORE_INTERNAL_FILES,
   DEMO_FIXTURE_METADATA,
 } from './src/engine/realSampleRepositories';
 import {
+  ALGORITHM_VERSION,
   DEFAULT_BENCHMARK_PROFILES,
   createInitialRunningBenchmark,
   executeBenchmarkRunOrchestration,
+  recalculateBenchmarkRunScoreCards,
 } from './src/engine/benchmarkOrchestrator';
 import { MarketCompetitorDiscoveryEngine } from './src/engine/marketCompetitorDiscoveryEngine';
 import {
@@ -142,6 +167,10 @@ function createInitialRealWorkspaceState(): PersistentDatabaseState {
     id: projectId,
     name: 'Comparativo Corporativo de Cofres de Senhas',
     category: 'Gerenciadores de Senhas & Criptografia',
+    domainTags: ['password-manager', 'cryptography', 'zero-knowledge', 'sqlite', 'kdbx', 'devsecops'],
+    defaultQualityProfileIds: ['sonar-way-ts-mqr-2026', 'sonar-way-sql-mqr-2026'],
+    defaultQualityGateId: 'qg-sonar-way-mqr',
+    enabledCategories: [...ALL_BENCHMARK_CATEGORIES],
     objective:
       'Avaliar segurança criptográfica, qualidade de código, acoplamento arquitetural, integridade SQL e resíduos de instalação entre o cofre interno VaultCore e o KeeSafe Open (arquitetura KeePass KDBX 4.1).',
     description:
@@ -154,13 +183,13 @@ function createInitialRealWorkspaceState(): PersistentDatabaseState {
         timestamp: nowIso,
         action: 'PROJECT_CREATED',
         actor: 'Arquiteto Chefe',
-        details: 'Projeto inicializado com requisitos de homologação de cofres de senhas.',
+        details: 'Projeto inicializado com avaliação transversal nas 12 categorias e Quality Gate Sonar way (MQR).',
       },
     ],
   };
 
   // Write real files to isolated disk storage and compute real technical inventory
-  const vaultCorePath = writeIsolatedArtifactsToDisk('vaultcore_internal_v2_4_0', VAULTCORE_INTERNAL_FILES);
+  const vaultCorePath = writeIsolatedArtifactsToDisk('vaultcore_internal_v2_5_0', VAULTCORE_INTERNAL_FILES);
   const vaultCoreInv = buildTechnicalInventory(VAULTCORE_INTERNAL_FILES, vaultCorePath);
 
   const keeSafePath = writeIsolatedArtifactsToDisk('keesafe_open_v2_56_0', KEESAFE_OPEN_FILES);
@@ -172,11 +201,15 @@ function createInitialRealWorkspaceState(): PersistentDatabaseState {
     name: 'VaultCore Internal',
     vendor: 'Desenvolvimento Interno Corporativo',
     description:
-      'Cofre de senhas desenvolvido internamente para compartilhamento de credenciais de infraestrutura.',
+      'Cofre de senhas corporativo remediado (Zero-Knowledge, PBKDF2-SHA512 600k iterações, AES-256-GCM autenticado e trilha de auditoria append-only).',
     category: 'Gerenciadores de Senhas',
-    version: '2.4.0',
+    domainTags: [...DEMO_FIXTURE_METADATA.VAULTCORE.domainTags],
+    defaultQualityProfileIds: [...DEMO_FIXTURE_METADATA.VAULTCORE.defaultQualityProfileIds],
+    defaultQualityGateId: DEMO_FIXTURE_METADATA.VAULTCORE.defaultQualityGateId,
+    enabledCategories: [...DEMO_FIXTURE_METADATA.VAULTCORE.enabledCategories],
+    version: '2.5.0',
     languages: Object.keys(vaultCoreInv.languageBreakdown),
-    architecture: 'Monolito em Camadas (Node.js / TypeScript / SQLite)',
+    architecture: 'Clean / Hexagonal Architecture (Node.js / TypeScript / SQLite)',
     operatingSystem: 'Windows 11 / Linux',
     distributionModel: 'Interno Corporativo (On-Premise)',
     licenseType: 'Proprietária Interna',
@@ -184,7 +217,7 @@ function createInitialRealWorkspaceState(): PersistentDatabaseState {
     repositoryUrl: 'https://git.corp.internal/sec/vaultcore-internal.git',
     documentationUrl: 'https://intranet.corp.internal/docs/vaultcore',
     owner: 'Equipe Interna de Ferramentas',
-    notes: 'Submetido para auditoria antes de implantação em estações Windows corporativas.',
+    notes: 'Versão 2.5.0 remediada e aprovada no Quality Gate Sonar way (Modo MQR).',
     sourceType: 'LOCAL_AUTHORIZED',
     commitHash: '8a3f91c4e20b7d159942a1c6f0083e2b1d7c4a90',
     packageSha256: vaultCoreInv.packageSha256,
@@ -210,6 +243,10 @@ function createInitialRealWorkspaceState(): PersistentDatabaseState {
     description:
       'Cofre de senhas open-source baseado no padrão KDBX 4.1 com derivação PBKDF2-SHA512/Argon2id e cifra autenticada AES-256-GCM.',
     category: 'Gerenciadores de Senhas',
+    domainTags: [...DEMO_FIXTURE_METADATA.KEESAFE.domainTags],
+    defaultQualityProfileIds: [...DEMO_FIXTURE_METADATA.KEESAFE.defaultQualityProfileIds],
+    defaultQualityGateId: DEMO_FIXTURE_METADATA.KEESAFE.defaultQualityGateId,
+    enabledCategories: [...DEMO_FIXTURE_METADATA.KEESAFE.enabledCategories],
     version: '2.56.0',
     languages: Object.keys(keeSafeInv.languageBreakdown),
     architecture: 'Clean / Hexagonal Architecture (Zero-Knowledge)',
@@ -359,6 +396,135 @@ function loadDatabase(): PersistentDatabaseState {
         parsed.toolsDb = SonarQubeIntegrationService.createInitialToolsDatabaseState(DATA_DIR);
       }
 
+      const upgradeSoftwareList = (softwaresList: Software[]): Software[] =>
+        (softwaresList || []).map((s) => {
+          if (s.id === 'sw-vaultcore-internal') {
+            const vaultCorePath = writeIsolatedArtifactsToDisk(
+              'vaultcore_internal_v2_5_0',
+              VAULTCORE_INTERNAL_FILES
+            );
+            const vaultCoreInv = buildTechnicalInventory(VAULTCORE_INTERNAL_FILES, vaultCorePath);
+            return {
+              ...s,
+              version: '2.5.0',
+              description:
+                'Cofre de senhas corporativo remediado (Zero-Knowledge, PBKDF2-SHA512 600k iterações, AES-256-GCM autenticado e trilha de auditoria append-only).',
+              category: s.category || 'Gerenciadores de Senhas',
+              domainTags: [...DEMO_FIXTURE_METADATA.VAULTCORE.domainTags],
+              defaultQualityProfileIds: [...DEMO_FIXTURE_METADATA.VAULTCORE.defaultQualityProfileIds],
+              defaultQualityGateId: DEMO_FIXTURE_METADATA.VAULTCORE.defaultQualityGateId,
+              enabledCategories: [...DEMO_FIXTURE_METADATA.VAULTCORE.enabledCategories],
+              packageSha256: vaultCoreInv.packageSha256,
+              inventory: {
+                totalFiles: vaultCoreInv.totalFiles,
+                eligibleFiles: vaultCoreInv.eligibleFiles,
+                totalLinesOfCode: vaultCoreInv.totalLinesOfCode,
+                totalSizeBytes: vaultCoreInv.totalSizeBytes,
+                languageBreakdown: vaultCoreInv.languageBreakdown,
+                files: vaultCoreInv.files,
+                isolatedStoragePath: vaultCorePath,
+                verifiedIntegrity: vaultCoreInv.verifiedIntegrity,
+              },
+              sourceFilesContent: VAULTCORE_INTERNAL_FILES,
+            };
+          }
+          return {
+            ...s,
+            category: s.category || s.domainTags?.[0] || 'Aplicação Multi-Domínio',
+            domainTags:
+              s.domainTags && s.domainTags.length > 0
+                ? s.domainTags
+                : [s.category || 'software', ...(s.languages || []).map((l) => l.toLowerCase())],
+            defaultQualityProfileIds: s.defaultQualityProfileIds || ['sonar-way-ts-mqr-2026'],
+            defaultQualityGateId: s.defaultQualityGateId || 'qg-sonar-way-mqr',
+            enabledCategories:
+              s.enabledCategories && s.enabledCategories.length > 0
+                ? s.enabledCategories
+                : [...ALL_BENCHMARK_CATEGORIES],
+          };
+        });
+
+      // Garantir compatibilidade MQR e 12 categorias em projetos, softwares e runs legados
+      parsed.projects = (parsed.projects || []).map((p) => ({
+        ...p,
+        category: p.category || p.domainTags?.[0] || 'Avaliação Multi-Categoria Transversal',
+        domainTags:
+          p.domainTags && p.domainTags.length > 0
+            ? p.domainTags
+            : [p.category || 'multi-category', 'devsecops', 'sonarqube-mqr'],
+        defaultQualityProfileIds: p.defaultQualityProfileIds || ['sonar-way-ts-mqr-2026'],
+        defaultQualityGateId: p.defaultQualityGateId || 'qg-sonar-way-mqr',
+        enabledCategories:
+          p.enabledCategories && p.enabledCategories.length > 0
+            ? p.enabledCategories
+            : [...ALL_BENCHMARK_CATEGORIES],
+      }));
+
+      parsed.softwares = upgradeSoftwareList(parsed.softwares || []);
+      if (parsed.demoData) {
+        parsed.demoData.softwares = upgradeSoftwareList(parsed.demoData.softwares || []);
+      }
+
+      const allKnownSoftwares = [
+        ...(parsed.softwares || []),
+        ...(parsed.demoData?.softwares || []),
+      ];
+
+      const upgradeRunsList = (runsList: BenchmarkRun[]): BenchmarkRun[] =>
+        (runsList || []).map((r) => {
+          // Preserve historical runs that already have a signed manifest or explicit historical version
+          if (r.signedManifest && r.comparabilityReport) {
+            return r;
+          }
+
+          const hasLegacyVaultCore = r.softwareIds?.includes('sw-vaultcore-internal') &&
+            (r.scoreCards?.some((sc) => sc.softwareId === 'sw-vaultcore-internal' && sc.softwareVersion !== '2.5.0') ||
+              r.findings?.some((f) => f.softwareId === 'sw-vaultcore-internal'));
+
+          if (hasLegacyVaultCore) {
+            const runSoftwares = r.softwareIds
+              .map((id) => allKnownSoftwares.find((s) => s.id === id))
+              .filter((s): s is Software => Boolean(s));
+            if (runSoftwares.length > 0) {
+              const defaultProfile = DEFAULT_BENCHMARK_PROFILES[0];
+              const reorchestrated = executeBenchmarkRunOrchestration({
+                runId: r.id,
+                projectId: r.projectId,
+                projectName: r.projectName,
+                profileName: r.profileName || defaultProfile.name,
+                softwares: runSoftwares,
+                weights: r.weightsUsed || defaultProfile.weights,
+                enabledCategories: r.enabledCategories || [...ALL_BENCHMARK_CATEGORIES],
+                qualityGateId: r.qualityGateId || 'qg-sonar-way-mqr',
+                enablePenaltyCaps: true,
+                equivalenceEnvironment:
+                  r.equivalenceEnvironment || defaultProfile.equivalenceEnvironment,
+              });
+              return {
+                ...reorchestrated,
+                dataOrigin: r.dataOrigin,
+                environmentMode: r.environmentMode,
+              };
+            }
+          }
+
+          r.findings = (r.findings || []).map((f) => enrichLegacyOrExternalFinding(f));
+          const recalc = recalculateBenchmarkRunScoreCards(r, allKnownSoftwares);
+          if (!recalc.signedManifest && recalc.evidenceChain?.length > 0) {
+            recalc.signedManifest = signEvidenceManifestHmacSha256({
+              runId: recalc.id,
+              algorithmVersion: recalc.algorithmVersion || ALGORITHM_VERSION,
+              evidenceChain: recalc.evidenceChain,
+            });
+          }
+          return recalc;
+        });
+
+      parsed.runs = upgradeRunsList(parsed.runs || []);
+      if (parsed.demoData) {
+        parsed.demoData.runs = upgradeRunsList(parsed.demoData.runs || []);
+      }
+
       // Regra P0 / Seção 4.1: Isolar dados demonstrativos do ambiente de Produção
       if (parsed.environmentMode === 'PRODUCTION') {
         const demoSwIds = new Set(['sw-vaultcore-internal', 'sw-keesafe-open']);
@@ -379,6 +545,7 @@ function loadDatabase(): PersistentDatabaseState {
         }
       }
 
+      fs.writeFileSync(STORE_FILE, JSON.stringify(parsed, null, 2), 'utf8');
       return parsed;
     } catch {
       return createInitialCleanWorkspaceState();
@@ -537,11 +704,15 @@ async function startServer() {
     next();
   });
 
-  // RBAC helper
+  // RBAC helper supporting per-request x-winhood-role header & session role
   const requireWritePermission = (
-    res: express.Response
+    res: express.Response,
+    req?: express.Request
   ): boolean => {
-    if (db.currentUser.role === 'AUDITOR') {
+    const requestObj = req || ((res as any).req as express.Request | undefined);
+    const headerRole = requestObj?.headers?.['x-winhood-role'] as string | undefined;
+    const effectiveRole = headerRole || db.currentUser.role;
+    if (effectiveRole === 'AUDITOR') {
       res.status(403).json({
         error: 'ACESSO NÃO AUTORIZADO',
         message:
@@ -588,6 +759,15 @@ async function startServer() {
     };
     if (!role || !['ADMIN', 'SECURITY_LEAD', 'AUDITOR', 'QA_ENGINEER'].includes(role)) {
       return res.status(400).json({ error: 'Perfil RBAC inválido.' });
+    }
+    const strictAuth = req.headers['x-winhood-strict-auth'] === 'true';
+    const adminToken = req.headers['x-winhood-admin-token'] as string | undefined;
+    const expectedToken = process.env.WINHOOD_ADMIN_TOKEN || 'winhood-admin-authorized';
+    if (strictAuth && adminToken !== expectedToken) {
+      return res.status(403).json({
+        error: 'ROLE_ELEVATION_BLOCKED',
+        message: 'Elevação de privilégio RBAC bloqueada: token administrativo ausente ou inválido em modo estrito.',
+      });
     }
     db.currentUser.role = role;
     appendAuditLog(db, 'RBAC_ROLE_SWITCHED', 'AUTH', db.currentUser.id, `Perfil alterado para ${role}`);
@@ -860,17 +1040,46 @@ async function startServer() {
 
   app.post('/api/projects', (req, res) => {
     if (!requireWritePermission(res)) return;
-    const { name, category, objective, description, owner } = req.body as Partial<Project>;
-    if (!name || !name.trim() || !category || !objective) {
+    const {
+      name,
+      category,
+      domainTags,
+      defaultQualityProfileIds,
+      defaultQualityGateId,
+      enabledCategories,
+      objective,
+      description,
+      owner,
+    } = req.body as Partial<Project>;
+    if (!name || !name.trim() || !objective || !objective.trim()) {
       return res.status(400).json({
-        error: 'Campos obrigatórios ausentes: Nome, Categoria e Objetivo do projeto são exigidos.',
+        error: 'Campos obrigatórios ausentes: Nome e Objetivo do projeto são exigidos.',
       });
     }
     const nowIso = new Date().toISOString();
+    const resolvedTags =
+      Array.isArray(domainTags) && domainTags.length > 0
+        ? domainTags.map((t) => String(t).trim()).filter(Boolean)
+        : category
+          ? [category.trim(), 'multi-category', 'sonarqube-mqr']
+          : ['multi-category', 'devsecops', 'sonarqube-mqr'];
+    const resolvedCategory = (category || resolvedTags[0] || 'Avaliação Multi-Categoria Transversal').trim();
+    const resolvedEnabledCategories =
+      Array.isArray(enabledCategories) && enabledCategories.length > 0
+        ? enabledCategories
+        : [...ALL_BENCHMARK_CATEGORIES];
+
     const project: Project = {
       id: crypto.randomUUID(),
       name: name.trim(),
-      category: category.trim(),
+      category: resolvedCategory,
+      domainTags: resolvedTags,
+      defaultQualityProfileIds:
+        Array.isArray(defaultQualityProfileIds) && defaultQualityProfileIds.length > 0
+          ? defaultQualityProfileIds
+          : ['sonar-way-ts-mqr-2026'],
+      defaultQualityGateId: defaultQualityGateId || 'qg-sonar-way-mqr',
+      enabledCategories: resolvedEnabledCategories,
       objective: objective.trim(),
       description: (description || '').trim(),
       owner: (owner || db.currentUser.name).trim(),
@@ -881,7 +1090,7 @@ async function startServer() {
           timestamp: nowIso,
           action: 'PROJECT_CREATED',
           actor: db.currentUser.name,
-          details: `Projeto "${name.trim()}" registrado com UUID v4.`,
+          details: `Projeto "${name.trim()}" registrado com UUID v4 (${resolvedEnabledCategories.length}/12 categorias habilitadas).`,
         },
       ],
     };
@@ -897,13 +1106,29 @@ async function startServer() {
     if (!proj) {
       return res.status(404).json({ error: 'Projeto não encontrado.' });
     }
-    const { name, category, objective, description, owner } = req.body as Partial<Project>;
+    const {
+      name,
+      category,
+      domainTags,
+      defaultQualityProfileIds,
+      defaultQualityGateId,
+      enabledCategories,
+      objective,
+      description,
+      owner,
+    } = req.body as Partial<Project>;
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'O nome do projeto não pode ser vazio.' });
     }
     const nowIso = new Date().toISOString();
     proj.name = name.trim();
-    if (category) proj.category = category.trim();
+    if (category !== undefined) proj.category = category.trim() || proj.category;
+    if (Array.isArray(domainTags)) proj.domainTags = domainTags.map((t) => String(t).trim()).filter(Boolean);
+    if (Array.isArray(defaultQualityProfileIds)) proj.defaultQualityProfileIds = defaultQualityProfileIds;
+    if (defaultQualityGateId) proj.defaultQualityGateId = defaultQualityGateId;
+    if (Array.isArray(enabledCategories) && enabledCategories.length > 0) {
+      proj.enabledCategories = enabledCategories;
+    }
     if (objective) proj.objective = objective.trim();
     if (description !== undefined) proj.description = description.trim();
     if (owner) proj.owner = owner.trim();
@@ -912,7 +1137,7 @@ async function startServer() {
       timestamp: nowIso,
       action: 'PROJECT_UPDATED',
       actor: db.currentUser.name,
-      details: `Metadados do projeto atualizados.`,
+      details: `Metadados e escopo multi-categoria do projeto atualizados.`,
     });
     appendAuditLog(db, 'PROJECT_UPDATED', 'PROJECT', proj.id, `Projeto "${proj.name}" editado.`);
     saveDatabase(db);
@@ -945,6 +1170,10 @@ async function startServer() {
     const {
       name,
       category,
+      domainTags,
+      defaultQualityProfileIds,
+      defaultQualityGateId,
+      enabledCategories,
       objective,
       description,
       owner,
@@ -955,6 +1184,10 @@ async function startServer() {
     } = req.body as {
       name?: string;
       category?: string;
+      domainTags?: string[];
+      defaultQualityProfileIds?: string[];
+      defaultQualityGateId?: string;
+      enabledCategories?: BenchmarkCategoryKey[];
       objective?: string;
       description?: string;
       owner?: string;
@@ -964,20 +1197,39 @@ async function startServer() {
       filesMap?: Record<string, string>;
     };
 
-    if (!name || !name.trim() || !category || !objective) {
+    if (!name || !name.trim() || !objective || !objective.trim()) {
       return res.status(400).json({
-        error: 'Nome do Projeto, Categoria e Objetivo são obrigatórios para upload.',
+        error: 'Nome do Projeto e Objetivo são obrigatórios para upload.',
       });
     }
 
     const nowIso = new Date().toISOString();
     const projectId = crypto.randomUUID();
+    const resolvedTags =
+      Array.isArray(domainTags) && domainTags.length > 0
+        ? domainTags.map((t) => String(t).trim()).filter(Boolean)
+        : category
+          ? [category.trim(), 'multi-category', 'sonarqube-mqr']
+          : ['multi-category', 'devsecops', 'sonarqube-mqr'];
+    const resolvedCategory = (category || resolvedTags[0] || 'Avaliação Multi-Categoria Transversal').trim();
+    const resolvedEnabledCategories =
+      Array.isArray(enabledCategories) && enabledCategories.length > 0
+        ? enabledCategories
+        : [...ALL_BENCHMARK_CATEGORIES];
+
     const project: Project = {
       id: projectId,
       name: name.trim(),
-      category: category.trim(),
+      category: resolvedCategory,
+      domainTags: resolvedTags,
+      defaultQualityProfileIds:
+        Array.isArray(defaultQualityProfileIds) && defaultQualityProfileIds.length > 0
+          ? defaultQualityProfileIds
+          : ['sonar-way-ts-mqr-2026'],
+      defaultQualityGateId: defaultQualityGateId || 'qg-sonar-way-mqr',
+      enabledCategories: resolvedEnabledCategories,
       objective: objective.trim(),
-      description: (description || 'Projeto importado via upload de artefatos.').trim(),
+      description: (description || 'Projeto importado via upload de artefatos com escopo transversal nas 12 categorias.').trim(),
       owner: (owner || db.currentUser.name).trim(),
       createdAt: nowIso,
       updatedAt: nowIso,
@@ -986,7 +1238,7 @@ async function startServer() {
           timestamp: nowIso,
           action: 'PROJECT_UPLOADED',
           actor: db.currentUser.name,
-          details: `Projeto "${name.trim()}" criado através de upload de código-fonte.`,
+          details: `Projeto "${name.trim()}" criado através de upload de código-fonte (${resolvedEnabledCategories.length}/12 categorias habilitadas).`,
         },
       ],
     };
@@ -1004,6 +1256,16 @@ async function startServer() {
       return res.status(400).json({
         error: 'SOURCE_REQUIRED',
         message: 'Nenhum arquivo enviado. É obrigatório fornecer os arquivos reais do projeto para upload.',
+      });
+    }
+
+    const uploadSecurity = validateSourceUploadSecurity(filesMap);
+    if (!uploadSecurity.valid) {
+      return res.status(400).json({
+        error: 'UPLOAD_SECURITY_VIOLATION',
+        message: `Upload bloqueado pela validação de segurança: ${uploadSecurity.violations.join(' ')}`,
+        violations: uploadSecurity.violations,
+        rejectedFiles: uploadSecurity.rejectedFiles,
       });
     }
 
@@ -1028,7 +1290,11 @@ async function startServer() {
       name: swName,
       vendor: swVendor,
       description: `Software ingerido a partir de upload (${inv.totalFiles} arquivos, ${inv.totalLinesOfCode} linhas de código).`,
-      category: category.trim(),
+      category: resolvedCategory,
+      domainTags: resolvedTags,
+      defaultQualityProfileIds: project.defaultQualityProfileIds,
+      defaultQualityGateId: project.defaultQualityGateId,
+      enabledCategories: resolvedEnabledCategories,
       version: swVersion,
       languages: Object.keys(inv.languageBreakdown),
       architecture: 'Arquitetura Importada via Upload',
@@ -1112,7 +1378,8 @@ async function startServer() {
     const matchedProjects = db.projects.filter(
       (p) =>
         p.name.toLowerCase().includes(q) ||
-        p.category.toLowerCase().includes(q) ||
+        (p.category || '').toLowerCase().includes(q) ||
+        (p.domainTags || []).some((t) => t.toLowerCase().includes(q)) ||
         p.objective.toLowerCase().includes(q) ||
         p.id.toLowerCase().includes(q)
     );
@@ -1122,7 +1389,8 @@ async function startServer() {
         s.name.toLowerCase().includes(q) ||
         s.vendor.toLowerCase().includes(q) ||
         s.version.toLowerCase().includes(q) ||
-        s.category.toLowerCase().includes(q) ||
+        (s.category || '').toLowerCase().includes(q) ||
+        (s.domainTags || []).some((t) => t.toLowerCase().includes(q)) ||
         s.languages.some((l) => l.toLowerCase().includes(q)) ||
         s.id.toLowerCase().includes(q)
     );
@@ -1604,10 +1872,43 @@ async function startServer() {
       customFilesMap?: Record<string, string>;
     };
 
-    if (!body.projectId || !body.name || !body.version || !body.vendor) {
+    if (!body.name || !body.version || !body.vendor) {
       return res.status(400).json({
-        error: 'Campos obrigatórios: Projeto, Nome do Software, Fabricante e Versão.',
+        error: 'Campos obrigatórios: Nome do Software, Fabricante e Versão.',
       });
+    }
+
+    // Permitir software avulso (sem projeto prévio obrigatório), vinculando ou criando portfólio padrão
+    let resolvedProjectId = body.projectId;
+    if (!resolvedProjectId || !db.projects.some((p) => p.id === resolvedProjectId)) {
+      let defaultPortfolio = db.projects.find((p) => p.id === 'proj-standalone-portfolio') || db.projects[0];
+      if (!defaultPortfolio) {
+        const nowIso = new Date().toISOString();
+        defaultPortfolio = {
+          id: 'proj-standalone-portfolio',
+          name: 'Portfólio Independente de Softwares',
+          category: 'Avaliação Multi-Categoria Transversal',
+          domainTags: ['multi-category', 'standalone', 'sonarqube-mqr'],
+          defaultQualityProfileIds: ['sonar-way-ts-mqr-2026'],
+          defaultQualityGateId: 'qg-sonar-way-mqr',
+          enabledCategories: [...ALL_BENCHMARK_CATEGORIES],
+          objective: 'Portfólio automático para avaliação e comparação independente de softwares.',
+          description: 'Criado automaticamente para permitir cadastro e avaliação de softwares sem projeto prévio.',
+          owner: db.currentUser.name,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+          history: [
+            {
+              timestamp: nowIso,
+              action: 'PROJECT_AUTO_CREATED',
+              actor: db.currentUser.name,
+              details: 'Portfólio padrão instanciado automaticamente.',
+            },
+          ],
+        };
+        db.projects.unshift(defaultPortfolio);
+      }
+      resolvedProjectId = defaultPortfolio.id;
     }
 
     let filesMap: Record<string, string> = {};
@@ -1615,6 +1916,15 @@ async function startServer() {
     let origin: DataOrigin = 'USER_SOURCE';
 
     if (body.customFilesMap && Object.keys(body.customFilesMap).length > 0) {
+      const uploadSecurity = validateSourceUploadSecurity(body.customFilesMap);
+      if (!uploadSecurity.valid) {
+        return res.status(400).json({
+          error: 'UPLOAD_SECURITY_VIOLATION',
+          message: `Arquivos rejeitados na validação de segurança: ${uploadSecurity.violations.join(' ')}`,
+          violations: uploadSecurity.violations,
+          rejectedFiles: uploadSecurity.rejectedFiles,
+        });
+      }
       filesMap = body.customFilesMap;
       hasSource = true;
     } else if (body.templatePreset === 'VAULTCORE' && db.environmentMode === 'DEMO') {
@@ -1637,6 +1947,16 @@ async function startServer() {
       languageBreakdown: {} as Record<string, number>,
       files: [] as FileInventoryItem[],
       verifiedIntegrity: false,
+      discoveredFilesCount: 0,
+      receivedFilesCount: 0,
+      analyzedFilesCount: 0,
+      ignoredFilesCount: 0,
+      excludedFilesCount: 0,
+      unsupportedFilesCount: 0,
+      errorFilesCount: 0,
+      partiallyProcessedFilesCount: 0,
+      frameworks: [] as string[],
+      dependenciesIdentified: [] as string[],
     };
 
     if (hasSource) {
@@ -1650,13 +1970,47 @@ async function startServer() {
       ? (body.commitHash && body.commitHash.trim().length > 0 ? body.commitHash.trim() : `PKG_${inv.packageSha256.slice(0, 16)}`)
       : (body.commitHash && body.commitHash.trim().length > 0 ? body.commitHash.trim() : 'NOT_DECLARED');
 
+    const resolvedDomainTags =
+      Array.isArray(body.domainTags) && body.domainTags.length > 0
+        ? body.domainTags.map((t) => String(t).trim()).filter(Boolean)
+        : body.category
+          ? [body.category.trim(), ...Object.keys(inv.languageBreakdown).map((l) => l.toLowerCase())]
+          : ['multi-category', ...Object.keys(inv.languageBreakdown).map((l) => l.toLowerCase())];
+
     const newSw: Software = {
       id: swId,
-      projectId: body.projectId,
+      projectId: resolvedProjectId,
       name: body.name.trim(),
       vendor: body.vendor.trim(),
       description: (body.description || '').trim(),
-      category: (body.category || 'Aplicação Corporativa').trim(),
+      category: (body.category || resolvedDomainTags[0] || 'Aplicação Multi-Domínio').trim(),
+      domainTags: resolvedDomainTags,
+      functionalDomain: body.functionalDomain,
+      sourceIngestionState: hasSource
+        ? origin === 'DEMO_FIXTURE'
+          ? 'DEMO_FIXTURE'
+          : inv.eligibleFiles > 0
+            ? 'SOURCE_VALIDATED'
+            : 'SOURCE_PARTIAL'
+        : body.sourceType === 'PUBLIC_DOCUMENTATION_ONLY'
+          ? 'PUBLIC_DOCUMENTATION_ONLY'
+          : 'METADATA_ONLY',
+      sourceAvailability: hasSource
+        ? inv.eligibleFiles === inv.totalFiles
+          ? 'FULL_SOURCE'
+          : 'PARTIAL_SOURCE'
+        : body.sourceType === 'PUBLIC_DOCUMENTATION_ONLY'
+          ? 'PUBLIC_DOCUMENTATION_ONLY'
+          : 'CLOSED_SOURCE',
+      defaultQualityProfileIds:
+        Array.isArray(body.defaultQualityProfileIds) && body.defaultQualityProfileIds.length > 0
+          ? body.defaultQualityProfileIds
+          : ['sonar-way-ts-mqr-2026'],
+      defaultQualityGateId: body.defaultQualityGateId || 'qg-sonar-way-mqr',
+      enabledCategories:
+        Array.isArray(body.enabledCategories) && body.enabledCategories.length > 0
+          ? body.enabledCategories
+          : [...ALL_BENCHMARK_CATEGORIES],
       version: (body.version || 'NOT_DECLARED').trim(),
       languages: Object.keys(inv.languageBreakdown),
       architecture: (body.architecture || 'Modular Service Architecture').trim(),
@@ -1683,25 +2037,37 @@ async function startServer() {
         artifactSha256: inv.packageSha256,
         importedAt: new Date().toISOString(),
         importStatus: hasSource ? 'COMPLETE' : 'SOURCE_MISSING',
-        filesDiscovered: hasSource ? inv.totalFiles : 0,
-        filesReceived: hasSource ? inv.totalFiles : 0,
-        filesAnalyzed: inv.eligibleFiles,
-        filesExcluded: 0,
-        filesFailed: 0,
-        unsupportedFiles: 0,
+        ingestionState: hasSource ? 'SOURCE_VALIDATED' : 'METADATA_ONLY',
+        sourceAvailability: hasSource ? 'FULL_SOURCE' : 'CLOSED_SOURCE',
+        filesDiscovered: hasSource ? inv.discoveredFilesCount : 0,
+        filesReceived: hasSource ? inv.receivedFilesCount : 0,
+        filesAnalyzed: inv.analyzedFilesCount,
+        filesExcluded: inv.excludedFilesCount,
+        filesFailed: inv.errorFilesCount,
+        unsupportedFiles: inv.unsupportedFilesCount,
         sourceProvider: 'Cadastro Direto',
         authenticationMode: 'MANUAL',
         provenanceEvidence: hasSource
           ? `Ingestão validada de ${inv.totalFiles} arquivos com hash SHA-256 ${inv.packageSha256}.`
-          : 'Cadastro apenas de metadados. Código-fonte não fornecido (SOURCE_MISSING).',
+          : 'Cadastro apenas de metadados. Código-fonte não fornecido (METADATA_ONLY / SOURCE_MISSING).',
         failureReasons: hasSource ? [] : ['Nenhum arquivo de código-fonte fornecido no cadastro.'],
       },
       inventory: {
         totalFiles: inv.totalFiles,
         eligibleFiles: inv.eligibleFiles,
+        discoveredFilesCount: inv.discoveredFilesCount,
+        receivedFilesCount: inv.receivedFilesCount,
+        analyzedFilesCount: inv.analyzedFilesCount,
+        ignoredFilesCount: inv.ignoredFilesCount,
+        excludedFilesCount: inv.excludedFilesCount,
+        unsupportedFilesCount: inv.unsupportedFilesCount,
+        errorFilesCount: inv.errorFilesCount,
+        partiallyProcessedFilesCount: inv.partiallyProcessedFilesCount,
         totalLinesOfCode: inv.totalLinesOfCode,
         totalSizeBytes: inv.totalSizeBytes,
         languageBreakdown: inv.languageBreakdown,
+        frameworks: inv.frameworks,
+        dependenciesIdentified: inv.dependenciesIdentified,
         files: inv.files,
         isolatedStoragePath: isolatedPath,
         verifiedIntegrity: inv.verifiedIntegrity,
@@ -1717,7 +2083,7 @@ async function startServer() {
       newSw.id,
       hasSource
         ? `Software "${newSw.name} v${newSw.version}" ingerido com SHA-256 ${newSw.packageSha256.slice(0, 16)}... (${inv.totalFiles} arquivos).`
-        : `Software "${newSw.name} v${newSw.version}" registrado sem código-fonte (SOURCE_MISSING).`
+        : `Software "${newSw.name} v${newSw.version}" registrado sem código-fonte (METADATA_ONLY).`
     );
     saveDatabase(db);
     return res.status(201).json({ software: newSw });
@@ -1735,6 +2101,16 @@ async function startServer() {
       return res.status(400).json({ error: 'Nenhum arquivo válido enviado para ingestão.' });
     }
 
+    const uploadSecurity = validateSourceUploadSecurity(filesMap);
+    if (!uploadSecurity.valid) {
+      return res.status(400).json({
+        error: 'UPLOAD_SECURITY_VIOLATION',
+        message: `Ingestão bloqueada por violação de segurança: ${uploadSecurity.violations.join(' ')}`,
+        violations: uploadSecurity.violations,
+        rejectedFiles: uploadSecurity.rejectedFiles,
+      });
+    }
+
     const mergedFiles = { ...(sw.sourceFilesContent || {}), ...filesMap };
     const slug = `${sw.id}_rev_${Date.now()}`;
     const isolatedPath = writeIsolatedArtifactsToDisk(slug, mergedFiles);
@@ -1743,16 +2119,37 @@ async function startServer() {
     sw.sourceFilesContent = mergedFiles;
     sw.packageSha256 = inv.packageSha256;
     sw.languages = Object.keys(inv.languageBreakdown);
+    sw.sourceIngestionState = inv.eligibleFiles > 0 ? 'SOURCE_VALIDATED' : 'SOURCE_PARTIAL';
+    sw.sourceAvailability = inv.eligibleFiles === inv.totalFiles ? 'FULL_SOURCE' : 'PARTIAL_SOURCE';
     sw.inventory = {
       totalFiles: inv.totalFiles,
       eligibleFiles: inv.eligibleFiles,
+      discoveredFilesCount: inv.discoveredFilesCount,
+      receivedFilesCount: inv.receivedFilesCount,
+      analyzedFilesCount: inv.analyzedFilesCount,
+      ignoredFilesCount: inv.ignoredFilesCount,
+      excludedFilesCount: inv.excludedFilesCount,
+      unsupportedFilesCount: inv.unsupportedFilesCount,
+      errorFilesCount: inv.errorFilesCount,
+      partiallyProcessedFilesCount: inv.partiallyProcessedFilesCount,
       totalLinesOfCode: inv.totalLinesOfCode,
       totalSizeBytes: inv.totalSizeBytes,
       languageBreakdown: inv.languageBreakdown,
+      frameworks: inv.frameworks,
+      dependenciesIdentified: inv.dependenciesIdentified,
       files: inv.files,
       isolatedStoragePath: isolatedPath,
       verifiedIntegrity: inv.verifiedIntegrity,
     };
+    if (sw.sourceManifest) {
+      sw.sourceManifest.importStatus = 'COMPLETE';
+      sw.sourceManifest.ingestionState = sw.sourceIngestionState;
+      sw.sourceManifest.sourceAvailability = sw.sourceAvailability;
+      sw.sourceManifest.artifactSha256 = inv.packageSha256;
+      sw.sourceManifest.filesDiscovered = inv.discoveredFilesCount;
+      sw.sourceManifest.filesReceived = inv.receivedFilesCount;
+      sw.sourceManifest.filesAnalyzed = inv.analyzedFilesCount;
+    }
 
     appendAuditLog(
       db,
@@ -1777,9 +2174,73 @@ async function startServer() {
     return res.json({ ok: true });
   });
 
-  // 7. Benchmark Profiles & Runs (/api/benchmarks, /api/benchmark-runs)
+  // 7. Benchmark Profiles, Methodology Catalog, Pre-Analysis & Runs
   app.get('/api/benchmarks/profiles', (_req, res) => {
-    res.json({ profiles: db.profiles });
+    res.json({
+      profiles: db.profiles,
+      specializedProfiles: DOMAIN_SPECIALIZED_PROFILES,
+      catalogVersion: METHODOLOGY_CATALOG_VERSION,
+    });
+  });
+
+  app.get('/api/methodology/catalog', (_req, res) => {
+    res.json({
+      version: METHODOLOGY_CATALOG_VERSION,
+      algorithmVersion: ALGORITHM_VERSION,
+      criteriaCount: EVALUATION_CRITERIA_CATALOG.length,
+      criteria: EVALUATION_CRITERIA_CATALOG,
+      specializedProfilesCount: DOMAIN_SPECIALIZED_PROFILES.length,
+      specializedProfiles: DOMAIN_SPECIALIZED_PROFILES,
+      defaultProfiles: db.profiles,
+    });
+  });
+
+  app.post('/api/benchmarks/pre-analysis', (req, res) => {
+    const {
+      softwareIds,
+      profileId,
+      enabledCategories,
+      weights,
+      equivalenceEnvironment,
+    } = req.body as {
+      softwareIds?: string[];
+      profileId?: string;
+      enabledCategories?: BenchmarkCategoryKey[];
+      weights?: Record<BenchmarkCategoryKey, number>;
+      equivalenceEnvironment?: BenchmarkProfileConfig['equivalenceEnvironment'];
+    };
+
+    const selectedSoftwares = Array.isArray(softwareIds) && softwareIds.length > 0
+      ? db.softwares.filter((s) => softwareIds.includes(s.id))
+      : db.softwares.slice(0, 2);
+
+    if (selectedSoftwares.length === 0) {
+      return res.status(400).json({ error: 'Selecione ao menos 1 software para pré-análise.' });
+    }
+
+    const activeCats =
+      Array.isArray(enabledCategories) && enabledCategories.length > 0
+        ? enabledCategories
+        : [...ALL_BENCHMARK_CATEGORIES];
+    const activeWeights = weights || normalizeEnabledCategoryWeights(DEFAULT_CATEGORY_WEIGHTS, activeCats);
+    const activeEnv = equivalenceEnvironment || DEFAULT_BENCHMARK_PROFILES[0].equivalenceEnvironment;
+    const eqCheck = validateEquivalenceConditions(activeEnv);
+
+    const summaries = selectedSoftwares.map((sw) =>
+      buildPreAnalysisSummary(sw, activeCats, activeWeights, profileId)
+    );
+
+    const comparability = evaluateSoftwareComparability({
+      softwares: selectedSoftwares,
+      enabledCategories: activeCats,
+      environmentEquivalent: eqCheck.equivalent,
+    });
+
+    return res.json({
+      preAnalysis: summaries,
+      comparability,
+      catalogVersion: METHODOLOGY_CATALOG_VERSION,
+    });
   });
 
   app.get('/api/benchmark-runs', (req, res) => {
@@ -1884,8 +2345,13 @@ async function startServer() {
     }
 
     const runId = `run-${crypto.randomUUID().slice(0, 8)}`;
-    const activeWeights = DEFAULT_CATEGORY_WEIGHTS;
+    const activeEnabledCategories =
+      targetProject.enabledCategories && targetProject.enabledCategories.length > 0
+        ? targetProject.enabledCategories
+        : [...ALL_BENCHMARK_CATEGORIES];
+    const activeWeights = normalizeEnabledCategoryWeights(DEFAULT_CATEGORY_WEIGHTS, activeEnabledCategories);
     const activeEnv = DEFAULT_BENCHMARK_PROFILES[0].equivalenceEnvironment;
+    const activeQualityGateId = targetProject.defaultQualityGateId || 'qg-sonar-way-mqr';
 
     const runningRun = createInitialRunningBenchmark({
       runId,
@@ -1894,8 +2360,11 @@ async function startServer() {
       profileName: 'Análise Rápida de 1 Clique (Zero-Configuração)',
       softwares: selectedSoftwares,
       weights: activeWeights,
+      enabledCategories: activeEnabledCategories,
+      qualityGateId: activeQualityGateId,
       enablePenaltyCaps: true,
       equivalenceEnvironment: activeEnv,
+      wizardMode: 'QUICK',
     });
 
     db.runs.unshift(runningRun);
@@ -1910,9 +2379,12 @@ async function startServer() {
           profileName: 'Análise Rápida de 1 Clique (Zero-Configuração)',
           softwares: selectedSoftwares,
           weights: activeWeights,
+          enabledCategories: activeEnabledCategories,
+          qualityGateId: activeQualityGateId,
           enablePenaltyCaps: true,
           equivalenceEnvironment: activeEnv,
           assessmentMode: selectedSoftwares.length === 1 ? 'INDIVIDUAL' : 'AB_COMPARE',
+          wizardMode: 'QUICK',
           environmentMode: db.environmentMode,
           dataOrigin: selectedSoftwares[0]?.dataOrigin || 'USER_SOURCE',
           onProgress: (prog) => {
@@ -1966,30 +2438,71 @@ async function startServer() {
     const {
       projectId,
       softwareIds,
+      profileId,
       profileName,
+      functionalDomain,
+      evaluationObjective,
+      wizardMode,
       weights,
+      enabledCategories,
+      notApplicableCategories,
+      qualityGateId,
       enablePenaltyCaps,
       equivalenceEnvironment,
       assessmentMode,
     } = req.body as {
       projectId?: string;
       softwareIds?: string[];
+      profileId?: string;
       profileName?: string;
+      functionalDomain?: string;
+      evaluationObjective?: string;
+      wizardMode?: 'QUICK' | 'CUSTOM' | 'ADVANCED';
       weights?: Record<BenchmarkCategoryKey, number>;
+      enabledCategories?: BenchmarkCategoryKey[];
+      notApplicableCategories?: BenchmarkCategoryKey[];
+      qualityGateId?: string;
       enablePenaltyCaps?: boolean;
       equivalenceEnvironment?: BenchmarkProfileConfig['equivalenceEnvironment'];
       assessmentMode?: AssessmentMode;
     };
 
-    const project = db.projects.find((p) => p.id === projectId);
-    if (!project) {
-      return res.status(400).json({ error: 'Projeto inválido ou não selecionado.' });
-    }
-
     if (!softwareIds || !Array.isArray(softwareIds) || softwareIds.length < 1) {
       return res.status(400).json({
         error: 'Selecione ao menos 1 software para executar a avaliação individual ou comparativa.',
       });
+    }
+
+    const selectedSoftwares = db.softwares.filter((s) => softwareIds.includes(s.id));
+    if (selectedSoftwares.length === 0) {
+      return res.status(400).json({
+        error: 'Nenhum dos softwares selecionados foi localizado no inventário da plataforma.',
+      });
+    }
+
+    // Permitir execução sem exigir projeto prévio obrigatório (Seção 10.1)
+    let project = db.projects.find((p) => p.id === projectId) ||
+      db.projects.find((p) => p.id === selectedSoftwares[0]?.projectId) ||
+      db.projects[0];
+
+    if (!project) {
+      const nowIso = new Date().toISOString();
+      project = {
+        id: `proj-${crypto.randomUUID().slice(0, 8)}`,
+        name: `Avaliação Independente (${selectedSoftwares.map((s) => s.name).join(' vs ')})`,
+        category: 'Avaliação Multi-Categoria Transversal',
+        domainTags: ['multi-category', 'standalone'],
+        defaultQualityProfileIds: ['sonar-way-ts-mqr-2026'],
+        defaultQualityGateId: 'qg-sonar-way-mqr',
+        enabledCategories: [...ALL_BENCHMARK_CATEGORIES],
+        objective: evaluationObjective || 'Avaliação e Benchmark Independente de Softwares',
+        description: 'Projeto instanciado automaticamente para execução de software avulso.',
+        owner: db.currentUser.name,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        history: [],
+      };
+      db.projects.unshift(project);
     }
 
     const resolvedAssessmentMode: AssessmentMode =
@@ -2007,35 +2520,53 @@ async function startServer() {
       });
     }
 
-    const selectedSoftwares = db.softwares.filter((s) => softwareIds.includes(s.id));
-    if (selectedSoftwares.length === 0) {
-      return res.status(400).json({
-        error: 'Nenhum dos softwares selecionados foi localizado no inventário do projeto.',
-      });
-    }
-
-    // Regra Fundamental Seção 2: Validação de Código Fonte Real (sem fonte = bloqueado)
+    // Regra Fundamental Seção 2 & 3: Validação de Código Fonte Real (sem fonte = bloqueado em avaliação individual)
     const missingSources = selectedSoftwares.filter((s) => {
       if (s.isMarketCompetitor && s.sourceType === 'PUBLIC_DOCUMENTATION_ONLY') return false;
+      if (s.sourceAvailability === 'PUBLIC_DOCUMENTATION_ONLY') return false;
       const hasCode =
         (Array.isArray(s.sourceCodeFiles) && s.sourceCodeFiles.length > 0) ||
         (s.sourceFilesContent && Object.keys(s.sourceFilesContent).length > 0);
       const hasManifest =
         s.sourceManifest &&
+        s.sourceManifest.importStatus !== 'SOURCE_MISSING' &&
         ((s.sourceManifest.discoveredFilesCount || 0) > 0 || (s.sourceManifest.filesDiscovered || 0) > 0);
       return !hasCode && !hasManifest;
     });
 
     if (missingSources.length > 0) {
       return res.status(400).json({
-        error: `REGRA DE VERACIDADE: O(s) software(s) [${missingSources.map((s) => s.name).join(', ')}] não possuem arquivos de código fonte validados. Faça o upload da pasta/ZIP ou importe o repositório antes de avaliar.`,
+        error: `REGRA DE VERACIDADE: O(s) software(s) [${missingSources.map((s) => s.name).join(', ')}] possuem apenas metadados (METADATA_ONLY) sem arquivos de código-fonte validados. Nenhuma pontuação pode ser gerada sem código real.`,
         code: 'SOURCE_REQUIRED',
         missingSoftwareIds: missingSources.map((s) => s.id),
       });
     }
 
-    const activeWeights = weights || DEFAULT_CATEGORY_WEIGHTS;
-    const weightCheck = validateCategoryWeights(activeWeights);
+    // Resolver perfil especializado ou padrão se profileId foi fornecido
+    const matchedSpecializedProfile = profileId
+      ? DOMAIN_SPECIALIZED_PROFILES.find((p) => p.id === profileId)
+      : undefined;
+
+    const activeEnabledCategories =
+      Array.isArray(enabledCategories) && enabledCategories.length > 0
+        ? enabledCategories
+        : matchedSpecializedProfile
+          ? [...matchedSpecializedProfile.enabledCategories]
+          : project.enabledCategories && project.enabledCategories.length > 0
+            ? project.enabledCategories
+            : [...ALL_BENCHMARK_CATEGORIES];
+
+    const activeNotApplicable =
+      Array.isArray(notApplicableCategories)
+        ? notApplicableCategories
+        : matchedSpecializedProfile?.notApplicableCategories || [];
+
+    const baseWeights = weights || matchedSpecializedProfile?.weights || DEFAULT_CATEGORY_WEIGHTS;
+    const activeWeights =
+      activeEnabledCategories.length < 12
+        ? normalizeEnabledCategoryWeights(baseWeights, activeEnabledCategories)
+        : baseWeights;
+    const weightCheck = validateCategoryWeights(activeWeights, activeEnabledCategories);
     if (!weightCheck.valid) {
       return res.status(400).json({
         error: weightCheck.errors.join(' '),
@@ -2052,14 +2583,29 @@ async function startServer() {
       });
     }
 
+    const activeQualityGateId = qualityGateId || project.defaultQualityGateId || 'qg-sonar-way-mqr';
+    const resolvedProfileName =
+      profileName ||
+      matchedSpecializedProfile?.name ||
+      (resolvedAssessmentMode === 'INDIVIDUAL'
+        ? `Auditoria Individual - ${selectedSoftwares[0]?.name}`
+        : 'Benchmark WinHood');
+
     const runId = `run-${crypto.randomUUID().slice(0, 8)}`;
     const runningRun = createInitialRunningBenchmark({
       runId,
       projectId: project.id,
       projectName: project.name,
-      profileName: profileName || (resolvedAssessmentMode === 'INDIVIDUAL' ? `Auditoria Individual - ${selectedSoftwares[0]?.name}` : 'Benchmark WinHood'),
+      profileId: profileId || matchedSpecializedProfile?.id,
+      profileName: resolvedProfileName,
+      functionalDomain: (functionalDomain as any) || matchedSpecializedProfile?.domainKey,
+      evaluationObjective,
+      wizardMode: wizardMode || 'CUSTOM',
       softwares: selectedSoftwares,
       weights: activeWeights,
+      enabledCategories: activeEnabledCategories,
+      notApplicableCategories: activeNotApplicable,
+      qualityGateId: activeQualityGateId,
       enablePenaltyCaps: enablePenaltyCaps !== false,
       equivalenceEnvironment: activeEnv,
       assessmentMode: resolvedAssessmentMode,
@@ -2077,9 +2623,16 @@ async function startServer() {
           runId,
           projectId: project.id,
           projectName: project.name,
-          profileName: profileName || (resolvedAssessmentMode === 'INDIVIDUAL' ? `Auditoria Individual - ${selectedSoftwares[0]?.name}` : 'Benchmark WinHood'),
+          profileId: profileId || matchedSpecializedProfile?.id,
+          profileName: resolvedProfileName,
+          functionalDomain: (functionalDomain as any) || matchedSpecializedProfile?.domainKey,
+          evaluationObjective,
+          wizardMode: wizardMode || 'CUSTOM',
           softwares: selectedSoftwares,
           weights: activeWeights,
+          enabledCategories: activeEnabledCategories,
+          notApplicableCategories: activeNotApplicable,
+          qualityGateId: activeQualityGateId,
           enablePenaltyCaps: enablePenaltyCaps !== false,
           equivalenceEnvironment: activeEnv,
           assessmentMode: resolvedAssessmentMode,
@@ -2554,12 +3107,15 @@ async function startServer() {
     return res.json({ suite });
   });
 
-  // 9.2 Validação Controlada de Vulnerabilidade nos 6 Estados
+  // 9.2 Validação Controlada de Vulnerabilidade e Triagem DevSecOps em Tempo Real (9 Estados + Recálculo MQR)
   app.post('/api/findings/:id/validate', (req, res) => {
     if (!requireWritePermission(res)) return;
-    const { validationState, verificationNote } = req.body as {
+    const { validationState, validationStatus, lifecycleState, verificationNote, runId } = req.body as {
       validationState?: VulnerabilityValidationState;
+      validationStatus?: NormalizedFinding['validationStatus'];
+      lifecycleState?: FindingValidationLifecycleState;
       verificationNote?: string;
+      runId?: string;
     };
 
     const validStates: VulnerabilityValidationState[] = [
@@ -2570,50 +3126,160 @@ async function startServer() {
       'INCONCLUSIVA',
       'NAO_TESTADA',
     ];
+    const validLifecycleStates: FindingValidationLifecycleState[] = [
+      'CONFIRMED',
+      'PROBABLE',
+      'FALSE_POSITIVE',
+      'INCONCLUSIVE',
+      'NOT_REPRODUCIBLE',
+      'NOT_TESTED',
+      'ACCEPTED_RISK',
+      'FIXED_PENDING_RETEST',
+      'VERIFIED_RESOLVED',
+    ];
+    const validStatuses = [
+      'VALIDATED',
+      'ACCEPTED',
+      'FALSE_POSITIVE_REVIEWED',
+      'CORRELATED_DEDUPLICATED',
+      'UNVERIFIED',
+      ...validLifecycleStates,
+    ] as const;
 
-    if (!validationState || !validStates.includes(validationState)) {
-      return res.status(400).json({ error: 'Estado de validação inválido. Valores aceitos: ' + validStates.join(', ') });
+    if (
+      (!validationState || !validStates.includes(validationState)) &&
+      (!validationStatus || !validStatuses.includes(validationStatus as any)) &&
+      (!lifecycleState || !validLifecycleStates.includes(lifecycleState))
+    ) {
+      return res.status(400).json({
+        error:
+          'Estado de validação inválido. Informe lifecycleState (' +
+          validLifecycleStates.join(', ') +
+          ') ou validationStatus (' +
+          validStatuses.join(', ') +
+          ').',
+      });
     }
 
-    const latestRun = db.runs[0];
-    if (!latestRun) {
+    const targetRun = runId ? db.runs.find((r) => r.id === runId) || db.runs[0] : db.runs[0];
+    if (!targetRun) {
       return res.status(404).json({ error: 'Execução de benchmark não encontrada.' });
     }
 
-    const finding = latestRun.findings.find((f) => f.id === req.params.id);
+    const finding = targetRun.findings.find((f) => f.id === req.params.id);
     if (!finding) {
       return res.status(404).json({ error: 'Achado não localizado na execução ativa.' });
     }
 
-    finding.validationStatus =
-      validationState === 'FALSO_POSITIVO' ? 'FALSE_POSITIVE_REVIEWED' : 'VALIDATED';
-
+    const previousState = finding.lifecycleState || finding.validationStatus;
     const nowIso = new Date().toISOString();
-    const prevHash =
-      latestRun.evidenceChain[latestRun.evidenceChain.length - 1]?.sha256 || 'GENESIS';
-    const nextIndex = latestRun.evidenceChain.length + 1;
-    const newEvHash = computeSha256(
-      `${nextIndex}|${prevHash}|VALIDATION|${finding.id}|${validationState}|${nowIso}`
-    );
 
-    latestRun.evidenceChain.push({
-      id: `evd-${newEvHash.slice(0, 12)}`,
-      runId: latestRun.id,
+    if (lifecycleState && validLifecycleStates.includes(lifecycleState)) {
+      finding.lifecycleState = lifecycleState;
+      finding.validationStatus =
+        lifecycleState === 'FALSE_POSITIVE'
+          ? 'FALSE_POSITIVE_REVIEWED'
+          : lifecycleState === 'ACCEPTED_RISK'
+            ? 'ACCEPTED'
+            : lifecycleState;
+    } else if (validationStatus && validStatuses.includes(validationStatus as any)) {
+      finding.validationStatus = validationStatus;
+      if (validLifecycleStates.includes(validationStatus as any)) {
+        finding.lifecycleState = validationStatus as FindingValidationLifecycleState;
+      } else if (validationStatus === 'FALSE_POSITIVE_REVIEWED') {
+        finding.lifecycleState = 'FALSE_POSITIVE';
+      } else if (validationStatus === 'ACCEPTED') {
+        finding.lifecycleState = 'ACCEPTED_RISK';
+      } else if (validationStatus === 'VALIDATED') {
+        finding.lifecycleState = 'CONFIRMED';
+      }
+    } else if (validationState) {
+      finding.validationStatus =
+        validationState === 'FALSO_POSITIVO'
+          ? 'FALSE_POSITIVE_REVIEWED'
+          : validationState === 'NAO_REPRODUZIVEL'
+            ? 'NOT_REPRODUCIBLE'
+            : validationState === 'INCONCLUSIVA'
+              ? 'INCONCLUSIVE'
+              : validationState === 'NAO_TESTADA'
+                ? 'NOT_TESTED'
+                : validationState === 'PROVAVEL'
+                  ? 'PROBABLE'
+                  : 'VALIDATED';
+      finding.lifecycleState =
+        validationState === 'FALSO_POSITIVO'
+          ? 'FALSE_POSITIVE'
+          : validationState === 'NAO_REPRODUZIVEL'
+            ? 'NOT_REPRODUCIBLE'
+            : validationState === 'INCONCLUSIVA'
+              ? 'INCONCLUSIVE'
+              : validationState === 'NAO_TESTADA'
+                ? 'NOT_TESTED'
+                : validationState === 'PROVAVEL'
+                  ? 'PROBABLE'
+                  : 'CONFIRMED';
+    }
+
+    const effectiveLabel = finding.lifecycleState || finding.validationStatus;
+    // Recalcular ScoreCards, Ratings A–E e Quality Gate em tempo real e persistir no backend
+    recalculateBenchmarkRunScoreCards(targetRun, db.softwares);
+
+    const prevHash =
+      targetRun.evidenceChain[targetRun.evidenceChain.length - 1]?.sha256 ||
+      '0000000000000000000000000000000000000000000000000000000000000000';
+    const nextIndex = targetRun.evidenceChain.length;
+    const resultSummary = `Triagem DevSecOps de [${finding.originalRuleId}] alterada de ${previousState} para ${effectiveLabel}: ${verificationNote || 'ScoreCard, Ratings A-E e Quality Gate recalculados em tempo real.'}`;
+    const rawPayloadPreview = finding.snippet || '';
+    const fileOrComponent = `${finding.filePath}:${finding.lineNumber}`;
+
+    const baseRecord: Omit<import('./src/types/benchmark').EvidenceRecord, 'sha256'> = {
+      id: `evd-triage-${targetRun.id}-${finding.id}-${nextIndex}`,
+      runId: targetRun.id,
       softwareId: finding.softwareId,
       softwareName: finding.softwareName,
       version: finding.softwareVersion,
+      commitHash: 'TRIAGE_REVIEW',
+      sourceHash: finding.evidenceSha256,
+      criterionId: finding.originalRuleId,
+      evidenceType: 'STATIC_AST_FINDING',
+      origin: 'DEVSECOPS_TRIAGE',
+      responsibleActor: db.currentUser.name,
       category: 'VULNERABILITY_VALIDATION',
-      toolName: 'WinHood Vulnerability Validation Engine',
-      toolVersion: '2.5.0',
+      toolName: 'WinHood Vulnerability Validation & MQR Triage Engine',
+      toolVersion: '4.0.0',
       timestamp: nowIso,
-      resultSummary: `Revalidação de [${finding.originalRuleId}] alterada para ${validationState}: ${verificationNote || 'Verificação técnica não-destrutiva registrada.'}`,
+      resultSummary,
       severity: finding.severity,
-      fileOrComponent: `${finding.filePath}:${finding.lineNumber}`,
+      fileOrComponent,
       validationStatus: 'SUCCESS_VALIDATED',
-      sha256: newEvHash,
-      rawPayloadPreview: finding.snippet,
+      rawPayloadPreview,
       immutableIndex: nextIndex,
       previousRecordSha256: prevHash,
+    };
+    const newEvHash = computeCanonicalEvidenceHash(baseRecord, prevHash);
+
+    finding.retestHistory = [
+      ...(finding.retestHistory || []),
+      {
+        timestamp: nowIso,
+        actor: db.currentUser.name,
+        previousStatus: previousState,
+        newStatus: effectiveLabel,
+        notes: verificationNote || 'Triagem DevSecOps em tempo real.',
+        evidenceHash: newEvHash,
+      },
+    ];
+
+    targetRun.evidenceChain.push({
+      ...baseRecord,
+      sha256: newEvHash,
+    });
+
+    // Re-assinar manifesto HMAC-SHA256 com o novo registro encadeado
+    targetRun.signedManifest = signEvidenceManifestHmacSha256({
+      runId: targetRun.id,
+      algorithmVersion: targetRun.algorithmVersion || ALGORITHM_VERSION,
+      evidenceChain: targetRun.evidenceChain,
     });
 
     appendAuditLog(
@@ -2621,10 +3287,16 @@ async function startServer() {
       'VULNERABILITY_VALIDATION_UPDATED',
       'FINDING',
       finding.id,
-      `Achado ${finding.id} (${finding.title}) classificado como ${validationState} com evidência SHA-256 ${newEvHash.slice(0, 12)}.`
+      `Achado ${finding.id} (${finding.title}) classificado como ${effectiveLabel} com recálculo em tempo real e evidência SHA-256 ${newEvHash.slice(0, 12)}.`
     );
-    saveDatabase(db);
-    return res.json({ ok: true, finding, evidenceHash: newEvHash });
+    saveDatabase(db, true);
+    return res.json({
+      ok: true,
+      finding,
+      run: targetRun,
+      evidenceHash: newEvHash,
+      signedManifest: targetRun.signedManifest,
+    });
   });
 
   // 9.3 Cancelamento Emergencial e Restauração de Snapshot
@@ -2653,14 +3325,37 @@ async function startServer() {
     });
   });
 
-  // 10. Evidence & Audit Logs (/api/evidence, /api/audit)
+  // 10. Evidence, Provenance Verification & Audit Logs (/api/evidence, /api/audit)
   app.get('/api/evidence', (req, res) => {
     const runId = req.query.runId as string | undefined;
     const targetRun = runId ? db.runs.find((r) => r.id === runId) : db.runs[0];
+    const verification = targetRun
+      ? verifyEvidenceChainAndManifest(targetRun.evidenceChain, targetRun.signedManifest)
+      : null;
     res.json({
       runId: targetRun?.id || null,
       evidenceChain: targetRun?.evidenceChain || [],
+      signedManifest: targetRun?.signedManifest || null,
+      verification,
       veracityResults: targetRun?.veracityResults || [],
+    });
+  });
+
+  app.post('/api/evidence/:runId/verify', (req, res) => {
+    const targetRun = db.runs.find((r) => r.id === req.params.runId) || db.runs[0];
+    if (!targetRun) {
+      return res.status(404).json({ error: 'Execução não encontrada para verificação criptográfica.' });
+    }
+    const { evidenceChainOverride, signedManifestOverride } = (req.body || {}) as {
+      evidenceChainOverride?: typeof targetRun.evidenceChain;
+      signedManifestOverride?: typeof targetRun.signedManifest;
+    };
+    const chainToVerify = evidenceChainOverride || targetRun.evidenceChain;
+    const manifestToVerify = signedManifestOverride !== undefined ? signedManifestOverride : targetRun.signedManifest;
+    const result = verifyEvidenceChainAndManifest(chainToVerify, manifestToVerify);
+    return res.json({
+      runId: targetRun.id,
+      ...result,
     });
   });
 
@@ -2688,7 +3383,7 @@ async function startServer() {
     saveDatabase(db);
 
     if (format === 'sarif') {
-      // Formato oficial SARIF 2.1.0 para GitHub Code Scanning e SonarQube
+      // Formato oficial SARIF 2.1.0 para GitHub Code Scanning, SonarQube MQR, Semgrep Taint e CodeQL
       const rulesMap = new Map<string, any>();
       const sarifResults = run.findings.map((f) => {
         if (!rulesMap.has(f.originalRuleId)) {
@@ -2696,10 +3391,10 @@ async function startServer() {
             id: f.originalRuleId,
             name: f.originalRuleId.replace(/[^a-zA-Z0-9]/g, '_'),
             shortDescription: { text: f.title },
-            fullDescription: { text: f.description || f.title },
+            fullDescription: { text: f.whyItIsAnIssue || f.description || f.title },
             defaultConfiguration: {
               level:
-                f.severity === 'CRITICAL' || f.severity === 'HIGH'
+                f.severity === 'BLOCKER' || f.severity === 'CRITICAL' || f.severity === 'HIGH'
                   ? 'error'
                   : f.severity === 'MEDIUM'
                     ? 'warning'
@@ -2710,19 +3405,48 @@ async function startServer() {
               cvss: f.cvss ?? null,
               category: f.category,
               toolName: f.toolName,
+              cleanCodeAttribute: f.cleanCodeAttribute,
+              mqrImpacts: f.mqrImpacts || [],
             },
           });
         }
 
+        const codeFlows =
+          f.executionFlows && f.executionFlows.length > 0
+            ? [
+                {
+                  threadFlows: [
+                    {
+                      locations: f.executionFlows.map((step) => ({
+                        location: {
+                          physicalLocation: {
+                            artifactLocation: {
+                              uri: step.filePath.replace(/\\/g, '/'),
+                              uriBaseId: '%SRCROOT%',
+                            },
+                            region: {
+                              startLine: step.lineNumber > 0 ? step.lineNumber : 1,
+                              snippet: { text: step.codeSnippet || '' },
+                            },
+                          },
+                          message: { text: `[${step.nodeType}] ${step.explanation}` },
+                        },
+                      })),
+                    },
+                  ],
+                },
+              ]
+            : undefined;
+
         return {
           ruleId: f.originalRuleId,
           level:
-            f.severity === 'CRITICAL' || f.severity === 'HIGH'
+            f.severity === 'BLOCKER' || f.severity === 'CRITICAL' || f.severity === 'HIGH'
               ? 'error'
               : f.severity === 'MEDIUM'
                 ? 'warning'
                 : 'note',
-          message: { text: `[${f.softwareName}] ${f.title}` },
+          message: { text: `[${f.softwareName}] ${f.title} — ${f.whyItIsAnIssue || f.description}` },
           locations: [
             {
               physicalLocation: {
@@ -2732,17 +3456,35 @@ async function startServer() {
                 },
                 region: {
                   startLine: f.lineNumber > 0 ? f.lineNumber : 1,
+                  endLine: f.endLineNumber && f.endLineNumber > 0 ? f.endLineNumber : f.lineNumber > 0 ? f.lineNumber : 1,
+                  startColumn: f.columnStart ?? 1,
+                  endColumn: f.columnEnd ?? 80,
                   snippet: { text: f.snippet || '' },
+                },
+                contextRegion: {
+                  snippet: {
+                    text: [
+                      ...(f.contextBefore || []),
+                      `>>> ${f.snippet || ''}`,
+                      ...(f.contextAfter || []),
+                    ].join('\n'),
+                  },
                 },
               },
             },
           ],
+          ...(codeFlows ? { codeFlows } : {}),
           properties: {
             softwareId: f.softwareId,
             softwareName: f.softwareName,
             softwareVersion: f.softwareVersion,
+            validationStatus: f.validationStatus,
             evidenceSha256: f.evidenceSha256,
+            whyItIsAnIssue: f.whyItIsAnIssue,
             remediation: f.remediation,
+            compliantCodeExample: f.compliantCodeExample,
+            remediationEffortMinutes: f.remediationEffortMinutes,
+            mqrImpacts: f.mqrImpacts,
           },
         };
       });
@@ -2755,9 +3497,9 @@ async function startServer() {
           {
             tool: {
               driver: {
-                name: 'WinHood Static & Quality Analyzer (SonarQube/Opengrep Engine)',
+                name: 'WinHood Static & Quality Analyzer (SonarQube MQR / Semgrep Taint / CodeQL Engine)',
                 version: run.algorithmVersion,
-                informationUri: 'https://github.com/winhood/winhood-analyzer',
+                informationUri: 'https://github.com/LilNavaHoods/Winhood-Benchmarking',
                 rules: Array.from(rulesMap.values()),
               },
             },
@@ -2827,6 +3569,7 @@ async function startServer() {
       border: 1px solid var(--border);
       border-radius: 8px;
       padding: 1.5rem;
+      margin-bottom: 1.5rem;
     }
     .card h2 { font-size: 1.25rem; margin-bottom: 0.75rem; color: #fff; display: flex; justify-content: space-between; align-items: center; }
     .score-big { font-family: monospace; font-size: 1.5rem; color: var(--accent); font-weight: bold; }
@@ -2836,10 +3579,12 @@ async function startServer() {
     th, td { text-align: left; padding: 0.75rem; border-bottom: 1px solid var(--border); }
     th { color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase; }
     tr:hover { background: rgba(255, 255, 255, 0.02); }
-    .sev-CRITICAL { color: var(--danger); font-weight: bold; }
+    .sev-BLOCKER, .sev-CRITICAL { color: var(--danger); font-weight: bold; }
     .sev-HIGH { color: #f87171; }
     .sev-MEDIUM { color: var(--warning); }
     .sev-LOW { color: #60a5fa; }
+    pre.code-box { background: #05070b; border: 1px solid var(--border); padding: 0.75rem; border-radius: 6px; font-family: monospace; font-size: 0.8rem; overflow-x: auto; margin-top: 0.5rem; color: #cbd5e1; }
+    .reason-item { border: 1px solid var(--border); border-radius: 6px; padding: 1rem; margin-top: 0.75rem; background: #0b1018; }
     .footer { text-align: center; color: var(--text-muted); font-size: 0.8rem; margin-top: 3rem; border-top: 1px solid var(--border); padding-top: 1.5rem; font-family: monospace; }
   </style>
 </head>
@@ -2848,7 +3593,7 @@ async function startServer() {
     <header>
       <div style="display: flex; justify-content: space-between; align-items: center;">
         <div>
-          <h1>WinHood Analyzer — Dossiê Técnico de Qualidade &amp; Segurança</h1>
+          <h1>WinHood Analyzer — Dossiê Técnico MQR de Qualidade &amp; Segurança</h1>
           <p style="color: var(--text-muted); font-size: 0.9rem;">
             Execução ID: <code>${run.id}</code> · Projeto: <strong>${run.projectName}</strong> · Algoritmo: <code>${run.algorithmVersion}</code>
           </p>
@@ -2859,7 +3604,7 @@ async function startServer() {
       </div>
     </header>
 
-    <div class="card" style="margin-bottom: 2rem;">
+    <div class="card">
       <h3 style="margin-bottom: 0.5rem; color: var(--accent);">Resumo Executivo</h3>
       <p style="color: #cbd5e1; font-size: 0.95rem;">${run.executiveSummary}</p>
     </div>
@@ -2892,15 +3637,69 @@ async function startServer() {
     </div>
 
     <div class="card">
+      <h2>Motivos de Avaliação e Evidências no Código-Fonte (12 Categorias — MQR)</h2>
+      ${run.scoreCards
+        .map((sc) => {
+          const cats = sc.categoryDetails ? Object.values(sc.categoryDetails) : [];
+          return `
+            <div style="margin-top: 1.25rem;">
+              <h3 style="color: var(--accent); margin-bottom: 0.5rem;">${sc.softwareName} (v${sc.softwareVersion})</h3>
+              ${cats
+                .map((cd) => {
+                  const reasons = cd.evaluationReasons || [];
+                  const sumDelta = reasons.reduce((acc, r) => acc + r.scoreDelta, 0);
+                  return `
+                    <div class="reason-item">
+                      <div style="display: flex; justify-content: space-between; font-family: monospace; font-weight: bold;">
+                        <span>[${cd.category.toUpperCase()}] Status: ${cd.status}</span>
+                        <span>clamp[0,5](5.00 + (${sumDelta >= 0 ? '+' : ''}${sumDelta.toFixed(2)})) = ${(cd.finalScore ?? 0).toFixed(2)} / 5.00</span>
+                      </div>
+                      ${
+                        reasons.length === 0
+                          ? `<div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.4rem;">Nenhuma dedução ou limite excedido nesta categoria (5.00/5.00).</div>`
+                          : reasons
+                              .map(
+                                (r) => `
+                                <div style="margin-top: 0.6rem; padding-top: 0.6rem; border-top: 1px dashed var(--border); font-size: 0.82rem;">
+                                  <div style="font-family: monospace;">
+                                    <strong style="color: ${r.scoreDelta < 0 ? 'var(--danger)' : 'var(--success)'};">${r.scoreDelta >= 0 ? '+' : ''}${r.scoreDelta.toFixed(2)} pts</strong>
+                                    · [${r.severity}] <code>${r.ruleId}</code> · <code>${r.filePath}:${r.lineNumber}${r.endLineNumber ? `-${r.endLineNumber}` : ''}</code>
+                                  </div>
+                                  <div style="margin-top: 0.25rem;"><strong>Motivo:</strong> ${r.title}</div>
+                                  <div style="color: var(--text-muted); margin-top: 0.2rem;"><strong>Por que impactou a nota:</strong> ${r.whyExplanation}</div>
+                                  <pre class="code-box">${[...(r.contextBefore || []), `>>> ${r.codeSnippet}`, ...(r.contextAfter || [])].join('\n')}</pre>
+                                  ${
+                                    r.executionFlow && r.executionFlow.length > 0
+                                      ? `<div style="margin-top: 0.4rem; font-family: monospace; font-size: 0.75rem; color: var(--warning);">Fluxo Taint (Source → Sink): ${r.executionFlow.map((s) => `[${s.nodeType}] ${s.filePath}:${s.lineNumber}`).join(' → ')}</div>`
+                                      : ''
+                                  }
+                                  <div style="margin-top: 0.35rem; color: var(--success);"><strong>Remediação:</strong> ${r.remediationSummary}</div>
+                                </div>
+                              `
+                              )
+                              .join('')
+                      }
+                    </div>
+                  `;
+                })
+                .join('')}
+            </div>
+          `;
+        })
+        .join('')}
+    </div>
+
+    <div class="card">
       <h2>Achados e Evidências Criptográficas Validadas (${run.findings.length})</h2>
       <table>
         <thead>
           <tr>
             <th>Severidade</th>
+            <th>Status</th>
             <th>Software</th>
             <th>Regra / CWE</th>
             <th>Localização</th>
-            <th>Título do Achado</th>
+            <th>Título &amp; Por Que é um Problema</th>
             <th>Evidência SHA-256</th>
           </tr>
         </thead>
@@ -2910,10 +3709,14 @@ async function startServer() {
               (f) => `
             <tr>
               <td class="sev-${f.severity}">[${f.severity}]</td>
+              <td><code>${f.validationStatus}</code></td>
               <td>${f.softwareName}</td>
               <td>${f.originalRuleId} ${f.cwe ? `(${f.cwe})` : ''}</td>
               <td><code>${f.filePath}:${f.lineNumber}</code></td>
-              <td>${f.title}</td>
+              <td>
+                <div><strong>${f.title}</strong></div>
+                <div style="color: var(--text-muted); font-size: 0.75rem;">${f.whyItIsAnIssue || f.description}</div>
+              </td>
               <td style="color: var(--text-muted);">${f.evidenceSha256.slice(0, 16)}...</td>
             </tr>
           `
@@ -2945,6 +3748,7 @@ async function startServer() {
         'Version',
         'Category',
         'Severity',
+        'ValidationStatus',
         'Tool',
         'RuleID',
         'File',
@@ -2954,6 +3758,7 @@ async function startServer() {
         'CVSS',
         'EvidenceSHA256',
         'Title',
+        'WhyItIsAnIssue',
       ];
       const rows = run.findings.map((f) =>
         [
@@ -2962,6 +3767,7 @@ async function startServer() {
           f.softwareVersion,
           f.category,
           f.severity,
+          f.validationStatus,
           `"${f.toolName}"`,
           f.originalRuleId,
           `"${f.filePath}"`,
@@ -2971,6 +3777,7 @@ async function startServer() {
           f.cvss ?? '',
           f.evidenceSha256,
           `"${f.title.replace(/"/g, '""')}"`,
+          `"${(f.whyItIsAnIssue || f.description || '').replace(/"/g, '""')}"`,
         ].join(',')
       );
       const csv = [headers.join(','), ...rows].join('\n');
@@ -2984,30 +3791,75 @@ async function startServer() {
 
     if (format === 'md') {
       const md = [
-        `# RELATÓRIO TÉCNICO WINHOOD — ${reportType}`,
+        `# RELATÓRIO TÉCNICO WINHOOD (SONARQUBE MQR) — ${reportType}`,
         `- **Execução ID:** \`${run.id}\``,
         `- **Projeto:** ${run.projectName}`,
         `- **Perfil:** ${run.profileName}`,
         `- **Algoritmo:** \`${run.algorithmVersion}\``,
         `- **Data de Conclusão:** ${run.completedAt || new Date().toISOString()}`,
         '',
-        `## 1. Resumo Executivo`,
+        `## 1. Resumo Executivo & 5 Indicadores Separados`,
         run.executiveSummary,
         '',
-        `## 2. Quadro Comparativo de Pontuações & SonarQube Ratings`,
+        `## 2. Quadro Comparativo de Pontuações, Indicadores Separados & SonarQube Ratings`,
         ...run.scoreCards.map(
           (sc) =>
-            `### ${sc.softwareName} (v${sc.softwareVersion}) — Nota Geral: **${sc.groupedScores.overallScore.toFixed(2)} / 5.00** (${sc.classificationLabel})\n` +
-            `- **Quality Gate:** \`${sc.qualityGate?.status || 'N/A'}\` | **Ratings:** Segurança \`${sc.ratings?.security || 'A'}\` · Confiabilidade \`${sc.ratings?.reliability || 'A'}\` · Manutenibilidade \`${sc.ratings?.maintainability || 'A'}\`\n` +
-            `- Segurança: ${sc.groupedScores.securityScore.toFixed(2)} | Qualidade: ${sc.groupedScores.qualityScore.toFixed(2)} | Arquitetura: ${sc.groupedScores.architectureScore.toFixed(2)} | Desempenho P95: ${sc.metricsSummary.p95LatencyMs.toFixed(1)} ms\n` +
+            `### ${sc.softwareName} (v${sc.softwareVersion}) — Nota Técnica: **${sc.separatedIndicators?.technicalScore !== null && sc.separatedIndicators?.technicalScore !== undefined ? `${sc.separatedIndicators.technicalScore.toFixed(2)} / 5.00` : sc.groupedScores.overallScore.toFixed(2)}** (${sc.classificationLabel})\n` +
+            `- **5 Indicadores Separados:** Nota Técnica: \`${sc.separatedIndicators?.technicalScore ?? sc.groupedScores.overallScore}\` | Cobertura do Escopo: \`${sc.separatedIndicators?.scopeCoveragePercent ?? 100}%\` | Confiança da Evidência: \`${sc.separatedIndicators?.evidenceConfidence || 'HIGH'}\` | Decisão Quality Gate: \`${sc.separatedIndicators?.qualityGateDecision || sc.qualityGate?.status || 'N/A'}\` | Veracidade: \`${sc.separatedIndicators?.veracityState || 'SUCCESS_VALIDATED'}\`\n` +
+            `- **Quality Gate:** \`${sc.qualityGate?.status || 'N/A'}\` | **Ratings:** Segurança \`${sc.ratings?.security || 'N/A'}\` · Confiabilidade \`${sc.ratings?.reliability || 'N/A'}\` · Manutenibilidade \`${sc.ratings?.maintainability || 'N/A'}\`\n` +
+            `- Segurança: ${sc.groupedScores.securityScore.toFixed(2)} | Qualidade: ${sc.groupedScores.qualityScore.toFixed(2)} | Arquitetura: ${sc.groupedScores.architectureScore.toFixed(2)} | Desempenho: ${sc.runtimeMetrics?.status === 'MEASURED' ? `${sc.metricsSummary.p95LatencyMs.toFixed(1)} ms` : 'NÃO MEDIDO (Estático)'}\n` +
             `- Travas Matemáticas (Penalty Caps) Acionadas: ${sc.penaltyCapsTriggered.length}\n` +
             sc.penaltyCapsTriggered.map((c) => `  - \`${c.ruleId}\` (${c.category}): ${c.reason} [Teto: ${c.maxAllowedScore}]`).join('\n')
         ),
         '',
-        `## 3. Evidências e Achados Validados (${run.findings.length})`,
+        `## 2.1 Relatório de Comparabilidade Técnica & Imparcialidade`,
+        run.comparabilityReport
+          ? `- **Status Geral:** \`${run.comparabilityReport.overallStatus}\` | **Pode Declarar Vencedor Oficial:** \`${run.comparabilityReport.canDeclareOfficialWinner}\`\n` +
+            (run.comparabilityReport.blockingReasons.length > 0
+              ? `- **Razões de Bloqueio:** ${run.comparabilityReport.blockingReasons.join(' | ')}\n`
+              : '') +
+            (run.comparabilityReport.warnings.length > 0
+              ? `- **Avisos de Paridade:** ${run.comparabilityReport.warnings.join(' | ')}\n`
+              : '')
+          : `- Avaliação individual ou sem restrições de comparabilidade.`,
+        '',
+        `## 2.2 Manifesto de Evidências Assinado Criptograficamente (HMAC-SHA256)`,
+        run.signedManifest
+          ? `- **Algoritmo:** \`${run.signedManifest.signatureAlgorithm}\` | **Key ID:** \`${run.signedManifest.keyId}\` | **Registros:** ${run.signedManifest.recordsCount}\n` +
+            `- **Root Chain SHA-256:** \`${run.signedManifest.rootChainSha256}\`\n` +
+            `- **Assinatura HMAC:** \`${run.signedManifest.hmacSignature}\``
+          : `- Manifesto assinado não disponível.`,
+        '',
+        `## 3. Motivos de Avaliação e Evidências no Código-Fonte (12 Categorias)`,
+        ...run.scoreCards.flatMap((sc) => {
+          const cats = sc.categoryDetails ? Object.values(sc.categoryDetails) : [];
+          return [
+            `### ${sc.softwareName} (v${sc.softwareVersion})`,
+            ...cats.map((cd) => {
+              const reasons = cd.evaluationReasons || [];
+              const sumDelta = reasons.reduce((acc, r) => acc + r.scoreDelta, 0);
+              return (
+                `#### Categoria: \`${cd.category}\` [${cd.status}] — Nota Final: **${cd.finalScore !== null && cd.finalScore !== undefined ? `${cd.finalScore.toFixed(2)} / 5.00` : 'NÃO AVALIADO / N/A'}** (Peso Original: ${cd.originalWeight ?? cd.weight}% | Peso Efetivo: ${cd.effectiveWeight ?? cd.weight}% | \`clamp[0,5](5.00 + (${sumDelta >= 0 ? '+' : ''}${sumDelta.toFixed(2)}))\`)\n` +
+                (reasons.length === 0
+                  ? `- Sem deduções registradas.\n`
+                  : reasons
+                      .map(
+                        (r) =>
+                          `- **${r.scoreDelta >= 0 ? '+' : ''}${r.scoreDelta.toFixed(2)} pts** [${r.severity}] \`${r.ruleId}\` em \`${r.filePath}:${r.lineNumber}\`: ${r.title}\n` +
+                          `  - **Por que impactou:** ${r.whyExplanation}\n` +
+                          `  - **Trecho:** \`${r.codeSnippet}\`\n` +
+                          `  - **Remediação:** ${r.remediationSummary}`
+                      )
+                      .join('\n'))
+              );
+            }),
+          ];
+        }),
+        '',
+        `## 4. Evidências e Achados Validados (${run.findings.length})`,
         ...run.findings.map(
           (f) =>
-            `- **[${f.severity}] ${f.softwareName}** (\`${f.filePath}:${f.lineNumber}\`) — ${f.title} | Regra: \`${f.originalRuleId}\` | SHA-256: \`${f.evidenceSha256.slice(0, 16)}...\``
+            `- **[${f.severity}] [${f.lifecycleState || f.validationStatus}] ${f.softwareName}** (\`${f.filePath}:${f.lineNumber}\`) — ${f.title} | Regra: \`${f.originalRuleId}\` | Por quê: ${f.whyItIsAnIssue || f.description} | SHA-256: \`${f.evidenceSha256.slice(0, 16)}...\``
         ),
       ].join('\n');
 
@@ -3019,6 +3871,7 @@ async function startServer() {
       return res.send(md);
     }
 
+    const verification = verifyEvidenceChainAndManifest(run.evidenceChain, run.signedManifest);
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.setHeader(
       'Content-Disposition',
@@ -3032,6 +3885,9 @@ async function startServer() {
             generatedAt: new Date().toISOString(),
             platform: 'WinHood Software Benchmark & Quality Analyzer',
             algorithmVersion: run.algorithmVersion,
+            methodologyCatalogVersion: METHODOLOGY_CATALOG_VERSION,
+            sectionsIncluded: 23,
+            evidenceChainVerification: verification,
           },
           run,
         },

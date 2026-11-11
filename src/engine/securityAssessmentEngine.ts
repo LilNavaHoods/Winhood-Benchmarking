@@ -457,7 +457,7 @@ export function executeSecurityAssessmentSuite(params: {
       Math.round(
         (exposedEntryPoints.length * 0.35 +
           externalProcessInvocations.length * 2.8 +
-          swFindings.filter((f) => f.severity === 'CRITICAL').length * 1.6) *
+          swFindings.filter((f) => f.severity === 'BLOCKER' || f.severity === 'CRITICAL').length * 1.6) *
           10
       ) / 10
     );
@@ -613,9 +613,9 @@ export function executeSecurityAssessmentSuite(params: {
 
     for (const f of swFindings) {
       const initialValidationState: VulnerabilityValidationState =
-        f.validationStatus === 'FALSE_POSITIVE_REVIEWED'
+        f.validationStatus === 'FALSE_POSITIVE_REVIEWED' || f.validationStatus === 'ACCEPTED'
           ? 'FALSO_POSITIVO'
-          : f.confidence === 'HIGH' && (f.severity === 'CRITICAL' || f.severity === 'HIGH')
+          : f.confidence === 'HIGH' && (f.severity === 'BLOCKER' || f.severity === 'CRITICAL' || f.severity === 'HIGH')
             ? 'CONFIRMADA'
             : f.confidence === 'HIGH'
               ? 'PROVAVEL'

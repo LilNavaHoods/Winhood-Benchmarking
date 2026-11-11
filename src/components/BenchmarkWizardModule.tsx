@@ -31,10 +31,17 @@ import type {
 } from '../types/benchmark';
 import { CATEGORY_LABELS } from './DashboardModule';
 import {
+  ALL_BENCHMARK_CATEGORIES,
   DEFAULT_CATEGORY_WEIGHTS,
+  normalizeEnabledCategoryWeights,
   validateCategoryWeights,
   validateEquivalenceConditions,
 } from '../engine/scoringEngine';
+import {
+  DOMAIN_SPECIALIZED_PROFILES,
+  buildPreAnalysisSummary,
+  evaluateSoftwareComparability,
+} from '../engine/methodologyCatalogEngine';
 
 interface BenchmarkWizardModuleProps {
   projects: Project[];
@@ -55,11 +62,13 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
 }) => {
   // Wizard Steps: 1 = Mode, 2 = Project & Primary Software, 3 = Compare Target / Competitor Discovery, 4 = Weights & Profile, 5 = Equivalence & Review
   const [step, setStep] = useState<1 | 2 | 3 | 4 | 5>(1);
+  const [wizardMode, setWizardMode] = useState<'QUICK' | 'CUSTOM' | 'ADVANCED'>('CUSTOM');
+  const [crossProjectSelection, setCrossProjectSelection] = useState<boolean>(true);
 
   // Mode Selection (Seção 1: Três Modalidades Independentes)
   const [assessmentMode, setAssessmentMode] = useState<AssessmentMode>('INDIVIDUAL');
 
-  // Primary Selection
+  // Primary Selection (Project is optional / cross-project enabled by default)
   const [selectedProjectId, setSelectedProjectId] = useState<string>(projects[0]?.id || '');
   const [primarySoftwareId, setPrimarySoftwareId] = useState<string>(softwares[0]?.id || '');
   const [comparisonSoftwareIds, setComparisonSoftwareIds] = useState<string[]>([]);
@@ -71,10 +80,15 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
   const [candidateApproved, setCandidateApproved] = useState<boolean>(false);
   const [approvedCompetitorSoftwareId, setApprovedCompetitorSoftwareId] = useState<string>('');
 
-  // Profile & Weights
+  // Profile, Enabled Categories, Not Applicable Categories, Quality Gate & Weights
   const [selectedProfileId, setSelectedProfileId] = useState<string>(
     profiles[0]?.id || 'prof-complete-enterprise'
   );
+  const [enabledCategories, setEnabledCategories] = useState<BenchmarkCategoryKey[]>([
+    ...ALL_BENCHMARK_CATEGORIES,
+  ]);
+  const [notApplicableCategories, setNotApplicableCategories] = useState<BenchmarkCategoryKey[]>([]);
+  const [qualityGateId, setQualityGateId] = useState<string>('qg-sonar-way-mqr');
   const [weights, setWeights] = useState<Record<BenchmarkCategoryKey, number>>({
     ...(profiles[0]?.weights || DEFAULT_CATEGORY_WEIGHTS),
   });
@@ -94,10 +108,10 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
 
   const [executing, setExecuting] = useState<boolean>(false);
 
-  // Update primary software when project changes
-  const projectSoftwares = softwares.filter(
-    (s) => !selectedProjectId || s.projectId === selectedProjectId
-  );
+  // Update primary software when project changes (or allow all softwares in cross-project mode)
+  const projectSoftwares = crossProjectSelection
+    ? softwares
+    : softwares.filter((s) => !selectedProjectId || s.projectId === selectedProjectId);
 
   useEffect(() => {
     if (projectSoftwares.length > 0 && !projectSoftwares.some((s) => s.id === primarySoftwareId)) {
@@ -177,7 +191,7 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
     }
   };
 
-  const weightValidation = validateCategoryWeights(weights);
+  const weightValidation = validateCategoryWeights(weights, enabledCategories);
   const eqValidation = validateEquivalenceConditions({
     cpuCoresLimit,
     memoryMbLimit,
@@ -189,19 +203,54 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
 
   const handleSelectProfile = (profId: string) => {
     setSelectedProfileId(profId);
-    const found = profiles.find((p) => p.id === profId);
-    if (found) {
-      setWeights({ ...found.weights });
-      setEnablePenaltyCaps(found.enablePenaltyCaps);
-      setCpuCoresLimit(found.equivalenceEnvironment.cpuCoresLimit);
-      setMemoryMbLimit(found.equivalenceEnvironment.memoryMbLimit);
-      setOsTarget(found.equivalenceEnvironment.osTarget);
-      setWorkloadConcurrency(found.equivalenceEnvironment.workloadConcurrency);
+    const foundStandard = profiles.find((p) => p.id === profId);
+    if (foundStandard) {
+      const cats =
+        foundStandard.enabledCategories && foundStandard.enabledCategories.length > 0
+          ? [...foundStandard.enabledCategories]
+          : [...ALL_BENCHMARK_CATEGORIES];
+      setEnabledCategories(cats);
+      setNotApplicableCategories(foundStandard.notApplicableCategories || []);
+      setQualityGateId(foundStandard.qualityGateId || 'qg-sonar-way-mqr');
+      setWeights(normalizeEnabledCategoryWeights(foundStandard.weights, cats));
+      setEnablePenaltyCaps(foundStandard.enablePenaltyCaps);
+      setCpuCoresLimit(foundStandard.equivalenceEnvironment.cpuCoresLimit);
+      setMemoryMbLimit(foundStandard.equivalenceEnvironment.memoryMbLimit);
+      setOsTarget(foundStandard.equivalenceEnvironment.osTarget);
+      setWorkloadConcurrency(foundStandard.equivalenceEnvironment.workloadConcurrency);
+      return;
+    }
+
+    const foundSpecialized = DOMAIN_SPECIALIZED_PROFILES.find((p) => p.id === profId);
+    if (foundSpecialized) {
+      const cats = [...foundSpecialized.enabledCategories];
+      setEnabledCategories(cats);
+      setNotApplicableCategories([...foundSpecialized.notApplicableCategories]);
+      setWeights(normalizeEnabledCategoryWeights(foundSpecialized.weights, cats));
     }
   };
 
-  const handleNormalizeWeightsTo100 = () => {
+  const handleToggleCategoryScope = (cat: BenchmarkCategoryKey) => {
+    setEnabledCategories((prev) => {
+      const exists = prev.includes(cat);
+      if (exists && prev.length <= 1) {
+        onNotify('Mantenha pelo menos 1 categoria habilitada para o cálculo.', 'error');
+        return prev;
+      }
+      const next = exists ? prev.filter((c) => c !== cat) : [...prev, cat];
+      setWeights((curWeights) => normalizeEnabledCategoryWeights(curWeights, next));
+      return next;
+    });
+  };
+
+  const handleEnableAll12Categories = () => {
+    const all12 = [...ALL_BENCHMARK_CATEGORIES];
+    setEnabledCategories(all12);
     setWeights({ ...DEFAULT_CATEGORY_WEIGHTS });
+  };
+
+  const handleNormalizeWeightsTo100 = () => {
+    setWeights((cur) => normalizeEnabledCategoryWeights(cur, enabledCategories));
   };
 
   const handleExecute = async () => {
@@ -250,20 +299,27 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
 
     setExecuting(true);
     try {
-      const activeProf = profiles.find((p) => p.id === selectedProfileId);
+      const activeProf =
+        profiles.find((p) => p.id === selectedProfileId) ||
+        DOMAIN_SPECIALIZED_PROFILES.find((p) => p.id === selectedProfileId);
       const res = await fetch('/api/benchmark-runs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           projectId: selectedProjectId || projects[0]?.id,
           softwareIds: finalSoftwareIds,
+          profileId: selectedProfileId,
           profileName:
             assessmentMode === 'INDIVIDUAL'
-              ? `Avaliação Individual - ${activePrimarySoftware?.name}`
+              ? `Avaliação Individual - ${activePrimarySoftware?.name} (${activeProf?.name || 'MQR'})`
               : assessmentMode === 'MARKET_COMPETITOR'
                 ? `Benchmark de Mercado: ${activePrimarySoftware?.name} vs ${selectedCandidate?.name}`
                 : activeProf?.name || 'Benchmark Comparativo A/B WinHood',
+          wizardMode,
           weights,
+          enabledCategories,
+          notApplicableCategories,
+          qualityGateId,
           enablePenaltyCaps,
           equivalenceEnvironment: {
             cpuCoresLimit,
@@ -299,15 +355,39 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="border-b border-slate-200 dark:border-slate-800 pb-4">
-        <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100 flex items-center gap-3">
-          <Scale className="w-7 h-7 text-[#31d6c4]" />
-          <span>Assistente de Avaliação &amp; Benchmark de Softwares</span>
-        </h1>
-        <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 mt-1">
-          Plataforma independente de Software Quality Assessment, Security Assessment e Benchmark
-          Intelligence. Três modalidades com auditoria e veracidade absoluta.
-        </p>
+      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100 flex items-center gap-3">
+            <Scale className="w-7 h-7 text-[#31d6c4]" />
+            <span>Assistente de Avaliação &amp; Benchmark de Softwares</span>
+          </h1>
+          <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 mt-1">
+            Plataforma independente de Software Quality Assessment, Security Assessment e Benchmark
+            Intelligence. Três modalidades com auditoria, pré-análise e veracidade absoluta.
+          </p>
+        </div>
+
+        {/* 3 Wizard Modes Selector (Seção 10.2: Rápido, Personalizado, Avançado) */}
+        <div className="flex items-center gap-1 p-1 rounded-lg bg-slate-200/70 dark:bg-[#0f141c] border border-slate-300/60 dark:border-slate-800 shrink-0">
+          {[
+            { id: 'QUICK', label: 'Modo Rápido' },
+            { id: 'CUSTOM', label: 'Modo Personalizado' },
+            { id: 'ADVANCED', label: 'Modo Avançado' },
+          ].map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              onClick={() => setWizardMode(m.id as 'QUICK' | 'CUSTOM' | 'ADVANCED')}
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer ${
+                wizardMode === m.id
+                  ? 'bg-[#31d6c4] text-slate-950'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
+              }`}
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Step Indicator Bar */}
@@ -503,22 +583,38 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
           </div>
         )}
 
-        {/* STEP 2: PROJETO & SOFTWARE PRINCIPAL */}
+        {/* STEP 2: PROJETO (OPCIONAL) & SOFTWARE PRINCIPAL */}
         {step === 2 && (
           <div className="space-y-6">
+            <div className="flex flex-wrap items-center justify-between gap-2 p-3 rounded-lg bg-slate-50 dark:bg-[#080b10] border border-slate-200 dark:border-slate-800 text-xs">
+              <span className="text-slate-600 dark:text-slate-300">
+                <strong>Desacoplamento de Projetos (Seção 10.1):</strong> Softwares podem ser avaliados avulsos ou comparados entre projetos diferentes.
+              </span>
+              <label className="flex items-center gap-2 font-bold text-[#31d6c4] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={crossProjectSelection}
+                  onChange={(e) => setCrossProjectSelection(e.target.checked)}
+                  className="rounded accent-[#31d6c4]"
+                />
+                <span>Listar softwares de todos os projetos / avulsos</span>
+              </label>
+            </div>
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-2">
-                  1. Projeto Vinculado
+                  1. Contexto / Projeto (Opcional)
                 </label>
                 <select
                   value={selectedProjectId}
                   onChange={(e) => setSelectedProjectId(e.target.value)}
                   className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3.5 py-2.5 text-xs text-slate-900 dark:text-slate-100"
                 >
+                  <option value="">Portfólio Global / Avaliação Independente</option>
                   {projects.map((p) => (
                     <option key={p.id} value={p.id}>
-                      {p.name} ({p.category})
+                      {p.name} ({p.enabledCategories?.length || 12}/12 Categorias)
                     </option>
                   ))}
                 </select>
@@ -535,7 +631,7 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                 >
                   {projectSoftwares.map((s) => (
                     <option key={s.id} value={s.id}>
-                      {s.name} (v{s.version}) - {s.inventory?.primaryLanguage || 'Sem linguagem'}
+                      {s.name} (v{s.version}) - {s.inventory?.primaryLanguage || s.languages?.[0] || 'Multi-Language'}
                     </option>
                   ))}
                 </select>
@@ -849,45 +945,124 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
           </div>
         )}
 
-        {/* STEP 4: PERFIS DE AVALIAÇÃO & PESOS POR CATEGORIA (Seção 20) */}
+        {/* STEP 4: PERFIS DE AVALIAÇÃO, QUALITY GATE & PESOS POR CATEGORIA (Seção 20 — MQR) */}
         {step === 4 && (
           <div className="space-y-6">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
                   <Sliders className="w-4 h-4 text-[#31d6c4]" />
-                  <span>Configuração de Pesos Matemáticos (Total = 100%)</span>
+                  <span>
+                    Escopo Multi-Categoria ({enabledCategories.length}/12 ativas) &amp; Pesos Matemáticos (Total = 100%)
+                  </span>
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  A pontuação oficial utiliza a média ponderada das 12 categorias. Performance sem runtime workers é sinalizada como NÃO MEDIDA.
+                  Qualquer projeto pode ser avaliado simultaneamente nas 12 categorias ou em um subconjunto customizável com normalização automática para 100%.
                 </p>
               </div>
 
-              <button
-                type="button"
-                onClick={handleNormalizeWeightsTo100}
-                className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-bold text-slate-700 dark:text-slate-300 hover:border-[#31d6c4]"
-              >
-                Restaurar Padrão WinHood (100%)
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleEnableAll12Categories}
+                  className="px-3 py-1.5 rounded-lg bg-[#31d6c4]/15 text-[#0e9f8e] dark:text-[#31d6c4] border border-[#31d6c4]/40 text-xs font-bold hover:bg-[#31d6c4]/25 cursor-pointer"
+                >
+                  Avaliar Todas as 12 Categorias
+                </button>
+                <button
+                  type="button"
+                  onClick={handleNormalizeWeightsTo100}
+                  className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-bold text-slate-700 dark:text-slate-300 hover:border-[#31d6c4] cursor-pointer"
+                >
+                  Normalizar Pesos Ativos (100%)
+                </button>
+              </div>
+            </div>
+
+            {/* Profile & Quality Gate Selector (Standard + 27 Specialized Profiles) */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-3.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10]">
+              <div>
+                <label className="block text-[11px] font-bold text-slate-600 dark:text-slate-400 mb-1">
+                  Perfil de Avaliação &amp; Especialização por Domínio (27 Perfis Oficiais)
+                </label>
+                <select
+                  value={selectedProfileId}
+                  onChange={(e) => handleSelectProfile(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0f141c] px-3 py-2 text-xs text-slate-900 dark:text-slate-100"
+                >
+                  <optgroup label="Perfis Corporativos Padrão">
+                    {profiles.map((prof) => (
+                      <option key={prof.id} value={prof.id}>
+                        {prof.name}
+                      </option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="15 Perfis Especializados por Domínio Funcional">
+                    {DOMAIN_SPECIALIZED_PROFILES.filter((p) => p.profileType === 'DOMAIN_SPECIALIZED').map(
+                      (prof) => (
+                        <option key={prof.id} value={prof.id}>
+                          {prof.name} ({prof.enabledCategories.length}/12 Dimensões Ativas)
+                        </option>
+                      )
+                    )}
+                  </optgroup>
+                  <optgroup label="12 Perfis Gerais Focados por Dimensão">
+                    {DOMAIN_SPECIALIZED_PROFILES.filter((p) => p.profileType === 'GENERAL_DIMENSION').map(
+                      (prof) => (
+                        <option key={prof.id} value={prof.id}>
+                          {prof.name}
+                        </option>
+                      )
+                    )}
+                  </optgroup>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-600 dark:text-slate-400 mb-1">
+                  Quality Gate Transversal (SonarQube MQR)
+                </label>
+                <select
+                  value={qualityGateId}
+                  onChange={(e) => setQualityGateId(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0f141c] px-3 py-2 text-xs text-slate-900 dark:text-slate-100"
+                >
+                  <option value="qg-sonar-way-mqr">Sonar way (MQR — Clean as You Code + Fudge Factor &lt; 20 linhas)</option>
+                  <option value="qg-zero-trust-strict">WinHood Zero-Trust Strict (Zero Bugs + Bloqueio CVSS &gt;= 7.0)</option>
+                </select>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              {(Object.keys(weights) as BenchmarkCategoryKey[]).map((cat) => {
-                const val = weights[cat];
+              {ALL_BENCHMARK_CATEGORIES.map((cat) => {
+                const isEnabled = enabledCategories.includes(cat);
+                const val = isEnabled ? weights[cat] || 0 : 0;
                 return (
                   <div
                     key={cat}
-                    className="p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10]"
+                    className={`p-3 rounded-lg border transition-colors ${
+                      isEnabled
+                        ? 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10]'
+                        : 'border-slate-200/50 dark:border-slate-800/40 bg-slate-100/50 dark:bg-[#080b10]/40 opacity-60'
+                    }`}
                   >
                     <div className="flex items-center justify-between text-xs font-bold text-slate-800 dark:text-slate-200">
-                      <span>{CATEGORY_LABELS[cat] || cat}</span>
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={isEnabled}
+                          onChange={() => handleToggleCategoryScope(cat)}
+                          className="rounded accent-[#31d6c4]"
+                        />
+                        <span>{CATEGORY_LABELS[cat] || cat}</span>
+                      </label>
                       <span className="font-mono text-[#31d6c4]">{val}%</span>
                     </div>
                     <input
                       type="range"
                       min={0}
-                      max={40}
+                      max={50}
+                      disabled={!isEnabled}
                       value={val}
                       onChange={(e) => {
                         const newWeight = parseInt(e.target.value, 10);
@@ -900,15 +1075,15 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
               })}
             </div>
 
-            <div className="p-3.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10] flex items-center justify-between">
+            <div className="p-3.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10] flex flex-wrap items-center justify-between gap-3">
               <div className="text-xs">
-                <span className="text-slate-500">Soma Total dos Pesos: </span>
+                <span className="text-slate-500">Soma Total dos Pesos ({enabledCategories.length} categorias): </span>
                 <span
                   className={`font-mono font-bold ${
                     weightValidation.valid ? 'text-emerald-500' : 'text-rose-500'
                   }`}
                 >
-                  {weightValidation.totalWeight}% {weightValidation.valid ? '(VÁLIDO)' : '(DEVE SER EXATAMENTE 100%)'}
+                  {weightValidation.totalWeight}% {weightValidation.valid ? '(VÁLIDO)' : '(CLIQUE EM NORMALIZAR PESOS ATIVOS PARA 100%)'}
                 </span>
               </div>
 
@@ -919,81 +1094,172 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                   onChange={(e) => setEnablePenaltyCaps(e.target.checked)}
                   className="rounded accent-[#31d6c4]"
                 />
-                <span>Habilitar Travas de Segurança (Penalty Caps para CVEs Críticas)</span>
+                <span>Habilitar Travas de Segurança (Penalty Caps Auditados com CAP_APPLIED)</span>
               </label>
             </div>
           </div>
         )}
 
-        {/* STEP 5: EQUIVALÊNCIA EXPERIMENTAL & REVISÃO FINAL (Seção 22 e Seção 13) */}
-        {step === 5 && (
-          <div className="space-y-6">
-            <div className="flex items-center gap-2 text-base font-bold text-slate-900 dark:text-slate-100">
-              <ShieldCheck className="w-5 h-5 text-[#31d6c4]" />
-              <span>Contrato de Execução, Equivalência &amp; Veracidade</span>
-            </div>
+        {/* STEP 5: PRÉ-ANÁLISE, COMPARABILIDADE, EQUIVALÊNCIA EXPERIMENTAL & REVISÃO FINAL (Seções 6, 10.3, 13, 22) */}
+        {step === 5 && (() => {
+          const selectedSwList =
+            assessmentMode === 'INDIVIDUAL'
+              ? activePrimarySoftware
+                ? [activePrimarySoftware]
+                : []
+              : assessmentMode === 'AB_COMPARE'
+                ? softwares.filter(
+                    (s) => s.id === primarySoftwareId || comparisonSoftwareIds.includes(s.id)
+                  )
+                : activePrimarySoftware
+                  ? [
+                      activePrimarySoftware,
+                      ...softwares.filter((s) => s.id === approvedCompetitorSoftwareId),
+                    ]
+                  : [];
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs font-mono">
-              <div className="p-4 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10]">
-                <div className="text-slate-400 font-sans">Modalidade de Avaliação</div>
-                <div className="text-base font-bold text-slate-900 dark:text-slate-100 mt-1">
-                  {assessmentMode === 'INDIVIDUAL'
-                    ? 'Opção A: Individual'
-                    : assessmentMode === 'AB_COMPARE'
-                      ? 'Opção B: Comparação A/B'
-                      : 'Opção C: Concorrente Mercado'}
+          const preAnalyses = selectedSwList.map((sw) =>
+            buildPreAnalysisSummary(sw, enabledCategories, weights, selectedProfileId)
+          );
+          const compPreview = evaluateSoftwareComparability({
+            softwares: selectedSwList,
+            enabledCategories,
+            environmentEquivalent: eqValidation.equivalent,
+          });
+
+          return (
+            <div className="space-y-6">
+              <div className="flex items-center gap-2 text-base font-bold text-slate-900 dark:text-slate-100">
+                <ShieldCheck className="w-5 h-5 text-[#31d6c4]" />
+                <span>Pré-Análise Técnica, Comparabilidade &amp; Contrato de Veracidade</span>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs font-mono">
+                <div className="p-4 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10]">
+                  <div className="text-slate-400 font-sans">Modalidade &amp; Modo do Wizard</div>
+                  <div className="text-base font-bold text-slate-900 dark:text-slate-100 mt-1">
+                    {assessmentMode === 'INDIVIDUAL'
+                      ? 'Opção A: Individual'
+                      : assessmentMode === 'AB_COMPARE'
+                        ? 'Opção B: Comparação A/B'
+                        : 'Opção C: Concorrente Mercado'}{' '}
+                    ({wizardMode})
+                  </div>
+                  <div className="text-slate-500 mt-1 font-sans">
+                    Software Principal: {activePrimarySoftware?.name}
+                  </div>
                 </div>
-                <div className="text-slate-500 mt-1 font-sans">
-                  Software Principal: {activePrimarySoftware?.name}
+
+                <div className="p-4 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10]">
+                  <div className="text-slate-400 font-sans">Validação Matemática</div>
+                  <div className="text-base font-bold text-emerald-500 mt-1">
+                    {weightValidation.totalWeight}% ({enabledCategories.length}/12 Dimensões)
+                  </div>
+                  <div className="text-slate-500 mt-1 font-sans">
+                    Travas Penalty Caps: {enablePenaltyCaps ? 'ATIVAS' : 'DESLIGADAS'}
+                  </div>
+                </div>
+
+                <div className="p-4 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10]">
+                  <div className="text-slate-400 font-sans">Imparcialidade &amp; Comparabilidade</div>
+                  <div
+                    className={`text-base font-bold mt-1 ${
+                      compPreview.canDeclareOfficialWinner ? 'text-[#31d6c4]' : 'text-amber-500'
+                    }`}
+                  >
+                    {compPreview.overallStatus}
+                  </div>
+                  <div className="text-slate-500 mt-1 font-sans">
+                    Vencedor Oficial: {compPreview.canDeclareOfficialWinner ? 'PERMITIDO' : 'BLOQUEADO'}
+                  </div>
                 </div>
               </div>
 
-              <div className="p-4 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10]">
-                <div className="text-slate-400 font-sans">Validação Matemática</div>
-                <div className="text-base font-bold text-emerald-500 mt-1">
-                  {weightValidation.totalWeight}% (100% OK)
+              {/* Pre-Analysis Summary Cards (Seção 10.3) */}
+              {preAnalyses.length > 0 && (
+                <div className="space-y-3">
+                  <div className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                    Resumo de Pré-Análise dos Artefatos Selecionados ({preAnalyses.length})
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                    {preAnalyses.map((pa) => (
+                      <div
+                        key={pa.softwareId}
+                        className="p-3.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-[#080b10] space-y-1.5"
+                      >
+                        <div className="flex items-center justify-between font-bold text-slate-900 dark:text-slate-100">
+                          <span>{pa.softwareName}</span>
+                          <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-[#31d6c4]/15 text-[#31d6c4]">
+                            {pa.ingestionState} · {pa.sourceAvailability}
+                          </span>
+                        </div>
+                        <div className="font-mono text-[11px] text-slate-500">
+                          Elegíveis: <strong>{pa.eligibleFiles}</strong>/{pa.totalFiles} arqs ·{' '}
+                          <strong>{pa.totalLinesOfCode.toLocaleString()}</strong> LOC · Domínio:{' '}
+                          <strong>{pa.inferredDomain}</strong>
+                        </div>
+                        <div className="text-[11px] text-slate-600 dark:text-slate-400">
+                          Critérios Verificáveis: <strong>{pa.verifiableCriteriaCount}</strong> · Não Aplicáveis:{' '}
+                          <strong>{pa.notApplicableCategories.length}</strong> · Perfil Sugerido:{' '}
+                          <span className="font-semibold text-[#31d6c4]">{pa.recommendedProfileName}</span>
+                        </div>
+                        {pa.warnings.length > 0 && (
+                          <div className="text-[11px] text-amber-500 pt-1">
+                            ⚠️ {pa.warnings.join(' ')}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
                 </div>
-                <div className="text-slate-500 mt-1 font-sans">
-                  Travas Penalty Caps: {enablePenaltyCaps ? 'ATIVAS' : 'DESLIGADAS'}
-                </div>
-              </div>
+              )}
 
-              <div className="p-4 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10]">
-                <div className="text-slate-400 font-sans">Equivalência Experimental</div>
-                <div className="text-base font-bold text-slate-900 dark:text-slate-100 mt-1">
-                  {cpuCoresLimit} vCPUs · {memoryMbLimit} MB RAM
+              {/* Comparability Warnings / Blocking Reasons */}
+              {(compPreview.blockingReasons.length > 0 || compPreview.warnings.length > 0) && (
+                <div className="p-3.5 rounded-lg border border-amber-500/30 bg-amber-500/10 text-xs space-y-1">
+                  <div className="font-bold text-amber-500 flex items-center gap-1.5">
+                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                    <span>Diagnóstico do Motor de Comparabilidade &amp; Imparcialidade (Seção 6):</span>
+                  </div>
+                  {compPreview.blockingReasons.map((b, i) => (
+                    <div key={`b-${i}`} className="text-rose-400 font-medium">
+                      • [BLOQUEIO DE VENCEDOR] {b}
+                    </div>
+                  ))}
+                  {compPreview.warnings.map((w, i) => (
+                    <div key={`w-${i}`} className="text-amber-300">
+                      • [AVISO] {w}
+                    </div>
+                  ))}
                 </div>
-                <div className="text-slate-500 mt-1 font-sans">
-                  Status: {eqValidation.equivalent ? 'HOMOLOGADO' : 'BLOQUEADO'}
-                </div>
+              )}
+
+              <div className="pt-2">
+                <button
+                  type="button"
+                  disabled={
+                    executing ||
+                    !activePrimarySoftware ||
+                    !weightValidation.valid ||
+                    !eqValidation.equivalent ||
+                    (assessmentMode === 'MARKET_COMPETITOR' && !candidateApproved)
+                  }
+                  onClick={handleExecute}
+                  className="inline-flex items-center gap-2 px-6 py-3 rounded-lg text-sm font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] disabled:opacity-50 transition-colors cursor-pointer"
+                >
+                  <Play className="w-4 h-4" />
+                  {executing
+                    ? 'Executando Adaptadores & Validando Evidências...'
+                    : assessmentMode === 'INDIVIDUAL'
+                      ? `Iniciar Avaliação Individual de ${activePrimarySoftware?.name}`
+                      : assessmentMode === 'MARKET_COMPETITOR'
+                        ? `Iniciar Benchmark de Mercado (${activePrimarySoftware?.name} vs ${selectedCandidate?.name})`
+                        : 'Iniciar Benchmark Comparativo Real'}
+                </button>
               </div>
             </div>
-
-            <div className="pt-2">
-              <button
-                type="button"
-                disabled={
-                  executing ||
-                  !activePrimarySoftware ||
-                  !weightValidation.valid ||
-                  !eqValidation.equivalent ||
-                  (assessmentMode === 'MARKET_COMPETITOR' && !candidateApproved)
-                }
-                onClick={handleExecute}
-                className="inline-flex items-center gap-2 px-6 py-3 rounded-lg text-sm font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] disabled:opacity-50 transition-colors cursor-pointer"
-              >
-                <Play className="w-4 h-4" />
-                {executing
-                  ? 'Executando Adaptadores & Validando Evidências...'
-                  : assessmentMode === 'INDIVIDUAL'
-                    ? `Iniciar Avaliação Individual de ${activePrimarySoftware?.name}`
-                    : assessmentMode === 'MARKET_COMPETITOR'
-                      ? `Iniciar Benchmark de Mercado (${activePrimarySoftware?.name} vs ${selectedCandidate?.name})`
-                      : 'Iniciar Benchmark Comparativo Real'}
-              </button>
-            </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* Wizard Footer Navigation */}
         <div className="flex items-center justify-between pt-4 border-t border-slate-200 dark:border-slate-800">

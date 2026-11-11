@@ -1,0 +1,1268 @@
+# PROMPT MASTER — REESTRUTURAÇÃO, REFINAMENTO E ELEVAÇÃO DA CONFIABILIDADE DO WINHOOD BENCHMARKING
+
+## 1. CONTEXTO E OBJETIVO
+
+Você é um engenheiro de software sênior, arquiteto de soluções, especialista em QA, engenharia de qualidade, DevSecOps, análise estática e dinâmica, segurança de aplicações, auditoria de software, ciência de dados e desenvolvimento de plataformas de benchmarking.
+
+Sua missão é realizar uma auditoria profunda e implementar as melhorias necessárias no **Winhood — Software Benchmark & Quality Analyzer**.
+
+O objetivo é transformar o Winhood em uma plataforma profissional, tecnicamente confiável, reproduzível, auditável e capaz de avaliar softwares de diferentes finalidades, tanto individualmente quanto em comparações.
+
+A plataforma deverá ser capaz de analisar aplicações, ferramentas, bibliotecas, serviços, sistemas corporativos, softwares desktop, aplicações web, APIs, VPNs, gerenciadores de senhas, sistemas de backup, bancos de dados, sistemas de chamados e outras soluções.
+
+O resultado deverá ser fundamentado em evidências verificáveis, medições reais e critérios técnicos adequados à finalidade do software.
+
+**REGRA FUNDAMENTAL: O Winhood jamais poderá inventar dados, simular execuções sem identificá-las como simulações, declarar ferramentas executadas sem comprovação, atribuir notas a dimensões não avaliadas ou transformar ausência de evidências em aprovação.**
+
+Não limite o trabalho a sugestões. Inspecione o código existente, identifique problemas, implemente as correções, atualize os testes e valide o funcionamento.
+
+---
+
+# 2. DIRETRIZES OBRIGATÓRIAS
+
+Antes de modificar qualquer arquivo:
+
+1. Inspecione a estrutura completa do projeto.
+2. Identifique os componentes, motores, serviços, adaptadores, rotas, contratos de dados e mecanismos de persistência.
+3. Identifique os fluxos completos entre frontend, backend, banco de dados, workers e ferramentas externas.
+4. Compare a implementação real com a documentação.
+5. Identifique recursos existentes que funcionam, recursos parciais e recursos simulados.
+6. Verifique dependências, scripts, configurações e compatibilidade.
+7. Identifique possíveis regressões causadas pelas mudanças propostas.
+
+Não considere comentários, documentação, nomes de funções ou registros de execução como provas de que determinada funcionalidade funciona.
+
+Não presuma que uma integração esteja operacional apenas porque existe uma classe ou um adaptador correspondente.
+
+Não reescreva componentes funcionais sem necessidade.
+
+Preserve o design system, a identidade visual, as funcionalidades existentes e a compatibilidade dos dados sempre que tecnicamente possível.
+
+Realize mudanças incrementais, mantendo os contratos coerentes entre frontend e backend.
+
+Não remova informações históricas nem substitua resultados antigos por novos cálculos.
+
+Quando uma funcionalidade não puder ser implementada integralmente por falta de uma dependência, ferramenta ou ambiente, deixe sua integração preparada, mas apresente claramente o estado de indisponibilidade. Não crie uma implementação fictícia para preencher a lacuna.
+
+---
+
+# 3. PRIORIDADE MÁXIMA: VERACIDADE E INTEGRIDADE DAS AVALIAÇÕES
+
+Esta é a principal etapa da evolução.
+
+O Winhood precisa garantir que todos os resultados apresentados correspondam ao que realmente foi executado.
+
+## 3.1. Corrigir a ingestão de código-fonte
+
+Audite todo o fluxo de cadastro, upload, importação de repositórios e ingestão de arquivos.
+
+Eliminar qualquer comportamento que gere automaticamente arquivos fictícios para satisfazer requisitos de ingestão.
+
+O cadastro de um software deve permitir:
+
+- Somente metadados.
+- Importação de repositório.
+- Upload de diretório ou pacote.
+- Importação parcial.
+- Importação de binários suportados.
+- Importação de imagens de contêineres, quando aplicável.
+- Importação de documentação pública.
+
+Cada origem deve ser identificada corretamente.
+
+Implementar estados independentes:
+
+- METADATA_ONLY
+- SOURCE_IMPORTED
+- SOURCE_PARTIAL
+- SOURCE_VALIDATED
+- SOURCE_FAILED
+- DEMO_FIXTURE
+- TEST_FIXTURE
+- PUBLIC_DOCUMENTATION_ONLY
+
+O estado precisa representar o que aconteceu de verdade.
+
+Uma documentação enviada pelo usuário não comprova a existência de uma implementação funcional.
+
+Uma dependência encontrada em um arquivo de configuração não comprova que ela esteja sendo efetivamente utilizada.
+
+Uma fonte importada não significa automaticamente que todo o repositório seja elegível para análise.
+
+### Inventário obrigatório
+
+Registrar:
+
+- Arquivos descobertos.
+- Arquivos recebidos.
+- Arquivos elegíveis.
+- Arquivos efetivamente analisados.
+- Arquivos ignorados.
+- Arquivos excluídos.
+- Arquivos não suportados.
+- Arquivos com erros.
+- Arquivos parcialmente processados.
+- Linhas de código.
+- Tamanho total.
+- Linguagens detectadas.
+- Frameworks identificados.
+- Dependências identificadas.
+- Hashes por arquivo.
+- Hash do pacote.
+
+Garantir proteção contra path traversal, arquivos excessivamente grandes, arquivos compactados malformados, links simbólicos perigosos e tentativas de escapar do diretório isolado.
+
+A importação deve preservar o manifesto de origem e o commit real quando aplicável.
+
+Não aceitar um SHA-256 de entrada como prova de integridade sem recalcular e comparar o conteúdo.
+
+## 3.2. Corrigir os registros das ferramentas de análise
+
+Auditar integralmente:
+
+- staticAnalyzer.ts
+- benchmarkOrchestrator.ts
+- ExternalToolLifecycleManager.ts
+- ToolAvailabilityService.ts
+- ToolCacheManager.ts
+- ToolResourceMonitor.ts
+- SonarQubeAdapter.ts
+- GitarAdapter.ts
+- Todos os demais adaptadores existentes.
+
+Eliminar registros de execução que utilizem horários, códigos de saída, versões, durações ou resultados gerados por constantes ou fórmulas, quando apresentados como execução real.
+
+Implementar um contrato padronizado de execução para todas as ferramentas.
+
+Cada execução deverá registrar:
+
+- Identificador único.
+- Ferramenta.
+- Versão efetivamente identificada.
+- Método de execução.
+- Configuração.
+- Hash da configuração.
+- Software avaliado.
+- Hash da fonte avaliada.
+- Commit.
+- Diretório de trabalho isolado.
+- Horário real de início.
+- Horário real de término.
+- Duração medida.
+- Código de saída real, quando aplicável.
+- Saída padrão.
+- Saída de erro.
+- Artefatos originais.
+- Formato do resultado.
+- Validação do formato.
+- Arquivos processados.
+- Arquivos com erro.
+- Cobertura.
+- Classificação de veracidade.
+- Motivos de falha.
+- Evidências persistidas.
+
+Estados mínimos:
+
+- NOT_AVAILABLE
+- NOT_INSTALLED
+- NOT_CONFIGURED
+- NOT_AUTHORIZED
+- NOT_EXECUTED
+- QUEUED
+- RUNNING
+- SUCCESS_VALIDATED
+- SUCCESS_WITH_WARNINGS
+- PARTIAL
+- TIMEOUT
+- EXECUTION_FAILED
+- INVALID_OUTPUT
+- PARSING_ERROR
+- CANCELLED
+- CONTRACT_SIMULATION
+
+Uma análise nativa do Winhood deverá ser registrada como análise nativa.
+
+Nunca atribuir resultados do motor interno a ferramentas externas.
+
+### Execução segura
+
+Os executores de ferramentas devem:
+
+- Utilizar argumentos estruturados, sem composição insegura de comandos.
+- Aplicar timeout.
+- Controlar CPU e memória.
+- Isolar diretórios.
+- Restringir permissões.
+- Capturar erros.
+- Permitir cancelamento.
+- Encerrar processos filhos.
+- Validar caminhos.
+- Proteger tokens e credenciais.
+- Não expor segredos nos logs.
+
+Testes dinâmicos, DAST e avaliações de segurança em aplicações devem ocorrer somente em ambientes autorizados, controlados e com escopo explicitamente definido.
+
+Não executar testes ativos contra sistemas externos arbitrários.
+
+## 3.3. Corrigir o motor de veracidade
+
+O motor de veracidade deverá validar evidências concretas.
+
+Eliminar verificações cujo resultado seja definido automaticamente como verdadeiro sem confirmação.
+
+Cada verificação precisa estar vinculada a uma evidência.
+
+Exemplo:
+
+toolExists somente poderá ser verdadeiro quando a disponibilidade da ferramenta tiver sido verificada.
+
+toolStarted somente poderá ser verdadeiro quando houver registro real de inicialização.
+
+executionCompleted somente poderá ser verdadeiro depois de uma execução concluída.
+
+outputReceived somente poderá ser verdadeiro quando houver saída válida.
+
+outputParsed somente poderá ser verdadeiro quando o parser processar efetivamente o conteúdo.
+
+evidencePersisted somente poderá ser verdadeiro depois de confirmação de persistência.
+
+evidenceHashVerified somente poderá ser verdadeiro depois de recalcular e verificar o hash.
+
+matchesSoftware somente poderá ser verdadeiro quando a identificação do ativo estiver comprovada.
+
+matchesCommit somente poderá ser verdadeiro quando o resultado estiver vinculado à versão correspondente.
+
+eligibleForScoring deverá depender de uma política de elegibilidade explícita.
+
+A verificação de veracidade deve resultar em uma matriz auditável, com resultado, justificativa e evidência individual.
+
+---
+
+# 4. REESTRUTURAÇÃO DA METODOLOGIA DE AVALIAÇÃO
+
+## 4.1. Separar projeto, software, domínio e avaliação
+
+Implementar uma separação conceitual completa entre:
+
+1. Projeto ou portfólio.
+2. Software ou ativo.
+3. Domínio funcional do software.
+4. Objetivo da avaliação.
+5. Perfil metodológico.
+6. Execução.
+7. Resultado.
+
+A categoria do projeto não deverá determinar automaticamente quais testes serão executados.
+
+O domínio do software deverá servir para recomendar critérios e perfis adequados.
+
+O objetivo da avaliação deverá controlar quais dimensões serão analisadas.
+
+O perfil metodológico deverá definir os critérios e métodos de verificação.
+
+O usuário deverá conseguir executar avaliações individuais independentemente de possuir um projeto previamente cadastrado.
+
+Também deverá conseguir selecionar softwares de diferentes projetos para uma comparação, desde que sejam respeitadas as condições de equivalência.
+
+Criar uma associação independente entre as execuções e os softwares participantes.
+
+Não exigir que um mesmo software seja cadastrado novamente para participar de diferentes avaliações.
+
+Preservar os relacionamentos anteriores durante a migração.
+
+## 4.2. Criar um catálogo de critérios de avaliação
+
+O atual conjunto de testes fixos deverá evoluir para um sistema modular.
+
+Cada critério precisa possuir:
+
+- Identificador.
+- Nome.
+- Descrição.
+- Domínio.
+- Dimensão.
+- Objetivo.
+- Método de verificação.
+- Ferramentas necessárias.
+- Requisitos prévios.
+- Condições de aplicabilidade.
+- Evidências obrigatórias.
+- Regra de interpretação.
+- Severidade.
+- Peso.
+- Regra de pontuação.
+- Versão.
+- Estado de manutenção.
+- Limitações conhecidas.
+
+Métodos de verificação permitidos:
+
+- STATIC_ANALYSIS
+- AST_ANALYSIS
+- FUNCTIONAL_TEST
+- RUNTIME_TEST
+- PERFORMANCE_TEST
+- EXTERNAL_TOOL
+- MANUAL_ASSESSMENT
+- DOCUMENTATION_REVIEW
+- CONTRACT_VALIDATION
+
+Cada critério deverá possuir um contrato de entrada e saída.
+
+Um critério não poderá ser aprovado apenas porque uma expressão textual não foi encontrada.
+
+A ausência de um padrão vulnerável é uma evidência insuficiente para declarar a existência de proteção.
+
+Quando não houver evidência suficiente, o resultado deverá ser INCONCLUSIVE ou NOT_VERIFIED.
+
+## 4.3. Criar perfis específicos por domínio
+
+Implementar uma biblioteca inicial de perfis.
+
+### Perfis gerais
+
+- Segurança.
+- Qualidade de código.
+- Arquitetura.
+- Desempenho.
+- Confiabilidade.
+- Compatibilidade.
+- Usabilidade.
+- Instalação.
+- Privacidade.
+- Documentação.
+- Banco de dados.
+- Funcionalidades.
+
+### Perfis especializados
+
+- VPN.
+- Gerenciador de senhas.
+- Cofre de segredos.
+- Backup.
+- Gestão de chamados.
+- CRM.
+- ERP.
+- Aplicações desktop.
+- Aplicações web.
+- APIs.
+- Microsserviços.
+- Bancos de dados.
+- Sistemas de monitoramento.
+- Ferramentas DevSecOps.
+- Infraestrutura e serviços.
+
+Cada perfil especializado deverá definir quais critérios gerais são relevantes e quais verificações adicionais são necessárias.
+
+Não obrigar todos os softwares a atenderem aos mesmos requisitos.
+
+Um requisito não implementado somente deverá gerar reprovação quando sua existência for efetivamente esperada para aquele software e estiver justificada pela especificação funcional, metodologia ou política selecionada.
+
+Não criar perfis com critérios arbitrários apenas para aumentar a quantidade de testes.
+
+---
+
+# 5. MATRIZ DE AVALIAÇÃO FUNCIONAL
+
+Substituir verificações universais baseadas em expressões textuais por critérios específicos, verificáveis e versionados.
+
+Cada teste funcional deverá conter:
+
+- Identificador.
+- Requisito.
+- Objetivo.
+- Pré-condições.
+- Entradas.
+- Procedimento de teste.
+- Resultado esperado.
+- Resultado obtido.
+- Asserções.
+- Evidências.
+- Tempo medido.
+- Estado.
+- Limitações.
+
+Estados possíveis:
+
+- PASSED_VALIDATED
+- FAILED_VALIDATED
+- NOT_IMPLEMENTED
+- NOT_APPLICABLE
+- NOT_EXECUTED
+- INCONCLUSIVE
+- BLOCKED
+- SIMULATED
+
+Não inventar tempo de execução ou quantidade de asserções.
+
+Executar testes reais em ambiente apropriado.
+
+Quando não existir ambiente de execução, utilizar análise estática apenas para produzir conclusões compatíveis com esse método.
+
+A interface deverá distinguir claramente:
+
+- Implementação encontrada.
+- Implementação potencialmente encontrada.
+- Implementação validada por teste.
+- Implementação não encontrada.
+- Requisito não aplicável.
+- Verificação inconclusiva.
+
+Criar capacidade de importar resultados de testes já realizados externamente, preservando o arquivo original, sua origem e integridade.
+
+---
+
+# 6. MOTOR DE PONTUAÇÃO WINHOOD
+
+Realizar uma revisão completa do scoringEngine.ts.
+
+A metodologia deverá ser matemática, determinística, transparente e reproduzível.
+
+## 6.1. Corrigir categorias sem avaliação
+
+Uma dimensão sem evidência não pode receber nota zero nem classificação máxima automaticamente.
+
+Implementar estados coerentes:
+
+- ASSESSED
+- PARTIAL
+- NOT_ASSESSED
+- NOT_APPLICABLE
+- NOT_COMPARABLE
+- INCONCLUSIVE
+- INSUFFICIENT_COVERAGE
+- FAILED_VALIDATION
+
+Categorias não avaliadas ou não aplicáveis devem possuir score null.
+
+Nunca converter null em uma nota zero ou em classificação A na camada de apresentação.
+
+## 6.2. Separar indicadores
+
+O resultado deverá apresentar independentemente:
+
+1. Nota técnica.
+2. Cobertura do escopo.
+3. Confiança das evidências.
+4. Quality Gate.
+5. Estado de veracidade.
+
+A cobertura deverá ser calculada com base no escopo definido, nos critérios aplicáveis e nas verificações efetivamente concluídas.
+
+Não considerar a existência de arquivos como comprovação de 100% de cobertura.
+
+Não considerar a existência de uma ferramenta como comprovação de que ela realizou todas as análises previstas.
+
+## 6.3. Regras de pesos
+
+O usuário deverá conseguir selecionar as dimensões habilitadas.
+
+Os pesos deverão ser normalizados exclusivamente dentro do escopo válido.
+
+Regras:
+
+- A soma dos pesos habilitados deve ser 100%.
+- Dimensões não selecionadas não participam da nota.
+- Dimensões não aplicáveis não participam da média.
+- Dimensões não avaliadas não participam da média.
+- Dimensões parcialmente avaliadas devem obedecer à política metodológica.
+- A ausência de avaliação deve diminuir a cobertura, não artificialmente a pontuação técnica.
+
+Registrar os pesos originais e os efetivamente utilizados.
+
+A alteração dos pesos deverá gerar uma nova configuração metodológica.
+
+## 6.4. Calibração
+
+Criar testes matemáticos para:
+
+- Determinismo.
+- Normalização.
+- Ausência de divisão por zero.
+- Categorias null.
+- Categorias não aplicáveis.
+- Cobertura parcial.
+- Vulnerabilidades críticas.
+- Kill switches.
+- Quality Gates.
+- Comparação de diferentes perfis.
+- Mudanças de algoritmo.
+
+O algoritmo deve possuir versão e documentação próprias.
+
+Não alterar o resultado de uma avaliação histórica automaticamente.
+
+Toda nova versão deverá permitir uma nova execução e comparação metodológica.
+
+---
+
+# 7. QUALITY GATE E DECISÃO EXECUTIVA
+
+Separar completamente o Quality Gate da pontuação geral.
+
+O Quality Gate deverá utilizar condições configuráveis e versionadas.
+
+Exemplos de condições:
+
+- Ausência de vulnerabilidades críticas confirmadas.
+- Ausência de segredos expostos confirmados.
+- Cobertura mínima.
+- Ausência de requisitos essenciais reprovados.
+- Integridade validada.
+- Ambiente experimental válido.
+- Critérios obrigatórios avaliados.
+
+As condições devem ser aplicadas no backend e não apenas apresentadas visualmente.
+
+O relatório deverá distinguir:
+
+- APROVADO.
+- APROVADO COM RESSALVAS.
+- REPROVADO.
+- INCONCLUSIVO.
+- NÃO AVALIADO.
+
+Não declarar um software vencedor quando a comparação não respeitar os critérios de equivalência.
+
+Um software poderá obter uma nota técnica elevada e reprovar no Quality Gate devido a um requisito crítico. Essa distinção deverá ser exibida de forma explícita.
+
+---
+
+# 8. COMPARABILIDADE E IMPARCIALIDADE
+
+Implementar um mecanismo de comparação que avalie se dois ou mais softwares podem ser comparados de maneira justa.
+
+Validar:
+
+- Domínio funcional.
+- Objetivo.
+- Escopo.
+- Metodologia.
+- Critérios.
+- Ambiente.
+- Configuração.
+- Versão das ferramentas.
+- Versão do algoritmo.
+- Cobertura.
+- Tipo e qualidade da fonte.
+- Condições de execução.
+- Disponibilidade dos testes.
+
+Comparar apenas critérios comuns e aplicáveis, exibindo claramente as diferenças de cobertura.
+
+Quando um software possuir código-fonte completo e outro disponibilizar somente documentação pública, não apresentar os resultados como equivalentes.
+
+Distinguir:
+
+- FULL_SOURCE
+- PARTIAL_SOURCE
+- PUBLIC_DOCUMENTATION_ONLY
+- CLOSED_SOURCE
+- RUNTIME_ACCESS
+- MANUAL_ASSESSMENT
+
+A comparação deverá apresentar vantagens e limitações de cada participante.
+
+Não utilizar a falta de acesso à implementação de um software fechado como prova de que ele seja inferior.
+
+Criar uma matriz de comparabilidade por dimensão.
+
+---
+
+# 9. ENGENHARIA DE EVIDÊNCIAS
+
+Desenvolver um Evidence & Provenance Engine independente.
+
+Cada evidência deverá possuir:
+
+- Identificador.
+- Execução relacionada.
+- Software relacionado.
+- Commit.
+- Hash da fonte.
+- Ferramenta.
+- Versão.
+- Critério.
+- Data.
+- Tipo de evidência.
+- Resultado.
+- Conteúdo original ou referência ao artefato.
+- Hash.
+- Estado de validação.
+- Origem.
+- Responsável, quando aplicável.
+
+Preservar a saída original das ferramentas.
+
+Não substituir evidências originais por resumos produzidos pelo Winhood.
+
+Implementar cadeia criptográfica de evidências com encadeamento, índice sequencial e verificação independente.
+
+Adicionar assinatura digital dos manifestos, utilizando chaves protegidas.
+
+Uma alteração na evidência deverá ser detectável.
+
+Diferenciar hash de integridade, assinatura digital e prova de autenticidade.
+
+O SHA-256 não deve ser apresentado como prova de execução ou como garantia absoluta de imutabilidade.
+
+Implementar exportação do manifesto verificável.
+
+---
+
+# 10. REFINAMENTO DOS RELATÓRIOS
+
+Reestruturar os relatórios para funcionarem como documentos técnicos de auditoria.
+
+Todo relatório oficial deverá conter:
+
+1. Identificação do software.
+2. Versão e origem.
+3. Commit e hash.
+4. Objetivo da avaliação.
+5. Metodologia e versão.
+6. Dimensões selecionadas.
+7. Critérios aplicáveis.
+8. Ferramentas utilizadas.
+9. Versões e configurações.
+10. Execuções realizadas.
+11. Arquivos e cobertura.
+12. Resultados por dimensão.
+13. Pontuações e fórmulas.
+14. Quality Gate.
+15. Achados.
+16. Evidências.
+17. Falsos positivos revisados.
+18. Limitações.
+19. Critérios não avaliados.
+20. Conclusão técnica.
+21. Recomendações.
+22. Histórico de execução.
+23. Manifesto de integridade.
+
+Cada conclusão deverá possuir uma referência à evidência que a sustenta.
+
+Não incluir métricas inexistentes.
+
+Não substituir valores ausentes por zero sem esclarecer o significado.
+
+Não emitir uma nota oficial quando as condições mínimas de validade não forem atingidas.
+
+## 10.1. Refinar os achados
+
+Cada achado deverá apresentar:
+
+- ID.
+- Regra.
+- Título.
+- Descrição.
+- Severidade.
+- Confiança.
+- Arquivo.
+- Linha.
+- Componente.
+- Evidência.
+- Origem.
+- Método de detecção.
+- CVE/CWE, quando aplicável.
+- Impacto.
+- Justificativa.
+- Remediação.
+- Estado de validação.
+- Histórico de retestes.
+
+Severidade e confiança devem ser independentes.
+
+Um achado de severidade crítica não é necessariamente uma vulnerabilidade confirmada.
+
+Permitir estados como:
+
+- CONFIRMED
+- PROBABLE
+- FALSE_POSITIVE
+- INCONCLUSIVE
+- NOT_REPRODUCIBLE
+- NOT_TESTED
+- ACCEPTED_RISK
+- FIXED_PENDING_RETEST
+- VERIFIED_RESOLVED
+
+---
+
+# 11. REESTRUTURAÇÃO DA EXPERIÊNCIA DO USUÁRIO
+
+Preservar a identidade visual atual do Winhood.
+
+Refinar hierarquia, navegação, consistência e apresentação das informações.
+
+Criar três experiências:
+
+## Modo rápido
+
+O usuário seleciona o software e o objetivo.
+
+O sistema recomenda um perfil e apresenta os testes disponíveis.
+
+A validação de veracidade continua obrigatória.
+
+## Modo personalizado
+
+O usuário seleciona dimensões, critérios, perfis, ferramentas e pesos.
+
+## Modo avançado
+
+Permite configurar políticas, ambientes, parâmetros, critérios personalizados, pré-requisitos e limites de execução.
+
+## 11.1. Novo Wizard
+
+Implementar a seguinte jornada:
+
+1. Seleção do software.
+2. Definição do objetivo.
+3. Seleção do domínio.
+4. Escolha do perfil.
+5. Seleção de critérios e dimensões.
+6. Configuração das ferramentas.
+7. Validação dos pré-requisitos.
+8. Revisão do escopo.
+9. Execução.
+10. Consulta do resultado.
+
+O usuário deve poder realizar uma avaliação individual sem cadastro obrigatório de um projeto.
+
+Também deverá poder comparar softwares de projetos diferentes.
+
+## 11.2. Pré-análise
+
+Antes de cada execução, apresentar:
+
+- Integridade da fonte.
+- Origem.
+- Arquivos recebidos.
+- Ferramentas disponíveis.
+- Ferramentas ausentes.
+- Critérios aplicáveis.
+- Critérios não aplicáveis.
+- Critérios que não poderão ser executados.
+- Necessidade de autorização.
+- Limitações.
+- Cobertura potencial.
+
+O usuário deverá entender o que será realmente avaliado antes de iniciar.
+
+## 11.3. Progresso real
+
+O progresso deverá representar etapas efetivas.
+
+Não utilizar porcentagens arbitrárias para dar aparência de execução.
+
+Apresentar:
+
+- Etapa atual.
+- Ferramenta.
+- Software.
+- Arquivos processados.
+- Total de arquivos.
+- Tempo decorrido.
+- Estado.
+- Últimos eventos.
+- Erros.
+- Possibilidade de cancelamento.
+
+A estimativa de tempo restante deverá ser identificada como estimativa e baseada em execuções anteriores comparáveis. Quando não houver amostras suficientes, exibir que a previsão não está disponível.
+
+## 11.4. Dashboard
+
+Priorizar:
+
+- Avaliações recentes.
+- Cobertura.
+- Veracidade.
+- Avaliações parciais.
+- Achados confirmados.
+- Riscos críticos.
+- Evolução histórica.
+- Comparações.
+- Ferramentas indisponíveis.
+- Softwares aguardando avaliação.
+
+Não destacar nota geral de forma isolada.
+
+## 11.5. Histórico
+
+Implementar histórico por software e versão.
+
+Permitir:
+
+- Comparar versões.
+- Identificar regressões.
+- Verificar melhorias.
+- Comparar vulnerabilidades.
+- Analisar evolução da cobertura.
+- Reexecutar avaliações.
+- Preservar metodologias antigas.
+
+Toda mudança de algoritmo ou perfil deverá ficar registrada.
+
+---
+
+# 12. SEGURANÇA DA PRÓPRIA PLATAFORMA
+
+Realizar auditoria completa em frontend, backend, APIs e persistência.
+
+Verificar:
+
+- Autenticação.
+- Autorização.
+- RBAC.
+- Gestão de sessão.
+- MFA.
+- CSRF.
+- XSS.
+- SQL Injection.
+- Path traversal.
+- Upload.
+- Validação de entrada.
+- Proteção de segredos.
+- Rate limiting.
+- Logs.
+- Isolamento de usuários.
+- Controle de arquivos.
+- Segurança dos workers.
+- Segurança das integrações.
+- Proteção das evidências.
+- Segurança dos relatórios.
+
+Corrigir imediatamente qualquer possibilidade de alteração de privilégios através de endpoints acessíveis ao usuário.
+
+Não permitir que o cliente se atribua livremente funções de administrador, auditor ou responsável de segurança.
+
+Implementar identidade individual por requisição.
+
+O estado de usuários e permissões não pode depender de variáveis globais compartilhadas entre requisições.
+
+Separar ambientes:
+
+- DEVELOPMENT
+- TEST
+- DEMO
+- PRODUCTION
+
+Contas e permissões de demonstração devem ser isoladas.
+
+Em produção, a aplicação deve falhar de forma segura quando os mecanismos de autenticação e configuração necessários estiverem ausentes.
+
+Não distribuir bancos de dados, credenciais ou fontes de usuários dentro dos pacotes de instalação.
+
+Implementar gerenciamento seguro de dados persistentes e migrações versionadas.
+
+Preservar os dados existentes durante as atualizações.
+
+---
+
+# 13. ARQUITETURA E PERFORMANCE
+
+Revisar os arquivos de grande responsabilidade, principalmente server.ts, staticAnalyzer.ts, scoringEngine.ts e benchmarkOrchestrator.ts.
+
+Separar responsabilidades em:
+
+- Routes.
+- Controllers.
+- Domain Services.
+- Application Services.
+- Repositories.
+- Engines.
+- Adapters.
+- Workers.
+- Evidence Services.
+- Report Services.
+
+O orquestrador não deve conter regras de domínio específicas de todos os softwares.
+
+As verificações devem ser módulos independentes.
+
+Implementar processamento assíncrono real para tarefas demoradas.
+
+Distinguir concorrência assíncrona de paralelismo real.
+
+Utilizar processos ou workers quando necessário.
+
+Medir efetivamente:
+
+- Tempo de execução.
+- Uso de CPU.
+- Memória.
+- Throughput.
+- Concorrência.
+- Tempo de inicialização.
+- Taxa de falhas.
+
+Não calcular aceleração de workers por fórmulas fixas.
+
+Implementar armazenamento persistente transacional, migrações, backups e recuperação.
+
+Avaliar a utilização de SQLite ou PostgreSQL conforme o ambiente de execução.
+
+Não migrar ou excluir informações sem mecanismo de backup e compatibilidade.
+
+---
+
+# 14. TESTES E VALIDAÇÃO DA QUALIDADE DO WINHOOD
+
+Criar uma suíte abrangente de testes unitários, integração, contratos, segurança, regressão e ponta a ponta.
+
+Não utilizar testes que simplesmente verificam se o código retorna o resultado esperado para os próprios dados fictícios criados pelo mesmo código, sem verificar o comportamento real da funcionalidade.
+
+Criar um corpus versionado de projetos de referência.
+
+Incluir cenários:
+
+1. Software seguro conhecido.
+2. Software com vulnerabilidades conhecidas.
+3. Código com falsos positivos potenciais.
+4. Código com dependências vulneráveis.
+5. Fonte parcial.
+6. Fonte vazia.
+7. Arquivos corrompidos.
+8. Arquivos incompatíveis.
+9. Ferramenta inexistente.
+10. Ferramenta sem configuração.
+11. Ferramenta com erro.
+12. Timeout.
+13. Falha de parser.
+14. Falha de persistência.
+15. Evidência alterada.
+16. Commit divergente.
+17. Categoria não aplicável.
+18. Critério não avaliado.
+19. Teste funcional reprovado.
+20. Avaliação com cobertura insuficiente.
+21. Comparação de ambientes incompatíveis.
+22. Software com documentação apenas.
+23. Reexecução com versão diferente de algoritmo.
+24. Tentativa de acesso não autorizado.
+25. Concorrência entre avaliações.
+
+Criar testes para verificar:
+
+- Ausência de métricas inventadas.
+- Ausência de execuções fictícias.
+- Ausência de pontuação automática.
+- Ausência de aprovação por falta de achados.
+- Integridade dos hashes.
+- Persistência das evidências.
+- Reprodutibilidade.
+- Isolamento de sessões.
+- Validação dos relacionamentos.
+- Compatibilidade de versões.
+
+## 14.1. Validar a precisão dos detectores
+
+Medir, por regra e por linguagem:
+
+- Precisão.
+- Revocação.
+- Falsos positivos.
+- Falsos negativos.
+- Cobertura.
+- Critérios inconclusivos.
+
+Não divulgar métricas gerais de precisão antes de possuir resultados de validação independentes suficientes.
+
+Registrar limitações específicas de cada regra.
+
+## 14.2. Testes de ponta a ponta
+
+Executar os seguintes fluxos:
+
+- Cadastro somente de metadados.
+- Ingestão real de código.
+- Importação de repositório.
+- Análise individual.
+- Análise personalizada.
+- Comparação A/B.
+- Comparação entre projetos.
+- Análise de mercado com limitações de fonte.
+- Relatório.
+- Exportação.
+- Histórico.
+- Reteste.
+- Migração de dados existentes.
+
+Verificar se frontend, backend e persistência concordam sobre todos os resultados.
+
+---
+
+# 15. INTEGRAÇÕES E FERRAMENTAS
+
+Revisar os adaptadores existentes antes de adicionar dependências.
+
+Avaliar a integração, conforme necessidade:
+
+- SonarQube.
+- Semgrep ou Opengrep.
+- Gitleaks.
+- Trivy.
+- Syft.
+- Grype.
+- OWASP ZAP.
+- Grafana k6.
+- Playwright.
+- JaCoCo.
+- Coverage.py.
+- Istanbul/nyc.
+- Coverlet.
+- OSV.
+- SQLFluff.
+
+Não integrar todas indiscriminadamente.
+
+Cada integração deve possuir:
+
+- Verificação de instalação.
+- Identificação de versão.
+- Configuração.
+- Teste de conectividade.
+- Execução.
+- Parser.
+- Validação do retorno.
+- Testes negativos.
+- Tratamento de falhas.
+- Documentação.
+- Licenciamento verificado.
+
+Preservar os resultados nativos de cada ferramenta.
+
+Normalizar sem perder a procedência.
+
+---
+
+# 16. COMPATIBILIDADE E EVOLUÇÃO DOS DADOS
+
+A aplicação possui histórico de versões anteriores.
+
+Implementar migrações para:
+
+- Novos estados de ingestão.
+- Novos estados de veracidade.
+- Perfis e critérios.
+- Associação independente das avaliações.
+- Novos estados das categorias.
+- Novos indicadores.
+- Evidências versionadas.
+- Histórico metodológico.
+
+Preservar execuções anteriores.
+
+Não reclassificar resultados V2 ou V2.4 como resultados V3.
+
+Não recalcular silenciosamente notas históricas.
+
+Permitir novas avaliações utilizando os motores atualizados.
+
+Registrar a versão do algoritmo e da metodologia em cada execução.
+
+---
+
+# 17. CRITÉRIOS DE ACEITAÇÃO FINAL
+
+Nenhuma entrega poderá ser considerada concluída apenas porque a interface foi alterada ou porque o TypeScript não apresentou erros.
+
+A implementação deverá atender aos seguintes critérios:
+
+### Veracidade
+
+- Nenhum código fictício apresentado como fonte real.
+- Nenhuma ferramenta externa apresentada como executada sem execução comprovada.
+- Nenhum tempo sintético apresentado como medição.
+- Nenhuma cobertura arbitrária.
+- Nenhuma funcionalidade aprovada sem evidência suficiente.
+- Nenhuma dimensão não avaliada recebendo nota.
+- Nenhum snapshot simulado apresentado como instalação real.
+
+### Metodologia
+
+- Domínio independente da categoria do projeto.
+- Objetivo independente do cadastro do software.
+- Critérios versionados.
+- Perfis configuráveis.
+- Testes especializados.
+- Critérios não aplicáveis tratados corretamente.
+- Pontuação matemática validada.
+- Quality Gates independentes.
+- Comparações justas.
+
+### Evidências
+
+- Origem identificada.
+- Integridade conferida.
+- Ferramentas identificadas.
+- Resultados persistidos.
+- Evidências vinculadas aos critérios.
+- Histórico preservado.
+- Relatórios verificáveis.
+
+### Interface
+
+- Modo rápido.
+- Modo personalizado.
+- Modo avançado.
+- Pré-análise.
+- Progresso real.
+- Resultados explicáveis.
+- Limitações visíveis.
+- Histórico por versão.
+- Relatórios completos.
+
+### Segurança
+
+- Autenticação e autorização reais.
+- Isolamento.
+- Proteção contra entradas maliciosas.
+- Segredos protegidos.
+- Workers controlados.
+- Dados persistentes protegidos.
+
+---
+
+# 18. FORMA DE EXECUÇÃO DO TRABALHO
+
+Realize as alterações em fases.
+
+Não tente reescrever a aplicação inteira de uma vez.
+
+Para cada fase:
+
+1. Inspecione a implementação atual.
+2. Identifique dependências.
+3. Defina a mudança.
+4. Implemente.
+5. Atualize contratos.
+6. Atualize frontend e backend.
+7. Crie testes.
+8. Execute os testes.
+9. Corrija regressões.
+10. Registre o que foi efetivamente validado.
+
+A prioridade é:
+
+**FASE 1:** veracidade, ingestão, evidências, execuções e pontuação.
+
+**FASE 2:** arquitetura metodológica, critérios, perfis e aplicabilidade.
+
+**FASE 3:** relatórios, comparação e histórico.
+
+**FASE 4:** interface, produtividade e experiência do usuário.
+
+**FASE 5:** segurança, performance, validação independente e preparação para distribuição.
+
+É permitido executar tarefas independentes em paralelo, mas as mudanças devem ser integradas e testadas em conjunto.
+
+Não interrompa o trabalho após encontrar o primeiro problema.
+
+Resolva as dependências necessárias e avance pelas prioridades até onde for tecnicamente possível.
+
+Não substitua implementações reais por mocks para fazer os testes passarem.
+
+Mocks são permitidos em testes isolados, desde que sejam claramente identificados e nunca apresentados como evidência de produção.
+
+Se uma ferramenta não estiver disponível no ambiente, registre isso e teste o comportamento correto de indisponibilidade.
+
+Não declare testes como aprovados sem executar efetivamente os comandos correspondentes.
+
+---
+
+# 19. ENTREGA FINAL OBRIGATÓRIA
+
+Ao finalizar, apresentar um relatório contendo:
+
+## A. Resumo executivo
+
+Estado do Winhood antes e depois das alterações.
+
+## B. Problemas identificados
+
+Tabela com:
+
+- Problema.
+- Arquivo.
+- Causa.
+- Impacto.
+- Correção aplicada.
+- Estado.
+
+## C. Arquivos modificados
+
+Listar todos os arquivos criados, modificados e removidos, justificando cada mudança.
+
+## D. Funcionalidades corrigidas
+
+Informar o funcionamento anterior e o comportamento novo.
+
+## E. Testes realizados
+
+Para cada teste:
+
+- Comando.
+- Ambiente.
+- Resultado.
+- Evidência.
+- Falhas encontradas.
+
+Separar testes aprovados, reprovados, não executados e bloqueados.
+
+## F. Pendências
+
+Registrar dependências externas, configurações, ferramentas não instaladas e funcionalidades não concluídas.
+
+## G. Indicadores de confiabilidade
+
+Informar somente métricas efetivamente medidas.
+
+Não inventar percentuais de conclusão, qualidade ou segurança.
+
+## H. Riscos remanescentes
+
+Identificar riscos técnicos e metodológicos que ainda impeçam a utilização em produção.
+
+## I. Documentação
+
+Atualizar README, arquitetura, guia do usuário, metodologia de pontuação e documentação dos adaptadores.
+
+## J. Próxima etapa
+
+Apresentar somente melhorias que realmente permaneçam pendentes, sem repetir funcionalidades já implementadas.
+
+---
+
+# 20. DIRETRIZ FINAL
+
+O Winhood deve ser desenvolvido sob o princípio de que **a confiabilidade do resultado é mais importante do que a quantidade de informações apresentadas**.
+
+Não queremos uma aplicação que apenas pareça realizar uma auditoria completa.
+
+Queremos uma plataforma que efetivamente consiga demonstrar:
+
+- O que foi analisado.
+- Como foi analisado.
+- Qual ferramenta foi utilizada.
+- O que foi executado.
+- O que foi encontrado.
+- Qual evidência sustenta cada conclusão.
+- Qual a cobertura.
+- Quais são as limitações.
+- Como a pontuação foi calculada.
+- Como reproduzir o resultado.
+
+O Winhood deverá ser capaz de admitir que não conseguiu verificar determinado requisito.
+
+Deverá ser capaz de interromper uma avaliação quando as condições de confiabilidade não forem suficientes.
+
+Deverá distinguir resultados reais, análises estáticas, avaliações manuais, demonstrações e simulações.
+
+Deverá fornecer resultados compreensíveis para usuários iniciantes e suficientemente detalhados para profissionais de engenharia, QA, segurança, arquitetura e auditoria.
+
+**O objetivo final não é construir apenas mais um benchmark de software. É construir uma plataforma independente de avaliação de qualidade, segurança e maturidade de software, cujo diferencial seja a transparência, a precisão, a metodologia e a comprovação técnica de cada resultado.**
+
+Implemente as alterações no projeto existente, preserve as funcionalidades válidas, não introduza regressões e entregue a aplicação com testes e documentação atualizados.

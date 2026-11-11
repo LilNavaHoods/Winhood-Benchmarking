@@ -1,4 +1,22 @@
-export type AppEnvironment = 'PRODUCTION' | 'DEMO' | 'TEST';
+export type AppEnvironment = 'PRODUCTION' | 'DEMO' | 'TEST' | 'DEVELOPMENT';
+
+export type SourceIngestionState =
+  | 'METADATA_ONLY'
+  | 'SOURCE_IMPORTED'
+  | 'SOURCE_PARTIAL'
+  | 'SOURCE_VALIDATED'
+  | 'SOURCE_FAILED'
+  | 'DEMO_FIXTURE'
+  | 'TEST_FIXTURE'
+  | 'PUBLIC_DOCUMENTATION_ONLY';
+
+export type SourceAvailabilityKind =
+  | 'FULL_SOURCE'
+  | 'PARTIAL_SOURCE'
+  | 'PUBLIC_DOCUMENTATION_ONLY'
+  | 'CLOSED_SOURCE'
+  | 'RUNTIME_ACCESS'
+  | 'MANUAL_ASSESSMENT';
 
 export type DataOrigin =
   | 'USER_SOURCE'
@@ -9,7 +27,9 @@ export type DataOrigin =
   | 'DEMO_FIXTURE'
   | 'TEST_FIXTURE'
   | 'INTERNAL_MEASUREMENT'
-  | 'STATIC_ANALYSIS';
+  | 'STATIC_ANALYSIS'
+  | 'METADATA_ONLY'
+  | 'PUBLIC_DOCUMENTATION_ONLY';
 
 export type ExecutionMode =
   | 'REAL_STATIC_ANALYSIS'
@@ -24,11 +44,13 @@ export type AssessmentMode = 'INDIVIDUAL' | 'AB_COMPARE' | 'MARKET_COMPETITOR';
 
 export type CategoryAssessmentStatus =
   | 'ASSESSED'
+  | 'PARTIAL'
   | 'NOT_ASSESSED'
   | 'NOT_APPLICABLE'
   | 'NOT_COMPARABLE'
+  | 'INCONCLUSIVE'
   | 'INSUFFICIENT_COVERAGE'
-  | 'PARTIAL';
+  | 'FAILED_VALIDATION';
 
 export interface SourceManifest {
   softwareId: string;
@@ -39,6 +61,8 @@ export interface SourceManifest {
   treeSha: string;
   artifactSha256: string;
   importedAt: string;
+  ingestionState?: SourceIngestionState;
+  sourceAvailability?: SourceAvailabilityKind;
   importStatus:
     | 'DISCOVERING'
     | 'FETCHING'
@@ -52,9 +76,12 @@ export interface SourceManifest {
     | 'SOURCE_MISSING';
   filesDiscovered?: number;
   filesReceived?: number;
+  filesEligible?: number;
   filesAnalyzed?: number;
+  filesIgnored?: number;
   filesExcluded?: number;
   filesFailed?: number;
+  filesPartiallyProcessed?: number;
   unsupportedFiles?: number;
   discoveredFilesCount?: number;
   ingestedFilesCount?: number;
@@ -69,8 +96,16 @@ export interface SourceManifest {
 }
 
 export type VeracityClassification =
+  | 'NOT_AVAILABLE'
+  | 'NOT_INSTALLED'
+  | 'NOT_CONFIGURED'
+  | 'NOT_AUTHORIZED'
+  | 'NOT_EXECUTED'
+  | 'QUEUED'
+  | 'RUNNING'
   | 'SUCCESS_VALIDATED'
   | 'SUCCESS_WITH_WARNINGS'
+  | 'PARTIAL'
   | 'INCOMPLETE_COVERAGE'
   | 'EMPTY_ERROR'
   | 'EXECUTION_FAILED'
@@ -82,10 +117,14 @@ export type VeracityClassification =
   | 'TIMEOUT'
   | 'CANCELLED'
   | 'NOT_SUPPORTED'
-  | 'NOT_EXECUTED'
-  | 'CONTRACT_SIMULATION';
+  | 'CONTRACT_SIMULATION'
+  | 'SOURCE_MISSING';
 
-export type SeverityLevel = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO';
+export type SeverityLevel = 'BLOCKER' | 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO';
+
+export type SoftwareQualityAttribute = 'SECURITY' | 'RELIABILITY' | 'MAINTAINABILITY';
+
+export type CleanCodeAttribute = 'CONSISTENT' | 'INTENTIONAL' | 'ADAPTABLE' | 'RESPONSIBLE';
 
 export type BenchmarkCategoryKey =
   | 'functionality'
@@ -101,10 +140,69 @@ export type BenchmarkCategoryKey =
   | 'privacy'
   | 'documentation';
 
+export interface CodeExecutionFlowStep {
+  stepOrder: number;
+  stepIndex?: number;
+  nodeType: 'SOURCE' | 'PROPAGATOR' | 'SANITIZER_MISSING' | 'SINK';
+  nodeKind?: 'SOURCE' | 'PROPAGATOR' | 'SANITIZER_MISSING' | 'SINK';
+  filePath: string;
+  lineNumber: number;
+  endLineNumber?: number;
+  columnStart?: number;
+  columnEnd?: number;
+  symbolName: string;
+  codeSnippet: string;
+  contextBefore?: string[];
+  contextAfter?: string[];
+  explanation: string;
+}
+
+export interface MqrCategoryImpact {
+  softwareQuality: SoftwareQualityAttribute;
+  qualityAttribute?: SoftwareQualityAttribute;
+  benchmarkCategory: BenchmarkCategoryKey;
+  category?: BenchmarkCategoryKey;
+  severity: SeverityLevel;
+  scoreDeduction: number;
+  rationale: string;
+}
+
+export interface CategoryEvaluationReason {
+  id: string;
+  category: BenchmarkCategoryKey;
+  impactType: 'PENALTY' | 'BONUS' | 'CAP_APPLIED' | 'METRIC_THRESHOLD';
+  originType?: 'PENALTY' | 'BONUS' | 'CAP_APPLIED' | 'METRIC_THRESHOLD' | 'FINDING_PENALTY';
+  toolName?: string;
+  scoreDelta: number;
+  severity: SeverityLevel;
+  ruleId: string;
+  cwe?: string;
+  cve?: string;
+  title: string;
+  whyExplanation: string;
+  filePath?: string;
+  lineNumber?: number;
+  endLineNumber?: number;
+  columnStart?: number;
+  columnEnd?: number;
+  codeSnippet?: string;
+  contextBefore?: string[];
+  contextAfter?: string[];
+  executionFlow?: CodeExecutionFlowStep[];
+  remediationSummary?: string;
+  compliantCodeExample?: string;
+  remediationEffortMinutes?: number;
+  findingId?: string;
+}
+
 export interface Project {
   id: string;
   name: string;
-  category: string;
+  category?: string;
+  domainTags?: string[];
+  defaultQualityProfileIds?: string[];
+  defaultQualityGateId?: string;
+  enabledCategories?: BenchmarkCategoryKey[];
   objective: string;
   description: string;
   owner: string;
@@ -128,13 +226,187 @@ export interface FileInventoryItem {
   eligibleForAnalysis: boolean;
 }
 
+export type FindingValidationLifecycleState =
+  | 'VALIDATED'
+  | 'ACCEPTED'
+  | 'FALSE_POSITIVE_REVIEWED'
+  | 'CORRELATED_DEDUPLICATED'
+  | 'UNVERIFIED'
+  | 'CONFIRMED'
+  | 'PROBABLE'
+  | 'FALSE_POSITIVE'
+  | 'INCONCLUSIVE'
+  | 'NOT_REPRODUCIBLE'
+  | 'NOT_TESTED'
+  | 'ACCEPTED_RISK'
+  | 'FIXED_PENDING_RETEST'
+  | 'VERIFIED_RESOLVED';
+
+export type CriterionVerificationMethod =
+  | 'STATIC_ANALYSIS'
+  | 'AST_ANALYSIS'
+  | 'FUNCTIONAL_TEST'
+  | 'RUNTIME_TEST'
+  | 'PERFORMANCE_TEST'
+  | 'EXTERNAL_TOOL'
+  | 'MANUAL_ASSESSMENT'
+  | 'DOCUMENTATION_REVIEW'
+  | 'CONTRACT_VALIDATION';
+
+export interface EvaluationCriterionDefinition {
+  id: string;
+  name: string;
+  description: string;
+  domain: string;
+  dimension: BenchmarkCategoryKey;
+  objective: string;
+  verificationMethod: CriterionVerificationMethod;
+  requiredTools: string[];
+  prerequisites: string[];
+  applicabilityConditions: string[];
+  mandatoryEvidence: string[];
+  interpretationRule: string;
+  severity: SeverityLevel;
+  weight: number;
+  scoringRule: string;
+  version: string;
+  maintenanceState: 'ACTIVE' | 'DEPRECATED' | 'EXPERIMENTAL';
+  knownLimitations: string[];
+}
+
+export interface CriterionEvaluationOutcome {
+  criterionId: string;
+  criterionName: string;
+  dimension: BenchmarkCategoryKey;
+  domain: string;
+  verificationMethod: CriterionVerificationMethod;
+  status:
+    | 'PASSED_VALIDATED'
+    | 'FAILED_VALIDATED'
+    | 'INCONCLUSIVE'
+    | 'NOT_VERIFIED'
+    | 'NOT_APPLICABLE'
+    | 'NOT_EXECUTED';
+  verificationLevel:
+    | 'VALIDATED_BY_TEST'
+    | 'IMPLEMENTATION_FOUND'
+    | 'POTENTIAL_IMPLEMENTATION'
+    | 'NOT_FOUND'
+    | 'NOT_APPLICABLE'
+    | 'INCONCLUSIVE';
+  scoreImpact: number;
+  evidenceSummary: string;
+  evidenceReferences: string[];
+  limitations: string[];
+  evaluatedAt: string;
+}
+
+export interface DomainSpecializedProfile {
+  id: string;
+  name: string;
+  domainKey: string;
+  profileKind: 'GENERAL_DIMENSION' | 'DOMAIN_SPECIALIZED';
+  profileType?: 'GENERAL_DIMENSION' | 'DOMAIN_SPECIALIZED';
+  description: string;
+  recommendedCategories: BenchmarkCategoryKey[];
+  enabledCategories: BenchmarkCategoryKey[];
+  notApplicableCategories: BenchmarkCategoryKey[];
+  weights: Record<BenchmarkCategoryKey, number>;
+  requiredCriteriaIds: string[];
+  specializedChecks: string[];
+  targetApplications: string[];
+}
+
+export interface DimensionComparabilityEntry {
+  category: BenchmarkCategoryKey;
+  comparable: boolean;
+  status: 'COMPARABLE' | 'PARTIALLY_COMPARABLE' | 'NOT_COMPARABLE' | 'NOT_APPLICABLE';
+  coverageBySoftware: Record<string, number>;
+  sourceAvailabilityBySoftware: Record<string, SourceAvailabilityKind>;
+  commonCriteriaCount: number;
+  notes: string;
+}
+
+export interface ComparabilityReport {
+  overallComparable: boolean;
+  overallStatus?: 'COMPARABLE' | 'PARTIALLY_COMPARABLE' | 'INCONCLUSIVE_COMPARISON' | 'NOT_COMPARABLE';
+  canDeclareOfficialWinner: boolean;
+  domainCompatible: boolean;
+  objectiveCompatible: boolean;
+  scopeCompatible: boolean;
+  methodologyCompatible: boolean;
+  environmentCompatible: boolean;
+  sourceAvailabilityCompatible: boolean;
+  algorithmVersionMatches: boolean;
+  blockingReasons: string[];
+  warnings: string[];
+  sourceAvailabilityBySoftware: Record<string, SourceAvailabilityKind>;
+  dimensionMatrix: DimensionComparabilityEntry[];
+}
+
+export interface SignedEvidenceManifest {
+  manifestId: string;
+  runId: string;
+  algorithmVersion: string;
+  generatedAt: string;
+  recordsCount: number;
+  genesisHash: string;
+  merkleOrChainRootSha256: string;
+  rootChainSha256?: string;
+  manifestPayloadSha256: string;
+  digitalSignatureHmacSha256: string;
+  hmacSignature?: string;
+  signatureAlgorithm?: 'HMAC-SHA256';
+  signingKeyId: string;
+  keyId?: string;
+  authenticityProofType: 'HMAC_SHA256_PROTECTED_SERVER_KEY';
+  integrityNote: string;
+  verified: boolean;
+}
+
+export interface PreAnalysisSummary {
+  softwareId: string;
+  softwareName: string;
+  softwareVersion: string;
+  ingestionState: SourceIngestionState;
+  sourceAvailability: SourceAvailabilityKind;
+  integrityVerified: boolean;
+  calculatedPackageSha256: string;
+  filesDiscovered: number;
+  filesReceived: number;
+  filesEligible: number;
+  eligibleFiles: number;
+  totalFiles: number;
+  totalLinesOfCode: number;
+  filesIgnored: number;
+  filesUnsupported: number;
+  availableTools: string[];
+  missingTools: string[];
+  applicableCriteriaCount: number;
+  verifiableCriteriaCount: number;
+  notApplicableCriteriaCount: number;
+  nonExecutableCriteriaCount: number;
+  notApplicableCategories: BenchmarkCategoryKey[];
+  inferredDomain: string;
+  recommendedProfileName: string;
+  requiresFormalAuthorization: boolean;
+  limitations: string[];
+  warnings: string[];
+  estimatedPotentialCoveragePercent: number;
+}
+
 export interface Software {
   id: string;
   projectId: string;
   name: string;
   vendor: string;
   description: string;
-  category: string;
+  category?: string;
+  domainTags?: string[];
+  functionalDomain?: string;
+  defaultQualityProfileIds?: string[];
+  defaultQualityGateId?: string;
+  enabledCategories?: BenchmarkCategoryKey[];
   version: string;
   languages: string[];
   architecture: string;
@@ -147,7 +419,20 @@ export interface Software {
   documentationUrl: string;
   owner: string;
   notes: string;
-  sourceType: 'GIT_REPO' | 'GIT_REPOSITORY' | 'ARCHIVE' | 'LOCAL_AUTHORIZED' | 'LOCAL_UPLOAD' | 'COMPILED_BINARY' | 'CONTAINER' | 'EXECUTION_ENV' | 'PUBLIC_DOCUMENTATION_ONLY';
+  sourceType:
+    | 'GIT_REPO'
+    | 'GIT_REPOSITORY'
+    | 'ARCHIVE'
+    | 'LOCAL_AUTHORIZED'
+    | 'LOCAL_UPLOAD'
+    | 'COMPILED_BINARY'
+    | 'CONTAINER'
+    | 'EXECUTION_ENV'
+    | 'PUBLIC_DOCUMENTATION_ONLY'
+    | 'METADATA_ONLY';
+  ingestionState?: SourceIngestionState;
+  sourceIngestionState?: SourceIngestionState;
+  sourceAvailability?: SourceAvailabilityKind;
   gitProvider?: string;
   commitHash: string;
   packageSha256: string;
@@ -175,16 +460,26 @@ export interface Software {
   };
   inventory: {
     totalFiles: number;
+    discoveredFilesCount?: number;
+    receivedFilesCount?: number;
     eligibleFiles: number;
+    analyzedFilesCount?: number;
+    ignoredFilesCount?: number;
+    excludedFilesCount?: number;
+    unsupportedFilesCount?: number;
+    errorFilesCount?: number;
+    partiallyProcessedFilesCount?: number;
     totalLinesOfCode: number;
     totalSizeBytes: number;
     languageBreakdown: Record<string, number>;
     primaryLanguage?: string;
     languages?: string[];
     frameworks?: string[];
+    dependenciesIdentified?: string[];
     fileExtensions?: string[];
     cyclomaticComplexityTotal?: number;
     category?: string;
+    domainTags?: string[];
     entropyViolationsCount?: number;
     estimatedHoursTechDebt?: number;
     files: FileInventoryItem[];
@@ -209,7 +504,8 @@ export interface ToolAdapterInfo {
     | 'FERRAMENTA NÃO INSTALADA'
     | 'INTEGRAÇÃO CONFIGURADA'
     | 'INTEGRAÇÃO NÃO CONFIGURADA'
-    | 'ACESSO NÃO AUTORIZADO';
+    | 'ACESSO NÃO AUTORIZADO'
+    | 'DISABLED';
   binaryDetected: boolean;
   configured: boolean;
   signatureHash: string;
@@ -228,16 +524,31 @@ export interface NormalizedFinding {
   toolId: string;
   toolName: string;
   toolVersion: string;
+  detectionMethod?: CriterionVerificationMethod;
+  originType?: 'WINHOOD_NATIVE_STATIC' | 'EXTERNAL_TOOL_EXECUTION' | 'IMPORTED_REPORT' | 'MANUAL_AUDIT';
   category: 'CODE_QUALITY' | 'SAST' | 'SCA' | 'SECRETS' | 'SBOM' | 'ARCHITECTURE' | 'DATABASE' | 'DAST' | 'IAC' | 'OS_SANDBOX';
   originalRuleId: string;
   title: string;
   description: string;
   severity: SeverityLevel;
   confidence: 'HIGH' | 'MEDIUM' | 'LOW';
+  cleanCodeAttribute: CleanCodeAttribute;
+  mqrImpacts: MqrCategoryImpact[];
+  isNewCode: boolean;
   filePath: string;
   lineNumber: number;
+  endLineNumber?: number;
+  columnStart?: number;
+  columnEnd?: number;
   component: string;
   snippet: string;
+  contextBefore?: string[];
+  contextAfter?: string[];
+  whyItIsAnIssue: string;
+  evaluationImpactSummary: string;
+  executionFlows?: CodeExecutionFlowStep[];
+  compliantCodeExample?: string;
+  remediationEffortMinutes: number;
   cwe?: string;
   cve?: string;
   cvss?: number;
@@ -245,7 +556,16 @@ export interface NormalizedFinding {
   cisaKev?: boolean;
   remediation: string;
   evidenceSha256: string;
-  validationStatus: 'VALIDATED' | 'FALSE_POSITIVE_REVIEWED' | 'CORRELATED_DEDUPLICATED' | 'UNVERIFIED';
+  validationStatus: FindingValidationLifecycleState;
+  lifecycleState?: FindingValidationLifecycleState;
+  retestHistory?: Array<{
+    timestamp: string;
+    actor: string;
+    previousStatus: FindingValidationLifecycleState;
+    newStatus: FindingValidationLifecycleState;
+    notes: string;
+    evidenceHash: string;
+  }>;
   collectedAt: string;
 }
 
@@ -256,18 +576,29 @@ export interface ToolExecutionRecord {
   toolId: string;
   toolName: string;
   toolVersion: string;
+  executionMethod?: 'NATIVE_AST_ENGINE' | 'CLI_BINARY' | 'EXTERNAL_API' | 'SANDBOX_WORKER' | 'NOT_EXECUTED';
+  configurationUsed?: Record<string, any>;
+  configHash?: string;
+  sourceHash?: string;
+  commitHash?: string;
+  workingDirectory?: string;
   startedAt: string;
   completedAt: string;
   durationMs: number;
-  exitCode: number;
+  exitCode: number | null;
+  stdout?: string;
+  stderr?: string;
   veracityStatus: VeracityClassification;
   eligibleFilesCount: number;
   analyzedFilesCount: number;
+  errorFilesCount?: number;
   coveragePercent: number;
   parsingErrorsCount: number;
   schemaValidated: boolean;
   canonicalFormat: string;
   rawOutputSha256: string;
+  failureReasons?: string[];
+  persistedEvidenceIds?: string[];
   logs: string[];
 }
 
@@ -303,12 +634,25 @@ export interface Veracity19Checks {
   persistenceConfirmed?: boolean;
 }
 
+export interface VeracityAuditMatrixRow {
+  checkKey: keyof Veracity19Checks;
+  checkId?: string;
+  label?: string;
+  passed: boolean;
+  claimedStatus?: string;
+  observedFact?: string;
+  reconciledStatus?: 'VERIFIED' | 'FAILED' | 'NOT_APPLICABLE';
+  justification: string;
+  evidenceReference: string;
+}
+
 export interface VeracityCheckResult {
   runId: string;
   softwareId: string;
   softwareName: string;
   overallClassification: VeracityClassification;
   checks: Veracity19Checks;
+  auditMatrix?: VeracityAuditMatrixRow[];
   overallCoveragePercent: number;
   warnings: string[];
   blockingReasons: string[];
@@ -316,13 +660,24 @@ export interface VeracityCheckResult {
 }
 
 export interface CategoryScoreDetail {
+  category: BenchmarkCategoryKey;
   status: CategoryAssessmentStatus;
+  rawScore: number | null;
+  finalScore: number | null;
   score: number | null;
+  rating?: 'A' | 'B' | 'C' | 'D' | 'E' | null;
+  weight: number;
+  weightPercent?: number;
+  effectiveWeight?: number;
+  originalWeight?: number;
+  remediationEffortMinutes?: number;
   coveragePercent: number;
   confidence: 'HIGH' | 'MEDIUM' | 'LOW';
   toolsUsed: string[];
   limitations: string[];
   evidenceCount: number;
+  evaluationReasons: CategoryEvaluationReason[];
+  criteriaOutcomes?: CriterionEvaluationOutcome[];
   testsTotal?: number;
   testsPassed?: number;
   testsFailed?: number;
@@ -382,6 +737,27 @@ export interface PenaltyCapTriggered {
   cappedScore: number;
 }
 
+export interface QualityGateConditionDetail {
+  metricKey: string;
+  label: string;
+  threshold: string;
+  actualValue: string;
+  status: 'PASSED' | 'FAILED' | 'WARN_FUDGE_FACTOR' | 'INCONCLUSIVE' | 'NOT_EVALUATED';
+  failureReason?: string;
+}
+
+export type ExecutiveQualityGateDecision =
+  | 'APROVADO'
+  | 'APROVADO COM RESSALVAS'
+  | 'REPROVADO'
+  | 'INCONCLUSIVO'
+  | 'NÃO AVALIADO'
+  | 'APPROVED'
+  | 'APPROVED_WITH_RESERVATIONS'
+  | 'BLOCKED'
+  | 'INCONCLUSIVE'
+  | 'REJECTED';
+
 export interface SoftwareScoreCard {
   softwareId: string;
   softwareName: string;
@@ -396,7 +772,23 @@ export interface SoftwareScoreCard {
     qualityScore: number;
     overallScore: number;
   };
-  classificationLabel: 'Inexistente' | 'Crítico' | 'Insuficiente' | 'Adequado' | 'Muito bom' | 'Excelente';
+  separatedIndicators?: {
+    technicalScore: number | null;
+    scopeCoveragePercent: number;
+    evidenceConfidence: 'HIGH' | 'MEDIUM' | 'LOW';
+    qualityGateDecision: ExecutiveQualityGateDecision;
+    veracityState: VeracityClassification;
+  };
+  originalWeights?: Record<BenchmarkCategoryKey, number>;
+  effectiveWeights?: Record<BenchmarkCategoryKey, number>;
+  classificationLabel:
+    | 'Inexistente'
+    | 'Crítico'
+    | 'Insuficiente'
+    | 'Adequado'
+    | 'Muito bom'
+    | 'Excelente'
+    | 'Inconclusivo / Cobertura Insuficiente';
   penaltyCapsTriggered: PenaltyCapTriggered[];
   advantages: string[];
   deficiencies: string[];
@@ -456,6 +848,7 @@ export interface SoftwareScoreCard {
     cyclomaticComplexity: number;
     cognitiveComplexity: number;
     duplicatedLinesPercent: number;
+    testCoveragePercent?: number;
     couplingIndex: number;
     cohesionIndex: number;
     circularDependenciesCount: number;
@@ -463,10 +856,14 @@ export interface SoftwareScoreCard {
     riskIndicators: string[];
   };
   qualityGate?: {
-    status: 'PASSED' | 'FAILED' | 'WARN';
+    gateName?: string;
+    status: 'PASSED' | 'FAILED' | 'WARN' | 'INCONCLUSIVE' | 'NOT_EVALUATED';
+    executiveDecision?: ExecutiveQualityGateDecision;
+    fudgeFactorApplied?: boolean;
     conditionsMet: number;
     conditionsFailed: number;
     failedMetrics: string[];
+    conditions?: QualityGateConditionDetail[];
   };
   ratings?: {
     reliability: 'A' | 'B' | 'C' | 'D' | 'E';
@@ -478,26 +875,40 @@ export interface SoftwareScoreCard {
 export interface BenchmarkRunProgress {
   percent: number;
   stageLabel: string;
-  estimatedRemainingSeconds: number;
+  estimatedRemainingSeconds: number | null;
+  estimationBasis?: 'HISTORICAL_COMPARABLE_RUNS' | 'UNAVAILABLE_FIRST_RUN';
   currentTool?: string;
+  currentSoftwareName?: string;
   processedFiles: number;
   totalFiles: number;
+  elapsedTimeMs?: number;
+  recentEvents?: string[];
+  errorsCount?: number;
+  cancellable?: boolean;
 }
 
 export interface BenchmarkProfileConfig {
   id: string;
   name: string;
   description: string;
+  domainKey?: string;
+  profileKind?: 'GENERAL_DIMENSION' | 'DOMAIN_SPECIALIZED';
+  enabledCategories?: BenchmarkCategoryKey[];
+  notApplicableCategories?: BenchmarkCategoryKey[];
   weights: Record<BenchmarkCategoryKey, number>;
   selectedAdapters: string[];
+  qualityProfileIds?: string[];
+  qualityGateId?: string;
+  analyzeNewCodeOnly?: boolean;
+  referenceBranch?: string;
   enablePenaltyCaps: boolean;
   equivalenceEnvironment: {
     cpuCoresLimit: number;
     memoryMbLimit: number;
     osTarget: string;
     workloadConcurrency: number;
-    dastFormalAuthorization: boolean;
-    authorizedByOwner: string;
+    dastFormalAuthorization?: boolean;
+    authorizedByOwner?: string;
   };
 }
 
@@ -529,13 +940,39 @@ export interface FunctionalEquivalenceRow {
   featureName: string;
   domainCategory: string;
   essential: boolean;
+  requirement?: string;
+  objective?: string;
+  preconditions?: string[];
+  inputs?: string[];
+  procedure?: string;
+  expectedResult?: string;
+  version?: string;
   resultsBySoftware: Record<
     string,
     {
-      status: 'PASSED_VALIDATED' | 'FAILED' | 'NOT_IMPLEMENTED' | 'VISUAL_ONLY';
-      executionTimeMs: number;
+      status:
+        | 'PASSED_VALIDATED'
+        | 'FAILED_VALIDATED'
+        | 'FAILED'
+        | 'NOT_IMPLEMENTED'
+        | 'NOT_APPLICABLE'
+        | 'NOT_EXECUTED'
+        | 'INCONCLUSIVE'
+        | 'BLOCKED'
+        | 'SIMULATED'
+        | 'VISUAL_ONLY';
+      verificationLevel?:
+        | 'VALIDATED_BY_TEST'
+        | 'IMPLEMENTATION_FOUND'
+        | 'POTENTIAL_IMPLEMENTATION'
+        | 'NOT_FOUND'
+        | 'NOT_APPLICABLE'
+        | 'INCONCLUSIVE';
+      obtainedResult?: string;
+      executionTimeMs: number | null;
       assertionCount: number;
       evidenceLog: string;
+      limitations?: string[];
     }
   >;
 }
@@ -544,6 +981,7 @@ export interface WindowsSandboxSnapshotDiff {
   softwareId: string;
   softwareName: string;
   sandboxEnvironment: string;
+  executionStatus?: 'EXECUTED_REAL_SANDBOX' | 'NOT_EXECUTED_HOST_UNAVAILABLE' | 'STATIC_MANIFEST_INSPECTION';
   t0BaselineHash: string;
   t1PostInstallHash: string;
   t2PostUninstallHash: string;
@@ -555,7 +993,7 @@ export interface WindowsSandboxSnapshotDiff {
   residualFilesT2: string[];
   residualRegistryKeysT2: string[];
   unexpectedMutations: string[];
-  cleanUninstall: boolean;
+  cleanUninstall: boolean | null;
 }
 
 export interface EvidenceRecord {
@@ -564,6 +1002,12 @@ export interface EvidenceRecord {
   softwareId: string;
   softwareName: string;
   version: string;
+  commitHash?: string;
+  sourceHash?: string;
+  criterionId?: string;
+  evidenceType?: 'STATIC_AST_FINDING' | 'TOOL_RAW_OUTPUT' | 'VERACITY_ATTESTATION' | 'MANIFEST_SIGNATURE';
+  origin?: string;
+  responsibleActor?: string;
   category: string;
   toolName: string;
   toolVersion: string;
@@ -583,16 +1027,29 @@ export interface BenchmarkRun {
   projectId: string;
   projectName: string;
   profileName: string;
+  profileId?: string;
+  functionalDomain?: string;
+  evaluationObjective?: string;
+  wizardMode?: 'QUICK' | 'CUSTOM' | 'ADVANCED';
   softwareIds: string[];
-  status: 'RUNNING' | 'COMPLETED' | 'COMPLETED_WITH_WARNINGS' | 'INCOMPLETE' | 'FAILED';
+  status: 'RUNNING' | 'COMPLETED' | 'COMPLETED_WITH_WARNINGS' | 'INCOMPLETE' | 'FAILED' | 'CANCELLED';
   startedAt: string;
   completedAt: string;
   algorithmVersion: string;
+  methodologyVersion?: string;
+  enabledCategories?: BenchmarkCategoryKey[];
+  notApplicableCategories?: BenchmarkCategoryKey[];
+  qualityGateId?: string;
+  originalWeights?: Record<BenchmarkCategoryKey, number>;
   weightsUsed: Record<BenchmarkCategoryKey, number>;
   equivalenceEnvironment: BenchmarkProfileConfig['equivalenceEnvironment'];
   environmentEquivalent: boolean;
+  comparabilityReport?: ComparabilityReport;
+  signedManifest?: SignedEvidenceManifest;
+  criteriaOutcomesBySoftware?: Record<string, CriterionEvaluationOutcome[]>;
   progress?: BenchmarkRunProgress;
   scoreCards: SoftwareScoreCard[];
+  categoryDetails?: Record<BenchmarkCategoryKey, CategoryScoreDetail>;
   toolExecutions: ToolExecutionRecord[];
   veracityResults: VeracityCheckResult[];
   findings: NormalizedFinding[];
@@ -605,10 +1062,14 @@ export interface BenchmarkRun {
   environmentMode?: AppEnvironment;
   dataOrigin?: DataOrigin;
   qualityGate?: {
-    status: 'PASSED' | 'FAILED' | 'WARN';
+    gateName?: string;
+    status: 'PASSED' | 'FAILED' | 'WARN' | 'INCONCLUSIVE' | 'NOT_EVALUATED';
+    executiveDecision?: ExecutiveQualityGateDecision;
+    fudgeFactorApplied?: boolean;
     conditionsMet: number;
     conditionsFailed: number;
     failedMetrics: string[];
+    conditions?: QualityGateConditionDetail[];
   };
   ratings?: {
     reliability: 'A' | 'B' | 'C' | 'D' | 'E';

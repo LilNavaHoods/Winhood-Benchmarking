@@ -1,6 +1,0 @@
-{
-  "summary":  "Plano para backend 100% automatico e invisivel para o usuario, com botao de 1 clique para inicializacao automatica do Docker SonarQube pelo backend, fallback inteligente para motor nativo em caso de ausencia do Docker, e fluxo de analise zero-configuracao.",
-  "updatedAt":  "2026-11-10T14:21:15.204600202Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

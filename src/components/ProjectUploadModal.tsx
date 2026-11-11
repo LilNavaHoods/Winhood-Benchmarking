@@ -53,7 +53,9 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
 
   // Form Fields
   const [projectName, setProjectName] = useState('');
-  const [category, setCategory] = useState(PROJECT_CATEGORIES[0]);
+  const [domainTagsInput, setDomainTagsInput] = useState('devsecops, sonarqube-mqr, security, clean-code');
+  const [qualityGateId, setQualityGateId] = useState('qg-sonar-way-mqr');
+  const [evaluateAll12Categories, setEvaluateAll12Categories] = useState(true);
   const [objective, setObjective] = useState('');
   const [description, setDescription] = useState('');
   const [softwareName, setSoftwareName] = useState('');
@@ -161,6 +163,11 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
       return;
     }
 
+    const parsedDomainTags = domainTagsInput
+      .split(',')
+      .map((t) => t.trim())
+      .filter(Boolean);
+
     setLoading(true);
     try {
       const res = await fetch('/api/projects/upload', {
@@ -168,7 +175,9 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: projectName.trim(),
-          category,
+          domainTags: parsedDomainTags.length > 0 ? parsedDomainTags : ['multi-category', 'sonarqube-mqr'],
+          defaultQualityGateId: qualityGateId,
+          defaultQualityProfileIds: ['sonar-way-ts-mqr-2026', 'sonar-way-sql-mqr-2026'],
           objective: objective.trim(),
           description: description.trim(),
           softwareName: (softwareName || projectName).trim(),
@@ -186,7 +195,7 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
       }
 
       onNotify(
-        `Projeto "${data.project.name}" e software "${data.software.name} v${data.software.version}" criados com sucesso a partir de ${totalFiles} arquivos ingeridos!`,
+        `Projeto "${data.project.name}" e software "${data.software.name} v${data.software.version}" criados com sucesso (${totalFiles} arquivos, 12 categorias habilitadas)!`,
         'success'
       );
       await onSuccess();
@@ -209,10 +218,10 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
             </div>
             <div>
               <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">
-                Upload &amp; Ingestão de Projeto
+                Upload &amp; Ingestão Multi-Categoria (SonarQube MQR)
               </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                Importe código-fonte local, pastas ou manifestos para inspeção estática e benchmarking.
+                Importe código-fonte local ou pastas para avaliação transversal nas 12 categorias sem bloqueio a uma categoria única.
               </p>
             </div>
           </div>
@@ -353,19 +362,42 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
 
             <div>
               <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
-                Categoria do Benchmark *
+                Quality Gate Transversal (SonarQube MQR)
               </label>
               <select
-                value={category}
-                onChange={(e) => setCategory(e.target.value)}
+                value={qualityGateId}
+                onChange={(e) => setQualityGateId(e.target.value)}
                 className="w-full px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121824] text-slate-900 dark:text-slate-100 text-xs focus:outline-none focus:border-[#31d6c4]"
               >
-                {PROJECT_CATEGORIES.map((cat) => (
-                  <option key={cat} value={cat}>
-                    {cat}
-                  </option>
-                ))}
+                <option value="qg-sonar-way-mqr">Sonar way (MQR — Clean as You Code + Fudge Factor)</option>
+                <option value="qg-zero-trust-strict">WinHood Zero-Trust Strict (Bloqueio CVSS &gt;= 7.0)</option>
               </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                Tags de Domínio Livres (separadas por vírgula)
+              </label>
+              <input
+                type="text"
+                value={domainTagsInput}
+                onChange={(e) => setDomainTagsInput(e.target.value)}
+                placeholder="Ex: api-gateway, cryptography, microservices, kdbx"
+                className="w-full px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121824] text-slate-900 dark:text-slate-100 text-xs font-mono focus:outline-none focus:border-[#31d6c4]"
+              />
+            </div>
+            <div className="flex items-center pt-4">
+              <label className="inline-flex items-center gap-2 text-xs font-semibold text-slate-700 dark:text-slate-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={evaluateAll12Categories}
+                  onChange={(e) => setEvaluateAll12Categories(e.target.checked)}
+                  className="rounded accent-[#31d6c4]"
+                />
+                <span>Avaliar simultaneamente todas as 12 categorias (MQR)</span>
+              </label>
             </div>
           </div>
 

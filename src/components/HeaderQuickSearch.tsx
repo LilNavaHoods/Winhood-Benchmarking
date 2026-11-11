@@ -84,7 +84,8 @@ export const HeaderQuickSearch: React.FC<HeaderQuickSearchProps> = ({
   const filteredProjects = projects.filter(
     (p) =>
       p.name.toLowerCase().includes(trimmed) ||
-      p.category.toLowerCase().includes(trimmed) ||
+      (p.category || '').toLowerCase().includes(trimmed) ||
+      (p.domainTags || []).some((t) => t.toLowerCase().includes(trimmed)) ||
       p.objective.toLowerCase().includes(trimmed) ||
       p.id.toLowerCase().includes(trimmed)
   );
@@ -94,7 +95,8 @@ export const HeaderQuickSearch: React.FC<HeaderQuickSearchProps> = ({
       s.name.toLowerCase().includes(trimmed) ||
       s.vendor.toLowerCase().includes(trimmed) ||
       s.version.toLowerCase().includes(trimmed) ||
-      s.category.toLowerCase().includes(trimmed) ||
+      (s.category || '').toLowerCase().includes(trimmed) ||
+      (s.domainTags || []).some((t) => t.toLowerCase().includes(trimmed)) ||
       s.languages.some((l) => l.toLowerCase().includes(trimmed)) ||
       s.id.toLowerCase().includes(trimmed)
   );
