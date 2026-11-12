@@ -377,14 +377,7 @@ export const ContextualScreenHelpBanner: React.FC<ContextualScreenHelpBannerProp
   activeNav,
   onOpenGuideChapter,
 }) => {
-  const [isExpanded, setIsExpanded] = useState<boolean>(() => {
-    try {
-      const saved = localStorage.getItem('winhood_contextual_help_expanded');
-      return saved === null ? true : saved === 'true';
-    } catch {
-      return true;
-    }
-  });
+  const [isExpanded, setIsExpanded] = useState<boolean>(false);
 
   if (activeNav === 'user_guide') {
     return null;

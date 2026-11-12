@@ -1,5 +1,5 @@
-import type { SonarIssueRecord } from '../../types/benchmark';
-import { computeSha256 } from '../../engine/scoringEngine';
+import type { NormalizedFinding, SeverityLevel, SonarIssueRecord } from '../../types/benchmark';
+import { computeSha256, enrichLegacyOrExternalFinding } from '../../engine/scoringEngine';
 
 const EXTERNAL_ENGINE_META: Record<string, { name: string; defaultVersion: string }> = {
   semgrep: { name: 'Semgrep / Opengrep SARIF', defaultVersion: '1.9.2' },
@@ -187,5 +187,101 @@ export class SonarResultParser {
     }
 
     return records;
+  }
+
+  /**
+   * Converte issues e hotspots do SonarCloud para o modelo NormalizedFinding da plataforma WinHood,
+   * permitindo que sejam visualizados imediatamente nos módulos de Findings, Relatórios e Dashboard.
+   */
+  public static mapSonarIssuesToNormalizedFindings(
+    issues: SonarIssueRecord[],
+    softwareId: string,
+    softwareName: string
+  ): NormalizedFinding[] {
+    return issues.map((iss) => {
+      let category: NormalizedFinding['category'] = 'CODE_QUALITY';
+      const ruleLow = (iss.ruleKey || '').toLowerCase();
+      const msgLow = (iss.message || '').toLowerCase();
+
+      if (
+        ruleLow.includes('sql') ||
+        ruleLow.includes('injection') ||
+        ruleLow.includes('database') ||
+        ruleLow.includes('db') ||
+        msgLow.includes('sql') ||
+        msgLow.includes('database') ||
+        msgLow.includes('query')
+      ) {
+        category = 'DATABASE';
+      } else if (
+        ruleLow.includes('secret') ||
+        ruleLow.includes('password') ||
+        ruleLow.includes('token') ||
+        ruleLow.includes('auth') ||
+        ruleLow.includes('key') ||
+        ruleLow.includes('credential') ||
+        msgLow.includes('password') ||
+        msgLow.includes('token') ||
+        msgLow.includes('credential') ||
+        msgLow.includes('secret')
+      ) {
+        category = 'SECRETS';
+      } else if (
+        ruleLow.includes('http') ||
+        ruleLow.includes('cors') ||
+        ruleLow.includes('ssrf') ||
+        ruleLow.includes('xss') ||
+        ruleLow.includes('csrf') ||
+        ruleLow.includes('tls') ||
+        ruleLow.includes('ssl') ||
+        ruleLow.includes('network') ||
+        msgLow.includes('http') ||
+        msgLow.includes('network') ||
+        msgLow.includes('endpoint')
+      ) {
+        category = 'SAST';
+      } else if (iss.type === 'VULNERABILITY' || iss.type === 'SECURITY_HOTSPOT') {
+        category = 'SAST';
+      } else if (ruleLow.includes('dep') || ruleLow.includes('cve') || ruleLow.includes('vulnerability')) {
+        category = 'SCA';
+      } else if (ruleLow.includes('arch') || ruleLow.includes('cycle') || ruleLow.includes('coupling')) {
+        category = 'ARCHITECTURE';
+      }
+
+      const mappedSeverity: SeverityLevel =
+        iss.severity === 'BLOCKER'
+          ? 'BLOCKER'
+          : iss.severity === 'CRITICAL'
+            ? 'CRITICAL'
+            : iss.severity === 'MAJOR'
+              ? 'HIGH'
+              : iss.severity === 'MINOR'
+                ? 'MEDIUM'
+                : 'INFO';
+
+      return enrichLegacyOrExternalFinding({
+        id: `fnd-sonar-${iss.issueKey || iss.id}`,
+        runId: 'run-sonarcloud-live',
+        softwareId,
+        softwareName,
+        softwareVersion: '1.0.0',
+        toolId: iss.isExternalImportedRule ? 'external-sarif' : 'sonarcloud-sast',
+        toolName: iss.externalOriginTool || 'SonarCloud SaaS Official',
+        toolVersion: iss.externalOriginVersion || '8.0.0.117526',
+        category,
+        originalRuleId: iss.originalRuleId || iss.ruleKey,
+        title: iss.ruleName || iss.ruleKey,
+        description: iss.message || 'SonarCloud rule detection',
+        severity: mappedSeverity,
+        confidence: iss.confidence || 'HIGH',
+        filePath: iss.filePath,
+        lineNumber: iss.lineNumber,
+        snippet: iss.evidenceSnippet,
+        remediation: iss.remediationGuidance || 'Consulte a documentação da regra do SonarCloud.',
+        remediationEffortMinutes: iss.effortMinutes || 20,
+        evidenceSha256: iss.evidenceSha256 || computeSha256(`${iss.ruleKey}:${iss.filePath}:${iss.lineNumber}`),
+        validationStatus: iss.type === 'SECURITY_HOTSPOT' ? 'UNVERIFIED' : 'CONFIRMED',
+      });
+    });
   }
 }

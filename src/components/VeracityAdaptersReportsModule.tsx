@@ -24,9 +24,77 @@ import type {
   BenchmarkRun,
   CategoryEvaluationReason,
   ToolAdapterInfo,
+  VisualReportCategoryKey,
 } from '../types/benchmark';
 import { CATEGORY_LABELS } from './DashboardModule';
 import { ALL_BENCHMARK_CATEGORIES } from '../engine/scoringEngine';
+import { HairlineAnimatedFigure, type HairlineFigureType } from './HairlineAnimatedFigure';
+
+const VISUAL_CATEGORIES_CONFIG: Array<{
+  id: VisualReportCategoryKey;
+  label: string;
+  figure: HairlineFigureType;
+  color: string;
+  description: string;
+  benchmarkCategories: BenchmarkCategoryKey[];
+}> = [
+  {
+    id: 'all',
+    label: 'Visão Consolidada Geral',
+    figure: 'vault',
+    color: '#10b981',
+    description: 'Consolidação de todas as 12 categorias de qualidade e segurança avaliadas.',
+    benchmarkCategories: ALL_BENCHMARK_CATEGORIES,
+  },
+  {
+    id: 'database',
+    label: 'Banco de Dados & Storage',
+    figure: 'lockers',
+    color: '#3b82f6',
+    description: 'Sanitização SQL, injeções, transações, integridade referencial e persistência em disco.',
+    benchmarkCategories: ['database'],
+  },
+  {
+    id: 'security',
+    label: 'Segurança Geral & DevSecOps',
+    figure: 'vault',
+    color: '#10b981',
+    description: 'Postura de segurança SAST, mitigação de vulnerabilidades CWE/OWASP e resiliência criptográfica.',
+    benchmarkCategories: ['security', 'privacy'],
+  },
+  {
+    id: 'auth_passwords',
+    label: 'IAM, Senhas & Segredos',
+    figure: 'padlock',
+    color: '#f59e0b',
+    description: 'Senhas hardcoded, tokens expostos, controle de acesso e proteção de credenciais.',
+    benchmarkCategories: ['security', 'privacy'],
+  },
+  {
+    id: 'web_network',
+    label: 'Comunicação Web, APIs & TLS',
+    figure: 'router',
+    color: '#06b6d4',
+    description: 'Headers HTTP/HTTPS, TLS, SSRF, CORS, endpoints REST e segurança de rede.',
+    benchmarkCategories: ['compatibility', 'security'],
+  },
+  {
+    id: 'code_quality',
+    label: 'Qualidade de Código & SAST',
+    figure: 'layers',
+    color: '#8b5cf6',
+    description: 'Clean Code, complexidade ciclomática, duplicações de código e dívida técnica.',
+    benchmarkCategories: ['code_quality', 'architecture'],
+  },
+  {
+    id: 'performance',
+    label: 'Performance & Hardware/OS',
+    figure: 'gauge',
+    color: '#f43f5e',
+    description: 'Throughput, latência, tempo de resposta e consumo de recursos de CPU e memória.',
+    benchmarkCategories: ['performance', 'reliability'],
+  },
+];
 
 interface VeracityAdaptersReportsModuleProps {
   latestRun: BenchmarkRun | null;
@@ -51,8 +119,7 @@ const REPORT_TYPES = [
 const EvaluationReasonEvidenceCard: React.FC<{ reason: CategoryEvaluationReason }> = ({
   reason,
 }) => {
-  const isHighSeverity = ['BLOCKER', 'CRITICAL', 'HIGH'].includes(reason.severity);
-  const [expanded, setExpanded] = useState<boolean>(isHighSeverity);
+  const [expanded, setExpanded] = useState<boolean>(false);
 
   return (
     <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0b1018] overflow-hidden">
@@ -203,6 +270,7 @@ export const VeracityAdaptersReportsModule: React.FC<
   const [subTab, setSubTab] = useState<'veracity' | 'adapters' | 'reports'>(initialTab);
   const [selectedReportType, setSelectedReportType] = useState('COMPARATIVE_FULL');
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<BenchmarkCategoryKey | 'ALL'>('ALL');
+  const [selectedVisualCategory, setSelectedVisualCategory] = useState<VisualReportCategoryKey>('all');
   const [exportingFormat, setExportingFormat] = useState<string | null>(null);
   const [exportFeedback, setExportFeedback] = useState<string | null>(null);
   const [verifyingChain, setVerifyingChain] = useState<boolean>(false);
@@ -930,6 +998,93 @@ export const VeracityAdaptersReportsModule: React.FC<
                     </p>
                   </div>
 
+                  {/* Seletor Visual de Inspeção Individual por Categoria com Figuras Hairline (Seção 8) */}
+                  <div className="space-y-3 p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-[#0c1017]">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-slate-900 dark:text-slate-100">
+                        Modo de Visualização do Relatório:
+                      </span>
+                      <span className="text-[11px] font-mono text-slate-500">
+                        Ciclo Animado com Pausa de 2s · 60/120fps
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+                      {VISUAL_CATEGORIES_CONFIG.map((catConfig) => {
+                        const isSelected = selectedVisualCategory === catConfig.id;
+                        return (
+                          <button
+                            key={catConfig.id}
+                            type="button"
+                            onClick={() => setSelectedVisualCategory(catConfig.id)}
+                            className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer flex items-center gap-2.5 ${
+                              isSelected
+                                ? 'bg-white dark:bg-[#131a24] shadow-sm'
+                                : 'border-slate-200 dark:border-slate-800/80 bg-white/50 dark:bg-[#090d13] hover:border-slate-300 dark:hover:border-slate-700'
+                            }`}
+                            style={{
+                              borderColor: isSelected ? catConfig.color : undefined,
+                            }}
+                          >
+                            <HairlineAnimatedFigure
+                              type={catConfig.figure}
+                              size={34}
+                              color={catConfig.color}
+                            />
+                            <div className="min-w-0">
+                              <div
+                                className="text-xs font-bold truncate"
+                                style={{ color: isSelected ? catConfig.color : undefined }}
+                              >
+                                {catConfig.label}
+                              </div>
+                              <div className="text-[10px] text-slate-500 truncate">
+                                {catConfig.id === 'all' ? '12 categorias' : 'Foco individual'}
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {selectedVisualCategory !== 'all' && (
+                      <div className="mt-2 p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] flex items-center gap-3">
+                        {(() => {
+                          const currentConfig = VISUAL_CATEGORIES_CONFIG.find(
+                            (c) => c.id === selectedVisualCategory
+                          );
+                          if (!currentConfig) return null;
+                          return (
+                            <>
+                              <HairlineAnimatedFigure
+                                type={currentConfig.figure}
+                                size={44}
+                                color={currentConfig.color}
+                              />
+                              <div>
+                                <div className="text-xs font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+                                  <span>{currentConfig.label}</span>
+                                  <span
+                                    className="px-2 py-0.5 rounded text-[10px] font-mono font-bold"
+                                    style={{
+                                      backgroundColor: `${currentConfig.color}20`,
+                                      color: currentConfig.color,
+                                    }}
+                                  >
+                                    INSPEÇÃO INDIVIDUAL ATIVA
+                                  </span>
+                                </div>
+                                <p className="text-[11px] text-slate-500 mt-0.5">
+                                  {currentConfig.description}
+                                </p>
+                              </div>
+                            </>
+                          );
+                        })()}
+                      </div>
+                    )}
+                  </div>
+
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
                     {latestRun.scoreCards.map((sc) => (
                       <div
@@ -1024,10 +1179,18 @@ export const VeracityAdaptersReportsModule: React.FC<
 
                   <div className="space-y-6">
                     {latestRun.scoreCards.map((sc) => {
+                      const visualConfig = VISUAL_CATEGORIES_CONFIG.find(
+                        (c) => c.id === selectedVisualCategory
+                      );
+                      const baseCategories =
+                        selectedVisualCategory === 'all'
+                          ? ALL_BENCHMARK_CATEGORIES
+                          : visualConfig?.benchmarkCategories || ALL_BENCHMARK_CATEGORIES;
+
                       const categoriesToRender =
                         selectedCategoryFilter === 'ALL'
-                          ? ALL_BENCHMARK_CATEGORIES
-                          : [selectedCategoryFilter];
+                          ? baseCategories
+                          : baseCategories.filter((c) => c === selectedCategoryFilter);
                       return (
                         <div key={sc.softwareId} className="space-y-4">
                           <div className="px-3.5 py-2 rounded-lg bg-[#31d6c4]/10 border border-[#31d6c4]/30 flex items-center justify-between">

@@ -178,8 +178,14 @@ export class SonarQubeConnection {
       const version = statusJson.version || null;
       const systemStatus = statusJson.status || 'UNKNOWN';
 
-      // Verificar compatibilidade de versão (exigir >= 9.9 ou formato 24.x / 25.x / 26.x)
-      if (version) {
+      const isCloudInstance =
+        options.mode === 'CLOUD' ||
+        rawUrl.toLowerCase().includes('sonarcloud.io') ||
+        rawUrl.toLowerCase().includes('sonarqube.us') ||
+        Boolean(version && (version.startsWith('8.0.0') || version.startsWith('8.0.')));
+
+      // Verificar compatibilidade de versão (SonarCloud SaaS 8.0+ aprovado automaticamente; on-premise exige >= 9.9 ou 24.x/26.x)
+      if (version && !isCloudInstance) {
         const major = Number.parseInt(version.split('.')[0], 10);
         if (!Number.isNaN(major) && major < 9) {
           return {
@@ -209,7 +215,7 @@ export class SonarQubeConnection {
           httpReachable: true,
           authenticated: false,
           version,
-          edition: options.mode === 'CLOUD' ? 'SonarQube Cloud' : 'Community Build',
+          edition: isCloudInstance ? 'SonarQube Cloud' : 'Community Build',
           systemStatus,
           apiCompatibility: 'WEB_API_V2_AND_V1',
           permissions: {

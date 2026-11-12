@@ -140,6 +140,15 @@ export type BenchmarkCategoryKey =
   | 'privacy'
   | 'documentation';
 
+export type VisualReportCategoryKey =
+  | 'all'
+  | 'database'
+  | 'security'
+  | 'auth_passwords'
+  | 'web_network'
+  | 'code_quality'
+  | 'performance';
+
 export interface CodeExecutionFlowStep {
   stepOrder: number;
   stepIndex?: number;

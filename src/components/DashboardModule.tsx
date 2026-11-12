@@ -16,8 +16,9 @@ import {
   ShieldCheck,
   Download,
 } from 'lucide-react';
-import type { BenchmarkCategoryKey, BenchmarkRun } from '../types/benchmark';
+import type { BenchmarkCategoryKey, BenchmarkRun, VisualReportCategoryKey } from '../types/benchmark';
 import { WinHoodLogo } from './WinHoodLogo';
+import { HairlineAnimatedFigure } from './HairlineAnimatedFigure';
 
 export const CATEGORY_LABELS: Record<BenchmarkCategoryKey, string> = {
   functionality: 'Funcionalidades',

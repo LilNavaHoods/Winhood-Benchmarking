@@ -50,10 +50,19 @@ interface SonarDockerStatus {
 
 interface Props {
   onNotify: (message: string, type?: 'success' | 'error') => void;
+  onRefreshRun?: () => void;
 }
 
-export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify }) => {
-  const [activeTab, setActiveTab] = useState<'docker' | 'cloud' | 'scanner' | 'hardware'>('docker');
+export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefreshRun }) => {
+  const [activeTab, setActiveTab] = useState<'docker' | 'cloud' | 'scanner' | 'hardware'>('cloud');
+  const [isHelpGuideOpen, setIsHelpGuideOpen] = useState(false);
+  const [vaultStatus, setVaultStatus] = useState<{
+    configured: boolean;
+    organization: string;
+    projectKey: string;
+    hasToken: boolean;
+    maskedToken: string | null;
+  } | null>(null);
 
   // SonarQube Docker state
   const [dockerStatus, setDockerStatus] = useState<SonarDockerStatus | null>(null);
@@ -105,6 +114,23 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify }) => {
   const [verifyingProjectId, setVerifyingProjectId] = useState<string | null>(null);
   const [exportingJsonId, setExportingJsonId] = useState<string | null>(null);
   const [exportingPs1Id, setExportingPs1Id] = useState<string | null>(null);
+  const [isExtractingDirect, setIsExtractingDirect] = useState(false);
+
+  const loadVaultStatus = async () => {
+    try {
+      const res = await fetch('/api/sonar/vault-status');
+      if (res.ok) {
+        const data = await res.json();
+        setVaultStatus(data);
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  useEffect(() => {
+    loadVaultStatus();
+  }, []);
 
   const loadSavedSonarProjects = async () => {
     setLoadingSavedProjects(true);
@@ -269,14 +295,77 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify }) => {
       URL.revokeObjectURL(downloadUrl);
 
       await loadSavedSonarProjects();
+      if (onRefreshRun) {
+        onRefreshRun();
+      }
       onNotify(
-        `Relatório sonarcloud-report-${safeKey}.json baixado diretamente da API oficial!`,
+        `Relatório sonarcloud-report-${safeKey}.json baixado e achados sincronizados com o painel!`,
         'success'
       );
     } catch {
       onNotify('Erro de rede ao baixar relatório JSON do SonarCloud.', 'error');
     } finally {
       setExportingJsonId(null);
+    }
+  };
+
+  const handleDirectOneClickExtract = async () => {
+    const targetKey = profProjectKey.trim() || vaultStatus?.projectKey || 'LilNavaHoods_Winhood-Benchmarking';
+    const targetOrg = profOrganization.trim() || vaultStatus?.organization || 'lilnavahoods';
+    const targetToken = profToken.trim() || undefined;
+
+    if (!targetToken && !vaultStatus?.hasToken) {
+      onNotify('Informe o seu Bearer Token do SonarCloud para realizar a extração 1-Clique.', 'error');
+      return;
+    }
+
+    setIsExtractingDirect(true);
+    try {
+      const res = await fetch('/api/sonar/export-full-report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          organization: targetOrg,
+          projectKey: targetKey,
+          token: targetToken,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        onNotify(data.error || 'Falha ao extrair dados do SonarCloud.', 'error');
+        return;
+      }
+
+      // 1. Download do arquivo JSON no navegador
+      const jsonStr = JSON.stringify(data.report, null, 2);
+      const blob = new Blob([jsonStr], { type: 'application/json' });
+      const safeKey = targetKey.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const downloadUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      a.download = `sonarcloud-report-${safeKey}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(downloadUrl);
+
+      // 2. Atualizar estado local e global
+      await loadVaultStatus();
+      await loadSavedSonarProjects();
+      if (onRefreshRun) {
+        onRefreshRun();
+      }
+
+      setProfToken('');
+      onNotify(
+        data.message || `Relatório baixado e ${data.syncedFindingsCount || 0} achados sincronizados automaticamente!`,
+        'success'
+      );
+    } catch {
+      onNotify('Erro de conexão ao realizar a extração do SonarCloud.', 'error');
+    } finally {
+      setIsExtractingDirect(false);
     }
   };
 
@@ -739,18 +828,75 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify }) => {
           </button>
         </div>
 
+        {/* Guia Passo a Passo de Token, Organization e Project Key (Retraído por padrão) */}
+        <div className="rounded-xl border border-slate-800 bg-slate-950/60 overflow-hidden">
+          <button
+            type="button"
+            onClick={() => setIsHelpGuideOpen((prev) => !prev)}
+            className="w-full px-5 py-3.5 flex items-center justify-between text-left bg-slate-900/60 hover:bg-slate-900 transition-colors cursor-pointer"
+          >
+            <div className="flex items-center gap-2.5">
+              <span className="w-2 h-2 rounded-full bg-[#31d6c4]" />
+              <span className="text-xs font-bold text-white">
+                Guia Rápido: Onde encontrar Token, Organization e Project Key no SonarCloud?
+              </span>
+            </div>
+            <span className="text-xs font-mono text-[#31d6c4]">
+              {isHelpGuideOpen ? 'Ocultar Guia ▲' : 'Ver Passo a Passo ▼'}
+            </span>
+          </button>
+
+          {isHelpGuideOpen && (
+            <div className="p-5 grid grid-cols-1 md:grid-cols-3 gap-4 text-xs text-slate-300 border-t border-slate-800 bg-slate-950/80">
+              <div className="space-y-1.5 p-3 rounded-lg bg-slate-900/60 border border-slate-800/80">
+                <div className="font-bold text-[#31d6c4] flex items-center gap-1.5">
+                  <span>1. Bearer Token</span>
+                </div>
+                <p className="text-slate-400 leading-relaxed text-[11px]">
+                  No SonarCloud (<a href="https://sonarcloud.io" target="_blank" rel="noreferrer" className="text-[#31d6c4] hover:underline">sonarcloud.io</a>), clique no seu <strong>avatar no canto superior direito</strong> → <strong>My Account</strong> → aba <strong>Security</strong> → em <em>Generate Tokens</em>, insira um nome (ex.: <code className="text-white">winhood-cli</code>) e clique em <strong>Generate</strong>.
+                </p>
+              </div>
+
+              <div className="space-y-1.5 p-3 rounded-lg bg-slate-900/60 border border-slate-800/80">
+                <div className="font-bold text-[#31d6c4] flex items-center gap-1.5">
+                  <span>2. Organization Key</span>
+                </div>
+                <p className="text-slate-400 leading-relaxed text-[11px]">
+                  Acesse o menu de organizações no topo direito (<strong>My Organizations</strong>) e copie a <strong>Key</strong> oficial exibida abaixo do nome da organização (ex.: <code className="text-white">lilnavahoods</code>).
+                </p>
+              </div>
+
+              <div className="space-y-1.5 p-3 rounded-lg bg-slate-900/60 border border-slate-800/80">
+                <div className="font-bold text-[#31d6c4] flex items-center gap-1.5">
+                  <span>3. Project Key</span>
+                </div>
+                <p className="text-slate-400 leading-relaxed text-[11px]">
+                  Abra seu projeto no SonarCloud → menu lateral inferior esquerdo <strong>Information</strong> → copie o campo <strong>Project Key</strong> exato (ex.: <code className="text-white">LilNavaHoods_Winhood-Benchmarking</code>).
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+
         {/* Formulário de Configuração & Validade do Token */}
         <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-5 space-y-4">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <span className="text-xs font-bold text-slate-200 flex items-center gap-2">
               <KeyRound className="w-4 h-4 text-[#31d6c4]" />
               {editingProfileId
                 ? `Configurar / Atualizar Projeto Selecionado (${profProjectKey || 'Projeto'})`
-                : 'Adicionar Novo Projeto SonarCloud / SonarQube'}
+                : 'Extração 1-Clique & Configuração do SonarCloud'}
             </span>
-            <span className="text-[11px] font-mono text-slate-400">
-              Criptografia em Repouso: AES-256-GCM
-            </span>
+            <div className="flex items-center gap-3">
+              {vaultStatus?.hasToken && (
+                <span className="px-2.5 py-1 rounded text-[11px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                  Cofre Ativo: Token Gravado com Sucesso
+                </span>
+              )}
+              <span className="text-[11px] font-mono text-slate-400">
+                Criptografia em Repouso: AES-256-GCM
+              </span>
+            </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -766,25 +912,8 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify }) => {
                 type="text"
                 value={profName}
                 onChange={(e) => setProfName(e.target.value)}
-                placeholder="Informe o nome do projeto..."
+                placeholder="Ex.: WinHood Benchmarking Oficial"
                 className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-white focus:outline-none focus:border-[#31d6c4]"
-              />
-            </div>
-
-            <div>
-              <label
-                htmlFor="sonar-prof-key"
-                className="block text-xs font-semibold text-slate-300 mb-1"
-              >
-                Project Key (`sonar.projectKey`)
-              </label>
-              <input
-                id="sonar-prof-key"
-                type="text"
-                value={profProjectKey}
-                onChange={(e) => setProfProjectKey(e.target.value)}
-                placeholder="Informe o Project Key..."
-                className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-[#31d6c4]"
               />
             </div>
 
@@ -800,7 +929,24 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify }) => {
                 type="text"
                 value={profOrganization}
                 onChange={(e) => setProfOrganization(e.target.value)}
-                placeholder="Informe a Organization..."
+                placeholder="lilnavahoods"
+                className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-[#31d6c4]"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="sonar-prof-key"
+                className="block text-xs font-semibold text-slate-300 mb-1"
+              >
+                Project Key (`sonar.projectKey`)
+              </label>
+              <input
+                id="sonar-prof-key"
+                type="text"
+                value={profProjectKey}
+                onChange={(e) => setProfProjectKey(e.target.value)}
+                placeholder="LilNavaHoods_Winhood-Benchmarking"
                 className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-[#31d6c4]"
               />
             </div>
@@ -917,28 +1063,26 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify }) => {
 
           <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
             <span className="text-[11px] text-slate-400">
-              Preencha os campos acima para salvar o projeto ou baixar o script PowerShell (`.ps1`) de análise completa.
+              Preencha os campos para baixar o JSON completo do SonarCloud ou salvar o projeto com segurança no cofre criptografado.
             </span>
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                disabled={exportingPs1Id === 'form-direct'}
-                onClick={() => void handleDownloadFormPs1Script()}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800 transition-colors cursor-pointer disabled:opacity-50"
+                disabled={isExtractingDirect}
+                onClick={() => void handleDirectOneClickExtract()}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] transition-colors cursor-pointer disabled:opacity-50 shadow-sm"
               >
-                <FileCode2 className="w-4 h-4 text-[#31d6c4]" />
-                Baixar Script .PS1 Completo
+                <Download className="w-4 h-4" />
+                {isExtractingDirect ? 'Extraindo e Sincronizando...' : 'Extrair JSON Completo (1-Clique)'}
               </button>
               <button
                 type="button"
                 disabled={savingProfile}
                 onClick={() => void handleSaveSonarProjectProfile()}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] transition-colors cursor-pointer disabled:opacity-50"
+                className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800 transition-colors cursor-pointer disabled:opacity-50"
               >
-                <ShieldCheck className="w-4 h-4" />
-                {savingProfile
-                  ? 'Salvando e Validando...'
-                  : 'Salvar Perfil de Projeto & Criptografar Token'}
+                <ShieldCheck className="w-4 h-4 text-[#31d6c4]" />
+                {savingProfile ? 'Salvando...' : 'Salvar no Cofre Local'}
               </button>
             </div>
           </div>

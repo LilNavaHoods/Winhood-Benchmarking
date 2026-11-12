@@ -16,6 +16,27 @@ export class ApiHttpError extends Error {
   }
 }
 
+export function enforceStrictHttpsUrl(rawUrl: string): string {
+  const trimmed = rawUrl.trim();
+  if (trimmed.startsWith('/') || trimmed.startsWith('./')) {
+    return trimmed;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    const isLocalhost =
+      parsed.hostname === 'localhost' ||
+      parsed.hostname === '127.0.0.1' ||
+      parsed.hostname === '0.0.0.0';
+    if (!isLocalhost && parsed.protocol === 'http:') {
+      parsed.protocol = 'https:';
+      return parsed.toString();
+    }
+    return parsed.toString();
+  } catch {
+    return trimmed;
+  }
+}
+
 /**
  * Helper centralizado de requisição HTTP com AbortController e tratamento determinístico de erros.
  */
@@ -24,12 +45,13 @@ export async function apiFetchJson<T>(
   options?: ApiFetchOptions,
   timeoutMs: number = 15000
 ): Promise<T> {
+  const secureUrl = enforceStrictHttpsUrl(url);
   const effectiveTimeout = options?.timeoutMs ?? timeoutMs;
   const controller = new AbortController();
   const timerId = globalThis.setTimeout(() => controller.abort(), effectiveTimeout);
 
   try {
-    const response = await fetch(url, {
+    const response = await fetch(secureUrl, {
       ...options,
       signal: options?.signal ?? controller.signal,
       headers: {

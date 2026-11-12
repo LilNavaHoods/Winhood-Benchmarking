@@ -15,8 +15,9 @@ import {
   ShieldAlert,
   ShieldCheck,
 } from 'lucide-react';
-import type { BenchmarkRun, NormalizedFinding, SeverityLevel } from '../types/benchmark';
+import type { BenchmarkRun, NormalizedFinding, SeverityLevel, VisualReportCategoryKey } from '../types/benchmark';
 import { CATEGORY_LABELS } from './DashboardModule';
+import { HairlineAnimatedFigure } from './HairlineAnimatedFigure';
 
 interface FindingsAndDevSecOpsModuleProps {
   latestRun: BenchmarkRun | null;
@@ -32,6 +33,7 @@ export const FindingsAndDevSecOpsModule: React.FC<FindingsAndDevSecOpsModuleProp
   const [selectedSoftwareId, setSelectedSoftwareId] = useState<string>('ALL');
   const [selectedSeverity, setSelectedSeverity] = useState<string>('ALL');
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
+  const [selectedVisualCat, setSelectedVisualCat] = useState<VisualReportCategoryKey>('all');
   const [selectedToolId, setSelectedToolId] = useState<string>('ALL');
   const [selectedValidationStatus, setSelectedValidationStatus] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -63,6 +65,48 @@ export const FindingsAndDevSecOpsModule: React.FC<FindingsAndDevSecOpsModuleProp
       if (selectedSoftwareId !== 'ALL' && f.softwareId !== selectedSoftwareId) return false;
       if (selectedSeverity !== 'ALL' && f.severity !== selectedSeverity) return false;
       if (selectedCategory !== 'ALL' && f.category !== selectedCategory) return false;
+
+      // Filtro visual dedicado por categoria (Seção 8 e 10)
+      if (selectedVisualCat === 'database') {
+        const isDb =
+          f.category === 'DATABASE' ||
+          f.filePath.toLowerCase().includes('sql') ||
+          (f.originalRuleId || '').toLowerCase().includes('sql');
+        if (!isDb) return false;
+      } else if (selectedVisualCat === 'security') {
+        const isSec =
+          f.category === 'SAST' ||
+          f.category === 'SECRETS' ||
+          f.category === 'SCA' ||
+          f.category === 'DAST';
+        if (!isSec) return false;
+      } else if (selectedVisualCat === 'auth_passwords') {
+        const isAuth =
+          f.category === 'SECRETS' ||
+          f.title.toLowerCase().includes('password') ||
+          f.title.toLowerCase().includes('token') ||
+          f.title.toLowerCase().includes('auth') ||
+          f.title.toLowerCase().includes('secret');
+        if (!isAuth) return false;
+      } else if (selectedVisualCat === 'web_network') {
+        const isNet =
+          f.filePath.toLowerCase().includes('http') ||
+          f.filePath.toLowerCase().includes('api') ||
+          f.title.toLowerCase().includes('cors') ||
+          f.title.toLowerCase().includes('tls') ||
+          f.title.toLowerCase().includes('network');
+        if (!isNet) return false;
+      } else if (selectedVisualCat === 'code_quality') {
+        if (f.category !== 'CODE_QUALITY' && f.category !== 'ARCHITECTURE') return false;
+      } else if (selectedVisualCat === 'performance') {
+        const isPerf =
+          f.title.toLowerCase().includes('perf') ||
+          f.title.toLowerCase().includes('memory') ||
+          f.title.toLowerCase().includes('cpu') ||
+          f.description.toLowerCase().includes('performance') ||
+          f.category === 'ARCHITECTURE';
+        if (!isPerf) return false;
+      }
       if (selectedToolId !== 'ALL' && f.toolId !== selectedToolId) return false;
       if (selectedValidationStatus === 'OPEN_ACTIVE') {
         if (
@@ -321,6 +365,105 @@ export const FindingsAndDevSecOpsModule: React.FC<FindingsAndDevSecOpsModuleProp
             </div>
           </div>
         ))}
+      </div>
+
+      {/* Seletor Visual de Categorias com Figuras Hairline (Seção 8) */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+        <button
+          type="button"
+          onClick={() => setSelectedVisualCat('all')}
+          className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer flex items-center gap-2 ${
+            selectedVisualCat === 'all'
+              ? 'bg-white dark:bg-[#131a24] border-[#10b981] shadow-sm'
+              : 'border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-[#090d13] hover:border-slate-300'
+          }`}
+        >
+          <HairlineAnimatedFigure type="vault" size={30} color="#10b981" />
+          <div className="min-w-0">
+            <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">Todos</div>
+            <div className="text-[10px] text-slate-500 font-mono">Consolidado</div>
+          </div>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setSelectedVisualCat('database')}
+          className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer flex items-center gap-2 ${
+            selectedVisualCat === 'database'
+              ? 'bg-white dark:bg-[#131a24] border-[#3b82f6] shadow-sm'
+              : 'border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-[#090d13] hover:border-slate-300'
+          }`}
+        >
+          <HairlineAnimatedFigure type="lockers" size={30} color="#3b82f6" />
+          <div className="min-w-0">
+            <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">Banco / DB</div>
+            <div className="text-[10px] text-slate-500 font-mono">Storage & SQL</div>
+          </div>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setSelectedVisualCat('security')}
+          className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer flex items-center gap-2 ${
+            selectedVisualCat === 'security'
+              ? 'bg-white dark:bg-[#131a24] border-[#10b981] shadow-sm'
+              : 'border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-[#090d13] hover:border-slate-300'
+          }`}
+        >
+          <HairlineAnimatedFigure type="vault" size={30} color="#10b981" />
+          <div className="min-w-0">
+            <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">Segurança</div>
+            <div className="text-[10px] text-slate-500 font-mono">DevSecOps</div>
+          </div>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setSelectedVisualCat('auth_passwords')}
+          className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer flex items-center gap-2 ${
+            selectedVisualCat === 'auth_passwords'
+              ? 'bg-white dark:bg-[#131a24] border-[#f59e0b] shadow-sm'
+              : 'border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-[#090d13] hover:border-slate-300'
+          }`}
+        >
+          <HairlineAnimatedFigure type="padlock" size={30} color="#f59e0b" />
+          <div className="min-w-0">
+            <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">Senhas & IAM</div>
+            <div className="text-[10px] text-slate-500 font-mono">Segredos</div>
+          </div>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setSelectedVisualCat('web_network')}
+          className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer flex items-center gap-2 ${
+            selectedVisualCat === 'web_network'
+              ? 'bg-white dark:bg-[#131a24] border-[#06b6d4] shadow-sm'
+              : 'border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-[#090d13] hover:border-slate-300'
+          }`}
+        >
+          <HairlineAnimatedFigure type="router" size={30} color="#06b6d4" />
+          <div className="min-w-0">
+            <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">Web & APIs</div>
+            <div className="text-[10px] text-slate-500 font-mono">TLS / Rede</div>
+          </div>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setSelectedVisualCat('code_quality')}
+          className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer flex items-center gap-2 ${
+            selectedVisualCat === 'code_quality'
+              ? 'bg-white dark:bg-[#131a24] border-[#8b5cf6] shadow-sm'
+              : 'border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-[#090d13] hover:border-slate-300'
+          }`}
+        >
+          <HairlineAnimatedFigure type="layers" size={30} color="#8b5cf6" />
+          <div className="min-w-0">
+            <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">Qualidade</div>
+            <div className="text-[10px] text-slate-500 font-mono">SAST / Smells</div>
+          </div>
+        </button>
       </div>
 
       {/* Filters Toolbar (Frente 3.4: Combinable Filters + Validation Status + Dynamic Counters) */}

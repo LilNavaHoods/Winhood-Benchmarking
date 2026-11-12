@@ -83,6 +83,7 @@ import { SonarQubeInstallationManager } from './src/integrations/sonarqube/Sonar
 import { GitarAdapter } from './src/integrations/gitar/GitarAdapter';
 import { GitarInstallationHealth } from './src/integrations/gitar/GitarInstallationHealth';
 import { SonarAnalysisWorker } from './src/workers/SonarAnalysisWorker';
+import { SonarResultParser } from './src/integrations/sonarqube/SonarResultParser';
 import {
   ExternalReportImportWorker,
   type SarifExternalReportPayload,
@@ -5037,6 +5038,56 @@ async function startServer() {
         facets: facetsList,
       };
 
+      // Sincronização automática com o estado global da avaliação ativa (Seção 10)
+      if (allIssues.length > 0) {
+        const targetRun = db.runs[0];
+        if (targetRun) {
+          const parsedRecords = SonarResultParser.parseIssuesAndHotspots({
+            analysisId: `sonar-sync-${Date.now()}`,
+            projectKey: proj.projectKey,
+            softwareId: targetRun.softwareIds[0] || 'sw-sonarcloud-imported',
+            softwareName: targetRun.scoreCards[0]?.softwareName || proj.name || proj.projectKey,
+            rawIssues: allIssues.map((iss) => ({
+              key: iss.key,
+              rule: iss.rule,
+              severity: iss.severity || 'MAJOR',
+              component: iss.component || '',
+              project: iss.project || proj.projectKey,
+              line: iss.line,
+              message: iss.message || '',
+              effort: iss.effort,
+              type: iss.type || 'CODE_SMELL',
+              externalRuleEngine: iss.externalRuleEngine,
+            })),
+            rawHotspots: allHotspots.map((hs) => ({
+              key: hs.key,
+              component: hs.component || '',
+              project: hs.project || proj.projectKey,
+              securityCategory: hs.securityCategory || 'OTHERS',
+              vulnerabilityProbability: hs.vulnerabilityProbability || 'MEDIUM',
+              status: hs.status || 'TO_REVIEW',
+              resolution: hs.resolution,
+              line: hs.line,
+              message: hs.message || '',
+              ruleKey: hs.ruleKey,
+            })),
+          });
+
+          const normalizedNewFindings = SonarResultParser.mapSonarIssuesToNormalizedFindings(
+            parsedRecords,
+            targetRun.softwareIds[0] || 'sw-sonarcloud-imported',
+            targetRun.scoreCards[0]?.softwareName || proj.name || proj.projectKey
+          );
+
+          // Mesclar achados sem duplicidade
+          const existingIds = new Set(targetRun.findings.map((f) => f.id));
+          const toAdd = normalizedNewFindings.filter((f) => !existingIds.has(f.id));
+          targetRun.findings = [...toAdd, ...targetRun.findings];
+          recalculateBenchmarkRunScoreCards(targetRun, db.softwares);
+          saveDatabase(db);
+        }
+      }
+
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader(
@@ -5047,6 +5098,263 @@ async function startServer() {
     } catch (err: any) {
       return res.status(502).json({
         error: `Falha de comunicação ao exportar análise completa de ${safeOrigin}: ${err?.message || 'Erro de conexão'}.`,
+      });
+    }
+  });
+
+  // 4.1 Endpoint de Recuperação Segura de Sessão do Cofre (GET /api/sonar/vault-status)
+  app.get('/api/sonar/vault-status', (_req, res) => {
+    if (!Array.isArray(db.savedSonarProjects)) {
+      db.savedSonarProjects = [];
+    }
+    const defaultProj = db.savedSonarProjects[0] || null;
+    const hasToken = Boolean(defaultProj?.hasToken && defaultProj?.encryptedToken);
+    res.json({
+      configured: Boolean(defaultProj),
+      id: defaultProj?.id || null,
+      name: defaultProj?.name || null,
+      organization: defaultProj?.organization || '',
+      projectKey: defaultProj?.projectKey || '',
+      serverUrl: defaultProj?.serverUrl || 'https://sonarcloud.io',
+      platform: defaultProj?.platform || 'SONARCLOUD',
+      hasToken,
+      maskedToken: hasToken ? '••••••••' : null,
+      lastVerifiedAt: defaultProj?.lastVerifiedAt || null,
+      lastVerificationStatus: defaultProj?.lastVerificationStatus || 'NOT_CONFIGURED',
+      lastExportedAt: defaultProj?.lastExportedAt || null,
+    });
+  });
+
+  // 4.2 Endpoint de Extração Silenciosa em 1-Clique (POST /api/sonar/export-full-report)
+  app.post('/api/sonar/export-full-report', async (req, res) => {
+    const { organization, projectKey, token } = req.body as {
+      organization?: string;
+      projectKey?: string;
+      token?: string;
+    };
+
+    if (!Array.isArray(db.savedSonarProjects)) {
+      db.savedSonarProjects = [];
+    }
+    const defaultProj = db.savedSonarProjects[0] || null;
+
+    const effectiveOrg = (organization || defaultProj?.organization || '').trim();
+    const effectiveKey = (projectKey || defaultProj?.projectKey || '').trim();
+    let effectiveToken = (token || '').trim();
+
+    if (!effectiveToken && defaultProj?.encryptedToken) {
+      effectiveToken = SonarQubeConnection.decryptToken(defaultProj.encryptedToken) || '';
+    }
+
+    if (!effectiveKey) {
+      return res.status(400).json({ error: 'Project Key não informado.' });
+    }
+    if (!effectiveToken) {
+      return res.status(400).json({
+        error:
+          'Token do SonarCloud não configurado. Forneça o token ou salve-o com segurança no cofre.',
+      });
+    }
+
+    const safeOrigin = 'https://sonarcloud.io';
+    const reqHeaders = {
+      Accept: 'application/json',
+      Authorization: `Bearer ${effectiveToken}`,
+      'User-Agent': 'WinHood-SonarCloudSilentExtractor/2.0',
+    };
+
+    try {
+      // 1. Quality Gate
+      let qualityGate: any = null;
+      try {
+        const qgRes = await fetch(
+          `${safeOrigin}/api/qualitygates/project_status?projectKey=${encodeURIComponent(effectiveKey)}`,
+          { headers: reqHeaders }
+        );
+        if (qgRes.ok) {
+          const qgJson = await qgRes.json();
+          qualityGate = qgJson.projectStatus || qgJson;
+        }
+      } catch {
+        // Fallback
+      }
+
+      // 2. Component Measures
+      let measures: any[] = [];
+      const measuresMap: Record<string, string | number> = {};
+      try {
+        const mKeys =
+          'bugs,vulnerabilities,security_hotspots,code_smells,coverage,duplicated_lines_density,ncloc,sqale_index,sqale_rating,reliability_rating,security_rating,security_review_rating,alert_status,complexity,cognitive_complexity';
+        const mRes = await fetch(
+          `${safeOrigin}/api/measures/component?component=${encodeURIComponent(effectiveKey)}&metricKeys=${mKeys}`,
+          { headers: reqHeaders }
+        );
+        if (mRes.ok) {
+          const mJson = await mRes.json();
+          measures = mJson.component?.measures || [];
+          for (const m of measures) {
+            measuresMap[m.metric] = m.value ?? '';
+          }
+        }
+      } catch {
+        // Fallback
+      }
+
+      // 3. Hotspots
+      let hotspots: any[] = [];
+      try {
+        const hsRes = await fetch(
+          `${safeOrigin}/api/hotspots/search?projectKey=${encodeURIComponent(effectiveKey)}&ps=500`,
+          { headers: reqHeaders }
+        );
+        if (hsRes.ok) {
+          const hsJson = await hsRes.json();
+          hotspots = hsJson.hotspots || [];
+        }
+      } catch {
+        // Fallback
+      }
+
+      // 4. Issues Paginadas
+      const allIssues: any[] = [];
+      let page = 1;
+      let totalIssues = 0;
+      do {
+        const orgParam = effectiveOrg ? `&organization=${encodeURIComponent(effectiveOrg)}` : '';
+        const issRes = await fetch(
+          `${safeOrigin}/api/issues/search?componentKeys=${encodeURIComponent(effectiveKey)}${orgParam}&ps=500&p=${page}&additionalFields=_all&facets=severities,types,rules,statuses`,
+          { headers: reqHeaders }
+        );
+        if (!issRes.ok) break;
+        const issJson = await issRes.json();
+        totalIssues = Number(issJson.total ?? (issJson.issues || []).length);
+        const batch = issJson.issues || [];
+        allIssues.push(...batch);
+        if (batch.length === 0) break;
+        page++;
+      } while (allIssues.length < totalIssues && page <= 20);
+
+      const nowIso = new Date().toISOString();
+      const reportPayload = {
+        schemaVersion: '1.0.0',
+        extractedAt: nowIso,
+        platform: 'SONARCLOUD',
+        serverUrl: safeOrigin,
+        organization: effectiveOrg,
+        projectKey: effectiveKey,
+        qualityGate,
+        measures,
+        measuresMap,
+        hotspots,
+        totalIssues: allIssues.length,
+        totalHotspots: hotspots.length,
+        issues: allIssues,
+      };
+
+      // Atualizar / salvar perfil no cofre caso ainda não exista
+      db.savedSonarProjects = db.savedSonarProjects || [];
+      const existingProfile = db.savedSonarProjects.find((p) => p.projectKey === effectiveKey);
+      if (!existingProfile) {
+        const newProfile: SavedSonarProjectProfile = {
+          id: `sonar-proj-${crypto.randomUUID().slice(0, 8)}`,
+          name: effectiveKey,
+          platform: 'SONARCLOUD',
+          serverUrl: safeOrigin,
+          organization: effectiveOrg,
+          projectKey: effectiveKey,
+          encryptedToken: SonarQubeConnection.encryptToken(effectiveToken),
+          maskedToken: SonarQubeConnection.maskToken(effectiveToken),
+          hasToken: true,
+          tokenCreatedAt: nowIso,
+          tokenValidityDaysPolicy: 90,
+          tokenExpiresAt: null,
+          lastVerifiedAt: nowIso,
+          lastVerificationStatus: 'VALID',
+          lastExportedAt: nowIso,
+          lastExportedIssuesCount: allIssues.length,
+        };
+        db.savedSonarProjects.unshift(newProfile);
+      } else {
+        if (token) {
+          existingProfile.encryptedToken = SonarQubeConnection.encryptToken(token);
+          existingProfile.maskedToken = SonarQubeConnection.maskToken(token);
+          existingProfile.hasToken = true;
+        }
+        existingProfile.lastVerifiedAt = nowIso;
+        existingProfile.lastVerificationStatus = 'VALID';
+        existingProfile.lastExportedAt = nowIso;
+        existingProfile.lastExportedIssuesCount = allIssues.length;
+      }
+
+      // Propagação automática para o BenchmarkRun ativo (Seção 10)
+      let syncedFindingsCount = 0;
+      if (allIssues.length > 0) {
+        const targetRun = db.runs[0];
+        if (targetRun) {
+          const parsedRecords = SonarResultParser.parseIssuesAndHotspots({
+            analysisId: `sonarcloud-live-${Date.now()}`,
+            projectKey: effectiveKey,
+            softwareId: targetRun.softwareIds[0] || 'sw-sonarcloud-imported',
+            softwareName: targetRun.scoreCards[0]?.softwareName || effectiveKey,
+            rawIssues: allIssues.map((iss) => ({
+              key: iss.key,
+              rule: iss.rule,
+              severity: iss.severity || 'MAJOR',
+              component: iss.component || '',
+              project: iss.project || effectiveKey,
+              line: iss.line,
+              message: iss.message || '',
+              effort: iss.effort,
+              type: iss.type || 'CODE_SMELL',
+              externalRuleEngine: iss.externalRuleEngine,
+            })),
+            rawHotspots: hotspots.map((hs) => ({
+              key: hs.key,
+              component: hs.component || '',
+              project: hs.project || effectiveKey,
+              securityCategory: hs.securityCategory || 'OTHERS',
+              vulnerabilityProbability: hs.vulnerabilityProbability || 'MEDIUM',
+              status: hs.status || 'TO_REVIEW',
+              resolution: hs.resolution,
+              line: hs.line,
+              message: hs.message || '',
+              ruleKey: hs.ruleKey,
+            })),
+          });
+
+          const normalized = SonarResultParser.mapSonarIssuesToNormalizedFindings(
+            parsedRecords,
+            targetRun.softwareIds[0] || 'sw-sonarcloud-imported',
+            targetRun.scoreCards[0]?.softwareName || effectiveKey
+          );
+
+          const existingIds = new Set(targetRun.findings.map((f) => f.id));
+          const toAdd = normalized.filter((f) => !existingIds.has(f.id));
+          targetRun.findings = [...toAdd, ...targetRun.findings];
+          syncedFindingsCount = toAdd.length;
+          recalculateBenchmarkRunScoreCards(targetRun, db.softwares);
+        }
+      }
+
+      appendAuditLog(
+        db,
+        'SONARCLOUD_SILENT_FULL_EXTRACTION',
+        'SONAR_PROJECT_PROFILE',
+        effectiveKey,
+        `Extração 1-Clique do SonarCloud concluída: ${allIssues.length} issues, ${hotspots.length} hotspots, ${measures.length} métricas. Sincronizados ${syncedFindingsCount} novos achados.`
+      );
+      saveDatabase(db);
+
+      return res.json({
+        ok: true,
+        report: reportPayload,
+        syncedFindingsCount,
+        latestRun: db.runs[0] || null,
+        message: `Relatório do SonarCloud (${effectiveKey}) extraído com sucesso! ${allIssues.length} issues coletadas e sincronizadas.`,
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        error: `Falha na extração de dados do SonarCloud: ${err?.message || 'Erro interno'}.`,
       });
     }
   });

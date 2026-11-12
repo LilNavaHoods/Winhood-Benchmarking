@@ -17,6 +17,37 @@ export class SonarQubeVersionManager {
   public static readonly OFFICIAL_DOCS_WEB_API =
     'https://docs.sonarsource.com/sonarqube-community-build/extension-guide/web-api';
 
+  public static isSonarCloudServer(serverUrl?: string): boolean {
+    if (!serverUrl) return false;
+    const lower = serverUrl.toLowerCase().trim();
+    return (
+      lower.includes('sonarcloud.io') ||
+      lower.includes('sonarqube.us') ||
+      lower.includes('sonarcloud')
+    );
+  }
+
+  public static isSupportedVersion(
+    version: string | null | undefined,
+    isCloud = false
+  ): { supported: boolean; reason?: string } {
+    if (!version) {
+      return { supported: false, reason: 'Versão do Sonar não informada.' };
+    }
+    const clean = version.trim();
+    if (isCloud || clean.startsWith('8.0.0') || clean.startsWith('8.0.')) {
+      return { supported: true };
+    }
+    const major = Number.parseInt(clean.split('.')[0], 10);
+    if (!Number.isNaN(major) && major >= 9) {
+      return { supported: true };
+    }
+    return {
+      supported: false,
+      reason: `Versão do SonarQube (${clean}) não é suportada. Utilize SonarQube Community Build 24.12+ / 26.11+ ou 9.9+ LTS.`,
+    };
+  }
+
   public static async discoverLatestOfficialVersions(): Promise<SonarVersionMetadata[]> {
     const nowIso = new Date().toISOString();
     const arch = os.arch();

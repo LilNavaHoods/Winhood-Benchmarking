@@ -574,35 +574,16 @@ export default function App() {
           </nav>
         </div>
 
-        {/* RBAC Role Switcher Panel in Sidebar Footer */}
+        {/* User Status in Sidebar Footer (Acesso Completo ADMIN por Padrão) */}
         {!sidebarCollapsed && (
-          <div className="p-4 border-t border-slate-200 dark:border-slate-800/80 space-y-2.5 text-xs">
+          <div className="p-4 border-t border-slate-200 dark:border-slate-800/80 space-y-1.5 text-xs">
             <div className="flex items-center gap-2 text-slate-700 dark:text-slate-300 font-semibold">
               <UserCheck className="w-4 h-4 text-[#31d6c4] shrink-0" />
               <span className="truncate">{currentUser.name}</span>
             </div>
-            <div>
-              <label
-                htmlFor="rbac-role-select"
-                className="block text-xs text-slate-500 dark:text-slate-400 mb-1"
-              >
-                Controle de Acesso (RBAC Ativo)
-              </label>
-              <select
-                id="rbac-role-select"
-                value={currentUser.role}
-                onChange={(e) =>
-                  void handleSwitchRole(
-                    e.target.value as 'ADMIN' | 'SECURITY_LEAD' | 'AUDITOR' | 'QA_ENGINEER'
-                  )
-                }
-                className="w-full rounded-md border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-2.5 py-1.5 text-xs font-mono text-slate-900 dark:text-slate-100"
-              >
-                <option value="ADMIN">ADMIN (Acesso Total)</option>
-                <option value="SECURITY_LEAD">SECURITY_LEAD (DevSecOps)</option>
-                <option value="QA_ENGINEER">QA_ENGINEER (Testes &amp; Runs)</option>
-                <option value="AUDITOR">AUDITOR (Somente Leitura)</option>
-              </select>
+            <div className="flex items-center gap-1.5 text-[11px] font-mono text-emerald-600 dark:text-[#31d6c4]">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#31d6c4]" />
+              <span>Acesso Total Irrestrito (ADMIN)</span>
             </div>
           </div>
         )}
