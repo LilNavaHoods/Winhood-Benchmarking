@@ -33,17 +33,21 @@ export const AnalysisProgressHeaderBanner: React.FC<AnalysisProgressHeaderBanner
   // Polling em tempo real se a corrida estiver com status RUNNING
   useEffect(() => {
     if (!activeRun || activeRun.status !== 'RUNNING') return;
+    const safeRunId = activeRun.id;
+    if (!/^[a-zA-Z0-9_-]+$/.test(safeRunId)) return;
 
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`/api/benchmark-runs/${activeRun.id}/progress`);
+        const res = await fetch(
+          `/api/benchmark-runs/${encodeURIComponent(safeRunId)}/progress`
+        );
         if (res.ok) {
           const data = await res.json();
           if (data.progress) {
             setLocalProgress(data.progress);
           }
           if (data.status && data.status !== 'RUNNING') {
-            onRefresh?.();
+            void onRefresh?.();
           }
         }
       } catch {

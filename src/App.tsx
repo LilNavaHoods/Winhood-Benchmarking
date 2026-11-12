@@ -14,7 +14,10 @@ import {
   FolderGit2,
   Github,
   LayoutDashboard,
+  Monitor,
   Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
   Play,
   ShieldAlert,
   ShieldCheck,
@@ -98,11 +101,17 @@ const GitHubSearchModal = lazy(() =>
     default: m.GitHubSearchModal,
   }))
 );
+const HardwareAndDisplayBenchmarkModule = lazy(() =>
+  import('./components/HardwareAndDisplayBenchmarkModule').then((m) => ({
+    default: m.HardwareAndDisplayBenchmarkModule,
+  }))
+);
 
 type NavSection = AppNavSection;
 
 export default function App() {
   const [activeNav, setActiveNav] = useState<NavSection>('dashboard');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
   const [guideChapterId, setGuideChapterId] = useState<string>('quickstart');
   const [darkMode, setDarkMode] = useState<boolean>(true);
   const [loading, setLoading] = useState<boolean>(true);
@@ -298,8 +307,10 @@ export default function App() {
       }
     };
 
-    checkActiveProgress();
-    const interval = setInterval(checkActiveProgress, activeRunningRun ? 1200 : 3500);
+    void checkActiveProgress();
+    const interval = setInterval(() => {
+      void checkActiveProgress();
+    }, activeRunningRun ? 1200 : 3500);
     return () => clearInterval(interval);
   }, [activeRunningRun, fetchAllBackendState]);
 
@@ -477,6 +488,12 @@ export default function App() {
         },
         { id: 'findings', stepBadge: '4B', label: 'Qualidade & DevSecOps', icon: ShieldAlert },
         { id: 'arch_qa_perf', stepBadge: '4C', label: 'Arquitetura, QA & Perf', icon: Cpu },
+        {
+          id: 'hardware_benchmark',
+          stepBadge: '4D',
+          label: 'Hardware, GPU & Monitores',
+          icon: Monitor,
+        },
       ],
     },
     {
@@ -495,41 +512,85 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex flex-col lg:flex-row bg-slate-50 text-slate-900 dark:bg-[#080b10] dark:text-slate-100">
-      {/* Sidebar Navigation (WinHood Architecture) */}
-      <aside className="w-full lg:w-64 shrink-0 border-b lg:border-b-0 lg:border-r border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0c1017] flex flex-col justify-between">
+      {/* Sidebar Navigation (WinHood Architecture - Collapsible w-64 / w-16) */}
+      <aside
+        className={`w-full ${
+          sidebarCollapsed ? 'lg:w-16' : 'lg:w-64'
+        } shrink-0 border-b lg:border-b-0 lg:border-r border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0c1017] flex flex-col justify-between transition-all duration-200`}
+      >
         <div>
           {/* Brand Header */}
-          <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800/80 flex items-center justify-between">
+          <div
+            className={`px-3.5 py-4 border-b border-slate-200 dark:border-slate-800/80 flex items-center ${
+              sidebarCollapsed ? 'justify-center' : 'justify-between'
+            }`}
+          >
             <button
               type="button"
               onClick={() => setActiveNav('dashboard')}
               className="text-left flex items-center gap-2.5 cursor-pointer"
+              title="WinHood Analyzer — Ir para o Dashboard Central"
             >
-              <div className="w-7 h-7 rounded-md bg-[#31d6c4] text-slate-950 font-mono font-bold text-sm flex items-center justify-center">
+              <div className="w-7 h-7 rounded-md bg-[#31d6c4] text-slate-950 font-mono font-bold text-sm flex items-center justify-center shrink-0">
                 WH
               </div>
-              <span className="text-base font-bold tracking-tight text-slate-900 dark:text-slate-100 whitespace-nowrap">
-                WinHood Analyzer
-              </span>
+              {!sidebarCollapsed && (
+                <span className="text-base font-bold tracking-tight text-slate-900 dark:text-slate-100 whitespace-nowrap">
+                  WinHood Analyzer
+                </span>
+              )}
             </button>
 
-            <button
-              type="button"
-              onClick={() => setDarkMode((d) => !d)}
-              aria-label={darkMode ? 'Ativar Tema Claro' : 'Ativar Tema Escuro'}
-              className="p-2 rounded-lg border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:border-[#31d6c4] transition-colors cursor-pointer"
-            >
-              {darkMode ? <Sun className="w-4 h-4 text-[#31d6c4]" /> : <Moon className="w-4 h-4" />}
-            </button>
+            {!sidebarCollapsed && (
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setDarkMode((d) => !d)}
+                  aria-label={darkMode ? 'Ativar Tema Claro' : 'Ativar Tema Escuro'}
+                  className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:border-[#31d6c4] transition-colors cursor-pointer"
+                >
+                  {darkMode ? (
+                    <Sun className="w-4 h-4 text-[#31d6c4]" />
+                  ) : (
+                    <Moon className="w-4 h-4" />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSidebarCollapsed(true)}
+                  aria-label="Recolher menu lateral"
+                  title="Recolher menu lateral"
+                  className="hidden lg:inline-flex p-1.5 rounded-lg border border-slate-200 dark:border-slate-800 text-slate-500 hover:text-[#31d6c4] hover:border-[#31d6c4] transition-colors cursor-pointer"
+                >
+                  <PanelLeftClose className="w-4 h-4" />
+                </button>
+              </div>
+            )}
           </div>
 
+          {sidebarCollapsed && (
+            <div className="hidden lg:flex justify-center py-2 border-b border-slate-200 dark:border-slate-800/80">
+              <button
+                type="button"
+                onClick={() => setSidebarCollapsed(false)}
+                aria-label="Expandir menu lateral"
+                title="Expandir menu lateral"
+                className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-800 text-slate-400 hover:text-[#31d6c4] hover:border-[#31d6c4] transition-colors cursor-pointer"
+              >
+                <PanelLeftOpen className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
           {/* Primary Navigation Links Grouped by Workflow Stage */}
-          <nav aria-label="Navegação Principal" className="p-3 space-y-4">
+          <nav aria-label="Navegação Principal" className="p-2.5 space-y-4">
             {navGroups.map((group) => (
               <div key={group.groupLabel} className="space-y-1">
-                <div className="px-3 text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">
-                  {group.groupLabel}
-                </div>
+                {!sidebarCollapsed && (
+                  <div className="px-2.5 text-[11px] font-mono font-bold uppercase tracking-wider text-slate-400 dark:text-slate-400">
+                    {group.groupLabel}
+                  </div>
+                )}
                 {group.items.map((item) => {
                   const Icon = item.icon;
                   const isActive = activeNav === item.id;
@@ -539,21 +600,26 @@ export default function App() {
                       key={item.id}
                       type="button"
                       onClick={() => setActiveNav(item.id)}
-                      className={`w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                      title={
+                        item.stepBadge ? `[P${item.stepBadge}] ${item.label}` : item.label
+                      }
+                      className={`w-full flex items-center ${
+                        sidebarCollapsed ? 'justify-center px-2 py-2.5' : 'justify-between gap-2 px-3 py-2'
+                      } rounded-lg text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
                         isActive
                           ? 'bg-[#31d6c4]/15 text-[#0e9f8e] dark:text-[#31d6c4] border border-[#31d6c4]/40'
                           : isGuide
                             ? 'text-[#0e9f8e] dark:text-[#31d6c4] bg-[#31d6c4]/5 hover:bg-[#31d6c4]/15 border border-[#31d6c4]/20'
-                            : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800/50 hover:text-slate-900 dark:hover:text-slate-100 border border-transparent'
+                            : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800/50 hover:text-slate-900 dark:hover:text-slate-100 border border-transparent'
                       }`}
                     >
                       <div className="flex items-center gap-2.5 min-w-0">
                         <Icon className="w-4 h-4 shrink-0" />
-                        <span className="truncate">{item.label}</span>
+                        {!sidebarCollapsed && <span className="truncate">{item.label}</span>}
                       </div>
-                      {item.stepBadge && (
+                      {!sidebarCollapsed && item.stepBadge && (
                         <span
-                          className={`text-[10px] font-mono px-1.5 py-0.5 rounded shrink-0 ${
+                          className={`text-[11px] font-mono px-1.5 py-0.5 rounded shrink-0 ${
                             isActive
                               ? 'bg-[#31d6c4] text-slate-950 font-bold'
                               : 'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400'
@@ -571,35 +637,37 @@ export default function App() {
         </div>
 
         {/* RBAC Role Switcher Panel in Sidebar Footer */}
-        <div className="p-4 border-t border-slate-200 dark:border-slate-800/80 space-y-2.5 text-xs">
-          <div className="flex items-center gap-2 text-slate-700 dark:text-slate-300 font-semibold">
-            <UserCheck className="w-4 h-4 text-[#31d6c4] shrink-0" />
-            <span className="truncate">{currentUser.name}</span>
+        {!sidebarCollapsed && (
+          <div className="p-4 border-t border-slate-200 dark:border-slate-800/80 space-y-2.5 text-xs">
+            <div className="flex items-center gap-2 text-slate-700 dark:text-slate-300 font-semibold">
+              <UserCheck className="w-4 h-4 text-[#31d6c4] shrink-0" />
+              <span className="truncate">{currentUser.name}</span>
+            </div>
+            <div>
+              <label
+                htmlFor="rbac-role-select"
+                className="block text-xs text-slate-500 dark:text-slate-400 mb-1"
+              >
+                Controle de Acesso (RBAC Ativo)
+              </label>
+              <select
+                id="rbac-role-select"
+                value={currentUser.role}
+                onChange={(e) =>
+                  void handleSwitchRole(
+                    e.target.value as 'ADMIN' | 'SECURITY_LEAD' | 'AUDITOR' | 'QA_ENGINEER'
+                  )
+                }
+                className="w-full rounded-md border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-2.5 py-1.5 text-xs font-mono text-slate-900 dark:text-slate-100"
+              >
+                <option value="ADMIN">ADMIN (Acesso Total)</option>
+                <option value="SECURITY_LEAD">SECURITY_LEAD (DevSecOps)</option>
+                <option value="QA_ENGINEER">QA_ENGINEER (Testes &amp; Runs)</option>
+                <option value="AUDITOR">AUDITOR (Somente Leitura)</option>
+              </select>
+            </div>
           </div>
-          <div>
-            <label
-              htmlFor="rbac-role-select"
-              className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1"
-            >
-              Controle de Acesso (RBAC Ativo)
-            </label>
-            <select
-              id="rbac-role-select"
-              value={currentUser.role}
-              onChange={(e) =>
-                handleSwitchRole(
-                  e.target.value as 'ADMIN' | 'SECURITY_LEAD' | 'AUDITOR' | 'QA_ENGINEER'
-                )
-              }
-              className="w-full rounded-md border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-2.5 py-1.5 text-xs font-mono text-slate-900 dark:text-slate-100"
-            >
-              <option value="ADMIN">ADMIN (Acesso Total)</option>
-              <option value="SECURITY_LEAD">SECURITY_LEAD (DevSecOps)</option>
-              <option value="QA_ENGINEER">QA_ENGINEER (Testes &amp; Runs)</option>
-              <option value="AUDITOR">AUDITOR (Somente Leitura)</option>
-            </select>
-          </div>
-        </div>
+        )}
       </aside>
 
       {/* Main Content Shell */}
@@ -856,6 +924,16 @@ export default function App() {
 
             {activeNav === 'arch_qa_perf' && (
               <ArchitectureQaPerfOsModule latestRun={dashboardData?.latestRun || null} />
+            )}
+
+            {activeNav === 'hardware_benchmark' && (
+              <HardwareAndDisplayBenchmarkModule
+                runs={dashboardData?.latestRun ? [dashboardData.latestRun] : []}
+                selectedRunId={dashboardData?.latestRun?.id}
+                onRefreshData={() => {
+                  void fetchAllBackendState();
+                }}
+              />
             )}
 
             {activeNav === 'veracity' && (

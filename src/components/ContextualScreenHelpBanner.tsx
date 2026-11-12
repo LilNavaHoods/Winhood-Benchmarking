@@ -283,6 +283,35 @@ const SCREEN_HELP_CATALOG: Record<Exclude<AppNavSection, 'user_guide'>, ScreenGu
       },
     ],
   },
+  hardware_benchmark: {
+    stepBadge: 'PASSO 4D DA JORNADA',
+    screenTitle: 'Como avaliar Hardware, GPU, IOPS e Calibração Óptica de Monitores',
+    plainSummary:
+      'Executa micro-benchmarks determinísticos da estação de trabalho (CPU Single/Multi-Core, Banda de Memória Float64, IOPS de Disco 4K) e diagnóstico óptico interativo do monitor (Taxa de Atualização Real Hz, Jitter, Ghosting UFO, Dead Pixels e Uniformidade DSE).',
+    howToSteps: [
+      '1. Clique em "Executar Benchmark de Hardware" no topo para medir CPU SHA-256, multiplicação matricial MFLOPS, banda de RAM e IOPS 4K reais do host com hash SHA-256.',
+      '2. Clique em "Medir Hz & Jitter" para amostrar a cadência real de quadros via requestAnimationFrame (FPS médio, 1% Low, 0.1% Low e estabilidade).',
+      '3. Utilize o Laboratório Visual Interativo (Motion UFO, Inspeção de Dead Pixel em Tela Cheia, Rampa de Gradiente 256-steps e Latência Reflex) e anexe o snapshot a um BenchmarkRun.',
+    ],
+    abInterpretationTip:
+      'Anexar o snapshot de Hardware & Display ao BenchmarkRun garante rastreabilidade completa da infraestrutura física onde os testes de performance e compilação SAST foram executados.',
+    guideChapterId: 'benchmark-weights',
+    guideChapterLabel: 'Equivalência de Hardware & Telemetria',
+    glossaryTerms: [
+      {
+        term: '1% Low & Frame Jitter',
+        meaning: 'Mede a consistência temporal dos quadros (ms); quedas bruscas no 1% Low indicam micro-stuttering visual.',
+      },
+      {
+        term: 'PPI & Dot Pitch (mm)',
+        meaning: 'Densidade de pixels por polegada e distância física entre subpixels, determinando a nitidez tipográfica (Retina/HiDPI).',
+      },
+      {
+        term: 'IOPS 4K & Banda Float64',
+        meaning: 'Velocidade real de leitura/escrita aleatória em disco e vazão de memória RAM em megabytes por segundo.',
+      },
+    ],
+  },
   veracity: {
     stepBadge: 'PASSO 5 DA JORNADA',
     screenTitle: 'Como auditar o Motor de Veracidade & Adaptadores',

@@ -12,6 +12,14 @@ export interface SonarApiClientConfig {
  * Cliente oficial da Web API do SonarQube Community Build / SonarQube Cloud.
  * Não utiliza web scraping; consome exclusivamente endpoints documentados com autenticação Bearer.
  */
+function stripTrailingSlashes(url: string): string {
+  let s = url.trim();
+  while (s.endsWith('/')) {
+    s = s.slice(0, -1);
+  }
+  return s;
+}
+
 export class SonarQubeApiClient {
   private baseUrl: string;
   private token?: string;
@@ -19,7 +27,7 @@ export class SonarQubeApiClient {
   private timeoutMs: number;
 
   constructor(config: SonarApiClientConfig) {
-    this.baseUrl = config.serverUrl.trim().replace(/\/+$/, '');
+    this.baseUrl = stripTrailingSlashes(config.serverUrl);
     this.token = config.token?.trim();
     this.organizationKey = config.organizationKey?.trim();
     this.timeoutMs = config.timeoutMs ?? 6000;

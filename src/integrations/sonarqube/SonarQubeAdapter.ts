@@ -1639,7 +1639,7 @@ export class SonarQubeIntegrationService {
 
       // 15.8 Timeout
       const timeoutClient = new SonarQubeApiClient({
-        serverUrl: 'http://10.255.255.1:9000',
+        serverUrl: 'https://10.255.255.1:9000',
         timeoutMs: 120,
       });
       const timeoutRes = await timeoutClient.getComponentMeasures('any');

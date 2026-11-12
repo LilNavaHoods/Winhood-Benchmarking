@@ -26,12 +26,12 @@ export class SonarResultParser {
   public static parseEffortToMinutes(effortStr?: string): number {
     if (!effortStr) return 10;
     let total = 0;
-    const hMatch = effortStr.match(/(\d+)h/);
-    const mMatch = effortStr.match(/(\d+)min/);
-    const dMatch = effortStr.match(/(\d+)d/);
-    if (dMatch) total += parseInt(dMatch[1], 10) * 480;
-    if (hMatch) total += parseInt(hMatch[1], 10) * 60;
-    if (mMatch) total += parseInt(mMatch[1], 10);
+    const hMatch = effortStr.match(/\b(\d{1,6})h\b/);
+    const mMatch = effortStr.match(/\b(\d{1,6})min\b/);
+    const dMatch = effortStr.match(/\b(\d{1,6})d\b/);
+    if (dMatch) total += Number.parseInt(dMatch[1], 10) * 480;
+    if (hMatch) total += Number.parseInt(hMatch[1], 10) * 60;
+    if (mMatch) total += Number.parseInt(mMatch[1], 10);
     return total > 0 ? total : 10;
   }
 

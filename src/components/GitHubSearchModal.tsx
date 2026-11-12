@@ -92,7 +92,7 @@ export const GitHubSearchModal: React.FC<GitHubSearchModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
-      fetchGitHubRepos(searchTerm);
+      void fetchGitHubRepos(searchTerm);
     }
   }, [isOpen]);
 
@@ -101,7 +101,7 @@ export const GitHubSearchModal: React.FC<GitHubSearchModalProps> = ({
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!searchTerm.trim()) return;
-    fetchGitHubRepos(searchTerm.trim());
+    void fetchGitHubRepos(searchTerm.trim());
   };
 
   const handleImportRepo = async (repo: GitHubRepoItem) => {
@@ -207,7 +207,7 @@ export const GitHubSearchModal: React.FC<GitHubSearchModalProps> = ({
                 type="button"
                 onClick={() => {
                   setSearchTerm(q);
-                  fetchGitHubRepos(q);
+                  void fetchGitHubRepos(q);
                 }}
                 className={`px-2 py-0.5 rounded-md border text-[11px] transition-colors cursor-pointer ${
                   searchTerm === q

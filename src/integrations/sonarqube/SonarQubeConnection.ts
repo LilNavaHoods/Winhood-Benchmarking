@@ -70,11 +70,19 @@ export class SonarQubeConnection {
     }
   }
 
+  private static stripTrailingSlashes(url: string): string {
+    let s = url.trim();
+    while (s.endsWith('/')) {
+      s = s.slice(0, -1);
+    }
+    return s;
+  }
+
   public static async probeSonarQube(
     options: ProbeSonarQubeOptions
   ): Promise<ProbeSonarQubeResult> {
     const start = performance.now();
-    const rawUrl = (options.serverUrl || '').trim().replace(/\/+$/, '');
+    const rawUrl = SonarQubeConnection.stripTrailingSlashes(options.serverUrl || '');
     const timeoutMs = options.timeoutMs ?? 4000;
 
     if (!rawUrl) {
@@ -172,7 +180,7 @@ export class SonarQubeConnection {
 
       // Verificar compatibilidade de versão (exigir >= 9.9 ou formato 24.x / 25.x / 26.x)
       if (version) {
-        const major = parseInt(version.split('.')[0], 10);
+        const major = Number.parseInt(version.split('.')[0], 10);
         if (!Number.isNaN(major) && major < 9) {
           return {
             connectionState: 'VERSION_UNSUPPORTED',
@@ -273,7 +281,7 @@ export class SonarQubeConnection {
         }
       }
 
-      const majorVer = version ? parseInt(version.split('.')[0], 10) : 26;
+      const majorVer = version ? Number.parseInt(version.split('.')[0], 10) : 26;
       const apiCompatibility: SonarInstanceRecord['apiCompatibility'] =
         majorVer >= 10 ? 'WEB_API_V2_AND_V1' : 'WEB_API_V1_LEGACY';
 

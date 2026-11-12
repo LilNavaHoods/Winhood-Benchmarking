@@ -639,8 +639,11 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                   <div>
-                    <label className="block text-[11px] text-slate-500 mb-1">Porta Local</label>
+                    <label htmlFor="sonar-local-port" className="block text-[11px] text-slate-500 mb-1">
+                      Porta Local
+                    </label>
                     <input
+                      id="sonar-local-port"
                       type="number"
                       value={localPort}
                       onChange={(e) => setLocalPort(Number(e.target.value) || 9000)}
@@ -648,10 +651,11 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                     />
                   </div>
                   <div className="sm:col-span-2">
-                    <label className="block text-[11px] text-slate-500 mb-1">
+                    <label htmlFor="sonar-local-token" className="block text-[11px] text-slate-500 mb-1">
                       SONAR_TOKEN (Bearer — Nunca exposto em URL/CLI)
                     </label>
                     <input
+                      id="sonar-local-token"
                       type="password"
                       placeholder={localInstance?.maskedToken || 'squ_...'}
                       value={localToken}
@@ -708,10 +712,11 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <div>
-                    <label className="block text-[11px] text-slate-500 mb-1">
+                    <label htmlFor="sonar-remote-url" className="block text-[11px] text-slate-500 mb-1">
                       URL do Servidor Remoto
                     </label>
                     <input
+                      id="sonar-remote-url"
                       type="url"
                       placeholder="https://sonar.corp.internal:9000"
                       value={remoteUrl}
@@ -720,10 +725,11 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                     />
                   </div>
                   <div>
-                    <label className="block text-[11px] text-slate-500 mb-1">
+                    <label htmlFor="sonar-remote-token" className="block text-[11px] text-slate-500 mb-1">
                       Token Bearer (SONAR_TOKEN)
                     </label>
                     <input
+                      id="sonar-remote-token"
                       type="password"
                       placeholder={remoteInstance?.maskedToken || 'squ_...'}
                       value={remoteToken}
@@ -798,10 +804,11 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-[11px] text-slate-500 mb-1">
+                    <label htmlFor="sonar-cloud-org" className="block text-[11px] text-slate-500 mb-1">
                       Organização SonarQube Cloud
                     </label>
                     <input
+                      id="sonar-cloud-org"
                       type="text"
                       placeholder="ex: winhood-sec-org"
                       value={cloudOrg}
@@ -810,10 +817,11 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                     />
                   </div>
                   <div>
-                    <label className="block text-[11px] text-slate-500 mb-1">
+                    <label htmlFor="sonar-cloud-token" className="block text-[11px] text-slate-500 mb-1">
                       Token SonarCloud (Bearer)
                     </label>
                     <input
+                      id="sonar-cloud-token"
                       type="password"
                       placeholder={cloudInstance?.maskedToken || 'sqp_...'}
                       value={cloudToken}
@@ -892,10 +900,11 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-[11px] text-slate-500 mb-1">
+                    <label htmlFor="sonar-vscode-mode" className="block text-[11px] text-slate-500 mb-1">
                       Alvo do Connected Mode
                     </label>
                     <select
+                      id="sonar-vscode-mode"
                       value={vscodeMode}
                       onChange={(e) =>
                         setVscodeMode(
@@ -910,10 +919,11 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                     </select>
                   </div>
                   <div>
-                    <label className="block text-[11px] text-slate-500 mb-1">
+                    <label htmlFor="sonar-vscode-url" className="block text-[11px] text-slate-500 mb-1">
                       URL da Instância para Binding
                     </label>
                     <input
+                      id="sonar-vscode-url"
                       type="text"
                       value={vscodeServerUrl}
                       onChange={(e) => setVscodeServerUrl(e.target.value)}
@@ -987,10 +997,11 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <div>
-                    <label className="block text-[11px] text-slate-500 mb-1">
+                    <label htmlFor="gitar-provider" className="block text-[11px] text-slate-500 mb-1">
                       Provedor Git Oficial
                     </label>
                     <select
+                      id="gitar-provider"
                       value={gitarProvider}
                       onChange={(e) => setGitarProvider(e.target.value as GitProviderType)}
                       className="w-full rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#080b10] px-2.5 py-1.5 text-xs font-mono"
@@ -1002,10 +1013,11 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                     </select>
                   </div>
                   <div>
-                    <label className="block text-[11px] text-slate-500 mb-1">
+                    <label htmlFor="gitar-token" className="block text-[11px] text-slate-500 mb-1">
                       Token API Gitar (Bearer)
                     </label>
                     <input
+                      id="gitar-token"
                       type="password"
                       placeholder={gitar?.maskedToken || 'gitar_pat_...'}
                       value={gitarToken}
@@ -1014,10 +1026,11 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                     />
                   </div>
                   <div className="sm:col-span-2">
-                    <label className="block text-[11px] text-slate-500 mb-1">
+                    <label htmlFor="gitar-repos" className="block text-[11px] text-slate-500 mb-1">
                       Repositórios Autorizados (separados por vírgula)
                     </label>
                     <input
+                      id="gitar-repos"
                       type="text"
                       value={gitarRepos}
                       onChange={(e) => setGitarRepos(e.target.value)}
@@ -1699,10 +1712,11 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
                 <div>
-                  <label className="block text-[11px] text-slate-500 mb-1">
+                  <label htmlFor="lifecycle-max-concurrency" className="block text-[11px] text-slate-500 mb-1">
                     Concorrência Máxima de Análises SonarQube
                   </label>
                   <input
+                    id="lifecycle-max-concurrency"
                     type="number"
                     min={1}
                     max={4}
@@ -1712,10 +1726,11 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                   />
                 </div>
                 <div>
-                  <label className="block text-[11px] text-slate-500 mb-1">
+                  <label htmlFor="lifecycle-idle-minutes" className="block text-[11px] text-slate-500 mb-1">
                     Auto-Encerramento por Inatividade (Minutos)
                   </label>
                   <input
+                    id="lifecycle-idle-minutes"
                     type="number"
                     min={5}
                     max={120}

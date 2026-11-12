@@ -7,12 +7,20 @@
  * - Consulta de revisões e falhas de CI
  * Não inventa endpoints nem realiza scraping de dashboard.
  */
+function stripTrailingSlashes(url: string): string {
+  let s = url.trim();
+  while (s.endsWith('/')) {
+    s = s.slice(0, -1);
+  }
+  return s;
+}
+
 export class GitarApiClient {
   private apiBaseUrl: string;
   private token: string;
 
   constructor(apiBaseUrl: string, token: string) {
-    this.apiBaseUrl = apiBaseUrl.trim().replace(/\/+$/, '');
+    this.apiBaseUrl = stripTrailingSlashes(apiBaseUrl);
     this.token = token.trim();
   }
 

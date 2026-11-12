@@ -333,7 +333,7 @@ export const UserGuideModule: React.FC<UserGuideModuleProps> = ({
   }, [searchQuery]);
 
   const handleCopyText = (text: string, label: string) => {
-    navigator.clipboard.writeText(text);
+    void navigator.clipboard.writeText(text);
     onNotify(`${label} copiado para a área de transferência!`, 'success');
   };
 

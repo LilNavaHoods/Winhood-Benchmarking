@@ -124,7 +124,7 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
   // Trigger Competitor Discovery when entering step 3 in Mode C
   useEffect(() => {
     if (step === 3 && assessmentMode === 'MARKET_COMPETITOR' && activePrimarySoftware) {
-      handleDiscoverCompetitors();
+      void handleDiscoverCompetitors();
     }
   }, [step, assessmentMode, activePrimarySoftware?.id]);
 
@@ -446,9 +446,10 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {/* Opção A: Avaliação Individual */}
-              <div
+              <button
+                type="button"
                 onClick={() => setAssessmentMode('INDIVIDUAL')}
-                className={`p-5 rounded-xl border-2 transition-all cursor-pointer flex flex-col justify-between ${
+                className={`w-full text-left p-5 rounded-xl border-2 transition-all cursor-pointer flex flex-col justify-between ${
                   assessmentMode === 'INDIVIDUAL'
                     ? 'border-[#31d6c4] bg-[#31d6c4]/5 shadow-sm'
                     : 'border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700'
@@ -488,12 +489,13 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                 <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-800/80 text-[11px] font-bold text-[#31d6c4]">
                   {assessmentMode === 'INDIVIDUAL' ? '✓ Modalidade Selecionada' : 'Selecionar Modalidade A'}
                 </div>
-              </div>
+              </button>
 
               {/* Opção B: Comparação A/B */}
-              <div
+              <button
+                type="button"
                 onClick={() => setAssessmentMode('AB_COMPARE')}
-                className={`p-5 rounded-xl border-2 transition-all cursor-pointer flex flex-col justify-between ${
+                className={`w-full text-left p-5 rounded-xl border-2 transition-all cursor-pointer flex flex-col justify-between ${
                   assessmentMode === 'AB_COMPARE'
                     ? 'border-[#31d6c4] bg-[#31d6c4]/5 shadow-sm'
                     : 'border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700'
@@ -533,12 +535,13 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                 <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-800/80 text-[11px] font-bold text-indigo-400">
                   {assessmentMode === 'AB_COMPARE' ? '✓ Modalidade Selecionada' : 'Selecionar Modalidade B'}
                 </div>
-              </div>
+              </button>
 
               {/* Opção C: Descoberta de Concorrente */}
-              <div
+              <button
+                type="button"
                 onClick={() => setAssessmentMode('MARKET_COMPETITOR')}
-                className={`p-5 rounded-xl border-2 transition-all cursor-pointer flex flex-col justify-between ${
+                className={`w-full text-left p-5 rounded-xl border-2 transition-all cursor-pointer flex flex-col justify-between ${
                   assessmentMode === 'MARKET_COMPETITOR'
                     ? 'border-[#31d6c4] bg-[#31d6c4]/5 shadow-sm'
                     : 'border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700'
@@ -578,7 +581,7 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                 <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-800/80 text-[11px] font-bold text-amber-400">
                   {assessmentMode === 'MARKET_COMPETITOR' ? '✓ Modalidade Selecionada' : 'Selecionar Modalidade C'}
                 </div>
-              </div>
+              </button>
             </div>
           </div>
         )}
@@ -603,10 +606,14 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-2">
+                <label
+                  htmlFor="wizard-project-select"
+                  className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-2"
+                >
                   1. Contexto / Projeto (Opcional)
                 </label>
                 <select
+                  id="wizard-project-select"
                   value={selectedProjectId}
                   onChange={(e) => setSelectedProjectId(e.target.value)}
                   className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3.5 py-2.5 text-xs text-slate-900 dark:text-slate-100"
@@ -621,10 +628,14 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-2">
+                <label
+                  htmlFor="wizard-primary-software-select"
+                  className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-2"
+                >
                   2. Software Principal a ser Avaliado
                 </label>
                 <select
+                  id="wizard-primary-software-select"
                   value={primarySoftwareId}
                   onChange={(e) => setPrimarySoftwareId(e.target.value)}
                   className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3.5 py-2.5 text-xs text-slate-900 dark:text-slate-100"
@@ -792,14 +803,15 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                     .map((s) => {
                       const isSelected = comparisonSoftwareIds.includes(s.id);
                       return (
-                        <div
+                        <button
+                          type="button"
                           key={s.id}
                           onClick={() => {
                             setComparisonSoftwareIds((prev) =>
                               prev.includes(s.id) ? prev.filter((id) => id !== s.id) : [...prev, s.id]
                             );
                           }}
-                          className={`p-4 rounded-lg border cursor-pointer transition-colors ${
+                          className={`w-full text-left p-4 rounded-lg border cursor-pointer transition-colors ${
                             isSelected
                               ? 'border-[#31d6c4] bg-[#31d6c4]/10'
                               : 'border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700'
@@ -819,7 +831,7 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                           <div className="mt-2 text-[10px] font-bold text-[#31d6c4]">
                             {isSelected ? '✓ Selecionado para Benchmark' : '+ Clique para Adicionar'}
                           </div>
-                        </div>
+                        </button>
                       );
                     })}
                 </div>
@@ -927,7 +939,7 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                                 type="button"
                                 onClick={() => {
                                   setSelectedCandidate(cand);
-                                  handleApproveCompetitor(cand);
+                                  void handleApproveCompetitor(cand);
                                 }}
                                 className="px-3 py-1.5 rounded-lg bg-amber-400 text-slate-950 text-xs font-bold hover:bg-amber-300 cursor-pointer"
                               >
@@ -982,10 +994,14 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
             {/* Profile & Quality Gate Selector (Standard + 27 Specialized Profiles) */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-3.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10]">
               <div>
-                <label className="block text-[11px] font-bold text-slate-600 dark:text-slate-400 mb-1">
+                <label
+                  htmlFor="wizard-profile-select"
+                  className="block text-[11px] font-bold text-slate-600 dark:text-slate-400 mb-1"
+                >
                   Perfil de Avaliação &amp; Especialização por Domínio (27 Perfis Oficiais)
                 </label>
                 <select
+                  id="wizard-profile-select"
                   value={selectedProfileId}
                   onChange={(e) => handleSelectProfile(e.target.value)}
                   className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0f141c] px-3 py-2 text-xs text-slate-900 dark:text-slate-100"
@@ -1019,10 +1035,14 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
               </div>
 
               <div>
-                <label className="block text-[11px] font-bold text-slate-600 dark:text-slate-400 mb-1">
+                <label
+                  htmlFor="wizard-quality-gate-select"
+                  className="block text-[11px] font-bold text-slate-600 dark:text-slate-400 mb-1"
+                >
                   Quality Gate Transversal (SonarQube MQR)
                 </label>
                 <select
+                  id="wizard-quality-gate-select"
                   value={qualityGateId}
                   onChange={(e) => setQualityGateId(e.target.value)}
                   className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0f141c] px-3 py-2 text-xs text-slate-900 dark:text-slate-100"
@@ -1065,7 +1085,7 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                       disabled={!isEnabled}
                       value={val}
                       onChange={(e) => {
-                        const newWeight = parseInt(e.target.value, 10);
+                        const newWeight = Number.parseInt(e.target.value, 10);
                         setWeights((prev) => ({ ...prev, [cat]: newWeight }));
                       }}
                       className="w-full mt-2 accent-[#31d6c4]"

@@ -9,7 +9,7 @@ import type { SonarMeasuresRecord } from '../../types/benchmark';
  */
 export class SonarMetricsMapper {
   public static mapNumericToRating(val?: string | number): 'A' | 'B' | 'C' | 'D' | 'E' {
-    const n = typeof val === 'number' ? val : parseFloat(val || '1');
+    const n = typeof val === 'number' ? val : Number.parseFloat(val || '1');
     if (n <= 1.0) return 'A';
     if (n <= 2.0) return 'B';
     if (n <= 3.0) return 'C';
@@ -34,14 +34,14 @@ export class SonarMetricsMapper {
 
     const getInt = (key: string, fallback = 0): number => {
       const v = map.get(key)?.value;
-      const parsed = parseInt(v || '', 10);
+      const parsed = Number.parseInt(v || '', 10);
       return Number.isNaN(parsed) ? fallback : parsed;
     };
 
     const getFloat = (key: string): number | null => {
       const v = map.get(key)?.value ?? map.get(key)?.periodValue;
       if (v === undefined) return null;
-      const parsed = parseFloat(v);
+      const parsed = Number.parseFloat(v);
       return Number.isNaN(parsed) ? null : Math.round(parsed * 100) / 100;
     };
 

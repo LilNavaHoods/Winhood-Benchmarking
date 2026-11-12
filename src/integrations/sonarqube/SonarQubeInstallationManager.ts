@@ -107,7 +107,7 @@ export class SonarQubeInstallationManager {
       });
       clearTimeout(timeout);
 
-      const contentLength = parseInt(
+      const contentLength = Number.parseInt(
         headRes.headers.get('content-length') || String(sq.sizeBytes),
         10
       );

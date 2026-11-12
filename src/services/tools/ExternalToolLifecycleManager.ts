@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import type { SonarConnectionState, SonarExecutionLogRecord, SonarInstallationMode } from '../../types/benchmark';
 import { ToolResourceMonitor, type HostResourceCheckResult } from './ToolResourceMonitor';
 
@@ -85,7 +86,7 @@ export class ExternalToolLifecycleManager {
       '[TOKEN_REDACTED]'
     );
     const entry: SonarExecutionLogRecord = {
-      id: `slog-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      id: `slog-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
       timestamp: new Date().toISOString(),
       component,
       level,

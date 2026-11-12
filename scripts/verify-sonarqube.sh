@@ -20,7 +20,7 @@ else
   exit 1
 fi
 
-if [ -n "${SONAR_TOKEN:-}" ]; then
+if [[ -n "${SONAR_TOKEN:-}" ]]; then
   AUTH_JSON=$(curl -fsS -H "Authorization: Bearer ${SONAR_TOKEN}" "${SONAR_HOST_URL}/api/authentication/validate")
   if echo "${AUTH_JSON}" | grep -q '"valid":true'; then
     echo "[OK] Autenticação Bearer (SONAR_TOKEN) validada com sucesso."

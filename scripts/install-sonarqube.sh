@@ -35,15 +35,15 @@ DOWNLOAD_URL="https://binaries.sonarsource.com/Distribution/sonarqube/sonarqube-
 
 mkdir -p "${SONAR_DIR}"
 
-if [ -x "${TARGET_EXTRACT}/bin/linux-x86-64/sonar.sh" ]; then
+if [[ -x "${TARGET_EXTRACT}/bin/linux-x86-64/sonar.sh" ]]; then
   echo "2. Instalação validada já encontrada em ${TARGET_EXTRACT}. Pulando download."
 else
   echo "2. Baixando distribuição oficial: ${DOWNLOAD_URL}"
-  curl -fL "${DOWNLOAD_URL}" -o "${ZIP_FILE}"
+  curl --proto '=https' --tlsv1.2 -fL "${DOWNLOAD_URL}" -o "${ZIP_FILE}"
 
   echo "3. Validando checksum SHA-256 oficial..."
   COMPUTED_SHA=$(sha256sum "${ZIP_FILE}" | awk '{print $1}')
-  if [ "${COMPUTED_SHA}" != "${OFFICIAL_SHA256}" ]; then
+  if [[ "${COMPUTED_SHA}" != "${OFFICIAL_SHA256}" ]]; then
     rm -f "${ZIP_FILE}"
     echo "[ERRO] Checksum SHA-256 inválido! Esperado: ${OFFICIAL_SHA256} | Calculado: ${COMPUTED_SHA}" >&2
     exit 1
@@ -55,7 +55,7 @@ else
 fi
 
 PROPS_FILE="${TARGET_EXTRACT}/conf/sonar.properties"
-if [ -f "${PROPS_FILE}" ] && ! grep -q "^sonar.web.port=" "${PROPS_FILE}"; then
+if [[ -f "${PROPS_FILE}" ]] && ! grep -q "^sonar.web.port=" "${PROPS_FILE}"; then
   echo "sonar.web.port=${SONAR_PORT}" >> "${PROPS_FILE}"
 fi
 

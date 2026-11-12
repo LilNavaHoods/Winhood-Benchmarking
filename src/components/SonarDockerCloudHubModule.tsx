@@ -64,12 +64,12 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify }) => {
   const [runningQuickAnalysis, setRunningQuickAnalysis] = useState(false);
 
   useEffect(() => {
-    checkDockerStatus();
-    loadHardwareProfile();
+    void checkDockerStatus();
+    void loadHardwareProfile();
   }, []);
 
   const copyToClipboard = (text: string, key: string) => {
-    navigator.clipboard.writeText(text);
+    void navigator.clipboard.writeText(text);
     setCopiedKey(key);
     onNotify('Comando copiado para a área de transferência!', 'success');
     setTimeout(() => setCopiedKey(null), 2500);
@@ -168,7 +168,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify }) => {
           'error'
         );
       }
-      checkDockerStatus();
+      void checkDockerStatus();
     } catch {
       onNotify('Falha na comunicação de rede com o SonarQube.', 'error');
     } finally {
@@ -628,10 +628,14 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify }) => {
             <h3 className="text-sm font-bold text-white">Vincular e Validar Credenciais do SonarCloud</h3>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1.5">
+                <label
+                  htmlFor="hub-cloud-org"
+                  className="block text-xs font-medium text-slate-400 mb-1.5"
+                >
                   Chave da Organização (Organization Key)
                 </label>
                 <input
+                  id="hub-cloud-org"
                   type="text"
                   value={cloudOrg}
                   onChange={(e) => setCloudOrg(e.target.value)}
@@ -641,10 +645,14 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify }) => {
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1.5">
+                <label
+                  htmlFor="hub-cloud-token"
+                  className="block text-xs font-medium text-slate-400 mb-1.5"
+                >
                   Token de Acesso SonarCloud
                 </label>
                 <input
+                  id="hub-cloud-token"
                   type="password"
                   value={cloudToken}
                   onChange={(e) => setCloudToken(e.target.value)}
@@ -723,10 +731,14 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify }) => {
             {/* Inputs for Custom Parameters */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
               <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">
+                <label
+                  htmlFor="hub-scanner-project-key"
+                  className="block text-xs font-medium text-slate-400 mb-1"
+                >
                   Chave do Projeto (-Dsonar.projectKey)
                 </label>
                 <input
+                  id="hub-scanner-project-key"
                   type="text"
                   value={projectKey}
                   onChange={(e) => setProjectKey(e.target.value)}
@@ -735,10 +747,14 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify }) => {
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">
+                <label
+                  htmlFor="hub-scanner-host-url"
+                  className="block text-xs font-medium text-slate-400 mb-1"
+                >
                   URL do Servidor (-Dsonar.host.url)
                 </label>
                 <input
+                  id="hub-scanner-host-url"
                   type="text"
                   value={hostUrl}
                   onChange={(e) => setHostUrl(e.target.value)}
@@ -747,10 +763,14 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify }) => {
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">
+                <label
+                  htmlFor="hub-scanner-token"
+                  className="block text-xs font-medium text-slate-400 mb-1"
+                >
                   Token de Acesso (-Dsonar.login)
                 </label>
                 <input
+                  id="hub-scanner-token"
                   type="text"
                   value={token}
                   onChange={(e) => setToken(e.target.value)}

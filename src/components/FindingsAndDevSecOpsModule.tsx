@@ -33,11 +33,30 @@ export const FindingsAndDevSecOpsModule: React.FC<FindingsAndDevSecOpsModuleProp
   const [selectedSeverity, setSelectedSeverity] = useState<string>('ALL');
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [selectedToolId, setSelectedToolId] = useState<string>('ALL');
+  const [selectedValidationStatus, setSelectedValidationStatus] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedFindingId, setSelectedFindingId] = useState<string | null>(null);
   const [triageLoadingId, setTriageLoadingId] = useState<string | null>(null);
 
   const findings = latestRun?.findings || [];
+
+  const statusCounters = useMemo(() => {
+    const activeOpen = findings.filter(
+      (f) =>
+        f.validationStatus !== 'ACCEPTED' &&
+        f.validationStatus !== 'FALSE_POSITIVE_REVIEWED'
+    ).length;
+    const accepted = findings.filter((f) => f.validationStatus === 'ACCEPTED').length;
+    const falsePositives = findings.filter(
+      (f) => f.validationStatus === 'FALSE_POSITIVE_REVIEWED'
+    ).length;
+    return {
+      total: findings.length,
+      activeOpen,
+      accepted,
+      falsePositives,
+    };
+  }, [findings]);
 
   const filteredFindings = useMemo(() => {
     return findings.filter((f) => {
@@ -45,6 +64,19 @@ export const FindingsAndDevSecOpsModule: React.FC<FindingsAndDevSecOpsModuleProp
       if (selectedSeverity !== 'ALL' && f.severity !== selectedSeverity) return false;
       if (selectedCategory !== 'ALL' && f.category !== selectedCategory) return false;
       if (selectedToolId !== 'ALL' && f.toolId !== selectedToolId) return false;
+      if (selectedValidationStatus === 'OPEN_ACTIVE') {
+        if (
+          f.validationStatus === 'ACCEPTED' ||
+          f.validationStatus === 'FALSE_POSITIVE_REVIEWED'
+        ) {
+          return false;
+        }
+      } else if (
+        selectedValidationStatus !== 'ALL' &&
+        f.validationStatus !== selectedValidationStatus
+      ) {
+        return false;
+      }
       if (searchQuery.trim().length > 0) {
         const q = searchQuery.toLowerCase();
         const match =
@@ -58,7 +90,15 @@ export const FindingsAndDevSecOpsModule: React.FC<FindingsAndDevSecOpsModuleProp
       }
       return true;
     });
-  }, [findings, selectedSoftwareId, selectedSeverity, selectedCategory, selectedToolId, searchQuery]);
+  }, [
+    findings,
+    selectedSoftwareId,
+    selectedSeverity,
+    selectedCategory,
+    selectedToolId,
+    selectedValidationStatus,
+    searchQuery,
+  ]);
 
   const activeFinding = useMemo(() => {
     if (selectedFindingId) {
@@ -283,15 +323,15 @@ export const FindingsAndDevSecOpsModule: React.FC<FindingsAndDevSecOpsModuleProp
         ))}
       </div>
 
-      {/* Filters Toolbar */}
-      <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-4">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+      {/* Filters Toolbar (Frente 3.4: Combinable Filters + Validation Status + Dynamic Counters) */}
+      <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-4 space-y-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
           <div>
             <label
               htmlFor="flt-search"
-              className="block text-[11px] font-semibold text-slate-500 mb-1"
+              className="block text-xs font-semibold text-slate-500 mb-1"
             >
-              Buscar por Regra, Arquivo, CWE ou Motivo
+              Buscar (Regra, Arquivo, CWE)
             </label>
             <div className="relative">
               <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
@@ -309,7 +349,7 @@ export const FindingsAndDevSecOpsModule: React.FC<FindingsAndDevSecOpsModuleProp
           <div>
             <label
               htmlFor="flt-software"
-              className="block text-[11px] font-semibold text-slate-500 mb-1"
+              className="block text-xs font-semibold text-slate-500 mb-1"
             >
               Software Analisado
             </label>
@@ -331,7 +371,7 @@ export const FindingsAndDevSecOpsModule: React.FC<FindingsAndDevSecOpsModuleProp
           <div>
             <label
               htmlFor="flt-sev"
-              className="block text-[11px] font-semibold text-slate-500 mb-1"
+              className="block text-xs font-semibold text-slate-500 mb-1"
             >
               Severidade
             </label>
@@ -354,9 +394,9 @@ export const FindingsAndDevSecOpsModule: React.FC<FindingsAndDevSecOpsModuleProp
           <div>
             <label
               htmlFor="flt-cat"
-              className="block text-[11px] font-semibold text-slate-500 mb-1"
+              className="block text-xs font-semibold text-slate-500 mb-1"
             >
-              Categoria de Análise
+              Categoria MQR / SAST
             </label>
             <select
               id="flt-cat"
@@ -376,8 +416,31 @@ export const FindingsAndDevSecOpsModule: React.FC<FindingsAndDevSecOpsModuleProp
 
           <div>
             <label
+              htmlFor="flt-status"
+              className="block text-xs font-semibold text-slate-500 mb-1"
+            >
+              Status de Triagem DevSecOps
+            </label>
+            <select
+              id="flt-status"
+              value={selectedValidationStatus}
+              onChange={(e) => setSelectedValidationStatus(e.target.value)}
+              className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-1.5 text-xs text-slate-900 dark:text-slate-100 font-mono"
+            >
+              <option value="ALL">Todos ({statusCounters.total})</option>
+              <option value="OPEN_ACTIVE">Ativos na Nota ({statusCounters.activeOpen})</option>
+              <option value="VALIDATED">VALIDATED</option>
+              <option value="ACCEPTED">ACCEPTED ({statusCounters.accepted})</option>
+              <option value="FALSE_POSITIVE_REVIEWED">
+                FALSE_POSITIVE ({statusCounters.falsePositives})
+              </option>
+            </select>
+          </div>
+
+          <div>
+            <label
               htmlFor="flt-tool"
-              className="block text-[11px] font-semibold text-slate-500 mb-1"
+              className="block text-xs font-semibold text-slate-500 mb-1"
             >
               Ferramenta de Origem
             </label>

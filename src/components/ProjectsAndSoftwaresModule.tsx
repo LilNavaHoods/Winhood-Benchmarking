@@ -997,10 +997,14 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div className="sm:col-span-1">
-                    <label className="block text-[11px] text-slate-500 mb-1">
+                    <label
+                      htmlFor="ingest-file-path"
+                      className="block text-[11px] text-slate-500 mb-1"
+                    >
                       Caminho Relativo do Arquivo
                     </label>
                     <input
+                      id="ingest-file-path"
                       type="text"
                       value={ingestFileName}
                       onChange={(e) => setIngestFileName(e.target.value)}
@@ -1008,10 +1012,14 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
                     />
                   </div>
                   <div className="sm:col-span-2">
-                    <label className="block text-[11px] text-slate-500 mb-1">
+                    <label
+                      htmlFor="ingest-file-content"
+                      className="block text-[11px] text-slate-500 mb-1"
+                    >
                       Conteúdo do Código-Fonte
                     </label>
                     <textarea
+                      id="ingest-file-content"
                       rows={3}
                       value={ingestFileContent}
                       onChange={(e) => setIngestFileContent(e.target.value)}

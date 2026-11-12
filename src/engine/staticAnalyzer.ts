@@ -457,7 +457,7 @@ export function executeRealStaticAnalysisOnSource(
       }
 
       // Cyclomatic & cognitive branch estimation
-      const branchMatches = trimmed.match(/\b(if|else\s+if|for|while|case|catch)\b|\?\s*[^:]+:|&&|\|\|/g);
+      const branchMatches = trimmed.match(/\b(if|else\s+if|for|while|case|catch)\b|&&|\|\||\?/g);
       if (branchMatches) {
         totalCyclomatic += branchMatches.length;
         totalCognitive += branchMatches.length * (rawLine.search(/\S|$/) > 8 ? 2 : 1);
@@ -468,7 +468,8 @@ export function executeRealStaticAnalysisOnSource(
       }
 
       // 1. SAST Rules (Opengrep Engine - Taint & Pattern Mode)
-      if (/SELECT\s+.*\+\s*\w+|`SELECT\s+.*\$\{/i.test(trimmed)) {
+      const upperTrimmed = trimmed.toUpperCase();
+      if (upperTrimmed.includes('SELECT ') && (trimmed.includes('+') || trimmed.includes('${'))) {
         criticalVulns += 1;
         const mqrImpacts: MqrCategoryImpact[] = [
           {

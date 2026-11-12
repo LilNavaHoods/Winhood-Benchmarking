@@ -1090,7 +1090,7 @@ export function evaluateCriteriaForSoftware(params: {
 
     // Database special check: if software has no SQL/DB/storage references and domain isn't DB-centric
     const hasDatabaseCode =
-      /(SELECT\s+.+\s+FROM|INSERT\s+INTO|UPDATE\s+.+\s+SET|CREATE\s+TABLE|prisma\.|sequelize|typeorm|knex|mongoose|sqlite|postgres|redis|localStorage|IndexedDB|writeFileSync|readFileSync)/i.test(
+      /(?:\bSELECT\b|\bINSERT\s+INTO\b|\bUPDATE\b|\bCREATE\s+TABLE\b|prisma\.|sequelize|typeorm|knex|mongoose|sqlite|postgres|redis|localStorage|IndexedDB|writeFileSync|readFileSync)/i.test(
         allCode
       );
     const isDbNotApplicable =

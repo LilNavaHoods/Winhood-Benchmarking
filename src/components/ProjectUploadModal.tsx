@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 
 async function computeClientSha256(filesMap: Record<string, string>): Promise<string> {
-  const keys = Object.keys(filesMap).sort();
+  const keys = Object.keys(filesMap).sort((a, b) => a.localeCompare(b));
   if (keys.length === 0) return 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
   const concatenated = keys.map((k) => `${k}:${filesMap[k]}`).join('\n--WINHOOD-ENTRY--\n');
   const encoder = new TextEncoder();
@@ -143,9 +143,13 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
 
   React.useEffect(() => {
     let active = true;
-    computeClientSha256(filesMap).then((hash) => {
-      if (active) setPackageHash(hash);
-    });
+    computeClientSha256(filesMap)
+      .then((hash) => {
+        if (active) setPackageHash(hash);
+      })
+      .catch(() => {
+        if (active) setPackageHash('');
+      });
     return () => {
       active = false;
     };
@@ -238,13 +242,24 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
         <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-6 space-y-5 text-xs">
           {/* Drag & Drop Zone */}
           <div>
-            <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-2">
+            <label
+              htmlFor="upload-project-files-input"
+              className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-2"
+            >
               Arquivos de Código-Fonte ou Diretório do Projeto
             </label>
             <div
+              role="button"
+              tabIndex={0}
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
               onDrop={handleDrop}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  fileInputRef.current?.click();
+                }
+              }}
               className={`border-2 border-dashed rounded-xl p-6 text-center transition-all cursor-pointer ${
                 isDragging
                   ? 'border-[#31d6c4] bg-[#31d6c4]/5'
@@ -253,6 +268,7 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
               onClick={() => fileInputRef.current?.click()}
             >
               <input
+                id="upload-project-files-input"
                 ref={fileInputRef}
                 type="file"
                 multiple
@@ -260,6 +276,7 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
                 onChange={(e) => e.target.files && processFileList(e.target.files)}
               />
               <input
+                id="upload-project-folder-input"
                 ref={folderInputRef}
                 type="file"
                 // @ts-expect-error webkitdirectory supported in Chromium/Firefox
@@ -278,24 +295,33 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
                 Suporta TypeScript, JavaScript, Python, C#, Go, Java, SQL, JSON e Markdown.
               </p>
 
-              <div className="flex items-center justify-center gap-2" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-center gap-2">
                 <button
                   type="button"
-                  onClick={() => fileInputRef.current?.click()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    fileInputRef.current?.click();
+                  }}
                   className="px-3 py-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-800 dark:text-slate-200 text-xs font-medium hover:bg-slate-300 dark:hover:bg-slate-700 transition-colors cursor-pointer"
                 >
                   Selecionar Arquivos
                 </button>
                 <button
                   type="button"
-                  onClick={() => folderInputRef.current?.click()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    folderInputRef.current?.click();
+                  }}
                   className="px-3 py-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-800 dark:text-slate-200 text-xs font-medium hover:bg-slate-300 dark:hover:bg-slate-700 transition-colors cursor-pointer"
                 >
                   Selecionar Pasta
                 </button>
                 <button
                   type="button"
-                  onClick={handleManualAddFile}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleManualAddFile();
+                  }}
                   className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 text-xs font-medium hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer inline-flex items-center gap-1"
                 >
                   <Plus className="w-3 h-3" /> Adicionar Arquivo Manual
@@ -347,10 +373,14 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
           {/* Metadata Fields */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+              <label
+                htmlFor="upload-project-name"
+                className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1"
+              >
                 Nome do Projeto *
               </label>
               <input
+                id="upload-project-name"
                 type="text"
                 required
                 value={projectName}
@@ -361,10 +391,14 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
             </div>
 
             <div>
-              <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+              <label
+                htmlFor="upload-quality-gate"
+                className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1"
+              >
                 Quality Gate Transversal (SonarQube MQR)
               </label>
               <select
+                id="upload-quality-gate"
                 value={qualityGateId}
                 onChange={(e) => setQualityGateId(e.target.value)}
                 className="w-full px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121824] text-slate-900 dark:text-slate-100 text-xs focus:outline-none focus:border-[#31d6c4]"
@@ -377,10 +411,14 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+              <label
+                htmlFor="upload-domain-tags"
+                className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1"
+              >
                 Tags de Domínio Livres (separadas por vírgula)
               </label>
               <input
+                id="upload-domain-tags"
                 type="text"
                 value={domainTagsInput}
                 onChange={(e) => setDomainTagsInput(e.target.value)}
@@ -402,10 +440,14 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
           </div>
 
           <div>
-            <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+            <label
+              htmlFor="upload-objective"
+              className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1"
+            >
               Objetivo Técnico da Avaliação *
             </label>
             <textarea
+              id="upload-objective"
               required
               rows={2}
               value={objective}
@@ -422,10 +464,14 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
             </span>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <div>
-                <label className="block text-[11px] font-medium text-slate-500 mb-1">
+                <label
+                  htmlFor="upload-software-name"
+                  className="block text-[11px] font-medium text-slate-500 mb-1"
+                >
                   Nome do Software
                 </label>
                 <input
+                  id="upload-software-name"
                   type="text"
                   value={softwareName}
                   onChange={(e) => setSoftwareName(e.target.value)}
@@ -434,10 +480,14 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
                 />
               </div>
               <div>
-                <label className="block text-[11px] font-medium text-slate-500 mb-1">
+                <label
+                  htmlFor="upload-software-vendor"
+                  className="block text-[11px] font-medium text-slate-500 mb-1"
+                >
                   Fabricante / Equipe
                 </label>
                 <input
+                  id="upload-software-vendor"
                   type="text"
                   value={softwareVendor}
                   onChange={(e) => setSoftwareVendor(e.target.value)}
@@ -445,10 +495,14 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
                 />
               </div>
               <div>
-                <label className="block text-[11px] font-medium text-slate-500 mb-1">
+                <label
+                  htmlFor="upload-software-version"
+                  className="block text-[11px] font-medium text-slate-500 mb-1"
+                >
                   Versão Inicial
                 </label>
                 <input
+                  id="upload-software-version"
                   type="text"
                   value={softwareVersion}
                   onChange={(e) => setSoftwareVersion(e.target.value)}

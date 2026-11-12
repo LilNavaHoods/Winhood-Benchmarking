@@ -155,9 +155,9 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
         </div>
       </div>
 
-      {/* 10 Real Backend KPIs Grid */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
-        <div className="rounded-lg border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-4">
+      {/* 10 Real Backend KPIs Grid (Frente 2.4: p-5 + tabular-nums + xl:grid-cols-5) */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-4">
+        <div className="rounded-lg border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-5">
           <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
             <span>Total de Projetos</span>
             <FolderGit2 className="w-4 h-4 text-[#31d6c4]" />
@@ -170,7 +170,7 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
           </div>
         </div>
 
-        <div className="rounded-lg border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-4">
+        <div className="rounded-lg border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-5">
           <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
             <span>Softwares Cadastrados</span>
             <Layers className="w-4 h-4 text-[#31d6c4]" />
@@ -183,7 +183,7 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
           </div>
         </div>
 
-        <div className="rounded-lg border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-4">
+        <div className="rounded-lg border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-5">
           <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
             <span>Benchmarks Executados</span>
             <Activity className="w-4 h-4 text-[#31d6c4]" />
@@ -198,7 +198,7 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
           </div>
         </div>
 
-        <div className="rounded-lg border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-4">
+        <div className="rounded-lg border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-5">
           <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
             <span>Vulnerabilidades</span>
             <ShieldAlert className="w-4 h-4 text-rose-500" />
@@ -211,7 +211,7 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
           </div>
         </div>
 
-        <div className="rounded-lg border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-4">
+        <div className="rounded-lg border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-5">
           <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
             <span>Problemas de Qualidade</span>
             <Code2 className="w-4 h-4 text-amber-500" />
@@ -224,7 +224,7 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
           </div>
         </div>
 
-        <div className="rounded-lg border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-4">
+        <div className="rounded-lg border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-5">
           <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
             <span>Média de Qualidade</span>
             <FileCheck2 className="w-4 h-4 text-[#31d6c4]" />
@@ -237,7 +237,7 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
           </div>
         </div>
 
-        <div className="rounded-lg border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-4">
+        <div className="rounded-lg border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-5">
           <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
             <span>Média de Desempenho</span>
             <Cpu className="w-4 h-4 text-[#31d6c4]" />
@@ -250,7 +250,7 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
           </div>
         </div>
 
-        <div className="rounded-lg border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-4">
+        <div className="rounded-lg border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-5">
           <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
             <span>Análises Concluídas</span>
             <CheckCircle2 className="w-4 h-4 text-emerald-500" />
@@ -263,7 +263,7 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
           </div>
         </div>
 
-        <div className="rounded-lg border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-4">
+        <div className="rounded-lg border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-5">
           <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
             <span>Análises com Falha</span>
             <AlertTriangle className="w-4 h-4 text-slate-400" />
@@ -276,7 +276,7 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
           </div>
         </div>
 
-        <div className="rounded-lg border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-4">
+        <div className="rounded-lg border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-5">
           <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
             <span>Evidências SHA-256</span>
             <ShieldCheck className="w-4 h-4 text-[#31d6c4]" />
@@ -406,6 +406,47 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
             {latestRun.scoreCards.map((sc) => {
               const isWinner = sc.softwareId === latestRun.winnerSoftwareId;
               const sep = sc.separatedIndicators;
+
+              // Calcular Delta Histórico Run-over-Run (Frente 3.3)
+              const priorRunEntry = (data?.historicalRuns || []).find(
+                (hr) =>
+                  hr.id !== latestRun.id &&
+                  hr.scores.some((s) => s.softwareId === sc.softwareId)
+              );
+              const priorSwScore = priorRunEntry?.scores.find(
+                (s) => s.softwareId === sc.softwareId
+              );
+              const overallDelta = priorSwScore
+                ? Number((sc.groupedScores.overallScore - priorSwScore.overallScore).toFixed(2))
+                : null;
+              const securityDelta = priorSwScore
+                ? Number((sc.groupedScores.securityScore - priorSwScore.securityScore).toFixed(2))
+                : null;
+              const qualityDelta = priorSwScore
+                ? Number((sc.groupedScores.qualityScore - priorSwScore.qualityScore).toFixed(2))
+                : null;
+
+              const formatDeltaBadge = (label: string, delta: number | null) => {
+                if (delta === null) return null;
+                const sign = delta > 0 ? '+' : '';
+                const colorClass =
+                  delta > 0
+                    ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30'
+                    : delta < 0
+                      ? 'text-rose-400 bg-rose-500/10 border-rose-500/30'
+                      : 'text-slate-400 bg-slate-800 border-slate-700';
+                return (
+                  <span
+                    key={label}
+                    className={`px-1.5 py-0.5 rounded text-[11px] font-mono border tabular-nums ${colorClass}`}
+                    title={`Evolução histórica (${label}) vs execução anterior`}
+                  >
+                    {label}: {sign}
+                    {delta.toFixed(2)}
+                  </span>
+                );
+              };
+
               return (
                 <div
                   key={sc.softwareId}
@@ -431,6 +472,13 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                       <h3 className="text-xl font-bold text-slate-900 dark:text-slate-100 mt-1">
                         {sc.softwareName}
                       </h3>
+                      {priorSwScore && (
+                        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                          {formatDeltaBadge('Δ Geral', overallDelta)}
+                          {formatDeltaBadge('Δ Seg', securityDelta)}
+                          {formatDeltaBadge('Δ Qual', qualityDelta)}
+                        </div>
+                      )}
                     </div>
                     <div className="text-right font-mono tabular-nums">
                       <div

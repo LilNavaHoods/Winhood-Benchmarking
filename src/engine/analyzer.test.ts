@@ -1352,6 +1352,35 @@ test('Scenario 17 & 25: 9-State DevSecOps Finding Lifecycle Triage & Pre-Analysi
   assert.equal(run.scoreCards[0].ratings?.security, 'A');
 });
 
+test('Scenario 28: ToolResourceMonitor.runHostHardwareBenchmark executes deterministic CPU, Memory and Storage IOPS stress suite with SHA-256 verification', async () => {
+  const { ToolResourceMonitor } = await import('../services/tools/ToolResourceMonitor');
+  const hwResult = ToolResourceMonitor.runHostHardwareBenchmark();
 
+  assert.ok(hwResult.benchmarkId.startsWith('hwbench-'));
+  assert.ok(hwResult.hostSummary.cpuCores >= 1);
+  assert.ok(hwResult.hostSummary.ramTotalMb > 0);
 
+  // CPU metrics
+  assert.ok(hwResult.cpuBenchmark.sha256OpsPerSec > 0);
+  assert.ok(hwResult.cpuBenchmark.matrixFlopsMflops > 0);
+  assert.ok(hwResult.cpuBenchmark.astParseOpsPerSec > 0);
+  assert.ok(hwResult.cpuBenchmark.singleCoreScore >= 10 && hwResult.cpuBenchmark.singleCoreScore <= 100);
+  assert.ok(hwResult.cpuBenchmark.multiCoreEstimatedScore >= 10 && hwResult.cpuBenchmark.multiCoreEstimatedScore <= 100);
+
+  // Memory metrics
+  assert.ok(hwResult.memoryBenchmark.sequentialWriteMbPerSec > 0);
+  assert.ok(hwResult.memoryBenchmark.sequentialReadMbPerSec > 0);
+  assert.ok(hwResult.memoryBenchmark.memoryScore >= 10 && hwResult.memoryBenchmark.memoryScore <= 100);
+
+  // Storage IOPS metrics
+  assert.ok(hwResult.storageBenchmark.sequentialWriteMbPerSec > 0);
+  assert.ok(hwResult.storageBenchmark.sequentialReadMbPerSec > 0);
+  assert.ok(hwResult.storageBenchmark.random4kIops > 0);
+  assert.equal(hwResult.storageBenchmark.tempFileCleanedUp, true);
+
+  // Overall score & SHA-256 verification hash
+  assert.ok(hwResult.overallHostScore >= 10 && hwResult.overallHostScore <= 100);
+  assert.ok(['S', 'A', 'B', 'C'].includes(hwResult.tier));
+  assert.equal(hwResult.verificationSha256.length, 64);
+});
 

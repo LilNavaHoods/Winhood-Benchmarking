@@ -73,7 +73,7 @@ import {
 } from './src/engine/securityAssessmentEngine';
 import { ExternalToolLifecycleManager } from './src/services/tools/ExternalToolLifecycleManager';
 import { ToolCacheManager } from './src/services/tools/ToolCacheManager';
-import { ToolResourceMonitor } from './src/services/tools/ToolResourceMonitor';
+import { ToolResourceMonitor, type HostHardwareBenchmarkResult } from './src/services/tools/ToolResourceMonitor';
 import { SonarQubeIntegrationService } from './src/integrations/sonarqube/SonarQubeAdapter';
 import { SonarQubeConnection } from './src/integrations/sonarqube/SonarQubeConnection';
 import { SonarQubeVersionManager } from './src/integrations/sonarqube/SonarQubeVersionManager';
@@ -92,6 +92,33 @@ const PORT = 3000;
 const DATA_DIR = path.resolve(process.cwd(), '.winhood_data');
 const ISOLATED_ARTIFACTS_DIR = path.join(DATA_DIR, 'isolated_artifacts');
 const STORE_FILE = path.join(DATA_DIR, 'winhood_persistent_db.json');
+
+const ALLOWED_REPORT_TYPES = new Set([
+  'COMPARATIVE_FULL',
+  'EXECUTIVE_SUMMARY',
+  'TECHNICAL_AUDIT',
+  'DEVSECOPS_SARIF',
+]);
+const SAFE_REPO_REGEX = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/;
+const SAFE_BRANCH_REGEX = /^[a-zA-Z0-9._/-]+$/;
+
+function escapeHtml(value: unknown): string {
+  const str = String(value ?? '');
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function stripTrailingSlashes(url: string): string {
+  let s = url.trim();
+  while (s.endsWith('/')) {
+    s = s.slice(0, -1);
+  }
+  return s;
+}
 
 interface PersistentDatabaseState {
   environmentMode: AppEnvironment;
@@ -555,6 +582,13 @@ function loadDatabase(): PersistentDatabaseState {
 }
 
 let pendingSaveTimer: NodeJS.Timeout | null = null;
+function writeDatabaseAtomically(state: PersistentDatabaseState): void {
+  ensureDirectories();
+  const tmpFile = `${STORE_FILE}.tmp`;
+  fs.writeFileSync(tmpFile, JSON.stringify(state, null, 2), 'utf8');
+  fs.renameSync(tmpFile, STORE_FILE);
+}
+
 function saveDatabase(state: PersistentDatabaseState, immediate = false): void {
   ensureDirectories();
   if (immediate) {
@@ -562,7 +596,7 @@ function saveDatabase(state: PersistentDatabaseState, immediate = false): void {
       clearTimeout(pendingSaveTimer);
       pendingSaveTimer = null;
     }
-    fs.writeFileSync(STORE_FILE, JSON.stringify(state, null, 2), 'utf8');
+    writeDatabaseAtomically(state);
     return;
   }
   if (pendingSaveTimer) {
@@ -570,7 +604,7 @@ function saveDatabase(state: PersistentDatabaseState, immediate = false): void {
   }
   pendingSaveTimer = setTimeout(() => {
     try {
-      fs.writeFileSync(STORE_FILE, JSON.stringify(state, null, 2), 'utf8');
+      writeDatabaseAtomically(state);
     } catch {
       // Non-blocking persistence
     }
@@ -603,6 +637,7 @@ function appendAuditLog(
 
 async function startServer() {
   const app = express();
+  app.disable('x-powered-by');
   app.use(express.json({ limit: '10mb' }));
 
   let db = loadDatabase();
@@ -976,7 +1011,7 @@ async function startServer() {
     };
 
     const cleanKey = (projectKey || 'MEU_PROJETO').trim();
-    const cleanHost = (hostUrl || 'http://localhost:9000').trim().replace(/\/+$/, '');
+    const cleanHost = stripTrailingSlashes(hostUrl || 'http://localhost:9000');
     const cleanToken = (token || 'SEU_TOKEN').trim();
 
     const commands: Record<string, { install?: string; run: string; explanation: string }> = {
@@ -1631,8 +1666,28 @@ async function startServer() {
       defaultBranch?: string;
     };
 
-    if (!repoFullName || !repoName) {
-      return res.status(400).json({ error: 'Repositório GitHub inválido.' });
+    const sanitizedRepoFull = (repoFullName || '').trim();
+    if (
+      !sanitizedRepoFull ||
+      !repoName ||
+      !SAFE_REPO_REGEX.test(sanitizedRepoFull) ||
+      sanitizedRepoFull.includes('..')
+    ) {
+      return res.status(400).json({ error: 'Repositório GitHub inválido ou formato não permitido.' });
+    }
+    const [repoOwnerSegment, repoSlugSegment] = sanitizedRepoFull.split('/');
+    if (
+      !repoOwnerSegment ||
+      !repoSlugSegment ||
+      repoOwnerSegment === '.' ||
+      repoSlugSegment === '.'
+    ) {
+      return res.status(400).json({ error: 'Segmentos de repositório GitHub inválidos.' });
+    }
+
+    const sanitizedBranch = (defaultBranch || 'main').trim();
+    if (!SAFE_BRANCH_REGEX.test(sanitizedBranch) || sanitizedBranch.includes('..')) {
+      return res.status(400).json({ error: 'Branch do GitHub inválida.' });
     }
 
     const nowIso = new Date().toISOString();
@@ -1644,10 +1699,10 @@ async function startServer() {
         id: projId,
         name: (newProjectName || `Benchmark ${repoName}`).trim(),
         category: (projectCategory || 'Engenharia de Software & Segurança').trim(),
-        objective: `Auditoria e benchmarking comparativo do repositório ${repoFullName} (${stars || 0} estrelas).`,
+        objective: `Auditoria e benchmarking comparativo do repositório ${sanitizedRepoFull} (${stars || 0} estrelas).`,
         description: (
           description ||
-          `Projeto criado a partir da importação do repositório GitHub ${repoFullName}.`
+          `Projeto criado a partir da importação do repositório GitHub ${sanitizedRepoFull}.`
         ).trim(),
         owner: db.currentUser.name,
         createdAt: nowIso,
@@ -1657,7 +1712,7 @@ async function startServer() {
             timestamp: nowIso,
             action: 'PROJECT_CREATED_FROM_GITHUB',
             actor: db.currentUser.name,
-            details: `Projeto criado via importação do repositório GitHub ${repoFullName}.`,
+            details: `Projeto criado via importação do repositório GitHub ${sanitizedRepoFull}.`,
           },
         ],
       };
@@ -1672,17 +1727,33 @@ async function startServer() {
     }
 
     let filesMap: Record<string, string> = {};
-    const branch = defaultBranch || 'main';
+    const branch = sanitizedBranch;
     let realCommitSha = '';
     let treeSha = '';
     let totalDiscovered = 0;
     let failedCount = 0;
     let rateLimited = false;
 
+    const encodedOwner = encodeURIComponent(repoOwnerSegment);
+    const encodedRepo = encodeURIComponent(repoSlugSegment);
+    const encodedBranchPath = branch
+      .split('/')
+      .filter(Boolean)
+      .map((seg) => encodeURIComponent(seg))
+      .join('/');
+
     // 100% Ingestão Real e Rastreável (P0 / Seção 4.2)
     try {
-      // 1. Obter SHA real do Commit da branch informada
-      const commitRes = await fetch(`https://api.github.com/repos/${repoFullName}/commits/${branch}`, {
+      // 1. Obter SHA real do Commit da branch informada com validação explícita de origin
+      const commitUrl = new URL(
+        `/repos/${encodedOwner}/${encodedRepo}/commits/${encodedBranchPath}`,
+        'https://api.github.com'
+      );
+      if (commitUrl.origin !== 'https://api.github.com') {
+        throw new Error('Origem de API inválida');
+      }
+
+      const commitRes = await fetch(commitUrl.toString(), {
         headers: {
           'User-Agent': 'WinHood-Security-Analyzer',
           Accept: 'application/vnd.github.v3+json',
@@ -1693,13 +1764,25 @@ async function startServer() {
         rateLimited = true;
       } else if (commitRes.ok) {
         const commitData = (await commitRes.json()) as { sha?: string };
-        realCommitSha = commitData.sha || '';
+        const candidateSha = (commitData.sha || '').trim();
+        if (/^[a-fA-F0-9]{7,40}$/.test(candidateSha)) {
+          realCommitSha = candidateSha;
+        }
       }
 
       // 2. Se obteve o commit, buscar a árvore completa a partir do SHA real
-      const treeTargetRef = realCommitSha || branch;
-      const treeUrl = `https://api.github.com/repos/${repoFullName}/git/trees/${treeTargetRef}?recursive=1`;
-      const treeRes = await fetch(treeUrl, {
+      const encodedTreeRef = realCommitSha
+        ? encodeURIComponent(realCommitSha)
+        : encodedBranchPath;
+      const treeUrl = new URL(
+        `/repos/${encodedOwner}/${encodedRepo}/git/trees/${encodedTreeRef}?recursive=1`,
+        'https://api.github.com'
+      );
+      if (treeUrl.origin !== 'https://api.github.com') {
+        throw new Error('Origem de API inválida');
+      }
+
+      const treeRes = await fetch(treeUrl.toString(), {
         headers: {
           'User-Agent': 'WinHood-Security-Analyzer',
           Accept: 'application/vnd.github.v3+json',
@@ -1722,6 +1805,8 @@ async function startServer() {
             const ext = path.extname(item.path).toLowerCase();
             return (
               ['.ts', '.tsx', '.js', '.jsx', '.py', '.sql', '.json', '.cs', '.java', '.go', '.rs', '.md', '.yml', '.yaml', '.toml'].includes(ext) &&
+              !item.path.includes('..') &&
+              !item.path.startsWith('/') &&
               !item.path.includes('node_modules/') &&
               !item.path.includes('dist/') &&
               !item.path.includes('vendor/') &&
@@ -1734,8 +1819,19 @@ async function startServer() {
         if (eligibleTreeItems.length > 0) {
           const fetchPromises = eligibleTreeItems.map(async (item) => {
             try {
-              const rawUrl = `https://raw.githubusercontent.com/${repoFullName}/${treeTargetRef}/${item.path}`;
-              const rawRes = await fetch(rawUrl, {
+              const safePathSegments = item.path
+                .split('/')
+                .filter((seg) => seg.length > 0 && seg !== '.' && seg !== '..')
+                .map((seg) => encodeURIComponent(seg))
+                .join('/');
+              const rawUrl = new URL(
+                `/${encodedOwner}/${encodedRepo}/${encodedTreeRef}/${safePathSegments}`,
+                'https://raw.githubusercontent.com'
+              );
+              if (rawUrl.origin !== 'https://raw.githubusercontent.com') {
+                return null;
+              }
+              const rawRes = await fetch(rawUrl.toString(), {
                 headers: { 'User-Agent': 'WinHood-Security-Analyzer' },
               });
               if (rawRes.ok) {
@@ -3363,15 +3459,19 @@ async function startServer() {
     res.json({ auditLogs: db.auditLogs });
   });
 
-  // 11. Reports Export (/api/reports/:runId/export)
-  app.get('/api/reports/:runId/export', (req, res) => {
+  // 11. Reports Export (/api/reports/:runId/export & /api/benchmark-runs/:runId/export)
+  app.get(['/api/reports/:runId/export', '/api/benchmark-runs/:runId/export'], (req, res) => {
     const run =
       db.runs.find((r) => r.id === req.params.runId) || db.runs[0];
     if (!run) {
       return res.status(404).json({ error: 'Execução não encontrada para exportação de relatório.' });
     }
-    const format = ((req.query.format as string) || 'json').toLowerCase();
-    const reportType = ((req.query.type as string) || 'COMPARATIVE_FULL').toUpperCase();
+    const rawFormat = ((req.query.format as string) || 'json').toLowerCase();
+    const format = ['json', 'sarif', 'html', 'csv', 'md'].includes(rawFormat) ? rawFormat : 'json';
+    const rawReportType = ((req.query.type as string) || 'COMPARATIVE_FULL').toUpperCase();
+    const reportType = ALLOWED_REPORT_TYPES.has(rawReportType) ? rawReportType : 'COMPARATIVE_FULL';
+    const safeFileRunId = String(run.id || 'run').replace(/[^a-zA-Z0-9_-]/g, '');
+    const safeFileReportType = reportType.toLowerCase().replace(/[^a-z0-9_]/g, '');
 
     appendAuditLog(
       db,
@@ -3514,18 +3614,24 @@ async function startServer() {
       res.setHeader('Content-Type', 'application/sarif+json; charset=utf-8');
       res.setHeader(
         'Content-Disposition',
-        `attachment; filename="winhood_${run.id}_${reportType.toLowerCase()}.sarif"`
+        `attachment; filename="winhood_${safeFileRunId}_${safeFileReportType}.sarif"`
       );
       return res.send(JSON.stringify(sarifPayload, null, 2));
     }
 
     if (format === 'html') {
+      const safeReportTypeHtml = escapeHtml(reportType);
+      const safeRunIdHtml = escapeHtml(run.id);
+      const safeProjectNameHtml = escapeHtml(run.projectName);
+      const safeAlgorithmVersionHtml = escapeHtml(run.algorithmVersion);
+      const safeExecutiveSummaryHtml = escapeHtml(run.executiveSummary);
+
       const htmlContent = `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>WinHood Analyzer — Relatório Técnico ${reportType} (${run.id})</title>
+  <title>WinHood Analyzer — Relatório Técnico ${safeReportTypeHtml} (${safeRunIdHtml})</title>
   <style>
     :root {
       --bg: #090d14;
@@ -3595,18 +3701,18 @@ async function startServer() {
         <div>
           <h1>WinHood Analyzer — Dossiê Técnico MQR de Qualidade &amp; Segurança</h1>
           <p style="color: var(--text-muted); font-size: 0.9rem;">
-            Execução ID: <code>${run.id}</code> · Projeto: <strong>${run.projectName}</strong> · Algoritmo: <code>${run.algorithmVersion}</code>
+            Execução ID: <code>${safeRunIdHtml}</code> · Projeto: <strong>${safeProjectNameHtml}</strong> · Algoritmo: <code>${safeAlgorithmVersionHtml}</code>
           </p>
         </div>
         <div>
-          <span class="badge">${reportType}</span>
+          <span class="badge">${safeReportTypeHtml}</span>
         </div>
       </div>
     </header>
 
     <div class="card">
       <h3 style="margin-bottom: 0.5rem; color: var(--accent);">Resumo Executivo</h3>
-      <p style="color: #cbd5e1; font-size: 0.95rem;">${run.executiveSummary}</p>
+      <p style="color: #cbd5e1; font-size: 0.95rem;">${safeExecutiveSummaryHtml}</p>
     </div>
 
     <div class="grid">
@@ -3615,20 +3721,20 @@ async function startServer() {
           (sc) => `
         <div class="card">
           <h2>
-            <span>${sc.softwareName} (v${sc.softwareVersion})</span>
-            <span class="score-big">${sc.groupedScores.overallScore.toFixed(2)} / 5.00</span>
+            <span>${escapeHtml(sc.softwareName)} (v${escapeHtml(sc.softwareVersion)})</span>
+            <span class="score-big">${Number(sc.groupedScores.overallScore).toFixed(2)} / 5.00</span>
           </h2>
           <div style="font-size: 0.85rem; margin-bottom: 1rem;">
-            Status Quality Gate: <span class="${sc.qualityGate?.status === 'PASSED' ? 'qg-passed' : 'qg-failed'}">${sc.qualityGate?.status || 'N/A'}</span>
-            · Classificação: <strong>${sc.classificationLabel}</strong>
+            Status Quality Gate: <span class="${sc.qualityGate?.status === 'PASSED' ? 'qg-passed' : 'qg-failed'}">${escapeHtml(sc.qualityGate?.status || 'N/A')}</span>
+            · Classificação: <strong>${escapeHtml(sc.classificationLabel)}</strong>
           </div>
           <div style="font-family: monospace; font-size: 0.8rem; color: var(--text-muted); line-height: 1.8;">
-            <div>Segurança: <strong>${sc.groupedScores.securityScore.toFixed(2)}</strong> (Rating ${sc.ratings?.security || 'A'})</div>
-            <div>Qualidade: <strong>${sc.groupedScores.qualityScore.toFixed(2)}</strong> (Rating ${sc.ratings?.maintainability || 'A'})</div>
-            <div>Confiabilidade: Rating <strong>${sc.ratings?.reliability || 'A'}</strong> (Bugs: ${sc.metricsSummary.bugs})</div>
-            <div>Arquitetura: <strong>${sc.groupedScores.architectureScore.toFixed(2)}</strong> (Ciclos: ${sc.metricsSummary.circularDependencies})</div>
-            <div>Desempenho P95: <strong>${sc.metricsSummary.p95LatencyMs.toFixed(1)} ms</strong> (Throughput: ${sc.metricsSummary.throughputRps} RPS)</div>
-            <div>Vulnerabilidades Críticas: <strong style="${sc.metricsSummary.criticalVulns > 0 ? 'color: var(--danger)' : ''}">${sc.metricsSummary.criticalVulns}</strong></div>
+            <div>Segurança: <strong>${Number(sc.groupedScores.securityScore).toFixed(2)}</strong> (Rating ${escapeHtml(sc.ratings?.security || 'A')})</div>
+            <div>Qualidade: <strong>${Number(sc.groupedScores.qualityScore).toFixed(2)}</strong> (Rating ${escapeHtml(sc.ratings?.maintainability || 'A')})</div>
+            <div>Confiabilidade: Rating <strong>${escapeHtml(sc.ratings?.reliability || 'A')}</strong> (Bugs: ${Number(sc.metricsSummary.bugs)})</div>
+            <div>Arquitetura: <strong>${Number(sc.groupedScores.architectureScore).toFixed(2)}</strong> (Ciclos: ${Number(sc.metricsSummary.circularDependencies)})</div>
+            <div>Desempenho P95: <strong>${Number(sc.metricsSummary.p95LatencyMs).toFixed(1)} ms</strong> (Throughput: ${Number(sc.metricsSummary.throughputRps)} RPS)</div>
+            <div>Vulnerabilidades Críticas: <strong style="${sc.metricsSummary.criticalVulns > 0 ? 'color: var(--danger)' : ''}">${Number(sc.metricsSummary.criticalVulns)}</strong></div>
           </div>
         </div>
       `
@@ -3643,7 +3749,7 @@ async function startServer() {
           const cats = sc.categoryDetails ? Object.values(sc.categoryDetails) : [];
           return `
             <div style="margin-top: 1.25rem;">
-              <h3 style="color: var(--accent); margin-bottom: 0.5rem;">${sc.softwareName} (v${sc.softwareVersion})</h3>
+              <h3 style="color: var(--accent); margin-bottom: 0.5rem;">${escapeHtml(sc.softwareName)} (v${escapeHtml(sc.softwareVersion)})</h3>
               ${cats
                 .map((cd) => {
                   const reasons = cd.evaluationReasons || [];
@@ -3651,8 +3757,8 @@ async function startServer() {
                   return `
                     <div class="reason-item">
                       <div style="display: flex; justify-content: space-between; font-family: monospace; font-weight: bold;">
-                        <span>[${cd.category.toUpperCase()}] Status: ${cd.status}</span>
-                        <span>clamp[0,5](5.00 + (${sumDelta >= 0 ? '+' : ''}${sumDelta.toFixed(2)})) = ${(cd.finalScore ?? 0).toFixed(2)} / 5.00</span>
+                        <span>[${escapeHtml(cd.category.toUpperCase())}] Status: ${escapeHtml(cd.status)}</span>
+                        <span>clamp[0,5](5.00 + (${sumDelta >= 0 ? '+' : ''}${sumDelta.toFixed(2)})) = ${Number(cd.finalScore ?? 0).toFixed(2)} / 5.00</span>
                       </div>
                       ${
                         reasons.length === 0
@@ -3662,18 +3768,18 @@ async function startServer() {
                                 (r) => `
                                 <div style="margin-top: 0.6rem; padding-top: 0.6rem; border-top: 1px dashed var(--border); font-size: 0.82rem;">
                                   <div style="font-family: monospace;">
-                                    <strong style="color: ${r.scoreDelta < 0 ? 'var(--danger)' : 'var(--success)'};">${r.scoreDelta >= 0 ? '+' : ''}${r.scoreDelta.toFixed(2)} pts</strong>
-                                    · [${r.severity}] <code>${r.ruleId}</code> · <code>${r.filePath}:${r.lineNumber}${r.endLineNumber ? `-${r.endLineNumber}` : ''}</code>
+                                    <strong style="color: ${r.scoreDelta < 0 ? 'var(--danger)' : 'var(--success)'};">${r.scoreDelta >= 0 ? '+' : ''}${Number(r.scoreDelta).toFixed(2)} pts</strong>
+                                    · [${escapeHtml(r.severity)}] <code>${escapeHtml(r.ruleId)}</code> · <code>${escapeHtml(r.filePath)}:${Number(r.lineNumber)}${r.endLineNumber ? `-${Number(r.endLineNumber)}` : ''}</code>
                                   </div>
-                                  <div style="margin-top: 0.25rem;"><strong>Motivo:</strong> ${r.title}</div>
-                                  <div style="color: var(--text-muted); margin-top: 0.2rem;"><strong>Por que impactou a nota:</strong> ${r.whyExplanation}</div>
-                                  <pre class="code-box">${[...(r.contextBefore || []), `>>> ${r.codeSnippet}`, ...(r.contextAfter || [])].join('\n')}</pre>
+                                  <div style="margin-top: 0.25rem;"><strong>Motivo:</strong> ${escapeHtml(r.title)}</div>
+                                  <div style="color: var(--text-muted); margin-top: 0.2rem;"><strong>Por que impactou a nota:</strong> ${escapeHtml(r.whyExplanation)}</div>
+                                  <pre class="code-box">${escapeHtml([...(r.contextBefore || []), `>>> ${r.codeSnippet}`, ...(r.contextAfter || [])].join('\n'))}</pre>
                                   ${
                                     r.executionFlow && r.executionFlow.length > 0
-                                      ? `<div style="margin-top: 0.4rem; font-family: monospace; font-size: 0.75rem; color: var(--warning);">Fluxo Taint (Source → Sink): ${r.executionFlow.map((s) => `[${s.nodeType}] ${s.filePath}:${s.lineNumber}`).join(' → ')}</div>`
+                                      ? `<div style="margin-top: 0.4rem; font-family: monospace; font-size: 0.75rem; color: var(--warning);">Fluxo Taint (Source → Sink): ${escapeHtml(r.executionFlow.map((s) => `[${s.nodeType}] ${s.filePath}:${s.lineNumber}`).join(' → '))}</div>`
                                       : ''
                                   }
-                                  <div style="margin-top: 0.35rem; color: var(--success);"><strong>Remediação:</strong> ${r.remediationSummary}</div>
+                                  <div style="margin-top: 0.35rem; color: var(--success);"><strong>Remediação:</strong> ${escapeHtml(r.remediationSummary)}</div>
                                 </div>
                               `
                               )
@@ -3690,7 +3796,7 @@ async function startServer() {
     </div>
 
     <div class="card">
-      <h2>Achados e Evidências Criptográficas Validadas (${run.findings.length})</h2>
+      <h2>Achados e Evidências Criptográficas Validadas (${Number(run.findings.length)})</h2>
       <table>
         <thead>
           <tr>
@@ -3708,16 +3814,16 @@ async function startServer() {
             .map(
               (f) => `
             <tr>
-              <td class="sev-${f.severity}">[${f.severity}]</td>
-              <td><code>${f.validationStatus}</code></td>
-              <td>${f.softwareName}</td>
-              <td>${f.originalRuleId} ${f.cwe ? `(${f.cwe})` : ''}</td>
-              <td><code>${f.filePath}:${f.lineNumber}</code></td>
+              <td class="sev-${escapeHtml(f.severity)}">[${escapeHtml(f.severity)}]</td>
+              <td><code>${escapeHtml(f.validationStatus)}</code></td>
+              <td>${escapeHtml(f.softwareName)}</td>
+              <td>${escapeHtml(f.originalRuleId)} ${f.cwe ? `(${escapeHtml(f.cwe)})` : ''}</td>
+              <td><code>${escapeHtml(f.filePath)}:${Number(f.lineNumber)}</code></td>
               <td>
-                <div><strong>${f.title}</strong></div>
-                <div style="color: var(--text-muted); font-size: 0.75rem;">${f.whyItIsAnIssue || f.description}</div>
+                <div><strong>${escapeHtml(f.title)}</strong></div>
+                <div style="color: var(--text-muted); font-size: 0.75rem;">${escapeHtml(f.whyItIsAnIssue || f.description)}</div>
               </td>
-              <td style="color: var(--text-muted);">${f.evidenceSha256.slice(0, 16)}...</td>
+              <td style="color: var(--text-muted);">${escapeHtml(f.evidenceSha256.slice(0, 16))}...</td>
             </tr>
           `
             )
@@ -3727,7 +3833,7 @@ async function startServer() {
     </div>
 
     <div class="footer">
-      Gerado automaticamente pelo WinHood Security &amp; Benchmark Engine · ${new Date().toISOString()} · Imutabilidade garantida por cadeia SHA-256.
+      Gerado automaticamente pelo WinHood Security &amp; Benchmark Engine · ${escapeHtml(new Date().toISOString())} · Imutabilidade garantida por cadeia SHA-256.
     </div>
   </div>
 </body>
@@ -3736,7 +3842,7 @@ async function startServer() {
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.setHeader(
         'Content-Disposition',
-        `attachment; filename="winhood_${run.id}_${reportType.toLowerCase()}.html"`
+        `attachment; filename="winhood_${safeFileRunId}_${safeFileReportType}.html"`
       );
       return res.send(htmlContent);
     }
@@ -3784,7 +3890,7 @@ async function startServer() {
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader(
         'Content-Disposition',
-        `attachment; filename="winhood_${run.id}_${reportType.toLowerCase()}.csv"`
+        `attachment; filename="winhood_${safeFileRunId}_${safeFileReportType}.csv"`
       );
       return res.send(csv);
     }
@@ -3866,7 +3972,7 @@ async function startServer() {
       res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
       res.setHeader(
         'Content-Disposition',
-        `attachment; filename="winhood_${run.id}_${reportType.toLowerCase()}.md"`
+        `attachment; filename="winhood_${safeFileRunId}_${safeFileReportType}.md"`
       );
       return res.send(md);
     }
@@ -3875,7 +3981,7 @@ async function startServer() {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="winhood_${run.id}_${reportType.toLowerCase()}.json"`
+      `attachment; filename="winhood_${safeFileRunId}_${safeFileReportType}.json"`
     );
     return res.send(
       JSON.stringify(
@@ -4486,6 +4592,66 @@ async function startServer() {
     });
   });
 
+  // 16. Hardware, GPU, Storage & Display Benchmark Suite (Frente 4)
+  let latestHardwareBenchmark: HostHardwareBenchmarkResult | null = null;
+
+  app.get('/api/hardware-benchmark/latest', (_req, res) => {
+    if (!latestHardwareBenchmark) {
+      latestHardwareBenchmark = ToolResourceMonitor.runHostHardwareBenchmark();
+    }
+    res.json({
+      benchmark: latestHardwareBenchmark,
+      hostResources: ToolResourceMonitor.inspectHostResources(),
+      hardwareProfile: getHardwareProfile(),
+    });
+  });
+
+  app.post('/api/hardware-benchmark/run', (_req, res) => {
+    const result = ToolResourceMonitor.runHostHardwareBenchmark();
+    latestHardwareBenchmark = result;
+    appendAuditLog(
+      db,
+      'HARDWARE_BENCHMARK_EXECUTED',
+      'HARDWARE_BENCHMARK',
+      result.benchmarkId,
+      `Benchmark de Hardware & Storage executado: Score ${result.overallHostScore}/100 (Tier ${result.tier}) | SHA-256: ${result.verificationSha256.slice(0, 16)}...`
+    );
+    saveDatabase(db);
+    res.json({
+      benchmark: result,
+      hostResources: ToolResourceMonitor.inspectHostResources(),
+      hardwareProfile: getHardwareProfile(),
+    });
+  });
+
+  app.post('/api/hardware-benchmark/attach-to-run', (req, res) => {
+    if (!requireWritePermission(res)) return;
+    const { runId, compositeScore, tier, displaySummary, verificationHash } = req.body as {
+      runId?: string;
+      compositeScore?: number;
+      tier?: string;
+      displaySummary?: string;
+      verificationHash?: string;
+    };
+    const targetRun = db.runs.find((r) => r.id === runId) || db.runs[0];
+    if (!targetRun) {
+      return res.status(404).json({ error: 'Execução de benchmark não encontrada para vincular snapshot de hardware.' });
+    }
+    appendAuditLog(
+      db,
+      'HARDWARE_SNAPSHOT_ATTACHED',
+      'BENCHMARK_RUN',
+      targetRun.id,
+      `Snapshot Hardware & Display vinculado à execução ${targetRun.id}: Score ${compositeScore ?? 0}/100 (Tier ${tier || 'A'}) — ${displaySummary || 'Display Telemetry'} [SHA-256: ${(verificationHash || '').slice(0, 16)}]`
+    );
+    saveDatabase(db);
+    return res.json({
+      attached: true,
+      runId: targetRun.id,
+      attachedAt: new Date().toISOString(),
+    });
+  });
+
   // Mount Vite or Static Dist
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
@@ -4506,4 +4672,6 @@ async function startServer() {
   });
 }
 
-startServer();
+void startServer().catch((err) => {
+  console.error('Failed to start WinHood server:', err);
+});

@@ -49,7 +49,10 @@ export class GitarInstallationHealth {
       };
     }
 
-    const cleanUrl = params.apiBaseUrl.trim().replace(/\/+$/, '');
+    let cleanUrl = params.apiBaseUrl.trim();
+    while (cleanUrl.endsWith('/')) {
+      cleanUrl = cleanUrl.slice(0, -1);
+    }
     try {
       const controller = new AbortController();
       const t = setTimeout(() => controller.abort(), 3500);
