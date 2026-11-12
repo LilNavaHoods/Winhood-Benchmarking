@@ -10,3 +10,7 @@ coverage/
 *.zip
 *.tar.gz
 .tempmediaStorage/
+.playwright-cli/
+!package-lock.json
+!bun.lock
+

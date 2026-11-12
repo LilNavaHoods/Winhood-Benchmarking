@@ -15,8 +15,27 @@ import {
   Monitor,
   HardDrive,
   Zap,
+  Download,
+  KeyRound,
+  Eye,
+  EyeOff,
+  Trash2,
+  Clock,
+  AlertTriangle,
+  CheckCircle2,
+  FileCode2,
+  PlusCircle,
 } from 'lucide-react';
 import type { HardwareProfile } from '../engine/workerPool';
+import type {
+  SavedSonarProjectProfile,
+  SonarTokenVerificationResult,
+} from '../types/benchmark';
+
+interface SavedSonarProjectWithVerification
+  extends Omit<SavedSonarProjectProfile, 'encryptedToken'> {
+  tokenVerification?: SonarTokenVerificationResult;
+}
 
 interface SonarDockerStatus {
   dockerContainerSuggestedCommand: string;
@@ -43,12 +62,12 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify }) => {
 
   // SonarScanner Generator state
   const [scannerEcosystem, setScannerEcosystem] = useState<'nodejs' | 'maven' | 'gradle' | 'dotnet' | 'cli'>('nodejs');
-  const [projectKey, setProjectKey] = useState('MEU_PROJETO');
-  const [hostUrl, setHostUrl] = useState('http://localhost:9000');
-  const [token, setToken] = useState('squ_token_exemplo123456');
+  const [projectKey, setProjectKey] = useState('');
+  const [hostUrl, setHostUrl] = useState('');
+  const [token, setToken] = useState('');
 
   // SonarCloud state
-  const [cloudOrg, setCloudOrg] = useState('minha-organizacao');
+  const [cloudOrg, setCloudOrg] = useState('');
   const [cloudToken, setCloudToken] = useState('');
   const [testingCloud, setTestingCloud] = useState(false);
   const [cloudResult, setCloudResult] = useState<{ ok: boolean; message: string } | null>(null);
@@ -63,9 +82,304 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify }) => {
   const [stoppingDocker, setStoppingDocker] = useState(false);
   const [runningQuickAnalysis, setRunningQuickAnalysis] = useState(false);
 
+  // Saved Sonar Projects & 1-Click JSON Exporter state (Especificação 2)
+  const [savedSonarProjects, setSavedSonarProjects] = useState<
+    SavedSonarProjectWithVerification[]
+  >([]);
+  const [loadingSavedProjects, setLoadingSavedProjects] = useState(false);
+  const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
+  const [profName, setProfName] = useState('');
+  const [profPlatform, setProfPlatform] = useState<'SONARCLOUD' | 'SONARQUBE_SERVER'>(
+    'SONARCLOUD'
+  );
+  const [profServerUrl, setProfServerUrl] = useState('');
+  const [profOrganization, setProfOrganization] = useState('');
+  const [profProjectKey, setProfProjectKey] = useState('');
+  const [profToken, setProfToken] = useState('');
+  const [showProfToken, setShowProfToken] = useState(false);
+  const [profValidityPolicy, setProfValidityPolicy] = useState<
+    30 | 60 | 90 | 'NO_EXPIRATION' | 'CUSTOM'
+  >(90);
+  const [profCustomExpiresAt, setProfCustomExpiresAt] = useState('');
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [verifyingProjectId, setVerifyingProjectId] = useState<string | null>(null);
+  const [exportingJsonId, setExportingJsonId] = useState<string | null>(null);
+  const [exportingPs1Id, setExportingPs1Id] = useState<string | null>(null);
+
+  const loadSavedSonarProjects = async () => {
+    setLoadingSavedProjects(true);
+    try {
+      const res = await fetch('/api/sonar/saved-projects');
+      if (res.ok) {
+        const data = (await res.json()) as {
+          projects?: SavedSonarProjectWithVerification[];
+        };
+        if (Array.isArray(data.projects)) {
+          setSavedSonarProjects(data.projects);
+        }
+      }
+    } catch {
+      // silent fallback
+    } finally {
+      setLoadingSavedProjects(false);
+    }
+  };
+
+  const handleSelectProfileForEdit = (proj: SavedSonarProjectWithVerification) => {
+    setEditingProfileId(proj.id);
+    setProfName(proj.name);
+    setProfPlatform(proj.platform);
+    setProfServerUrl(proj.serverUrl);
+    setProfOrganization(proj.organization);
+    setProfProjectKey(proj.projectKey);
+    setProfValidityPolicy(proj.tokenValidityDaysPolicy || 90);
+    setProfCustomExpiresAt(
+      proj.tokenExpiresAt ? proj.tokenExpiresAt.slice(0, 10) : ''
+    );
+    setProfToken('');
+  };
+
+  const handleSaveSonarProjectProfile = async () => {
+    if (!profProjectKey.trim()) {
+      onNotify('Informe o Project Key do projeto no SonarCloud/SonarQube.', 'error');
+      return;
+    }
+    setSavingProfile(true);
+    try {
+      const res = await fetch('/api/sonar/saved-projects', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: editingProfileId || undefined,
+          name: profName.trim() || profProjectKey.trim(),
+          platform: profPlatform,
+          serverUrl: profServerUrl.trim(),
+          organization: profOrganization.trim(),
+          projectKey: profProjectKey.trim(),
+          token: profToken.trim() || undefined,
+          tokenValidityDaysPolicy: profValidityPolicy,
+          customTokenExpiresAt:
+            profValidityPolicy === 'CUSTOM' && profCustomExpiresAt
+              ? profCustomExpiresAt
+              : null,
+        }),
+      });
+      const data = (await res.json()) as {
+        error?: string;
+        projects?: SavedSonarProjectWithVerification[];
+        project?: SavedSonarProjectWithVerification;
+      };
+      if (!res.ok) {
+        onNotify(data.error || 'Falha ao salvar perfil do projeto Sonar.', 'error');
+        return;
+      }
+      if (Array.isArray(data.projects)) {
+        setSavedSonarProjects(data.projects);
+      }
+      if (data.project) {
+        setEditingProfileId(data.project.id);
+      }
+      setProfToken('');
+      onNotify(
+        `Perfil "${profProjectKey.trim()}" salvo com sucesso (Token criptografado com AES-256-GCM).`,
+        'success'
+      );
+    } catch {
+      onNotify('Erro ao salvar perfil do projeto Sonar.', 'error');
+    } finally {
+      setSavingProfile(false);
+    }
+  };
+
+  const handleVerifyProjectToken = async (projId: string) => {
+    setVerifyingProjectId(projId);
+    try {
+      const res = await fetch(`/api/sonar/saved-projects/${projId}/verify-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          token:
+            editingProfileId === projId && profToken.trim()
+              ? profToken.trim()
+              : undefined,
+        }),
+      });
+      const data = (await res.json()) as {
+        error?: string;
+        project?: SavedSonarProjectWithVerification;
+        verification?: SonarTokenVerificationResult;
+      };
+      if (!res.ok) {
+        onNotify(data.error || 'Erro ao verificar token.', 'error');
+        return;
+      }
+      if (data.project) {
+        setSavedSonarProjects((prev) =>
+          prev.map((item) => (item.id === projId ? data.project! : item))
+        );
+      }
+      onNotify(
+        data.verification?.message || 'Status do token atualizado.',
+        data.verification?.valid ? 'success' : 'error'
+      );
+    } catch {
+      onNotify('Falha ao verificar validade do token.', 'error');
+    } finally {
+      setVerifyingProjectId(null);
+    }
+  };
+
+  const handleDownloadSonarJsonReport = async (
+    proj: SavedSonarProjectWithVerification
+  ) => {
+    if (!proj.hasToken && !(editingProfileId === proj.id && profToken.trim())) {
+      handleSelectProfileForEdit(proj);
+      onNotify(
+        `Insira e salve seu Bearer Token do SonarCloud para o projeto "${proj.projectKey}" antes de baixar o relatório JSON.`,
+        'error'
+      );
+      return;
+    }
+
+    setExportingJsonId(proj.id);
+    try {
+      // Se o usuário digitou o token no formulário mas ainda não clicou em Salvar, salva antes de exportar
+      if (editingProfileId === proj.id && profToken.trim()) {
+        await handleSaveSonarProjectProfile();
+      }
+      const res = await fetch(`/api/sonar/saved-projects/${proj.id}/export-json`);
+      if (!res.ok) {
+        const errJson = (await res.json().catch(() => ({}))) as { error?: string };
+        onNotify(
+          errJson.error ||
+            `Falha HTTP ${res.status} ao exportar relatório JSON de "${proj.projectKey}".`,
+          'error'
+        );
+        return;
+      }
+      const blob = await res.blob();
+      const safeKey = proj.projectKey.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const downloadUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      a.download = `sonarcloud-report-${safeKey}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(downloadUrl);
+
+      await loadSavedSonarProjects();
+      onNotify(
+        `Relatório sonarcloud-report-${safeKey}.json baixado diretamente da API oficial!`,
+        'success'
+      );
+    } catch {
+      onNotify('Erro de rede ao baixar relatório JSON do SonarCloud.', 'error');
+    } finally {
+      setExportingJsonId(null);
+    }
+  };
+
+  const handleDownloadSonarPs1Script = async (
+    proj: SavedSonarProjectWithVerification
+  ) => {
+    setExportingPs1Id(proj.id);
+    try {
+      const res = await fetch(`/api/sonar/saved-projects/${proj.id}/export-ps1`);
+      if (!res.ok) {
+        onNotify('Falha ao gerar script PowerShell (.ps1).', 'error');
+        return;
+      }
+      const blob = await res.blob();
+      const safeKey = proj.projectKey.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const downloadUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      a.download = `sonarcloud-${safeKey}.ps1`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(downloadUrl);
+      onNotify(
+        `Script PowerShell completo sonarcloud-${safeKey}.ps1 baixado (coleta Quality Gate, Métricas, Hotspots e Issues)!`,
+        'success'
+      );
+    } catch {
+      onNotify('Erro ao baixar script PowerShell (.ps1).', 'error');
+    } finally {
+      setExportingPs1Id(null);
+    }
+  };
+
+  const handleDownloadFormPs1Script = async () => {
+    setExportingPs1Id('form-direct');
+    try {
+      const res = await fetch('/api/sonar/export-ps1-direct', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          platform: profPlatform,
+          serverUrl:
+            profServerUrl.trim() ||
+            (profPlatform === 'SONARCLOUD'
+              ? 'https://sonarcloud.io'
+              : 'http://localhost:9000'),
+          projectKey: profProjectKey.trim(),
+          organization: profOrganization.trim(),
+          token: profToken.trim() || undefined,
+        }),
+      });
+      if (!res.ok) {
+        onNotify('Falha ao gerar script PowerShell (.ps1).', 'error');
+        return;
+      }
+      const blob = await res.blob();
+      const safeKey = (profProjectKey.trim() || 'sonar_project').replace(
+        /[^a-zA-Z0-9._-]/g,
+        '_'
+      );
+      const downloadUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      a.download = `sonarcloud-${safeKey}.ps1`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(downloadUrl);
+      onNotify(
+        `Script PowerShell completo sonarcloud-${safeKey}.ps1 baixado!`,
+        'success'
+      );
+    } catch {
+      onNotify('Erro ao baixar script PowerShell (.ps1).', 'error');
+    } finally {
+      setExportingPs1Id(null);
+    }
+  };
+
+  const handleDeleteSavedProject = async (proj: SavedSonarProjectWithVerification) => {
+    try {
+      const res = await fetch(`/api/sonar/saved-projects/${proj.id}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        const data = (await res.json()) as {
+          projects?: SavedSonarProjectWithVerification[];
+        };
+        if (Array.isArray(data.projects)) {
+          setSavedSonarProjects(data.projects);
+        }
+        onNotify(`Perfil "${proj.projectKey}" removido.`, 'success');
+      }
+    } catch {
+      onNotify('Erro ao remover perfil.', 'error');
+    }
+  };
+
   useEffect(() => {
     void checkDockerStatus();
     void loadHardwareProfile();
+    void loadSavedSonarProjects();
   }, []);
 
   const copyToClipboard = (text: string, key: string) => {
@@ -371,6 +685,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify }) => {
             Gerador SonarScanner CLI
           </button>
           <button
+            type="button"
             onClick={() => setActiveTab('hardware')}
             className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
               activeTab === 'hardware'
@@ -381,6 +696,420 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify }) => {
             <Zap className="w-4 h-4" />
             Hardware & Executável Windows (.exe)
           </button>
+        </div>
+      </div>
+
+      {/* ESPECIFICAÇÃO 2: Meus Projetos SonarQube / SonarCloud — Download 1-Clique de Relatório JSON & Monitor de Validade de Token */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-6">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 border-b border-slate-800 pb-4">
+          <div className="space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="px-2.5 py-0.5 rounded text-[11px] font-mono font-bold bg-[#31d6c4]/15 text-[#31d6c4] border border-[#31d6c4]/30">
+                EXPORTADOR DIRETO SONARCLOUD / SONARQUBE
+              </span>
+              <span className="px-2.5 py-0.5 rounded text-[11px] font-mono bg-slate-800 text-slate-300">
+                Análise Completa: Quality Gate · Métricas MQR · Hotspots · Issues Paginadas
+              </span>
+            </div>
+            <h2 className="text-lg font-bold text-white">
+              Meus Projetos SonarQube / SonarCloud — Download 1-Clique de Relatório JSON
+            </h2>
+            <p className="text-xs text-slate-400">
+              Cadastre seus projetos (`Project Key`, `Organization`, `Bearer Token`) para baixar relatórios JSON completos (Quality Gate, 39 Métricas, Security Hotspots, Componentes, Regras e Issues paginadas) ou gerar o script `.PS1` integral.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => {
+              setEditingProfileId(null);
+              setProfName('');
+              setProfPlatform('SONARCLOUD');
+              setProfServerUrl('');
+              setProfOrganization('');
+              setProfProjectKey('');
+              setProfToken('');
+              setProfValidityPolicy(90);
+              setProfCustomExpiresAt('');
+            }}
+            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-bold border border-[#31d6c4]/40 text-[#31d6c4] hover:bg-[#31d6c4]/10 transition-colors cursor-pointer shrink-0"
+          >
+            <PlusCircle className="w-4 h-4" />
+            Limpar Campos / Novo Projeto
+          </button>
+        </div>
+
+        {/* Formulário de Configuração & Validade do Token */}
+        <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-5 space-y-4">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold text-slate-200 flex items-center gap-2">
+              <KeyRound className="w-4 h-4 text-[#31d6c4]" />
+              {editingProfileId
+                ? `Configurar / Atualizar Projeto Selecionado (${profProjectKey || 'Projeto'})`
+                : 'Adicionar Novo Projeto SonarCloud / SonarQube'}
+            </span>
+            <span className="text-[11px] font-mono text-slate-400">
+              Criptografia em Repouso: AES-256-GCM
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div>
+              <label
+                htmlFor="sonar-prof-name"
+                className="block text-xs font-semibold text-slate-300 mb-1"
+              >
+                Nome de Exibição do Projeto
+              </label>
+              <input
+                id="sonar-prof-name"
+                type="text"
+                value={profName}
+                onChange={(e) => setProfName(e.target.value)}
+                placeholder="Informe o nome do projeto..."
+                className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-white focus:outline-none focus:border-[#31d6c4]"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="sonar-prof-key"
+                className="block text-xs font-semibold text-slate-300 mb-1"
+              >
+                Project Key (`sonar.projectKey`)
+              </label>
+              <input
+                id="sonar-prof-key"
+                type="text"
+                value={profProjectKey}
+                onChange={(e) => setProfProjectKey(e.target.value)}
+                placeholder="Informe o Project Key..."
+                className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-[#31d6c4]"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="sonar-prof-org"
+                className="block text-xs font-semibold text-slate-300 mb-1"
+              >
+                Organization (`sonar.organization`)
+              </label>
+              <input
+                id="sonar-prof-org"
+                type="text"
+                value={profOrganization}
+                onChange={(e) => setProfOrganization(e.target.value)}
+                placeholder="Informe a Organization..."
+                className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-[#31d6c4]"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="sonar-prof-platform"
+                className="block text-xs font-semibold text-slate-300 mb-1"
+              >
+                Plataforma &amp; URL do Servidor
+              </label>
+              <div className="flex gap-2">
+                <select
+                  id="sonar-prof-platform"
+                  value={profPlatform}
+                  onChange={(e) => {
+                    const nextPlat = e.target.value as 'SONARCLOUD' | 'SONARQUBE_SERVER';
+                    setProfPlatform(nextPlat);
+                  }}
+                  className="rounded-lg border border-slate-800 bg-slate-900 px-2.5 py-2 text-xs text-white focus:outline-none focus:border-[#31d6c4]"
+                >
+                  <option value="SONARCLOUD">SonarCloud</option>
+                  <option value="SONARQUBE_SERVER">SonarQube Server</option>
+                </select>
+                <input
+                  id="sonar-prof-url"
+                  aria-label="URL do Servidor Sonar"
+                  type="text"
+                  value={profServerUrl}
+                  onChange={(e) => setProfServerUrl(e.target.value)}
+                  placeholder={
+                    profPlatform === 'SONARCLOUD'
+                      ? 'https://sonarcloud.io'
+                      : 'http://localhost:9000'
+                  }
+                  className="flex-1 rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-[#31d6c4]"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label
+                htmlFor="sonar-prof-token"
+                className="block text-xs font-semibold text-slate-300 mb-1"
+              >
+                Bearer Token (`SONAR_TOKEN`)
+              </label>
+              <div className="relative flex items-center">
+                <input
+                  id="sonar-prof-token"
+                  type={showProfToken ? 'text' : 'password'}
+                  value={profToken}
+                  onChange={(e) => setProfToken(e.target.value)}
+                  placeholder="Cole seu token do SonarCloud/SonarQube..."
+                  className="w-full rounded-lg border border-slate-800 bg-slate-900 pl-3 pr-9 py-2 text-xs font-mono text-white focus:outline-none focus:border-[#31d6c4]"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowProfToken((prev) => !prev)}
+                  className="absolute right-2.5 text-slate-400 hover:text-slate-200 cursor-pointer"
+                  title={showProfToken ? 'Ocultar Token' : 'Mostrar Token'}
+                >
+                  {showProfToken ? (
+                    <EyeOff className="w-3.5 h-3.5" />
+                  ) : (
+                    <Eye className="w-3.5 h-3.5" />
+                  )}
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <label
+                htmlFor="sonar-prof-validity"
+                className="block text-xs font-semibold text-slate-300 mb-1"
+              >
+                Prazo de Validade do Token
+              </label>
+              <div className="flex gap-2">
+                <select
+                  id="sonar-prof-validity"
+                  value={String(profValidityPolicy)}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val === '30' || val === '60' || val === '90') {
+                      setProfValidityPolicy(Number(val) as 30 | 60 | 90);
+                    } else if (val === 'CUSTOM') {
+                      setProfValidityPolicy('CUSTOM');
+                    } else {
+                      setProfValidityPolicy('NO_EXPIRATION');
+                    }
+                  }}
+                  className="flex-1 rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-white focus:outline-none focus:border-[#31d6c4]"
+                >
+                  <option value="30">Expira em 30 dias</option>
+                  <option value="60">Expira em 60 dias</option>
+                  <option value="90">Expira em 90 dias (Padrão Sonar)</option>
+                  <option value="NO_EXPIRATION">Sem Expiração</option>
+                  <option value="CUSTOM">Data Personalizada</option>
+                </select>
+                {profValidityPolicy === 'CUSTOM' && (
+                  <input
+                    id="sonar-prof-custom-date"
+                    aria-label="Data personalizada de expiração do token"
+                    type="date"
+                    value={profCustomExpiresAt}
+                    onChange={(e) => setProfCustomExpiresAt(e.target.value)}
+                    className="rounded-lg border border-slate-800 bg-slate-900 px-2.5 py-2 text-xs font-mono text-white focus:outline-none focus:border-[#31d6c4]"
+                  />
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
+            <span className="text-[11px] text-slate-400">
+              Preencha os campos acima para salvar o projeto ou baixar o script PowerShell (`.ps1`) de análise completa.
+            </span>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={exportingPs1Id === 'form-direct'}
+                onClick={() => void handleDownloadFormPs1Script()}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800 transition-colors cursor-pointer disabled:opacity-50"
+              >
+                <FileCode2 className="w-4 h-4 text-[#31d6c4]" />
+                Baixar Script .PS1 Completo
+              </button>
+              <button
+                type="button"
+                disabled={savingProfile}
+                onClick={() => void handleSaveSonarProjectProfile()}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] transition-colors cursor-pointer disabled:opacity-50"
+              >
+                <ShieldCheck className="w-4 h-4" />
+                {savingProfile
+                  ? 'Salvando e Validando...'
+                  : 'Salvar Perfil de Projeto & Criptografar Token'}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Lista de Cards dos Projetos Sonar Salvos */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {loadingSavedProjects && savedSonarProjects.length === 0 ? (
+            <div className="text-xs text-slate-400 font-mono p-4">
+              Carregando projetos Sonar salvos...
+            </div>
+          ) : savedSonarProjects.length === 0 ? (
+            <div className="col-span-full rounded-xl border border-dashed border-slate-800 bg-slate-950/40 p-6 text-center space-y-1.5">
+              <div className="text-xs font-semibold text-slate-300">
+                Nenhum projeto SonarCloud / SonarQube cadastrado no momento
+              </div>
+              <p className="text-xs text-slate-400">
+                Preencha os campos em branco acima com seu <code className="text-slate-200 font-mono">Project Key</code>, <code className="text-slate-200 font-mono">Organization</code> e <code className="text-slate-200 font-mono">Bearer Token</code> e clique em <strong className="text-slate-200">Salvar Perfil de Projeto</strong>.
+              </p>
+            </div>
+          ) : (
+            savedSonarProjects.map((proj) => {
+              const ver = proj.tokenVerification;
+              const statusLabel = ver?.statusLabel || 'NOT_CONFIGURED';
+
+              let badgeClasses =
+                'bg-slate-800 text-slate-300 border-slate-700';
+              if (statusLabel === 'VALID_ACTIVE' || statusLabel === 'NO_EXPIRATION') {
+                badgeClasses =
+                  'bg-emerald-500/15 text-emerald-400 border-emerald-500/30';
+              } else if (statusLabel === 'EXPIRING_SOON') {
+                badgeClasses =
+                  'bg-amber-500/15 text-amber-400 border-amber-500/30';
+              } else if (statusLabel === 'EXPIRED' || statusLabel === 'INVALID_TOKEN') {
+                badgeClasses =
+                  'bg-rose-500/15 text-rose-400 border-rose-500/30';
+              }
+
+              return (
+                <div
+                  key={proj.id}
+                  className={`rounded-xl border p-5 space-y-4 transition-colors ${
+                    editingProfileId === proj.id
+                      ? 'border-[#31d6c4]/60 bg-slate-950'
+                      : 'border-slate-800 bg-slate-950/50 hover:border-slate-700'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="text-sm font-bold text-white">
+                          {proj.name}
+                        </h3>
+                        <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-[#31d6c4]/15 text-[#31d6c4] border border-[#31d6c4]/30">
+                          {proj.platform}
+                        </span>
+                      </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-3 text-xs font-mono text-slate-400">
+                        <span>
+                          ProjectKey: <strong className="text-slate-200">{proj.projectKey}</strong>
+                        </span>
+                        {proj.organization && (
+                          <span>
+                            Org: <strong className="text-slate-200">{proj.organization}</strong>
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => handleSelectProfileForEdit(proj)}
+                      className="px-2.5 py-1 rounded text-[11px] font-semibold border border-slate-700 text-slate-300 hover:bg-slate-800 cursor-pointer shrink-0"
+                    >
+                      {proj.hasToken ? 'Editar / Trocar Token' : 'Configurar Token'}
+                    </button>
+                  </div>
+
+                  {/* Indicador Visual de Validade Restante do Token */}
+                  <div
+                    className={`rounded-lg border px-3.5 py-2.5 flex items-center justify-between gap-3 text-xs ${badgeClasses}`}
+                  >
+                    <div className="flex items-center gap-2">
+                      {statusLabel === 'VALID_ACTIVE' ||
+                      statusLabel === 'NO_EXPIRATION' ? (
+                        <CheckCircle2 className="w-4 h-4 shrink-0" />
+                      ) : statusLabel === 'EXPIRING_SOON' ? (
+                        <Clock className="w-4 h-4 shrink-0" />
+                      ) : (
+                        <AlertTriangle className="w-4 h-4 shrink-0" />
+                      )}
+                      <div>
+                        <div className="font-semibold">
+                          {ver?.message ||
+                            'Token não configurado — cole seu Bearer Token acima'}
+                        </div>
+                        <div className="text-[11px] opacity-80 font-mono mt-0.5">
+                          Token Mascarado: {proj.maskedToken}
+                          {proj.lastExportedAt &&
+                            ` · Última Exportação: ${proj.lastExportedIssuesCount ?? 0} issues em ${new Date(
+                              proj.lastExportedAt
+                            ).toLocaleString('pt-BR')}`}
+                        </div>
+                      </div>
+                    </div>
+
+                    {ver?.remainingDays !== null &&
+                      ver?.remainingDays !== undefined && (
+                        <div className="text-right font-mono shrink-0">
+                          <div className="text-sm font-bold">
+                            {ver.remainingDays}d {ver.remainingHours ?? 0}h
+                          </div>
+                          <div className="text-[10px] opacity-75">restantes</div>
+                        </div>
+                      )}
+                  </div>
+
+                  {/* 4 Botões de Ação do Card */}
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={exportingJsonId === proj.id}
+                        onClick={() => void handleDownloadSonarJsonReport(proj)}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        {exportingJsonId === proj.id
+                          ? 'Baixando Análise Completa...'
+                          : 'Baixar Relatório JSON Agora'}
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={exportingPs1Id === proj.id}
+                        onClick={() => void handleDownloadSonarPs1Script(proj)}
+                        className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800 transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        <FileCode2 className="w-3.5 h-3.5 text-[#31d6c4]" />
+                        Baixar Script .PS1
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={verifyingProjectId === proj.id}
+                        onClick={() => void handleVerifyProjectToken(proj.id)}
+                        className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800 transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        <RefreshCw
+                          className={`w-3.5 h-3.5 ${
+                            verifyingProjectId === proj.id ? 'animate-spin' : ''
+                          }`}
+                        />
+                        Verificar Token
+                      </button>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => void handleDeleteSavedProject(proj)}
+                      className="inline-flex items-center gap-1 px-2.5 py-2 rounded-lg text-xs font-semibold text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
+                      title="Remover Perfil"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      Remover
+                    </button>
+                  </div>
+                </div>
+              );
+            })
+          )}
         </div>
       </div>
 
@@ -742,6 +1471,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify }) => {
                   type="text"
                   value={projectKey}
                   onChange={(e) => setProjectKey(e.target.value)}
+                  placeholder="Informe a chave do projeto..."
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-[#31d6c4]"
                 />
               </div>
@@ -758,6 +1488,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify }) => {
                   type="text"
                   value={hostUrl}
                   onChange={(e) => setHostUrl(e.target.value)}
+                  placeholder="http://localhost:9000"
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-[#31d6c4]"
                 />
               </div>
@@ -771,9 +1502,10 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify }) => {
                 </label>
                 <input
                   id="hub-scanner-token"
-                  type="text"
+                  type="password"
                   value={token}
                   onChange={(e) => setToken(e.target.value)}
+                  placeholder="Cole seu token de acesso..."
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-[#31d6c4]"
                 />
               </div>

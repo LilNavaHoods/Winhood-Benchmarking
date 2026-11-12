@@ -19,9 +19,11 @@ import type {
   MarketCompetitorCandidate,
   NormalizedFinding,
   Project,
+  SavedSonarProjectProfile,
   Software,
   SonarAndToolsDatabaseBundle,
   SonarInstallationMode,
+  SonarTokenVerificationResult,
   SourceManifest,
   ToolAdapterInfo,
   VulnerabilityValidationState,
@@ -93,14 +95,62 @@ const DATA_DIR = path.resolve(process.cwd(), '.winhood_data');
 const ISOLATED_ARTIFACTS_DIR = path.join(DATA_DIR, 'isolated_artifacts');
 const STORE_FILE = path.join(DATA_DIR, 'winhood_persistent_db.json');
 
-const ALLOWED_REPORT_TYPES = new Set([
-  'COMPARATIVE_FULL',
-  'EXECUTIVE_SUMMARY',
-  'TECHNICAL_AUDIT',
-  'DEVSECOPS_SARIF',
-]);
+const REPORT_TYPE_LITERALS: Record<
+  string,
+  'COMPARATIVE_FULL' | 'EXECUTIVE_SUMMARY' | 'TECHNICAL_AUDIT' | 'DEVSECOPS_SARIF'
+> = {
+  COMPARATIVE_FULL: 'COMPARATIVE_FULL',
+  EXECUTIVE_SUMMARY: 'EXECUTIVE_SUMMARY',
+  TECHNICAL_AUDIT: 'TECHNICAL_AUDIT',
+  DEVSECOPS_SARIF: 'DEVSECOPS_SARIF',
+};
+const EXPORT_FORMAT_LITERALS: Record<string, 'json' | 'sarif' | 'html' | 'csv' | 'md'> = {
+  json: 'json',
+  sarif: 'sarif',
+  html: 'html',
+  csv: 'csv',
+  md: 'md',
+};
 const SAFE_REPO_REGEX = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/;
 const SAFE_BRANCH_REGEX = /^[a-zA-Z0-9._/-]+$/;
+
+function resolveSafeExportFormat(raw: unknown): 'json' | 'sarif' | 'html' | 'csv' | 'md' {
+  const requestedFormatKey = typeof raw === 'string' ? raw.toLowerCase() : 'json';
+  const mapped = Object.prototype.hasOwnProperty.call(EXPORT_FORMAT_LITERALS, requestedFormatKey)
+    ? EXPORT_FORMAT_LITERALS[requestedFormatKey]
+    : 'json';
+  switch (mapped) {
+    case 'sarif':
+      return 'sarif';
+    case 'html':
+      return 'html';
+    case 'csv':
+      return 'csv';
+    case 'md':
+      return 'md';
+    default:
+      return 'json';
+  }
+}
+
+function resolveSafeReportType(
+  raw: unknown
+): 'COMPARATIVE_FULL' | 'EXECUTIVE_SUMMARY' | 'TECHNICAL_AUDIT' | 'DEVSECOPS_SARIF' {
+  const requestedTypeKey = typeof raw === 'string' ? raw.toUpperCase() : 'COMPARATIVE_FULL';
+  const mapped = Object.prototype.hasOwnProperty.call(REPORT_TYPE_LITERALS, requestedTypeKey)
+    ? REPORT_TYPE_LITERALS[requestedTypeKey]
+    : 'COMPARATIVE_FULL';
+  switch (mapped) {
+    case 'EXECUTIVE_SUMMARY':
+      return 'EXECUTIVE_SUMMARY';
+    case 'TECHNICAL_AUDIT':
+      return 'TECHNICAL_AUDIT';
+    case 'DEVSECOPS_SARIF':
+      return 'DEVSECOPS_SARIF';
+    default:
+      return 'COMPARATIVE_FULL';
+  }
+}
 
 function escapeHtml(value: unknown): string {
   const str = String(value ?? '');
@@ -136,6 +186,7 @@ interface PersistentDatabaseState {
   adapters: ToolAdapterInfo[];
   auditLogs: AuditLogEntry[];
   toolsDb: SonarAndToolsDatabaseBundle;
+  savedSonarProjects?: SavedSonarProjectProfile[];
   demoData?: {
     projects: Project[];
     softwares: Software[];
@@ -148,6 +199,150 @@ interface PersistentDatabaseState {
     avgResponseTimeMs: number;
     workerExecutionsCount: number;
   };
+}
+
+const SAFE_SONAR_KEY_REGEX = /^[a-zA-Z0-9._:-]+$/;
+const SAFE_SONAR_ORG_REGEX = /^[a-zA-Z0-9._-]+$/;
+
+const SONAR_FULL_METRIC_KEYS = [
+  'ncloc',
+  'lines',
+  'files',
+  'functions',
+  'classes',
+  'statements',
+  'complexity',
+  'cognitive_complexity',
+  'duplicated_lines_density',
+  'duplicated_blocks',
+  'duplicated_lines',
+  'duplicated_files',
+  'bugs',
+  'vulnerabilities',
+  'code_smells',
+  'security_hotspots',
+  'security_hotspots_reviewed',
+  'security_review_rating',
+  'sqale_index',
+  'sqale_debt_ratio',
+  'sqale_rating',
+  'reliability_rating',
+  'security_rating',
+  'coverage',
+  'line_coverage',
+  'branch_coverage',
+  'lines_to_cover',
+  'uncovered_lines',
+  'conditions_to_cover',
+  'uncovered_conditions',
+  'new_bugs',
+  'new_vulnerabilities',
+  'new_code_smells',
+  'new_security_hotspots',
+  'new_coverage',
+  'new_duplicated_lines_density',
+  'alert_status',
+  'quality_gate_details',
+].join(',');
+
+function createDefaultSavedSonarProjects(): SavedSonarProjectProfile[] {
+  return [];
+}
+
+function sanitizeSavedSonarProjectForClient(
+  proj: SavedSonarProjectProfile
+): Omit<SavedSonarProjectProfile, 'encryptedToken'> {
+  const { encryptedToken: _omit, ...safeProj } = proj;
+  return safeProj;
+}
+
+function computeSonarTokenVerification(
+  proj: SavedSonarProjectProfile,
+  overrideValid?: boolean,
+  customMessage?: string
+): SonarTokenVerificationResult {
+  if (!proj.hasToken || !proj.encryptedToken) {
+    return {
+      valid: false,
+      tokenExpiresAt: proj.tokenExpiresAt,
+      remainingDays: null,
+      remainingHours: null,
+      statusLabel: 'NOT_CONFIGURED',
+      message: customMessage || 'Nenhum token Bearer configurado para este projeto.',
+    };
+  }
+
+  if (overrideValid === false || proj.lastVerificationStatus === 'INVALID') {
+    return {
+      valid: false,
+      tokenExpiresAt: proj.tokenExpiresAt,
+      remainingDays: 0,
+      remainingHours: 0,
+      statusLabel: 'INVALID_TOKEN',
+      message:
+        customMessage ||
+        'Token inválido ou revogado no servidor SonarCloud / SonarQube.',
+    };
+  }
+
+  if (!proj.tokenExpiresAt || proj.tokenValidityDaysPolicy === 'NO_EXPIRATION') {
+    return {
+      valid: true,
+      tokenExpiresAt: null,
+      remainingDays: null,
+      remainingHours: null,
+      statusLabel: 'NO_EXPIRATION',
+      message: customMessage || 'Token ativo (Sem Expiração configurada).',
+    };
+  }
+
+  const expiresMs = new Date(proj.tokenExpiresAt).getTime();
+  const nowMs = Date.now();
+  const diffMs = expiresMs - nowMs;
+
+  if (Number.isNaN(expiresMs) || diffMs <= 0) {
+    return {
+      valid: false,
+      tokenExpiresAt: proj.tokenExpiresAt,
+      remainingDays: 0,
+      remainingHours: 0,
+      statusLabel: 'EXPIRED',
+      message:
+        customMessage ||
+        `Token expirado em ${new Date(proj.tokenExpiresAt).toLocaleDateString('pt-BR')}. Gere um novo token no SonarCloud/SonarQube.`,
+    };
+  }
+
+  const remainingDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  const remainingHours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+  const statusLabel = remainingDays <= 7 ? 'EXPIRING_SOON' : 'VALID_ACTIVE';
+
+  return {
+    valid: true,
+    tokenExpiresAt: proj.tokenExpiresAt,
+    remainingDays,
+    remainingHours,
+    statusLabel,
+    message:
+      customMessage ||
+      `Token ativo — expira em ${remainingDays} dias e ${remainingHours}h (${new Date(proj.tokenExpiresAt).toLocaleDateString('pt-BR')}).`,
+  };
+}
+
+function validateSonarServerOrigin(rawServerUrl: string, platform: 'SONARCLOUD' | 'SONARQUBE_SERVER'): string {
+  const fallback = platform === 'SONARCLOUD' ? 'https://sonarcloud.io' : 'http://localhost:9000';
+  const candidate = (rawServerUrl || fallback).trim();
+  const parsed = new URL(candidate);
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error('Protocolo inválido para o servidor Sonar. Utilize http:// ou https://.');
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error('Credenciais embutidas na URL não são permitidas.');
+  }
+  if (platform === 'SONARCLOUD' && parsed.hostname !== 'sonarcloud.io') {
+    throw new Error('Para a plataforma SONARCLOUD, o host oficial deve ser estritamente https://sonarcloud.io.');
+  }
+  return parsed.origin;
 }
 
 function ensureDirectories() {
@@ -339,7 +534,7 @@ function createInitialRealWorkspaceState(): PersistentDatabaseState {
   ];
 
   const state: PersistentDatabaseState = {
-    environmentMode: 'DEMO',
+    environmentMode: 'PRODUCTION',
     currentUser: {
       id: 'usr-admin-01',
       name: 'Lohan Silva (Lead Security Architect)',
@@ -354,6 +549,7 @@ function createInitialRealWorkspaceState(): PersistentDatabaseState {
     adapters: buildFull21SecurityAdaptersCatalog(),
     auditLogs,
     toolsDb: SonarQubeIntegrationService.createInitialToolsDatabaseState(DATA_DIR),
+    savedSonarProjects: createDefaultSavedSonarProjects(),
     telemetry: {
       startedAt: nowIso,
       totalApiRequests: 1,
@@ -398,6 +594,7 @@ function createInitialCleanWorkspaceState(): PersistentDatabaseState {
       },
     ],
     toolsDb: SonarQubeIntegrationService.createInitialToolsDatabaseState(DATA_DIR),
+    savedSonarProjects: createDefaultSavedSonarProjects(),
     telemetry: {
       startedAt: nowIso,
       totalApiRequests: 0,
@@ -416,11 +613,17 @@ function loadDatabase(): PersistentDatabaseState {
     try {
       const raw = fs.readFileSync(STORE_FILE, 'utf8');
       const parsed = JSON.parse(raw) as PersistentDatabaseState;
-      if (!parsed.environmentMode) {
-        parsed.environmentMode = 'PRODUCTION';
-      }
+      parsed.environmentMode = 'PRODUCTION';
       if (!parsed.toolsDb) {
         parsed.toolsDb = SonarQubeIntegrationService.createInitialToolsDatabaseState(DATA_DIR);
+      }
+      if (!Array.isArray(parsed.savedSonarProjects)) {
+        parsed.savedSonarProjects = [];
+      } else {
+        // Remover o perfil pré-cadastrado automático caso não tenha sido configurado pelo usuário
+        parsed.savedSonarProjects = parsed.savedSonarProjects.filter(
+          (p) => !(p.id === 'sonar-proj-winhood-benchmarking' && !p.hasToken && !p.lastExportedAt)
+        );
       }
 
       const upgradeSoftwareList = (softwaresList: Software[]): Software[] =>
@@ -552,24 +755,16 @@ function loadDatabase(): PersistentDatabaseState {
         parsed.demoData.runs = upgradeRunsList(parsed.demoData.runs || []);
       }
 
-      // Regra P0 / Seção 4.1: Isolar dados demonstrativos do ambiente de Produção
-      if (parsed.environmentMode === 'PRODUCTION') {
-        const demoSwIds = new Set(['sw-vaultcore-internal', 'sw-keesafe-open']);
-        const isDemoProject = (p: Project) => p.id === 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
-        const demoProjects = parsed.projects.filter(isDemoProject);
-        const demoSoftwares = parsed.softwares.filter((s) => demoSwIds.has(s.id) || s.dataOrigin === 'DEMO_FIXTURE');
-        const demoRuns = parsed.runs.filter((r) => r.softwareIds.some((id) => demoSwIds.has(id)) || r.dataOrigin === 'DEMO_FIXTURE');
-
-        if (demoProjects.length > 0 || demoSoftwares.length > 0 || demoRuns.length > 0) {
-          parsed.demoData = {
-            projects: demoProjects.map((p) => ({ ...p, dataOrigin: 'DEMO_FIXTURE' as any })),
-            softwares: demoSoftwares.map((s) => ({ ...s, dataOrigin: 'DEMO_FIXTURE' as any })),
-            runs: demoRuns.map((r) => ({ ...r, dataOrigin: 'DEMO_FIXTURE' as any, environmentMode: 'DEMO' as any })),
-          };
-          parsed.projects = parsed.projects.filter((p) => !isDemoProject(p));
-          parsed.softwares = parsed.softwares.filter((s) => !demoSwIds.has(s.id) && s.dataOrigin !== 'DEMO_FIXTURE');
-          parsed.runs = parsed.runs.filter((r) => !r.softwareIds.some((id) => demoSwIds.has(id)) && r.dataOrigin !== 'DEMO_FIXTURE');
-        }
+      // Se houver projetos/softwares reais salvos anteriormente em demoData por migração antiga, restaurá-los quando o workspace principal estiver vazio
+      if (
+        parsed.projects.length === 0 &&
+        parsed.demoData &&
+        Array.isArray(parsed.demoData.projects) &&
+        parsed.demoData.projects.length > 0
+      ) {
+        parsed.projects = parsed.demoData.projects;
+        parsed.softwares = parsed.demoData.softwares || [];
+        parsed.runs = parsed.demoData.runs || [];
       }
 
       fs.writeFileSync(STORE_FILE, JSON.stringify(parsed, null, 2), 'utf8');
@@ -3466,12 +3661,10 @@ async function startServer() {
     if (!run) {
       return res.status(404).json({ error: 'Execução não encontrada para exportação de relatório.' });
     }
-    const rawFormat = ((req.query.format as string) || 'json').toLowerCase();
-    const format = ['json', 'sarif', 'html', 'csv', 'md'].includes(rawFormat) ? rawFormat : 'json';
-    const rawReportType = ((req.query.type as string) || 'COMPARATIVE_FULL').toUpperCase();
-    const reportType = ALLOWED_REPORT_TYPES.has(rawReportType) ? rawReportType : 'COMPARATIVE_FULL';
+    const format = resolveSafeExportFormat(req.query.format);
+    const reportType = resolveSafeReportType(req.query.type);
     const safeFileRunId = String(run.id || 'run').replace(/[^a-zA-Z0-9_-]/g, '');
-    const safeFileReportType = reportType.toLowerCase().replace(/[^a-z0-9_]/g, '');
+    const safeFileReportType = reportType.toLowerCase();
 
     appendAuditLog(
       db,
@@ -3612,11 +3805,12 @@ async function startServer() {
       };
 
       res.setHeader('Content-Type', 'application/sarif+json; charset=utf-8');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader(
         'Content-Disposition',
         `attachment; filename="winhood_${safeFileRunId}_${safeFileReportType}.sarif"`
       );
-      return res.send(JSON.stringify(sarifPayload, null, 2));
+      return res.end(Buffer.from(JSON.stringify(sarifPayload, null, 2), 'utf-8'));
     }
 
     if (format === 'html') {
@@ -3697,12 +3891,46 @@ async function startServer() {
 <body>
   <div class="container">
     <header>
-      <div style="display: flex; justify-content: space-between; align-items: center;">
-        <div>
-          <h1>WinHood Analyzer — Dossiê Técnico MQR de Qualidade &amp; Segurança</h1>
-          <p style="color: var(--text-muted); font-size: 0.9rem;">
-            Execução ID: <code>${safeRunIdHtml}</code> · Projeto: <strong>${safeProjectNameHtml}</strong> · Algoritmo: <code>${safeAlgorithmVersionHtml}</code>
-          </p>
+      <div style="display: flex; justify-content: space-between; align-items: center; gap: 1rem;">
+        <div style="display: flex; align-items: center; gap: 1rem;">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" width="48" height="48" fill="none" style="flex-shrink: 0;">
+            <defs>
+              <linearGradient id="wh-doc-arc" x1="24" y1="84" x2="136" y2="140" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#a855f7" />
+                <stop offset="50%" stop-color="#6366f1" />
+                <stop offset="100%" stop-color="#3b82f6" />
+              </linearGradient>
+              <linearGradient id="wh-doc-w" x1="38" y1="36" x2="122" y2="98" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#31d6c4" />
+                <stop offset="60%" stop-color="#2dd4bf" />
+                <stop offset="100%" stop-color="#10b981" />
+              </linearGradient>
+            </defs>
+            <rect x="4" y="4" width="152" height="152" rx="34" fill="#0c1017" stroke="#1e293b" stroke-width="2.5" />
+            <g stroke="url(#wh-doc-arc)" fill="none" stroke-linecap="round">
+              <path d="M 26 84 A 54 54 0 0 0 134 84" stroke-width="5.5" />
+              <path d="M 35 84 A 45 45 0 0 0 125 84" stroke-width="4.5" stroke-opacity="0.92" />
+              <path d="M 44 84 A 36 36 0 0 0 116 84" stroke-width="3.5" stroke-opacity="0.82" />
+              <line x1="25" y1="84" x2="45" y2="84" stroke-width="4.5" />
+              <line x1="115" y1="84" x2="135" y2="84" stroke-width="4.5" />
+            </g>
+            <g stroke="#0c1017" stroke-width="3">
+              <line x1="51" y1="101" x2="32" y2="112" />
+              <line x1="68" y1="117" x2="60" y2="137" />
+              <line x1="92" y1="117" x2="100" y2="137" />
+              <line x1="109" y1="101" x2="128" y2="112" />
+            </g>
+            <g stroke="url(#wh-doc-w)" fill="none" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M 38 38 L 62 96 L 80 54 L 98 96 L 122 38" stroke-width="7.5" />
+              <path d="M 48 38 L 62 73 L 80 36 L 98 73 L 112 38" stroke-width="5" />
+            </g>
+          </svg>
+          <div>
+            <h1>WinHood Analyzer — Dossiê Técnico MQR de Qualidade &amp; Segurança</h1>
+            <p style="color: var(--text-muted); font-size: 0.9rem;">
+              Execução ID: <code>${safeRunIdHtml}</code> · Projeto: <strong>${safeProjectNameHtml}</strong> · Algoritmo: <code>${safeAlgorithmVersionHtml}</code>
+            </p>
+          </div>
         </div>
         <div>
           <span class="badge">${safeReportTypeHtml}</span>
@@ -3839,12 +4067,17 @@ async function startServer() {
 </body>
 </html>`;
 
-      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader(
+        'Content-Security-Policy',
+        "default-src 'none'; style-src 'unsafe-inline'"
+      );
       res.setHeader(
         'Content-Disposition',
         `attachment; filename="winhood_${safeFileRunId}_${safeFileReportType}.html"`
       );
-      return res.send(htmlContent);
+      return res.end(Buffer.from(htmlContent, 'utf-8'));
     }
 
     if (format === 'csv') {
@@ -3888,11 +4121,12 @@ async function startServer() {
       );
       const csv = [headers.join(','), ...rows].join('\n');
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader(
         'Content-Disposition',
         `attachment; filename="winhood_${safeFileRunId}_${safeFileReportType}.csv"`
       );
-      return res.send(csv);
+      return res.end(Buffer.from(csv, 'utf-8'));
     }
 
     if (format === 'md') {
@@ -3970,11 +4204,12 @@ async function startServer() {
       ].join('\n');
 
       res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader(
         'Content-Disposition',
         `attachment; filename="winhood_${safeFileRunId}_${safeFileReportType}.md"`
       );
-      return res.send(md);
+      return res.end(Buffer.from(md, 'utf-8'));
     }
 
     const verification = verifyEvidenceChainAndManifest(run.evidenceChain, run.signedManifest);
@@ -4027,6 +4262,1133 @@ async function startServer() {
       },
       cacheStats,
     });
+  });
+
+  // ============================================================================
+  // 12.0 MULTI-PROJECT SONARCLOUD / SONARQUBE JSON REPORT EXPORTER & TOKEN MONITOR
+  // ============================================================================
+
+  app.get('/api/sonar/saved-projects', (_req, res) => {
+    if (!Array.isArray(db.savedSonarProjects)) {
+      db.savedSonarProjects = [];
+    }
+    const projects = db.savedSonarProjects.map((proj) => ({
+      ...sanitizeSavedSonarProjectForClient(proj),
+      tokenVerification: computeSonarTokenVerification(proj),
+    }));
+    res.json({ projects });
+  });
+
+  app.post('/api/sonar/saved-projects', async (req, res) => {
+    if (!requireWritePermission(res)) return;
+    const {
+      id,
+      name,
+      platform,
+      serverUrl,
+      organization,
+      projectKey,
+      token,
+      tokenValidityDaysPolicy,
+      customTokenExpiresAt,
+    } = req.body as {
+      id?: string;
+      name?: string;
+      platform?: 'SONARCLOUD' | 'SONARQUBE_SERVER';
+      serverUrl?: string;
+      organization?: string;
+      projectKey?: string;
+      token?: string;
+      tokenValidityDaysPolicy?: 30 | 60 | 90 | 'NO_EXPIRATION' | 'CUSTOM';
+      customTokenExpiresAt?: string | null;
+    };
+
+    const resolvedPlatform: 'SONARCLOUD' | 'SONARQUBE_SERVER' =
+      platform === 'SONARQUBE_SERVER' ? 'SONARQUBE_SERVER' : 'SONARCLOUD';
+    const cleanProjectKey = (projectKey || '').trim();
+    const cleanOrg = (organization || '').trim();
+
+    if (!cleanProjectKey || !SAFE_SONAR_KEY_REGEX.test(cleanProjectKey)) {
+      return res.status(400).json({
+        error:
+          'Project Key inválido. Informe apenas caracteres alfanuméricos, pontos, hifens, dois-pontos ou sublinhados.',
+      });
+    }
+    if (resolvedPlatform === 'SONARCLOUD' && (!cleanOrg || !SAFE_SONAR_ORG_REGEX.test(cleanOrg))) {
+      return res.status(400).json({
+        error:
+          'Organization inválida para o SonarCloud. Informe o identificador da organização.',
+      });
+    }
+
+    let safeOrigin: string;
+    try {
+      safeOrigin = validateSonarServerOrigin(
+        serverUrl || (resolvedPlatform === 'SONARCLOUD' ? 'https://sonarcloud.io' : 'http://localhost:9000'),
+        resolvedPlatform
+      );
+    } catch (err: any) {
+      return res.status(400).json({ error: err?.message || 'URL do servidor Sonar inválida.' });
+    }
+
+    if (!Array.isArray(db.savedSonarProjects)) {
+      db.savedSonarProjects = [];
+    }
+
+    const nowIso = new Date().toISOString();
+    const policy: SavedSonarProjectProfile['tokenValidityDaysPolicy'] =
+      tokenValidityDaysPolicy === 30 ||
+      tokenValidityDaysPolicy === 60 ||
+      tokenValidityDaysPolicy === 90 ||
+      tokenValidityDaysPolicy === 'NO_EXPIRATION' ||
+      tokenValidityDaysPolicy === 'CUSTOM'
+        ? tokenValidityDaysPolicy
+        : 90;
+
+    let computedExpiresAt: string | null = null;
+    if (policy === 30 || policy === 60 || policy === 90) {
+      computedExpiresAt = new Date(Date.now() + policy * 24 * 60 * 60 * 1000).toISOString();
+    } else if (policy === 'CUSTOM' && customTokenExpiresAt) {
+      const parsedDate = new Date(customTokenExpiresAt);
+      if (!Number.isNaN(parsedDate.getTime())) {
+        computedExpiresAt = parsedDate.toISOString();
+      }
+    }
+
+    let existing = db.savedSonarProjects.find(
+      (p) => (id && p.id === id) || p.projectKey === cleanProjectKey
+    );
+
+    if (!existing) {
+      existing = {
+        id: id || `sonar-proj-${crypto.randomUUID().slice(0, 8)}`,
+        name: (name || cleanProjectKey).trim(),
+        platform: resolvedPlatform,
+        serverUrl: safeOrigin,
+        organization: cleanOrg,
+        projectKey: cleanProjectKey,
+        maskedToken: 'Não configurado',
+        hasToken: false,
+        tokenCreatedAt: nowIso,
+        tokenExpiresAt: computedExpiresAt,
+        tokenValidityDaysPolicy: policy,
+        lastVerifiedAt: null,
+        lastVerificationStatus: 'UNCHECKED',
+        lastExportedAt: null,
+        lastExportedIssuesCount: null,
+      };
+      db.savedSonarProjects.unshift(existing);
+    } else {
+      existing.name = (name || existing.name || cleanProjectKey).trim();
+      existing.platform = resolvedPlatform;
+      existing.serverUrl = safeOrigin;
+      existing.organization = cleanOrg;
+      existing.projectKey = cleanProjectKey;
+      existing.tokenValidityDaysPolicy = policy;
+      if (computedExpiresAt !== null || policy === 'NO_EXPIRATION') {
+        existing.tokenExpiresAt = computedExpiresAt;
+      }
+    }
+
+    if (token && token.trim().length > 0) {
+      const cleanToken = token.trim();
+      existing.encryptedToken = SonarQubeConnection.encryptToken(cleanToken);
+      existing.maskedToken = SonarQubeConnection.maskToken(cleanToken);
+      existing.hasToken = true;
+      existing.tokenCreatedAt = nowIso;
+      if (computedExpiresAt !== null || policy === 'NO_EXPIRATION') {
+        existing.tokenExpiresAt = computedExpiresAt;
+      }
+
+      // Validar token imediatamente na API do SonarCloud / SonarQube se acessível
+      try {
+        const authUrl = new URL('/api/authentication/validate', safeOrigin);
+        const authRes = await fetch(authUrl.toString(), {
+          method: 'GET',
+          headers: {
+            Accept: 'application/json',
+            Authorization: `Bearer ${cleanToken}`,
+            'User-Agent': 'WinHood-SonarExporter/2.0',
+          },
+        });
+        if (authRes.ok) {
+          const authJson = (await authRes.json()) as { valid?: boolean };
+          existing.lastVerifiedAt = nowIso;
+          existing.lastVerificationStatus = authJson.valid ? 'VALID' : 'INVALID';
+        } else if (authRes.status === 401 || authRes.status === 403) {
+          existing.lastVerifiedAt = nowIso;
+          existing.lastVerificationStatus = 'INVALID';
+        }
+      } catch {
+        // Permanece UNCHECKED caso offline
+      }
+    }
+
+    appendAuditLog(
+      db,
+      'SONAR_PROJECT_PROFILE_SAVED',
+      'SONAR_PROJECT_PROFILE',
+      existing.id,
+      `Perfil de projeto Sonar "${existing.name}" (${existing.projectKey}) salvo com política de token ${existing.tokenValidityDaysPolicy}.`
+    );
+    saveDatabase(db);
+
+    return res.json({
+      project: {
+        ...sanitizeSavedSonarProjectForClient(existing),
+        tokenVerification: computeSonarTokenVerification(existing),
+      },
+      projects: db.savedSonarProjects.map((p) => ({
+        ...sanitizeSavedSonarProjectForClient(p),
+        tokenVerification: computeSonarTokenVerification(p),
+      })),
+    });
+  });
+
+  app.delete('/api/sonar/saved-projects/:id', (req, res) => {
+    if (!requireWritePermission(res)) return;
+    if (!Array.isArray(db.savedSonarProjects)) {
+      db.savedSonarProjects = [];
+    }
+    const idx = db.savedSonarProjects.findIndex((p) => p.id === req.params.id);
+    if (idx === -1) {
+      return res.status(404).json({ error: 'Perfil de projeto Sonar não encontrado.' });
+    }
+    const removed = db.savedSonarProjects.splice(idx, 1)[0];
+    appendAuditLog(
+      db,
+      'SONAR_PROJECT_PROFILE_DELETED',
+      'SONAR_PROJECT_PROFILE',
+      removed.id,
+      `Perfil de projeto Sonar "${removed.projectKey}" removido.`
+    );
+    saveDatabase(db);
+    return res.json({
+      ok: true,
+      projects: db.savedSonarProjects.map((p) => ({
+        ...sanitizeSavedSonarProjectForClient(p),
+        tokenVerification: computeSonarTokenVerification(p),
+      })),
+    });
+  });
+
+  app.post('/api/sonar/saved-projects/:id/verify-token', async (req, res) => {
+    if (!requireWritePermission(res)) return;
+    if (!Array.isArray(db.savedSonarProjects)) {
+      db.savedSonarProjects = [];
+    }
+    const proj = db.savedSonarProjects.find((p) => p.id === req.params.id);
+    if (!proj) {
+      return res.status(404).json({ error: 'Perfil de projeto Sonar não encontrado.' });
+    }
+
+    const { token: inlineToken } = (req.body || {}) as { token?: string };
+    if (inlineToken && inlineToken.trim().length > 0) {
+      proj.encryptedToken = SonarQubeConnection.encryptToken(inlineToken.trim());
+      proj.maskedToken = SonarQubeConnection.maskToken(inlineToken.trim());
+      proj.hasToken = true;
+    }
+
+    const plainToken = proj.encryptedToken
+      ? SonarQubeConnection.decryptToken(proj.encryptedToken)
+      : null;
+
+    if (!plainToken) {
+      const verification = computeSonarTokenVerification(
+        proj,
+        false,
+        'Nenhum token Bearer configurado neste projeto. Edite ou insira o token para validar.'
+      );
+      return res.json({
+        project: {
+          ...sanitizeSavedSonarProjectForClient(proj),
+          tokenVerification: verification,
+        },
+        verification,
+      });
+    }
+
+    let safeOrigin: string;
+    try {
+      safeOrigin = validateSonarServerOrigin(proj.serverUrl, proj.platform);
+    } catch (err: any) {
+      return res.status(400).json({ error: err?.message || 'URL do servidor Sonar inválida.' });
+    }
+
+    const nowIso = new Date().toISOString();
+    try {
+      const validateUrl = new URL('/api/authentication/validate', safeOrigin);
+      const authRes = await fetch(validateUrl.toString(), {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${plainToken}`,
+          'User-Agent': 'WinHood-SonarExporter/2.0',
+        },
+      });
+
+      if (authRes.status === 401 || authRes.status === 403) {
+        proj.lastVerifiedAt = nowIso;
+        proj.lastVerificationStatus = 'INVALID';
+        saveDatabase(db);
+        const verification = computeSonarTokenVerification(
+          proj,
+          false,
+          `Autenticação recusada (HTTP ${authRes.status}): token inválido ou expirado no servidor.`
+        );
+        return res.json({
+          project: {
+            ...sanitizeSavedSonarProjectForClient(proj),
+            tokenVerification: verification,
+          },
+          verification,
+        });
+      }
+
+      const authData = (await authRes.json()) as { valid?: boolean };
+      const isValid = Boolean(authData.valid);
+
+      // Tentar consultar /api/user_tokens/search para descobrir expirationDate real se disponível
+      if (isValid) {
+        try {
+          const tokensUrl = new URL('/api/user_tokens/search', safeOrigin);
+          const tokensRes = await fetch(tokensUrl.toString(), {
+            method: 'GET',
+            headers: {
+              Accept: 'application/json',
+              Authorization: `Bearer ${plainToken}`,
+              'User-Agent': 'WinHood-SonarExporter/2.0',
+            },
+          });
+          if (tokensRes.ok) {
+            const tokensJson = (await tokensRes.json()) as {
+              userTokens?: Array<{
+                name?: string;
+                createdAt?: string;
+                expirationDate?: string;
+                isExpired?: boolean;
+              }>;
+            };
+            const tokenWithExp = (tokensJson.userTokens || []).find((t) => Boolean(t.expirationDate));
+            if (tokenWithExp?.expirationDate) {
+              proj.tokenExpiresAt = new Date(tokenWithExp.expirationDate).toISOString();
+            }
+          }
+        } catch {
+          // Endpoint opcional, mantém tokenExpiresAt da política cadastrada
+        }
+      }
+
+      proj.lastVerifiedAt = nowIso;
+      proj.lastVerificationStatus = isValid ? 'VALID' : 'INVALID';
+      saveDatabase(db);
+
+      const verification = computeSonarTokenVerification(
+        proj,
+        isValid,
+        isValid
+          ? undefined
+          : 'O endpoint /api/authentication/validate retornou valid: false para este token.'
+      );
+
+      return res.json({
+        project: {
+          ...sanitizeSavedSonarProjectForClient(proj),
+          tokenVerification: verification,
+        },
+        verification,
+      });
+    } catch (err: any) {
+      const verification = computeSonarTokenVerification(
+        proj,
+        undefined,
+        `Não foi possível contatar ${safeOrigin} (${err?.message || 'Erro de rede'}). Exibindo cálculo baseado na validade cadastrada.`
+      );
+      return res.json({
+        project: {
+          ...sanitizeSavedSonarProjectForClient(proj),
+          tokenVerification: verification,
+        },
+        verification,
+      });
+    }
+  });
+
+  app.get('/api/sonar/saved-projects/:id/export-json', async (req, res) => {
+    if (!Array.isArray(db.savedSonarProjects)) {
+      db.savedSonarProjects = [];
+    }
+    const proj = db.savedSonarProjects.find((p) => p.id === req.params.id);
+    if (!proj) {
+      return res.status(404).json({ error: 'Perfil de projeto Sonar não encontrado.' });
+    }
+
+    const plainToken = proj.encryptedToken
+      ? SonarQubeConnection.decryptToken(proj.encryptedToken)
+      : null;
+
+    if (!plainToken) {
+      return res.status(400).json({
+        error:
+          'Token Bearer não configurado para este projeto. Insira e salve seu token do SonarCloud/SonarQube antes de baixar o relatório JSON.',
+      });
+    }
+
+    let safeOrigin: string;
+    try {
+      safeOrigin = validateSonarServerOrigin(proj.serverUrl, proj.platform);
+    } catch (err: any) {
+      return res.status(400).json({ error: err?.message || 'URL do servidor Sonar inválida.' });
+    }
+
+    if (!SAFE_SONAR_KEY_REGEX.test(proj.projectKey)) {
+      return res.status(400).json({ error: 'Project Key inválido.' });
+    }
+
+    const reqHeaders = {
+      Accept: 'application/json',
+      Authorization: `Bearer ${plainToken}`,
+      'User-Agent': 'WinHood-SonarExporter/2.0',
+    };
+
+    const hasValidOrg =
+      proj.platform === 'SONARCLOUD' &&
+      Boolean(proj.organization) &&
+      SAFE_SONAR_ORG_REGEX.test(proj.organization);
+
+    try {
+      // 1. Consultar metadados do Componente/Projeto (/api/components/show)
+      let componentMetadata: Record<string, unknown> | null = null;
+      let componentAncestors: unknown[] = [];
+      try {
+        const compUrl = new URL('/api/components/show', safeOrigin);
+        compUrl.searchParams.set('component', proj.projectKey);
+        if (compUrl.origin === safeOrigin) {
+          const compRes = await fetch(compUrl.toString(), { method: 'GET', headers: reqHeaders });
+          if (compRes.ok) {
+            const compData = (await compRes.json()) as {
+              component?: Record<string, unknown>;
+              ancestors?: unknown[];
+            };
+            componentMetadata = compData.component || null;
+            componentAncestors = Array.isArray(compData.ancestors) ? compData.ancestors : [];
+          }
+        }
+      } catch {
+        // Continua caso endpoint opcional falhe
+      }
+
+      // 2. Consultar Status do Quality Gate (/api/qualitygates/project_status)
+      let qualityGateStatusObj: Record<string, unknown> | null = null;
+      try {
+        const qgUrl = new URL('/api/qualitygates/project_status', safeOrigin);
+        qgUrl.searchParams.set('projectKey', proj.projectKey);
+        if (qgUrl.origin === safeOrigin) {
+          const qgRes = await fetch(qgUrl.toString(), { method: 'GET', headers: reqHeaders });
+          if (qgRes.ok) {
+            const qgData = (await qgRes.json()) as {
+              projectStatus?: Record<string, unknown>;
+            };
+            qualityGateStatusObj = qgData.projectStatus || (qgData as Record<string, unknown>);
+          }
+        }
+      } catch {
+        // Continua caso endpoint opcional falhe
+      }
+
+      // 3. Consultar Métricas Estáticas e MQR (/api/measures/component)
+      let rawMeasures: Array<{
+        metric: string;
+        value?: string;
+        period?: { value?: string };
+        periods?: Array<{ value?: string }>;
+      }> = [];
+      const measuresMap: Record<string, string | number> = {};
+      try {
+        const measuresUrl = new URL('/api/measures/component', safeOrigin);
+        measuresUrl.searchParams.set('component', proj.projectKey);
+        measuresUrl.searchParams.set('metricKeys', SONAR_FULL_METRIC_KEYS);
+        if (measuresUrl.origin === safeOrigin) {
+          const mRes = await fetch(measuresUrl.toString(), { method: 'GET', headers: reqHeaders });
+          if (mRes.ok) {
+            const mData = (await mRes.json()) as {
+              component?: {
+                measures?: Array<{
+                  metric: string;
+                  value?: string;
+                  period?: { value?: string };
+                  periods?: Array<{ value?: string }>;
+                }>;
+              };
+            };
+            if (Array.isArray(mData.component?.measures)) {
+              rawMeasures = mData.component!.measures!;
+              for (const m of rawMeasures) {
+                const rawVal =
+                  m.value ??
+                  m.period?.value ??
+                  (Array.isArray(m.periods) ? m.periods[0]?.value : undefined) ??
+                  '';
+                const numVal = Number(rawVal);
+                measuresMap[m.metric] =
+                  rawVal !== '' && !Number.isNaN(numVal) && String(numVal) === String(rawVal).trim()
+                    ? numVal
+                    : String(rawVal);
+              }
+            }
+          }
+        }
+      } catch {
+        // Continua caso endpoint opcional falhe
+      }
+
+      // 4. Consultar Todas as Issues Paginadas com additionalFields=_all (/api/issues/search)
+      const pageSize = 500;
+      let page = 1;
+      let totalIssuesReported = 0;
+      let effortTotal = 0;
+      let debtTotal = 0;
+      const allIssues: Array<Record<string, any>> = [];
+      const componentsByKey = new Map<string, Record<string, unknown>>();
+      const rulesByKey = new Map<string, Record<string, unknown>>();
+      const usersByLogin = new Map<string, Record<string, unknown>>();
+      let facetsList: unknown[] = [];
+
+      do {
+        const searchUrl = new URL('/api/issues/search', safeOrigin);
+        searchUrl.searchParams.set('componentKeys', proj.projectKey);
+        if (hasValidOrg) {
+          searchUrl.searchParams.set('organization', proj.organization);
+        }
+        searchUrl.searchParams.set('ps', String(pageSize));
+        searchUrl.searchParams.set('p', String(page));
+        searchUrl.searchParams.set('additionalFields', '_all');
+        searchUrl.searchParams.set(
+          'facets',
+          'severities,types,rules,statuses,resolutions,cleanCodeAttributeCategories,impactSoftwareQualities,impactSeverities'
+        );
+
+        if (searchUrl.origin !== safeOrigin) {
+          return res.status(400).json({ error: 'Origem da URL de busca inválida.' });
+        }
+
+        const response = await fetch(searchUrl.toString(), {
+          method: 'GET',
+          headers: reqHeaders,
+        });
+
+        if (response.status === 401 || response.status === 403) {
+          proj.lastVerificationStatus = 'INVALID';
+          proj.lastVerifiedAt = new Date().toISOString();
+          saveDatabase(db);
+          return res.status(401).json({
+            error: `Falha de autenticação HTTP ${response.status} no Sonar (${safeOrigin}). Verifique se o token Bearer está ativo e possui permissão Browse no projeto "${proj.projectKey}".`,
+          });
+        }
+
+        if (!response.ok) {
+          return res.status(response.status).json({
+            error: `A API do Sonar retornou status HTTP ${response.status} ao buscar issues de "${proj.projectKey}".`,
+          });
+        }
+
+        const pageData = (await response.json()) as {
+          total?: number;
+          effortTotal?: number;
+          debtTotal?: number;
+          paging?: { total?: number; pageIndex?: number; pageSize?: number };
+          issues?: Array<Record<string, any>>;
+          components?: Array<Record<string, any>>;
+          rules?: Array<Record<string, any>>;
+          users?: Array<Record<string, any>>;
+          facets?: unknown[];
+        };
+
+        const issuesBatch = Array.isArray(pageData.issues) ? pageData.issues : [];
+        totalIssuesReported = Number(
+          pageData.total ?? pageData.paging?.total ?? issuesBatch.length
+        );
+        if (typeof pageData.effortTotal === 'number') effortTotal = pageData.effortTotal;
+        if (typeof pageData.debtTotal === 'number') debtTotal = pageData.debtTotal;
+
+        allIssues.push(...issuesBatch);
+
+        if (Array.isArray(pageData.components)) {
+          for (const comp of pageData.components) {
+            if (comp && typeof comp.key === 'string') {
+              componentsByKey.set(comp.key, comp);
+            }
+          }
+        }
+        if (Array.isArray(pageData.rules)) {
+          for (const rule of pageData.rules) {
+            if (rule && typeof rule.key === 'string') {
+              rulesByKey.set(rule.key, rule);
+            }
+          }
+        }
+        if (Array.isArray(pageData.users)) {
+          for (const usr of pageData.users) {
+            if (usr && typeof usr.login === 'string') {
+              usersByLogin.set(usr.login, usr);
+            }
+          }
+        }
+        if (page === 1 && Array.isArray(pageData.facets)) {
+          facetsList = pageData.facets;
+        }
+
+        if (issuesBatch.length === 0) {
+          break;
+        }
+        page += 1;
+      } while (allIssues.length < totalIssuesReported && (page - 1) * pageSize < 10000);
+
+      // 5. Consultar Todos os Security Hotspots Paginados (/api/hotspots/search)
+      const allHotspots: Array<Record<string, any>> = [];
+      const hotspotComponentsByKey = new Map<string, Record<string, unknown>>();
+      try {
+        let hsPage = 1;
+        let hsTotal = 0;
+        do {
+          const hsUrl = new URL('/api/hotspots/search', safeOrigin);
+          hsUrl.searchParams.set('projectKey', proj.projectKey);
+          hsUrl.searchParams.set('ps', String(pageSize));
+          hsUrl.searchParams.set('p', String(hsPage));
+
+          if (hsUrl.origin !== safeOrigin) break;
+          const hsRes = await fetch(hsUrl.toString(), { method: 'GET', headers: reqHeaders });
+          if (!hsRes.ok) break;
+
+          const hsData = (await hsRes.json()) as {
+            paging?: { total?: number };
+            hotspots?: Array<Record<string, any>>;
+            components?: Array<Record<string, any>>;
+          };
+          const hsBatch = Array.isArray(hsData.hotspots) ? hsData.hotspots : [];
+          hsTotal = Number(hsData.paging?.total ?? hsBatch.length);
+          allHotspots.push(...hsBatch);
+
+          if (Array.isArray(hsData.components)) {
+            for (const c of hsData.components) {
+              if (c && typeof c.key === 'string') {
+                hotspotComponentsByKey.set(c.key, c);
+              }
+            }
+          }
+
+          if (hsBatch.length === 0) break;
+          hsPage += 1;
+        } while (allHotspots.length < hsTotal && (hsPage - 1) * pageSize < 10000);
+      } catch {
+        // Continua caso endpoint opcional falhe
+      }
+
+      // 6. Consultar Branches e Histórico de Análises (/api/project_branches/list & /api/project_analyses/search)
+      let projectBranches: unknown[] = [];
+      let projectAnalyses: unknown[] = [];
+      try {
+        const brUrl = new URL('/api/project_branches/list', safeOrigin);
+        brUrl.searchParams.set('project', proj.projectKey);
+        if (brUrl.origin === safeOrigin) {
+          const brRes = await fetch(brUrl.toString(), { method: 'GET', headers: reqHeaders });
+          if (brRes.ok) {
+            const brData = (await brRes.json()) as { branches?: unknown[] };
+            projectBranches = Array.isArray(brData.branches) ? brData.branches : [];
+          }
+        }
+      } catch {
+        // Opcional
+      }
+
+      try {
+        const anUrl = new URL('/api/project_analyses/search', safeOrigin);
+        anUrl.searchParams.set('project', proj.projectKey);
+        anUrl.searchParams.set('ps', '50');
+        anUrl.searchParams.set('p', '1');
+        if (anUrl.origin === safeOrigin) {
+          const anRes = await fetch(anUrl.toString(), { method: 'GET', headers: reqHeaders });
+          if (anRes.ok) {
+            const anData = (await anRes.json()) as { analyses?: unknown[] };
+            projectAnalyses = Array.isArray(anData.analyses) ? anData.analyses : [];
+          }
+        }
+      } catch {
+        // Opcional
+      }
+
+      // 7. Construir Resumo Analítico Consolidado (summary)
+      const bySeverity: Record<string, number> = {
+        BLOCKER: 0,
+        CRITICAL: 0,
+        MAJOR: 0,
+        MINOR: 0,
+        INFO: 0,
+      };
+      const byType: Record<string, number> = {
+        VULNERABILITY: 0,
+        BUG: 0,
+        CODE_SMELL: 0,
+        SECURITY_HOTSPOT: allHotspots.length,
+      };
+      const byStatus: Record<string, number> = {};
+      const byMqrImpactSoftwareQuality: Record<string, number> = {
+        SECURITY: 0,
+        RELIABILITY: 0,
+        MAINTAINABILITY: 0,
+      };
+      let openIssuesCount = 0;
+      let closedIssuesCount = 0;
+
+      for (const iss of allIssues) {
+        const sev = String(iss.severity || 'MAJOR').toUpperCase();
+        bySeverity[sev] = (bySeverity[sev] || 0) + 1;
+
+        const typ = String(iss.type || 'CODE_SMELL').toUpperCase();
+        byType[typ] = (byType[typ] || 0) + 1;
+
+        const st = String(iss.status || 'OPEN').toUpperCase();
+        byStatus[st] = (byStatus[st] || 0) + 1;
+        if (st === 'CLOSED' || st === 'RESOLVED') {
+          closedIssuesCount += 1;
+        } else {
+          openIssuesCount += 1;
+        }
+
+        if (Array.isArray(iss.impacts)) {
+          for (const imp of iss.impacts) {
+            const sq = String(imp?.softwareQuality || '').toUpperCase();
+            if (sq) {
+              byMqrImpactSoftwareQuality[sq] = (byMqrImpactSoftwareQuality[sq] || 0) + 1;
+            }
+          }
+        }
+      }
+
+      const toReviewHotspotsCount = allHotspots.filter(
+        (h) => String(h.status || '').toUpperCase() === 'TO_REVIEW'
+      ).length;
+      const reviewedHotspotsCount = allHotspots.length - toReviewHotspotsCount;
+
+      const nowIso = new Date().toISOString();
+      proj.lastExportedAt = nowIso;
+      proj.lastExportedIssuesCount = allIssues.length;
+      proj.lastVerifiedAt = nowIso;
+      proj.lastVerificationStatus = 'VALID';
+
+      appendAuditLog(
+        db,
+        'SONAR_JSON_REPORT_EXPORTED',
+        'SONAR_PROJECT_PROFILE',
+        proj.id,
+        `Análise completa exportada de ${safeOrigin} para "${proj.projectKey}" (${allIssues.length} issues, ${allHotspots.length} hotspots, ${rawMeasures.length} métricas).`
+      );
+      saveDatabase(db);
+
+      const safeFileProjectKey = proj.projectKey.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const reportPayload = {
+        platform: proj.platform,
+        serverUrl: safeOrigin,
+        projectKey: proj.projectKey,
+        organization: proj.organization,
+        generatedAt: nowIso,
+        total: allIssues.length,
+        p: 1,
+        ps: allIssues.length,
+        paging: {
+          pageIndex: 1,
+          pageSize: allIssues.length,
+          total: totalIssuesReported || allIssues.length,
+        },
+        effortTotal,
+        debtTotal,
+        totalIssues: allIssues.length,
+        totalHotspots: allHotspots.length,
+        summary: {
+          qualityGateStatus:
+            (qualityGateStatusObj?.status as string) ||
+            (measuresMap.alert_status as string) ||
+            'UNKNOWN',
+          totalIssues: allIssues.length,
+          openIssuesCount,
+          closedIssuesCount,
+          totalHotspots: allHotspots.length,
+          toReviewHotspotsCount,
+          reviewedHotspotsCount,
+          effortTotalMinutes: effortTotal,
+          bySeverity,
+          byType,
+          byStatus,
+          byMqrImpactSoftwareQuality,
+        },
+        component: componentMetadata,
+        ancestors: componentAncestors,
+        qualityGate: qualityGateStatusObj,
+        measuresMap,
+        measures: rawMeasures,
+        branches: projectBranches,
+        analyses: projectAnalyses,
+        issues: allIssues,
+        hotspots: allHotspots,
+        components: Array.from(componentsByKey.values()),
+        hotspotComponents: Array.from(hotspotComponentsByKey.values()),
+        rules: Array.from(rulesByKey.values()),
+        users: Array.from(usersByLogin.values()),
+        facets: facetsList,
+      };
+
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="sonarcloud-report-${safeFileProjectKey}.json"`
+      );
+      return res.end(Buffer.from(JSON.stringify(reportPayload, null, 2), 'utf-8'));
+    } catch (err: any) {
+      return res.status(502).json({
+        error: `Falha de comunicação ao exportar análise completa de ${safeOrigin}: ${err?.message || 'Erro de conexão'}.`,
+      });
+    }
+  });
+
+  const buildCompleteSonarPs1Script = (params: {
+    platform: 'SONARCLOUD' | 'SONARQUBE_SERVER';
+    serverUrl: string;
+    projectKey: string;
+    organization: string;
+    plainToken?: string | null;
+  }): { filename: string; content: string } => {
+    const safeFileProjectKey = (params.projectKey || 'sonar_project').replace(
+      /[^a-zA-Z0-9._-]/g,
+      '_'
+    );
+    const safeProjectKey = (params.projectKey || '').replace(/[^a-zA-Z0-9._:-]/g, '');
+    const safeOrg = (params.organization || '').replace(/[^a-zA-Z0-9._-]/g, '');
+    let safeOrigin = 'https://sonarcloud.io';
+    try {
+      safeOrigin = validateSonarServerOrigin(params.serverUrl, params.platform);
+    } catch {
+      safeOrigin = params.platform === 'SONARQUBE_SERVER' ? 'http://localhost:9000' : 'https://sonarcloud.io';
+    }
+
+    const sanitizedSavedToken = (params.plainToken || '').replace(/["`$]/g, '');
+
+    const ps1Lines = [
+      `# ==============================================================================`,
+      `# WinHood Analyzer — Exportador Completo de Análise SonarCloud / SonarQube (.PS1)`,
+      `# Coleta Integral: Componente, Quality Gate, Métricas MQR, Issues, Rules,`,
+      `#                  Components, Facets, Security Hotspots, Branches e Análises`,
+      `# Projeto: ${safeProjectKey || 'N/A'} | Organização: ${safeOrg || 'N/A'}`,
+      `# ==============================================================================`,
+      `$ErrorActionPreference = "Stop"`,
+      `[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12`,
+      ``,
+      `$configuredToken = "${sanitizedSavedToken}"`,
+      `$sonarToken      = if (-not [string]::IsNullOrWhiteSpace($env:SONAR_TOKEN)) { $env:SONAR_TOKEN } elseif (-not [string]::IsNullOrWhiteSpace($configuredToken)) { $configuredToken } else { "" }`,
+      `$projectKey      = "${safeProjectKey}"`,
+      `$organization    = "${safeOrg}"`,
+      `$serverUrl       = "${safeOrigin}".TrimEnd('/')`,
+      `$platform        = "${params.platform}"`,
+      ``,
+      `if ([string]::IsNullOrWhiteSpace($projectKey)) {`,
+      `    $projectKey = (Read-Host "Informe o Project Key (sonar.projectKey)").Trim()`,
+      `}`,
+      `if ($platform -eq "SONARCLOUD" -and [string]::IsNullOrWhiteSpace($organization)) {`,
+      `    $organization = (Read-Host "Informe a Organization do SonarCloud (sonar.organization)").Trim()`,
+      `}`,
+      `if ([string]::IsNullOrWhiteSpace($sonarToken)) {`,
+      `    $sonarToken = (Read-Host "Informe seu Bearer Token do SonarCloud/SonarQube (SONAR_TOKEN)").Trim()`,
+      `}`,
+      `if ([string]::IsNullOrWhiteSpace($sonarToken) -or [string]::IsNullOrWhiteSpace($projectKey)) {`,
+      `    Write-Error "Project Key e SONAR_TOKEN sao obrigatorios para exportar a analise completa."`,
+      `    exit 1`,
+      `}`,
+      ``,
+      `$safeFileKey = ($projectKey -replace '[^a-zA-Z0-9._-]', '_')`,
+      `$outputFile  = Join-Path -Path (Get-Location).Path -ChildPath ("sonarcloud-report-{0}.json" -f $safeFileKey)`,
+      ``,
+      `$headers = @{`,
+      `    Authorization = "Bearer $sonarToken"`,
+      `    Accept        = "application/json"`,
+      `    "User-Agent"  = "WinHood-SonarExporter-PS1/2.0"`,
+      `}`,
+      ``,
+      `function Invoke-SonarEndpointSafe {`,
+      `    param([string]$FullUrl, [bool]$Critical = $false)`,
+      `    try {`,
+      `        return Invoke-RestMethod -Uri $FullUrl -Headers $headers -Method Get`,
+      `    } catch {`,
+      `        if ($Critical) { throw $_ }`,
+      `        Write-Host ("  [Aviso] Endpoint opcional indisponivel: {0}" -f $FullUrl) -ForegroundColor DarkYellow`,
+      `        return $null`,
+      `    }`,
+      `}`,
+      ``,
+      `$escapedKey = [uri]::EscapeDataString($projectKey)`,
+      `$orgParam   = if ([string]::IsNullOrWhiteSpace($organization)) { "" } else { "&organization=$([uri]::EscapeDataString($organization))" }`,
+      ``,
+      `Write-Host "========================================================================" -ForegroundColor Cyan`,
+      `Write-Host " Iniciando Exportacao Completa do Sonar ($platform) para '$projectKey' " -ForegroundColor Cyan`,
+      `Write-Host "========================================================================" -ForegroundColor Cyan`,
+      ``,
+      `# 1. Metadados do Componente (/api/components/show)`,
+      `Write-Host "[1/6] Coletando metadados do projeto (/api/components/show)..." -ForegroundColor Cyan`,
+      `$compResp = Invoke-SonarEndpointSafe -FullUrl "$serverUrl/api/components/show?component=$escapedKey"`,
+      `$componentData = if ($null -ne $compResp -and $null -ne $compResp.component) { $compResp.component } else { $null }`,
+      `$ancestorsData = if ($null -ne $compResp -and $null -ne $compResp.ancestors) { @($compResp.ancestors) } else { @() }`,
+      ``,
+      `# 2. Status do Quality Gate (/api/qualitygates/project_status)`,
+      `Write-Host "[2/6] Coletando Quality Gate (/api/qualitygates/project_status)..." -ForegroundColor Cyan`,
+      `$qgResp = Invoke-SonarEndpointSafe -FullUrl "$serverUrl/api/qualitygates/project_status?projectKey=$escapedKey"`,
+      `$qualityGateData = if ($null -ne $qgResp -and $null -ne $qgResp.projectStatus) { $qgResp.projectStatus } else { $qgResp }`,
+      ``,
+      `# 3. Metricas Estaticas e MQR (/api/measures/component)`,
+      `Write-Host "[3/6] Coletando 39 metricas estaticas e MQR (/api/measures/component)..." -ForegroundColor Cyan`,
+      `$metricKeys = "${SONAR_FULL_METRIC_KEYS}"`,
+      `$measuresResp = Invoke-SonarEndpointSafe -FullUrl "$serverUrl/api/measures/component?component=$escapedKey&metricKeys=$metricKeys"`,
+      `$measuresList = New-Object 'System.Collections.Generic.List[object]'`,
+      `$measuresMap  = [ordered]@{}`,
+      `if ($null -ne $measuresResp -and $null -ne $measuresResp.component -and $null -ne $measuresResp.component.measures) {`,
+      `    foreach ($m in $measuresResp.component.measures) {`,
+      `        [void]$measuresList.Add($m)`,
+      `        $val = if ($null -ne $m.value) { $m.value } elseif ($null -ne $m.period -and $null -ne $m.period.value) { $m.period.value } elseif ($null -ne $m.periods -and $m.periods.Count -gt 0) { $m.periods[0].value } else { "" }`,
+      `        $measuresMap[$m.metric] = $val`,
+      `    }`,
+      `}`,
+      ``,
+      `# 4. Issues Paginadas com additionalFields=_all (/api/issues/search)`,
+      `Write-Host "[4/6] Coletando todas as paginas de Issues com fluxos, regras e impactos MQR..." -ForegroundColor Cyan`,
+      `$pageSize        = 500`,
+      `$page            = 1`,
+      `$totalIssues     = 0`,
+      `$effortTotal     = 0`,
+      `$debtTotal       = 0`,
+      `$allIssues       = New-Object 'System.Collections.Generic.List[object]'`,
+      `$allComponents   = New-Object 'System.Collections.Generic.List[object]'`,
+      `$seenComponents  = @{}`,
+      `$allRules        = New-Object 'System.Collections.Generic.List[object]'`,
+      `$seenRules       = @{}`,
+      `$allUsers        = New-Object 'System.Collections.Generic.List[object]'`,
+      `$seenUsers       = @{}`,
+      `$facetsData      = @()`,
+      ``,
+      `do {`,
+      `    $facetsParam = "severities,types,rules,statuses,resolutions,cleanCodeAttributeCategories,impactSoftwareQualities,impactSeverities"`,
+      `    $issuesUrl = "$serverUrl/api/issues/search?componentKeys=$escapedKey$orgParam&ps=$pageSize&p=$page&additionalFields=_all&facets=$facetsParam"`,
+      `    $response = Invoke-SonarEndpointSafe -FullUrl $issuesUrl -Critical $true`,
+      `    if ($null -eq $response) { break }`,
+      ``,
+      `    $batchCount = 0`,
+      `    if ($null -ne $response.issues) {`,
+      `        foreach ($iss in $response.issues) {`,
+      `            [void]$allIssues.Add($iss)`,
+      `            $batchCount++`,
+      `        }`,
+      `    }`,
+      `    if ($null -ne $response.components) {`,
+      `        foreach ($comp in $response.components) {`,
+      `            if ($null -ne $comp.key -and -not $seenComponents.ContainsKey($comp.key)) {`,
+      `                $seenComponents[$comp.key] = $true`,
+      `                [void]$allComponents.Add($comp)`,
+      `            }`,
+      `        }`,
+      `    }`,
+      `    if ($null -ne $response.rules) {`,
+      `        foreach ($rule in $response.rules) {`,
+      `            if ($null -ne $rule.key -and -not $seenRules.ContainsKey($rule.key)) {`,
+      `                $seenRules[$rule.key] = $true`,
+      `                [void]$allRules.Add($rule)`,
+      `            }`,
+      `        }`,
+      `    }`,
+      `    if ($null -ne $response.users) {`,
+      `        foreach ($usr in $response.users) {`,
+      `            if ($null -ne $usr.login -and -not $seenUsers.ContainsKey($usr.login)) {`,
+      `                $seenUsers[$usr.login] = $true`,
+      `                [void]$allUsers.Add($usr)`,
+      `            }`,
+      `        }`,
+      `    }`,
+      `    if ($page -eq 1 -and $null -ne $response.facets) {`,
+      `        $facetsData = @($response.facets)`,
+      `    }`,
+      `    if ($null -ne $response.effortTotal) { $effortTotal = [int]$response.effortTotal }`,
+      `    if ($null -ne $response.debtTotal)   { $debtTotal   = [int]$response.debtTotal }`,
+      ``,
+      `    $totalIssues = if ($null -ne $response.total) { [int]$response.total } elseif ($null -ne $response.paging -and $null -ne $response.paging.total) { [int]$response.paging.total } else { $allIssues.Count }`,
+      `    Write-Host ("  -> Pagina {0}: {1}/{2} issues coletadas (Regras: {3}, Arquivos: {4})..." -f $page, $allIssues.Count, $totalIssues, $allRules.Count, $allComponents.Count) -ForegroundColor Gray`,
+      `    if ($batchCount -eq 0) { break }`,
+      `    $page++`,
+      `} while ($allIssues.Count -lt $totalIssues -and (($page - 1) * $pageSize) -lt 10000)`,
+      ``,
+      `# 5. Security Hotspots Paginados (/api/hotspots/search)`,
+      `Write-Host "[5/6] Coletando Security Hotspots (/api/hotspots/search)..." -ForegroundColor Cyan`,
+      `$hsPage      = 1`,
+      `$hsTotal     = 0`,
+      `$allHotspots = New-Object 'System.Collections.Generic.List[object]'`,
+      `do {`,
+      `    $hsUrl  = "$serverUrl/api/hotspots/search?projectKey=$escapedKey&ps=$pageSize&p=$hsPage"`,
+      `    $hsResp = Invoke-SonarEndpointSafe -FullUrl $hsUrl`,
+      `    if ($null -eq $hsResp -or $null -eq $hsResp.hotspots) { break }`,
+      `    $hsBatchCount = 0`,
+      `    foreach ($hs in $hsResp.hotspots) {`,
+      `        [void]$allHotspots.Add($hs)`,
+      `        $hsBatchCount++`,
+      `    }`,
+      `    $hsTotal = if ($null -ne $hsResp.paging -and $null -ne $hsResp.paging.total) { [int]$hsResp.paging.total } else { $allHotspots.Count }`,
+      `    Write-Host ("  -> Pagina {0}: {1}/{2} hotspots coletados..." -f $hsPage, $allHotspots.Count, $hsTotal) -ForegroundColor Gray`,
+      `    if ($hsBatchCount -eq 0) { break }`,
+      `    $hsPage++`,
+      `} while ($allHotspots.Count -lt $hsTotal -and (($hsPage - 1) * $pageSize) -lt 10000)`,
+      ``,
+      `# 6. Branches e Historico de Analises (/api/project_branches/list & /api/project_analyses/search)`,
+      `Write-Host "[6/6] Coletando branches e historico de analises..." -ForegroundColor Cyan`,
+      `$branchesResp = Invoke-SonarEndpointSafe -FullUrl "$serverUrl/api/project_branches/list?project=$escapedKey"`,
+      `$branchesData = if ($null -ne $branchesResp -and $null -ne $branchesResp.branches) { @($branchesResp.branches) } else { @() }`,
+      `$analysesResp = Invoke-SonarEndpointSafe -FullUrl "$serverUrl/api/project_analyses/search?project=$escapedKey&ps=50&p=1"`,
+      `$analysesData = if ($null -ne $analysesResp -and $null -ne $analysesResp.analyses) { @($analysesResp.analyses) } else { @() }`,
+      ``,
+      `# Contabilizar Resumo Estatistico`,
+      `$bySeverity = [ordered]@{ BLOCKER = 0; CRITICAL = 0; MAJOR = 0; MINOR = 0; INFO = 0 }`,
+      `$byType     = [ordered]@{ VULNERABILITY = 0; BUG = 0; CODE_SMELL = 0; SECURITY_HOTSPOT = $allHotspots.Count }`,
+      `$byStatus   = [ordered]@{}`,
+      `$openCount  = 0`,
+      `$closedCount = 0`,
+      `foreach ($iss in $allIssues) {`,
+      `    $sev = if ($null -ne $iss.severity) { [string]$iss.severity } else { "MAJOR" }`,
+      `    if (-not $bySeverity.Contains($sev)) { $bySeverity[$sev] = 0 }`,
+      `    $bySeverity[$sev] = [int]$bySeverity[$sev] + 1`,
+      `    $typ = if ($null -ne $iss.type) { [string]$iss.type } else { "CODE_SMELL" }`,
+      `    if (-not $byType.Contains($typ)) { $byType[$typ] = 0 }`,
+      `    $byType[$typ] = [int]$byType[$typ] + 1`,
+      `    $st = if ($null -ne $iss.status) { [string]$iss.status } else { "OPEN" }`,
+      `    if (-not $byStatus.Contains($st)) { $byStatus[$st] = 0 }`,
+      `    $byStatus[$st] = [int]$byStatus[$st] + 1`,
+      `    if ($st -eq "CLOSED" -or $st -eq "RESOLVED") { $closedCount++ } else { $openCount++ }`,
+      `}`,
+      ``,
+      `$qgStatusText = if ($null -ne $qualityGateData -and $null -ne $qualityGateData.status) { [string]$qualityGateData.status } elseif ($measuresMap.Contains("alert_status")) { [string]$measuresMap["alert_status"] } else { "UNKNOWN" }`,
+      ``,
+      `$finalReport = [PSCustomObject]@{`,
+      `    platform      = $platform`,
+      `    serverUrl     = $serverUrl`,
+      `    projectKey    = $projectKey`,
+      `    organization  = $organization`,
+      `    generatedAt   = (Get-Date).ToString("o")`,
+      `    total         = $allIssues.Count`,
+      `    p             = 1`,
+      `    ps            = $allIssues.Count`,
+      `    paging        = [PSCustomObject]@{`,
+      `        pageIndex = 1`,
+      `        pageSize  = $allIssues.Count`,
+      `        total     = $totalIssues`,
+      `    }`,
+      `    effortTotal   = $effortTotal`,
+      `    debtTotal     = $debtTotal`,
+      `    totalIssues   = $allIssues.Count`,
+      `    totalHotspots = $allHotspots.Count`,
+      `    summary       = [PSCustomObject]@{`,
+      `        qualityGateStatus  = $qgStatusText`,
+      `        totalIssues        = $allIssues.Count`,
+      `        openIssuesCount    = $openCount`,
+      `        closedIssuesCount  = $closedCount`,
+      `        totalHotspots      = $allHotspots.Count`,
+      `        effortTotalMinutes = $effortTotal`,
+      `        bySeverity         = $bySeverity`,
+      `        byType             = $byType`,
+      `        byStatus           = $byStatus`,
+      `    }`,
+      `    component     = $componentData`,
+      `    ancestors     = $ancestorsData`,
+      `    qualityGate   = $qualityGateData`,
+      `    measuresMap   = $measuresMap`,
+      `    measures      = $measuresList.ToArray()`,
+      `    branches      = $branchesData`,
+      `    analyses      = $analysesData`,
+      `    issues        = $allIssues.ToArray()`,
+      `    hotspots      = $allHotspots.ToArray()`,
+      `    components    = $allComponents.ToArray()`,
+      `    rules         = $allRules.ToArray()`,
+      `    users         = $allUsers.ToArray()`,
+      `    facets        = $facetsData`,
+      `}`,
+      ``,
+      `Write-Host "Serializando arvore JSON completa (-Depth 100)..." -ForegroundColor Cyan`,
+      `$jsonContent = ConvertTo-Json -InputObject $finalReport -Depth 100`,
+      `$utf8NoBom   = New-Object System.Text.UTF8Encoding($false)`,
+      `[System.IO.File]::WriteAllText($outputFile, $jsonContent, $utf8NoBom)`,
+      ``,
+      `Write-Host "========================================================================" -ForegroundColor Green`,
+      `Write-Host (" Relatorio Completo salvo em: {0}" -f $outputFile) -ForegroundColor Green`,
+      `Write-Host (" -> Quality Gate: {0} | Issues: {1} (Abertas: {2}) | Hotspots: {3} | Metricas: {4}" -f $qgStatusText, $allIssues.Count, $openCount, $allHotspots.Count, $measuresList.Count) -ForegroundColor Green`,
+      `Write-Host "========================================================================" -ForegroundColor Green`,
+    ];
+
+    return {
+      filename: `sonarcloud-${safeFileProjectKey}.ps1`,
+      content: ps1Lines.join('\r\n'),
+    };
+  };
+
+  app.get('/api/sonar/saved-projects/:id/export-ps1', (req, res) => {
+    if (!Array.isArray(db.savedSonarProjects)) {
+      db.savedSonarProjects = [];
+    }
+    const proj = db.savedSonarProjects.find((p) => p.id === req.params.id);
+    if (!proj) {
+      return res.status(404).json({ error: 'Perfil de projeto Sonar não encontrado.' });
+    }
+
+    const plainToken = proj.encryptedToken
+      ? SonarQubeConnection.decryptToken(proj.encryptedToken)
+      : null;
+
+    const generated = buildCompleteSonarPs1Script({
+      platform: proj.platform,
+      serverUrl: proj.serverUrl,
+      projectKey: proj.projectKey,
+      organization: proj.organization,
+      plainToken,
+    });
+
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${generated.filename}"`
+    );
+    return res.end(Buffer.from(generated.content, 'utf-8'));
+  });
+
+  app.post('/api/sonar/export-ps1-direct', (req, res) => {
+    const { platform, serverUrl, projectKey, organization, token } = (req.body || {}) as {
+      platform?: 'SONARCLOUD' | 'SONARQUBE_SERVER';
+      serverUrl?: string;
+      projectKey?: string;
+      organization?: string;
+      token?: string;
+    };
+
+    const resolvedPlatform: 'SONARCLOUD' | 'SONARQUBE_SERVER' =
+      platform === 'SONARQUBE_SERVER' ? 'SONARQUBE_SERVER' : 'SONARCLOUD';
+
+    const generated = buildCompleteSonarPs1Script({
+      platform: resolvedPlatform,
+      serverUrl:
+        serverUrl ||
+        (resolvedPlatform === 'SONARCLOUD' ? 'https://sonarcloud.io' : 'http://localhost:9000'),
+      projectKey: (projectKey || '').trim(),
+      organization: (organization || '').trim(),
+      plainToken: (token || '').trim() || null,
+    });
+
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${generated.filename}"`
+    );
+    return res.end(Buffer.from(generated.content, 'utf-8'));
   });
 
   app.post('/api/sonarqube/probe', async (req, res) => {

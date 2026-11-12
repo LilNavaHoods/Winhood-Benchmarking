@@ -329,7 +329,8 @@ export class ToolResourceMonitor {
       checksumAcc += memArray[i];
     }
     const readSec = Math.max(0.0002, (performance.now() - readStart) / 1000);
-    const sequentialReadMbPerSec = Math.round((bufferSizeMb / readSec) * (checksumAcc !== -1 ? 1 : 1));
+    const readGuardFactor = Number.isFinite(checksumAcc) ? 1 : 0;
+    const sequentialReadMbPerSec = Math.round((bufferSizeMb / readSec) * readGuardFactor);
 
     const memoryScore = Math.min(
       100,

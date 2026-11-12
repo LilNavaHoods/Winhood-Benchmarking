@@ -5,7 +5,6 @@
 
 import React, { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import {
-  AlertTriangle,
   BookOpen,
   CheckCircle2,
   Cpu,
@@ -29,7 +28,6 @@ import {
   UserCheck,
   Wrench,
   XCircle,
-  Zap,
 } from 'lucide-react';
 import type {
   AuditLogEntry,
@@ -44,6 +42,7 @@ import { HeaderQuickSearch } from './components/HeaderQuickSearch';
 import { StepByStepJourneyBar, type AppNavSection } from './components/StepByStepJourneyBar';
 import { ContextualScreenHelpBanner } from './components/ContextualScreenHelpBanner';
 import { AnalysisProgressHeaderBanner } from './components/AnalysisProgressHeaderBanner';
+import { WinHoodLogo } from './components/WinHoodLogo';
 
 // Lazy-loaded modules (Seção 11.7 — Otimização do frontend: Code Splitting & Lazy Loading sob demanda)
 const ProjectsAndSoftwaresModule = lazy(() =>
@@ -106,6 +105,11 @@ const HardwareAndDisplayBenchmarkModule = lazy(() =>
     default: m.HardwareAndDisplayBenchmarkModule,
   }))
 );
+const MarketResearchAndCompetitorsModule = lazy(() =>
+  import('./components/MarketResearchAndCompetitorsModule').then((m) => ({
+    default: m.MarketResearchAndCompetitorsModule,
+  }))
+);
 
 type NavSection = AppNavSection;
 
@@ -115,7 +119,6 @@ export default function App() {
   const [guideChapterId, setGuideChapterId] = useState<string>('quickstart');
   const [darkMode, setDarkMode] = useState<boolean>(true);
   const [loading, setLoading] = useState<boolean>(true);
-  const [environmentMode, setEnvironmentMode] = useState<'PRODUCTION' | 'DEMO' | 'TEST'>('PRODUCTION');
 
   const [currentUser, setCurrentUser] = useState<{
     id: string;
@@ -216,17 +219,6 @@ export default function App() {
         setProfiles(data.profiles || []);
         setAdapters(data.adapters || []);
         setAuditLogs(data.auditLogs || []);
-      }
-
-      // Sincroniza modo de ambiente (PRODUCTION / DEMO / TEST)
-      try {
-        const envRes = await fetch('/api/environment');
-        if (envRes.ok) {
-          const envData = await envRes.json();
-          setEnvironmentMode(envData.environmentMode || 'PRODUCTION');
-        }
-      } catch {
-        // Ignora erro momentâneo
       }
     } catch {
       notify('Falha ao sincronizar estado com o servidor backend.', 'error');
@@ -332,28 +324,6 @@ export default function App() {
     }
   };
 
-  const handleQuickRun = async () => {
-    try {
-      const res = await fetch('/api/benchmark-runs/quick-run', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        notify(
-          'Análise de 1 Clique iniciada! O backend executa Docker ou o motor nativo automaticamente em segundo plano.',
-          'success'
-        );
-        await fetchAllBackendState();
-      } else {
-        notify(data.error || 'Falha ao iniciar análise rápida.', 'error');
-      }
-    } catch {
-      notify('Erro ao solicitar análise rápida de 1 clique.', 'error');
-    }
-  };
-
   const handleSwitchRole = async (
     role: 'ADMIN' | 'SECURITY_LEAD' | 'AUDITOR' | 'QA_ENGINEER'
   ) => {
@@ -371,41 +341,6 @@ export default function App() {
       }
     } catch {
       notify('Erro ao alterar perfil RBAC.', 'error');
-    }
-  };
-
-  const handleSwitchEnvironment = async (mode: 'PRODUCTION' | 'DEMO' | 'TEST') => {
-    try {
-      const res = await fetch('/api/environment/switch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setEnvironmentMode(mode);
-        notify(`Ambiente alterado para ${mode}. Regras de veracidade atualizadas.`, 'success');
-        await fetchAllBackendState();
-      } else {
-        notify(data.error || 'Falha ao alternar ambiente.', 'error');
-      }
-    } catch {
-      notify('Erro ao solicitar mudança de ambiente.', 'error');
-    }
-  };
-
-  const handleSeedDemoData = async () => {
-    try {
-      const res = await fetch('/api/demo/seed', { method: 'POST' });
-      const data = await res.json();
-      if (!res.ok) {
-        notify(data.error || 'Acesso negado para dados demonstrativos.', 'error');
-        return;
-      }
-      notify(data.message || 'Dados de demonstração carregados com sucesso!', 'success');
-      await fetchAllBackendState();
-    } catch {
-      notify('Erro ao carregar dados de demonstração.', 'error');
     }
   };
 
@@ -531,13 +466,16 @@ export default function App() {
               className="text-left flex items-center gap-2.5 cursor-pointer"
               title="WinHood Analyzer — Ir para o Dashboard Central"
             >
-              <div className="w-7 h-7 rounded-md bg-[#31d6c4] text-slate-950 font-mono font-bold text-sm flex items-center justify-center shrink-0">
-                WH
-              </div>
+              <WinHoodLogo size={34} className="brand-mark shrink-0" />
               {!sidebarCollapsed && (
-                <span className="text-base font-bold tracking-tight text-slate-900 dark:text-slate-100 whitespace-nowrap">
-                  WinHood Analyzer
-                </span>
+                <div className="flex flex-col leading-tight">
+                  <span className="text-sm font-bold tracking-tight text-slate-900 dark:text-slate-100 whitespace-nowrap">
+                    WinHood Analyzer
+                  </span>
+                  <span className="text-[10px] font-mono text-[#31d6c4] tracking-wider">
+                    SHA-256 VERACITY ENGINE
+                  </span>
+                </div>
               )}
             </button>
 
@@ -726,77 +664,22 @@ export default function App() {
               <span className="hidden md:inline">GitHub</span>
             </button>
 
-            <button
-              type="button"
-              onClick={handleQuickRun}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] transition-colors whitespace-nowrap shrink-0 cursor-pointer shadow-sm"
-              title="Disparar análise automática em 1 clique (Backend & Docker automáticos)"
-            >
-              <Zap className="w-3.5 h-3.5 fill-current" />
-              <span>Análise 1-Clique</span>
-            </button>
-
-            {/* Environment Indicator & Switcher (Seção 2.1) */}
-            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] text-xs font-mono shrink-0">
-              <span className="text-[10px] text-slate-400 font-sans hidden xl:inline">Ambiente:</span>
-              <select
-                aria-label="Selecionar Ambiente de Execução"
-                value={environmentMode}
-                onChange={(e) =>
-                  handleSwitchEnvironment(e.target.value as 'PRODUCTION' | 'DEMO' | 'TEST')
-                }
-                className={`text-[11px] font-bold rounded px-1.5 py-0.5 border cursor-pointer ${
-                  environmentMode === 'PRODUCTION'
-                    ? 'bg-emerald-500/10 text-emerald-500 dark:text-[#31d6c4] border-emerald-500/30'
-                    : environmentMode === 'DEMO'
-                      ? 'bg-amber-500/15 text-amber-500 dark:text-amber-300 border-amber-500/40'
-                      : 'bg-sky-500/10 text-sky-500 dark:text-sky-400 border-sky-500/30'
-                }`}
-              >
-                <option value="PRODUCTION">PRODUÇÃO (Zero Fakes)</option>
-                <option value="DEMO">DEMO (Fixtures)</option>
-                <option value="TEST">TEST (Isolado)</option>
-              </select>
+            {/* Static Production Environment Indicator (Especificação 4 — 100% PRODUÇÃO) */}
+            <div className="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-[11px] font-mono font-bold text-emerald-600 dark:text-[#31d6c4] shrink-0">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#31d6c4]" />
+              <span>PRODUÇÃO (Zero Fakes)</span>
             </div>
 
             <button
               type="button"
               onClick={() => setActiveNav('wizard')}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 hover:border-[#31d6c4] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
-              <Play className="w-3.5 h-3.5 text-[#31d6c4]" />
+              <Play className="w-3.5 h-3.5" />
               <span className="hidden lg:inline">Nova Avaliação</span>
             </button>
           </div>
         </header>
-
-        {/* DEMO Environment Alert Banner (Seção 2.1 da Especificação) */}
-        {environmentMode === 'DEMO' && (
-          <div className="bg-amber-500/15 border-b border-amber-500/30 px-6 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs text-amber-900 dark:text-amber-200">
-            <div className="flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />
-              <span>
-                <strong>AMBIENTE DE DEMONSTRAÇÃO ATIVO:</strong> Fixtures e dados sintéticos são permitidos exclusivamente para demonstração e são excluídos das estatísticas e rankings oficiais.
-              </span>
-            </div>
-            <div className="flex items-center gap-2 shrink-0">
-              <button
-                type="button"
-                onClick={handleSeedDemoData}
-                className="px-2.5 py-1 rounded bg-amber-400 text-slate-950 font-bold hover:bg-amber-300 transition-colors cursor-pointer text-[11px]"
-              >
-                Carregar Fixtures Demo (VaultCore vs KeeSafe)
-              </button>
-              <button
-                type="button"
-                onClick={() => handleSwitchEnvironment('PRODUCTION')}
-                className="px-2.5 py-1 rounded border border-amber-500/40 hover:bg-amber-500/20 text-amber-800 dark:text-amber-200 cursor-pointer text-[11px]"
-              >
-                Voltar para Produção
-              </button>
-            </div>
-          </div>
-        )}
 
         {/* Componente Visual de Progresso de Análise (Barra Global com ETA e Status em Andamento) */}
         <AnalysisProgressHeaderBanner
@@ -881,7 +764,7 @@ export default function App() {
               />
             )}
 
-            {(activeNav === 'wizard' || activeNav === 'market_discovery') && (
+            {activeNav === 'wizard' && (
               <BenchmarkWizardModule
                 projects={projects}
                 softwares={softwares}
@@ -891,6 +774,17 @@ export default function App() {
                   await fetchAllBackendState();
                   setActiveNav('dashboard');
                 }}
+                onNotify={notify}
+              />
+            )}
+
+            {activeNav === 'market_discovery' && (
+              <MarketResearchAndCompetitorsModule
+                projects={projects}
+                softwares={softwares}
+                selectedProjectId={projects[0]?.id || ''}
+                onRefreshWorkspace={fetchAllBackendState}
+                onNavigate={(tab) => setActiveNav(tab as NavSection)}
                 onNotify={notify}
               />
             )}

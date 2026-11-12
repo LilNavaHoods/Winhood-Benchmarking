@@ -23,6 +23,7 @@ import {
   Wrench,
 } from 'lucide-react';
 import type { AppNavSection } from './StepByStepJourneyBar';
+import { WinHoodLogo } from './WinHoodLogo';
 
 export type GuideChapterId =
   | 'quickstart'
@@ -355,19 +356,22 @@ export const UserGuideModule: React.FC<UserGuideModuleProps> = ({
   return (
     <div className="space-y-8">
       {/* Top Header Banner */}
-      <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-6">
+      <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-6 space-y-5">
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-5">
-          <div className="space-y-1.5">
-            <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-md bg-[#31d6c4]/15 text-[#0e9f8e] dark:text-[#31d6c4] font-mono text-xs font-bold border border-[#31d6c4]/30">
-              <BookOpen className="w-3.5 h-3.5" />
-              <span>MANUAL INTERATIVO OFICIAL — DO BÁSICO AO AVANÇADO</span>
+          <div className="flex items-start gap-4">
+            <WinHoodLogo size={48} className="shrink-0" />
+            <div className="space-y-1.5">
+              <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-md bg-[#31d6c4]/15 text-[#0e9f8e] dark:text-[#31d6c4] font-mono text-xs font-bold border border-[#31d6c4]/30">
+                <BookOpen className="w-3.5 h-3.5" />
+                <span>MANUAL INTERATIVO OFICIAL — DO BÁSICO AO AVANÇADO</span>
+              </div>
+              <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
+                Guia de Utilização &amp; Entendimento do WinHood Analyzer
+              </h1>
+              <p className="text-sm text-slate-600 dark:text-slate-400 max-w-3xl leading-relaxed">
+                Aprenda passo a passo como cadastrar softwares, configurar pesos matemáticos, interpretar travas de segurança (Kill Switches), operar o SonarQube / Gitar AI e emitir laudos técnicos comparativos A/B.
+              </p>
             </div>
-            <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
-              Guia de Utilização &amp; Entendimento do WinHood Analyzer
-            </h1>
-            <p className="text-sm text-slate-600 dark:text-slate-400 max-w-3xl leading-relaxed">
-              Aprenda passo a passo como cadastrar softwares, configurar pesos matemáticos, interpretar travas de segurança (Kill Switches), operar o SonarQube / Gitar AI e emitir laudos técnicos comparativos A/B.
-            </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-3 shrink-0">
@@ -390,6 +394,41 @@ export const UserGuideModule: React.FC<UserGuideModuleProps> = ({
                 <span>Carregar Exemplo Real A/B Agora</span>
               </button>
             )}
+          </div>
+        </div>
+
+        {/* Showcase Oficial da Identidade Visual "01. WinHood Pulse" */}
+        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-[#080b10] p-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+          <div className="space-y-1">
+            <div className="text-xs font-mono font-bold text-[#31d6c4]">
+              01. WINHOOD PULSE — IDENTIDADE VISUAL OFICIAL
+            </div>
+            <p className="text-xs text-slate-600 dark:text-slate-400 max-w-xl">
+              Duplo Chevron &ldquo;W&rdquo; em Turquesa SLA (<code className="font-mono">#31d6c4</code>) sobre arco de suporte concêntrico segmentado no gradiente Wini IA (<code className="font-mono">#a855f7 → #6366f1 → #3b82f6</code>). Projetado para nitidez vetorial em <code className="font-mono">.brand-mark 34x34px</code>, headers <code className="font-mono">48px</code> e showcase <code className="font-mono">160px</code>.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-4 shrink-0">
+            <div className="flex items-center gap-2.5 rounded-lg border border-slate-800 bg-[#0d1117] px-3.5 py-2">
+              <WinHoodLogo size={48} variant="dark" />
+              <div className="text-[11px] font-mono text-slate-300">
+                <div className="font-bold text-white">Dark Mode</div>
+                <div>#0d1117 · 160/48px</div>
+              </div>
+            </div>
+            <div className="flex items-center gap-2.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2">
+              <WinHoodLogo size={48} variant="light" />
+              <div className="text-[11px] font-mono text-slate-700">
+                <div className="font-bold text-slate-900">Light Mode</div>
+                <div>#ffffff · 160/48px</div>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2">
+              <WinHoodLogo size={34} className="brand-mark" />
+              <div className="text-[11px] font-mono text-slate-300">
+                <div className="font-bold text-[#31d6c4]">.brand-mark</div>
+                <div>34x34px</div>
+              </div>
+            </div>
           </div>
         </div>
 

@@ -1384,3 +1384,37 @@ test('Scenario 28: ToolResourceMonitor.runHostHardwareBenchmark executes determi
   assert.equal(hwResult.verificationSha256.length, 64);
 });
 
+test('Scenario 29: SonarQubeConnection AES-256-GCM Token Encryption & MarketCompetitorDiscoveryEngine 16 Categories + 6-Axis Similarity', async () => {
+  const { SonarQubeConnection } = await import('../integrations/sonarqube/SonarQubeConnection');
+  const { MarketCompetitorDiscoveryEngine } = await import('./marketCompetitorDiscoveryEngine');
+
+  const sampleToken = 'squ_9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b';
+  const encrypted = SonarQubeConnection.encryptToken(sampleToken);
+  assert.ok(encrypted.includes(':'), 'Encrypted token must contain IV:Tag:Ciphertext');
+  assert.notEqual(encrypted, sampleToken);
+
+  const decrypted = SonarQubeConnection.decryptToken(encrypted);
+  assert.equal(decrypted, sampleToken);
+
+  const masked = SonarQubeConnection.maskToken(sampleToken);
+  assert.equal(masked, 'squ_••••••••1a0b');
+
+  const categories = MarketCompetitorDiscoveryEngine.getAvailableCategories();
+  assert.equal(categories.length, 16);
+  assert.ok(MarketCompetitorDiscoveryEngine.getCatalogSize() >= 8);
+
+  const candidates = MarketCompetitorDiscoveryEngine.discoverCompetitors({
+    category: 'Password & Secrets Management',
+    purpose: 'KDBX AES-256-GCM Zero-Knowledge',
+    features: ['AES-256-GCM', 'PBKDF2-SHA512', 'KDBX'],
+  });
+  assert.ok(candidates.length >= 3);
+  for (const cand of candidates) {
+    assert.ok(cand.similarityScore >= 0 && cand.similarityScore <= 100);
+    assert.ok(cand.similarityBreakdown);
+    assert.ok(typeof cand.similarityBreakdown.purpose === 'number');
+    assert.ok(typeof cand.similarityBreakdown.features === 'number');
+  }
+});
+
+

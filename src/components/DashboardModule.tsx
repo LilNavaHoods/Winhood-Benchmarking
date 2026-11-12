@@ -14,8 +14,10 @@ import {
   RefreshCw,
   ShieldAlert,
   ShieldCheck,
+  Download,
 } from 'lucide-react';
 import type { BenchmarkCategoryKey, BenchmarkRun } from '../types/benchmark';
+import { WinHoodLogo } from './WinHoodLogo';
 
 export const CATEGORY_LABELS: Record<BenchmarkCategoryKey, string> = {
   functionality: 'Funcionalidades',
@@ -115,15 +117,34 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
     <div className="space-y-8">
       {/* Header Toolbar */}
       <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 border-b border-slate-200 dark:border-slate-800/80 pb-5">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
-            Dashboard Central de Benchmarking &amp; Qualidade
-          </h1>
-          <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
-            Métricas consolidadas exclusivamente a partir das execuções reais persistidas no backend e validadas pelo Motor de Veracidade.
-          </p>
+        <div className="flex items-start gap-3.5">
+          <WinHoodLogo size={48} className="shrink-0" />
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
+              Dashboard Central de Benchmarking &amp; Qualidade
+            </h1>
+            <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
+              Métricas consolidadas exclusivamente a partir das execuções reais persistidas no backend e validadas pelo Motor de Veracidade.
+            </p>
+          </div>
         </div>
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <button
+            type="button"
+            onClick={() => onNavigate('sonar_hub')}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold border border-[#31d6c4]/40 text-[#31d6c4] hover:bg-[#31d6c4]/10 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Download className="w-3.5 h-3.5" />
+            Exportar Relatório SonarCloud JSON
+          </button>
+          <button
+            type="button"
+            onClick={() => onNavigate('market_discovery')}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800/60 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Award className="w-3.5 h-3.5 text-[#31d6c4]" />
+            Pesquisa de Mercado
+          </button>
           {data?.hasEvaluations ? (
             <>
               <button

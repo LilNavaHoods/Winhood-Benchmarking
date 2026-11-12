@@ -1763,4 +1763,41 @@ export interface SonarAndToolsDatabaseBundle {
   optimization_report: ResourceOptimizationReport;
 }
 
+export type SonarTokenStatusLabel =
+  | 'VALID_ACTIVE'
+  | 'EXPIRING_SOON'
+  | 'EXPIRED'
+  | 'NO_EXPIRATION'
+  | 'INVALID_TOKEN'
+  | 'NOT_CONFIGURED';
+
+export interface SavedSonarProjectProfile {
+  id: string;
+  name: string;
+  platform: 'SONARCLOUD' | 'SONARQUBE_SERVER';
+  serverUrl: string;
+  organization: string;
+  projectKey: string;
+  encryptedToken?: string;
+  maskedToken: string;
+  hasToken: boolean;
+  tokenCreatedAt: string;
+  tokenExpiresAt: string | null;
+  tokenValidityDaysPolicy: 30 | 60 | 90 | 'NO_EXPIRATION' | 'CUSTOM';
+  lastVerifiedAt: string | null;
+  lastVerificationStatus: 'VALID' | 'EXPIRED' | 'INVALID' | 'UNCHECKED';
+  lastExportedAt: string | null;
+  lastExportedIssuesCount: number | null;
+}
+
+export interface SonarTokenVerificationResult {
+  valid: boolean;
+  tokenExpiresAt: string | null;
+  remainingDays: number | null;
+  remainingHours: number | null;
+  statusLabel: SonarTokenStatusLabel;
+  message: string;
+}
+
+
 

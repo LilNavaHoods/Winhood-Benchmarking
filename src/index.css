@@ -19,6 +19,11 @@ pre,
   font-variant-numeric: tabular-nums;
 }
 
+.brand-mark {
+  width: 34px;
+  height: 34px;
+}
+
 /* Scrollbars finas e visíveis em painéis de telemetria (Frente 2.2) */
 * {
   scrollbar-width: thin;
