@@ -4,12 +4,22 @@ import type {
   CleanCodeAttribute,
   CodeExecutionFlowStep,
   FileInventoryItem,
+  MetricProvenanceRecord,
   MqrCategoryImpact,
   NormalizedFinding,
+  ParsedCoverageReportSummary,
+  SbomDocumentBundle,
+  ScaVulnerabilityCorrelation,
+  Software,
   SoftwareScoreCard,
   ToolExecutionRecord,
   VeracityCheckResult,
 } from '../types/benchmark';
+import { ParserRegistry } from '../analyzers/ParserRegistry';
+import { TaintAnalyzer } from '../analyzers/TaintAnalyzer';
+import { SbomGenerator } from '../analyzers/sca/SbomGenerator';
+import { ScaCorrelator } from '../analyzers/sca/ScaCorrelator';
+import { CoverageReportParser } from '../execution/CoverageReportParser';
 import { computeSha256, enrichLegacyOrExternalFinding, maskSecretsInText } from './scoringEngine';
 
 const LANGUAGE_BY_EXT: Record<string, string> = {
@@ -272,6 +282,10 @@ export interface StaticAnalysisBundleResult {
   hasEncryptionAtRest: boolean;
   hasAuditTrail: boolean;
   hasCompleteDocumentation: boolean;
+  sbomSummary?: SbomDocumentBundle;
+  scaCorrelations?: ScaVulnerabilityCorrelation[];
+  coverageReportSummary?: ParsedCoverageReportSummary;
+  metricProvenance?: Record<string, MetricProvenanceRecord>;
 }
 
 function extractLineContext(lines: string[], zeroBasedIdx: number): {
@@ -381,6 +395,15 @@ export function executeRealStaticAnalysisOnSource(
 
   const seenLineHashes = new Map<string, number>();
 
+  const parsedAstMap = new Map<string, ReturnType<typeof ParserRegistry.parseFile>>();
+  for (const [fp, content] of eligibleEntries) {
+    parsedAstMap.set(fp, ParserRegistry.parseFile(fp, content));
+  }
+  const realTaintIssues = TaintAnalyzer.analyzeFlows(
+    Array.from(parsedAstMap.values()),
+    safeFilesMap
+  );
+
   const pushFinding = (
     f: Partial<NormalizedFinding> &
       Pick<
@@ -414,13 +437,17 @@ export function executeRealStaticAnalysisOnSource(
     const evidenceSha256 = computeSha256(
       `${f.softwareId}|${f.toolId}|${f.originalRuleId}|${f.filePath}|${f.lineNumber}|${maskedSnippet}`
     );
+    const astInfo = parsedAstMap.get(f.filePath);
+    const resolvedDetectionMethod: NormalizedFinding['detectionMethod'] =
+      f.detectionMethod ||
+      (astInfo?.astParsed ? 'AST_ANALYSIS' : 'STATIC_PATTERN');
     const enriched = enrichLegacyOrExternalFinding({
       ...f,
       id: `fnd-${evidenceSha256.slice(0, 12)}`,
       snippet: maskedSnippet,
       evidenceSha256,
       originType: 'WINHOOD_NATIVE_STATIC',
-      detectionMethod: 'AST_ANALYSIS',
+      detectionMethod: resolvedDetectionMethod,
       collectedAt: nowIso,
     });
     findings.push(enriched);
@@ -495,46 +522,49 @@ export function executeRealStaticAnalysisOnSource(
           },
         ];
 
-        const executionFlows: CodeExecutionFlowStep[] = [
+        const matchedRealTaint = realTaintIssues.find(
+          (t) =>
+            (t.cwe === 'CWE-89' || t.ruleId.includes('S3649')) &&
+            t.executionFlows &&
+            t.executionFlows.length >= 2 &&
+            (t.filePath === filePath ||
+              t.executionFlows.some((step) => step.filePath === filePath && step.lineNumber === lineNumber))
+        );
+
+        const executionFlows: CodeExecutionFlowStep[] = matchedRealTaint?.executionFlows?.map((step) => ({
+          ...step,
+          codeSnippet: step.codeSnippet || step.snippet || '',
+        })) || [
           {
             stepOrder: 1,
             nodeType: 'SOURCE',
-            filePath: filesMap['src/ui/vaultController.ts'] ? 'src/ui/vaultController.ts' : filePath,
-            lineNumber: filesMap['src/ui/vaultController.ts'] ? 47 : Math.max(1, lineNumber - 1),
-            symbolName: 'searchCredentialsController(userInput)',
-            codeSnippet: 'export function searchCredentialsController(userInput: string): any',
-            explanation: 'Entrada externa controlada pelo usuário ingressa sem validação de schema ou sanitização.',
+            filePath,
+            lineNumber: Math.max(1, lineNumber - 1),
+            symbolName: parsedAstMap.get(filePath)?.functions[0]?.name || path.basename(filePath),
+            codeSnippet: maskSecretsInText(lines[Math.max(0, idx - 1)]?.trim() || trimmed),
+            explanation: 'Parâmetro/identificador ingressa na função analisada via AST sem sanitização estrutural comprovada.',
           },
           {
             stepOrder: 2,
-            nodeType: 'PROPAGATOR',
-            filePath: filesMap['src/ui/vaultController.ts'] ? 'src/ui/vaultController.ts' : filePath,
-            lineNumber: filesMap['src/ui/vaultController.ts'] ? 50 : Math.max(1, lineNumber - 1),
-            symbolName: 'queryVaultEntriesRaw(searchTerm, callerHash)',
-            codeSnippet: 'return queryVaultEntriesRaw(userInput, hashed);',
-            explanation: 'O parâmetro contaminado (tainted) é repassado diretamente da camada UI para o repositório SQL.',
-          },
-          {
-            stepOrder: 3,
             nodeType: 'SANITIZER_MISSING',
             filePath,
             lineNumber: Math.max(1, lineNumber - 1),
-            symbolName: 'queryVaultEntriesRaw',
-            codeSnippet: lines[Math.max(0, idx - 1)]?.trim() || 'export function queryVaultEntriesRaw(searchTerm: string)',
-            explanation: 'Nenhum bind parameter (?, $1) ou validação estrita foi aplicado antes da montagem da string SQL.',
+            symbolName: 'PreparedStatement Missing',
+            codeSnippet: maskSecretsInText(lines[Math.max(0, idx - 1)]?.trim() || trimmed),
+            explanation: 'Nenhum bind parameter (?, $1) foi aplicado antes da montagem dinâmica da query SQL.',
           },
           {
-            stepOrder: 4,
+            stepOrder: 3,
             nodeType: 'SINK',
             filePath,
             lineNumber,
             columnStart: ctx.columnStart,
             columnEnd: ctx.columnEnd,
-            symbolName: 'sqlQuery string concatenation',
+            symbolName: 'SQL String Concatenation',
             codeSnippet: maskSecretsInText(trimmed),
             contextBefore: ctx.contextBefore,
             contextAfter: ctx.contextAfter,
-            explanation: 'A variável contaminada é concatenada diretamente na cláusula WHERE, permitindo SQL Injection (CWE-89).',
+            explanation: 'Expressão contaminada concatenada diretamente na string SQL (CWE-89).',
           },
         ];
 
@@ -1897,31 +1927,33 @@ export function executeRealStaticAnalysisOnSource(
     auditedAt: completedAtIso,
   };
 
-  // Static test analysis: calculate verified test files and test lines (never fabricate 82% when 0 test files exist)
-  const testFiles = entries.filter(([p]) => /test|spec/i.test(p));
-  const testLines = testFiles.reduce(
-    (acc, [, c]) => acc + c.split(/\r?\n/).filter((l) => l.trim().length > 0 && !l.trim().startsWith('//')).length,
-    0
-  );
-  const baseCoverage = Math.round(25 + testFiles.length * 14 + testLines * 1.4);
-  const cleanSuiteBonus =
-    criticalVulns === 0 && bugs === 0 && secretsExposed === 0
-      ? Math.round(68 + testFiles.length * 14 + testLines * 1.2)
-      : 0;
+  // Cobertura REAL extraída exclusivamente de relatórios reais (LCOV/JaCoCo/Cobertura/Istanbul)
+  // Nunca inferir % de cobertura por contagem de arquivos de teste (Regra P0)
+  const coverageReportSummary = CoverageReportParser.parseFromFilesMap(safeFilesMap);
   const testCoveragePercent =
-    testFiles.length > 0
-      ? Math.min(96, Math.max(32, Math.max(baseCoverage, cleanSuiteBonus)))
+    coverageReportSummary.found && coverageReportSummary.lineCoveragePercent !== null
+      ? coverageReportSummary.lineCoveragePercent
       : 0;
 
-  // Real test file/assertion inspection metrics
-  const functionalTestsTotal =
-    testFiles.length > 0
-      ? testFiles.length * 4
-      : eligibleEntries.length > 0
-        ? eligibleEntries.length * 2
-        : 0;
-  const functionalTestsFailed = criticalVulns > 0 ? Math.min(2, criticalVulns) : 0;
-  const functionalTestsPassed = Math.max(0, functionalTestsTotal - functionalTestsFailed);
+  // Testes funcionais executados na análise estática são 0 / NOT_MEASURED até execução controlada real
+  const functionalTestsTotal = 0;
+  const functionalTestsFailed = 0;
+  const functionalTestsPassed = 0;
+
+  // SBOM (CycloneDX 1.5 / SPDX 2.3) + SCA Correlation
+  const softwareStub = {
+    id: softwareId,
+    name: softwareName,
+    version: softwareVersion,
+    sourceFilesContent: safeFilesMap,
+  } as Software;
+  const sbomSummary = SbomGenerator.generateFromSoftware(softwareStub);
+  const scaResult = ScaCorrelator.correlateSbom({
+    software: softwareStub,
+    sbom: sbomSummary,
+    runId,
+  });
+  const scaCorrelations = scaResult.correlations;
 
   // Documentation check based on real README content
   if (!hasCompleteDocumentation && entries.length > 0) {
@@ -1932,7 +1964,6 @@ export function executeRealStaticAnalysisOnSource(
   }
 
   // Runtime performance metrics are NOT inferred statically from lines of code or complexity
-  // They are strictly set to 0 (NOT_MEASURED) in static analysis, to be populated only by runtime workers
   const p50LatencyMs = 0;
   const p95LatencyMs = 0;
   const p99LatencyMs = 0;
@@ -1959,6 +1990,71 @@ export function executeRealStaticAnalysisOnSource(
     (acc, f) => acc + (f.remediationEffortMinutes || 15),
     0
   );
+
+  const metricProvenance: Record<string, MetricProvenanceRecord> = {
+    testCoveragePercent: {
+      metricKey: 'testCoveragePercent',
+      value: coverageReportSummary.found ? testCoveragePercent : null,
+      state: coverageReportSummary.state,
+      origin: coverageReportSummary.found ? `COVERAGE_REPORT_${coverageReportSummary.format}` : 'NO_COVERAGE_REPORT',
+      method: coverageReportSummary.found
+        ? `Leitura real de ${coverageReportSummary.format} (${coverageReportSummary.linesHit}/${coverageReportSummary.linesFound} linhas)`
+        : 'Nenhum relatório LCOV/JaCoCo/Cobertura/Istanbul fornecido no pacote.',
+      toolName: 'WinHood CoverageReportParser',
+      toolVersion: '4.1.0',
+      measuredAt: completedAtIso,
+      scope: coverageReportSummary.sourceFiles.join(', ') || 'repository',
+      evidenceFile: coverageReportSummary.sourceFiles[0] || null,
+      evidenceHash: coverageReportSummary.evidenceHash,
+    },
+    functionalTestsTotal: {
+      metricKey: 'functionalTestsTotal',
+      value: null,
+      state: 'NOT_MEASURED',
+      origin: 'STATIC_ANALYSIS_ONLY',
+      method: 'Execução dinâmica de testes não realizada na fase estática.',
+      toolName: 'WinHood Static Analyzer',
+      toolVersion: '4.1.0',
+      measuredAt: completedAtIso,
+      scope: 'functional_tests',
+      evidenceHash: inventorySnapshot.packageSha256,
+    },
+    p50LatencyMs: {
+      metricKey: 'p50LatencyMs',
+      value: null,
+      state: 'NOT_MEASURED',
+      origin: 'STATIC_ANALYSIS_ONLY',
+      method: 'Latência de runtime exige carga controlada em ControlledTestAndPerfRunner.',
+      toolName: 'WinHood Static Analyzer',
+      toolVersion: '4.1.0',
+      measuredAt: completedAtIso,
+      scope: 'runtime',
+    },
+    cyclomaticComplexity: {
+      metricKey: 'avgCyclomaticComplexity',
+      value: avgCyclomaticComplexity,
+      state: 'STATIC_DERIVED',
+      origin: 'WINHOOD_AST_PARSER',
+      method: 'Extração determinística sobre nós de fluxo de controle AST',
+      toolName: 'WinHood ParserRegistry',
+      toolVersion: '4.1.0',
+      measuredAt: completedAtIso,
+      scope: `${eligibleEntries.length} arquivo(s) elegíveis`,
+      evidenceHash: inventorySnapshot.packageSha256,
+    },
+    sbomComponents: {
+      metricKey: 'sbomComponentsCount',
+      value: sbomSummary.componentsCount,
+      state: 'STATIC_DERIVED',
+      origin: sbomSummary.sourceMethod,
+      method: 'Extração CycloneDX 1.5 / SPDX 2.3 a partir de manifestos e lockfiles',
+      toolName: 'WinHood SbomGenerator',
+      toolVersion: '4.1.0',
+      measuredAt: completedAtIso,
+      scope: `${sbomSummary.directCount} diretas / ${sbomSummary.transitiveCount} transitivas`,
+      evidenceHash: sbomSummary.cyclonedxSha256,
+    },
+  };
 
   return {
     findings,
@@ -2024,5 +2120,9 @@ export function executeRealStaticAnalysisOnSource(
     hasEncryptionAtRest,
     hasAuditTrail,
     hasCompleteDocumentation,
+    sbomSummary,
+    scaCorrelations,
+    coverageReportSummary,
+    metricProvenance,
   };
 }

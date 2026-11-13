@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { KeyManagementService } from '../../security/KeyManagementService';
 import type { SonarConnectionState, SonarInstallationMode, SonarInstanceRecord } from '../../types/benchmark';
 
 export interface ProbeSonarQubeOptions {
@@ -27,14 +28,9 @@ export interface ProbeSonarQubeResult {
  * SonarQubeConnection & probeSonarQube() (Seção 3.4, 4.1 e 4.2)
  * - Nunca exibe CONNECTED apenas porque uma URL foi cadastrada.
  * - Exige resposta HTTP real e válida do servidor SonarQube (/api/system/status, /api/authentication/validate).
- * - Mantém tokens criptografados no backend e usa cabeçalho Authorization: Bearer <token>.
+ * - Utiliza gerenciamento externo de chaves AES-256-GCM (KeyManagementService) com suporte a rotação.
  */
 export class SonarQubeConnection {
-  private static readonly SECRET_KEY = crypto
-    .createHash('sha256')
-    .update(process.env.SONAR_SECRET_SALT || 'winhood-sonar-vault-key-2026')
-    .digest();
-
   public static maskToken(token?: string): string {
     if (!token || token.trim().length === 0) return 'Não configurado';
     const clean = token.trim();
@@ -43,20 +39,39 @@ export class SonarQubeConnection {
   }
 
   public static encryptToken(plainToken: string): string {
+    const active = KeyManagementService.getActiveVaultAesKey();
     const iv = crypto.randomBytes(12);
-    const cipher = crypto.createCipheriv('aes-256-gcm', SonarQubeConnection.SECRET_KEY, iv);
+    const cipher = crypto.createCipheriv('aes-256-gcm', active.keyBuffer, iv);
     const encrypted = Buffer.concat([cipher.update(plainToken, 'utf8'), cipher.final()]);
     const authTag = cipher.getAuthTag();
-    return `${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted.toString('hex')}`;
+    return `${active.keyId}:${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted.toString('hex')}`;
   }
 
   public static decryptToken(cipherText: string): string | null {
     try {
-      const [ivHex, tagHex, dataHex] = cipherText.split(':');
-      if (!ivHex || !tagHex || !dataHex) return null;
+      const parts = cipherText.split(':');
+      let keyBuffer: Buffer | null = null;
+      let ivHex = '';
+      let tagHex = '';
+      let dataHex = '';
+
+      if (parts.length === 4) {
+        const [keyId, iv, tag, data] = parts;
+        keyBuffer = KeyManagementService.getVaultKeyBufferByKeyId(keyId!);
+        ivHex = iv!;
+        tagHex = tag!;
+        dataHex = data!;
+      } else if (parts.length === 3) {
+        keyBuffer = KeyManagementService.getActiveVaultAesKey().keyBuffer;
+        [ivHex, tagHex, dataHex] = parts as [string, string, string];
+      } else {
+        return null;
+      }
+
+      if (!keyBuffer || !ivHex || !tagHex || !dataHex) return null;
       const decipher = crypto.createDecipheriv(
         'aes-256-gcm',
-        SonarQubeConnection.SECRET_KEY,
+        keyBuffer,
         Buffer.from(ivHex, 'hex')
       );
       decipher.setAuthTag(Buffer.from(tagHex, 'hex'));
@@ -287,6 +302,45 @@ export class SonarQubeConnection {
         }
       }
 
+      // Consultar permissões reais via /api/users/current quando autenticado
+      let verifiedPerms: SonarInstanceRecord['permissionsVerified'] = {
+        browse: true,
+        executeAnalysis: authenticated,
+        administerQualityGates: false,
+        provisioning: false,
+      };
+      if (authenticated) {
+        try {
+          const userRes = await fetch(`${rawUrl}/api/users/current`, {
+            method: 'GET',
+            headers,
+          });
+          if (userRes.ok) {
+            const userJson = (await userRes.json()) as { permissions?: { global?: string[] } };
+            const globalPerms = userJson.permissions?.global;
+            if (Array.isArray(globalPerms)) {
+              verifiedPerms = {
+                browse: true,
+                executeAnalysis: globalPerms.includes('scan') || globalPerms.includes('admin'),
+                administerQualityGates:
+                  globalPerms.includes('gateadmin') || globalPerms.includes('admin'),
+                provisioning:
+                  globalPerms.includes('provisioning') || globalPerms.includes('admin'),
+              };
+            } else {
+              verifiedPerms = {
+                browse: true,
+                executeAnalysis: true,
+                administerQualityGates: true,
+                provisioning: true,
+              };
+            }
+          }
+        } catch {
+          // Keep scan permission only if /api/users/current is unavailable
+        }
+      }
+
       const majorVer = version ? Number.parseInt(version.split('.')[0], 10) : 26;
       const apiCompatibility: SonarInstanceRecord['apiCompatibility'] =
         majorVer >= 10 ? 'WEB_API_V2_AND_V1' : 'WEB_API_V1_LEGACY';
@@ -299,12 +353,7 @@ export class SonarQubeConnection {
         edition: options.mode === 'CLOUD' ? 'SonarQube Cloud' : 'Community Build',
         systemStatus,
         apiCompatibility,
-        permissions: {
-          browse: true,
-          executeAnalysis: authenticated,
-          administerQualityGates: authenticated,
-          provisioning: authenticated,
-        },
+        permissions: verifiedPerms,
         tokenExpiresAt,
         latencyMs,
         errorMessage: authenticated

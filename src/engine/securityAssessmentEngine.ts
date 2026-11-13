@@ -1,5 +1,4 @@
-import fs from 'node:fs';
-import path from 'node:path';
+import os from 'node:os';
 import type {
   AttackPathChain,
   AttackSurfaceProfile,
@@ -13,24 +12,17 @@ import type {
   ToolAdapterInfo,
   VulnerabilityValidationState,
 } from '../types/benchmark';
+import { CoverageReportParser } from '../execution/CoverageReportParser';
+import { ToolAvailabilityService } from '../services/tools/ToolAvailabilityService';
 import { computeSha256, maskSecretsInText } from './scoringEngine';
 
-function checkBinaryInPath(binaryName: string): boolean {
-  const pathEnv = process.env.PATH || '';
-  const dirs = pathEnv.split(path.delimiter).filter(Boolean);
-  for (const dir of dirs) {
-    const full = path.join(dir, binaryName);
-    if (fs.existsSync(full)) return true;
-  }
-  return false;
-}
-
 /**
- * Catálogo completo dos 21 adaptadores solicitados.
- * Verifica disponibilidade real no ambiente sem simular ferramentas ausentes.
+ * Catálogo completo dos 21 adaptadores de segurança, qualidade, QA, perf e SO.
+ * Verifica disponibilidade real de binários e variáveis no host sem simular ferramentas ausentes.
  */
 export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
   const nowIso = new Date().toISOString();
+  const isWindowsHost = os.platform() === 'win32';
 
   const definitions: Array<{
     id: string;
@@ -41,21 +33,28 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
     analysisType: string;
     executionMethod: ToolAdapterInfo['executionMethod'];
     canonicalFormat: ToolAdapterInfo['canonicalFormat'];
-    binaryOrEnvCheck: () => { detected: boolean; configured: boolean };
+    binaryOrEnvCheck: () => { detected: boolean; configured: boolean; detectedVersion?: string | null };
     description: string;
     supportedLanguages: string[];
   }> = [
     {
       id: 'sonarqube-quality',
-      name: 'SonarQube Community Build',
-      vendor: 'SonarSource',
-      version: '26.11.0.134175',
+      name: 'SonarQube Community Build (Bridge + AST)',
+      vendor: 'SonarSource / WinHood',
+      version: '26.11.0',
       category: 'CODE_QUALITY',
       analysisType: 'Qualidade Estática, Bugs, Code Smells & Security Hotspots',
-      executionMethod: 'NATIVE_AST_ENGINE',
+      executionMethod: 'EXTERNAL_API',
       canonicalFormat: 'SARIF_2_1_0',
-      binaryOrEnvCheck: () => ({ detected: true, configured: true }),
-      description: 'Motor estático integrado para inspeção de qualidade, complexidade e falhas de tratamento de exceções.',
+      binaryOrEnvCheck: () => {
+        const scanner = ToolAvailabilityService.checkBinaryInPath('sonar-scanner');
+        return {
+          detected: scanner.detected,
+          configured: Boolean(process.env.SONARQUBE_URL && process.env.SONAR_TOKEN),
+          detectedVersion: scanner.versionOutput,
+        };
+      },
+      description: 'Integração real com instância SonarQube Server/Cloud e executável sonar-scanner.',
       supportedLanguages: ['TypeScript', 'JavaScript', 'Python', 'Java', 'C#', 'SQL'],
     },
     {
@@ -65,10 +64,18 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
       version: '1.16.1',
       category: 'SECURITY_DEVSECOPS',
       analysisType: 'SAST Multi-Linguagem (SQLi, RCE, Criptografia, Auth)',
-      executionMethod: 'NATIVE_AST_ENGINE',
+      executionMethod: 'CLI_BINARY',
       canonicalFormat: 'SARIF_2_1_0',
-      binaryOrEnvCheck: () => ({ detected: true, configured: true }),
-      description: 'Motor de regras SAST baseado em padrões sintáticos com saída SARIF 2.1.0.',
+      binaryOrEnvCheck: () => {
+        const sem = ToolAvailabilityService.checkBinaryInPath('semgrep');
+        const open = ToolAvailabilityService.checkBinaryInPath('opengrep');
+        return {
+          detected: sem.detected || open.detected,
+          configured: sem.detected || open.detected,
+          detectedVersion: sem.versionOutput || open.versionOutput,
+        };
+      },
+      description: 'Requer binário semgrep/opengrep no PATH; quando ausente, WinHood Compiler AST/Taint assume análise nativa.',
       supportedLanguages: ['TypeScript', 'JavaScript', 'Python', 'Go', 'Java', 'SQL'],
     },
     {
@@ -78,37 +85,58 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
       version: '8.21.2',
       category: 'SECURITY_DEVSECOPS',
       analysisType: 'Secret Scanning, Entropia & Redação Automática',
-      executionMethod: 'NATIVE_AST_ENGINE',
+      executionMethod: 'CLI_BINARY',
       canonicalFormat: 'SARIF_2_1_0',
-      binaryOrEnvCheck: () => ({ detected: true, configured: true }),
-      description: 'Detecção determinística de chaves privadas, tokens e senhas hardcoded com mascaramento.',
+      binaryOrEnvCheck: () => {
+        const probe = ToolAvailabilityService.checkBinaryInPath('gitleaks');
+        return {
+          detected: probe.detected,
+          configured: probe.detected,
+          detectedVersion: probe.versionOutput,
+        };
+      },
+      description: 'Scanner CLI Gitleaks; WinHood AST também aplica detecção de entropia Shannon nativa.',
       supportedLanguages: ['All'],
     },
     {
       id: 'syft-sbom',
       name: 'Anchore Syft SBOM Generator',
-      vendor: 'Anchore',
+      vendor: 'Anchore / WinHood SBOM',
       version: '1.18.0',
       category: 'SECURITY_DEVSECOPS',
-      analysisType: 'Geração de SBOM CycloneDX 1.6 / SPDX',
+      analysisType: 'Geração de SBOM CycloneDX 1.5 / SPDX 2.3',
       executionMethod: 'NATIVE_AST_ENGINE',
       canonicalFormat: 'CYCLONEDX_1_5',
-      binaryOrEnvCheck: () => ({ detected: true, configured: true }),
-      description: 'Mapeamento de inventário de dependências e pacotes para análise de supply chain.',
-      supportedLanguages: ['JSON', 'TypeScript', 'Python', 'Java'],
+      binaryOrEnvCheck: () => {
+        const cli = ToolAvailabilityService.checkBinaryInPath('syft');
+        return {
+          detected: true, // Gerador nativo de lockfiles/manifests sempre operacional; syft CLI opcional
+          configured: true,
+          detectedVersion: cli.detected ? cli.versionOutput : 'WinHood SBOM Parser v4.1.0',
+        };
+      },
+      description: 'Parser nativo CycloneDX 1.5 / SPDX 2.3 com suporte opcional ao binário Anchore Syft.',
+      supportedLanguages: ['JSON', 'TypeScript', 'Python', 'Java', 'Go', 'Rust', 'C#'],
     },
     {
       id: 'grype-sca',
-      name: 'Anchore Grype SCA (CVSS + EPSS + KEV)',
-      vendor: 'Anchore',
+      name: 'Anchore Grype / OSV.dev SCA',
+      vendor: 'Anchore / OSV.dev',
       version: '0.121.0',
       category: 'SECURITY_DEVSECOPS',
-      analysisType: 'SCA Vulnerability Scanner com Priorização Composta',
+      analysisType: 'SCA Vulnerability Scanner (CVE, GHSA, CVSS, EPSS, KEV)',
       executionMethod: 'NATIVE_AST_ENGINE',
       canonicalFormat: 'CYCLONEDX_1_5',
-      binaryOrEnvCheck: () => ({ detected: true, configured: true }),
-      description: 'Correlação de manifestos de dependências contra CVEs, EPSS e catálogo CISA KEV.',
-      supportedLanguages: ['JSON', 'TypeScript', 'Python', 'Java'],
+      binaryOrEnvCheck: () => {
+        const cli = ToolAvailabilityService.checkBinaryInPath('grype');
+        return {
+          detected: true, // Correlator SCA nativo via snapshots OSV/NVD/EPSS/KEV sempre operacional
+          configured: true,
+          detectedVersion: cli.detected ? cli.versionOutput : 'WinHood SCA Correlator v4.1.0',
+        };
+      },
+      description: 'Correlação real de dependências diretas e transitivas contra snapshots OSV.dev, NVD, EPSS e CISA KEV.',
+      supportedLanguages: ['JSON', 'TypeScript', 'Python', 'Java', 'Go', 'Rust', 'C#'],
     },
     {
       id: 'trivy-scanner',
@@ -116,14 +144,18 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
       vendor: 'Aqua Security',
       version: '0.76.2',
       category: 'SECURITY_DEVSECOPS',
-      analysisType: 'Container, IaC & Filesystem Security Scanner (Sigstore Verified)',
+      analysisType: 'Container, IaC & Filesystem Security Scanner',
       executionMethod: 'CLI_BINARY',
       canonicalFormat: 'SARIF_2_1_0',
-      binaryOrEnvCheck: () => ({
-        detected: checkBinaryInPath('trivy'),
-        configured: Boolean(process.env.TRIVY_SERVER_URL),
-      }),
-      description: 'Requer binário /usr/local/bin/trivy v0.76.2 verificado por assinatura Sigstore.',
+      binaryOrEnvCheck: () => {
+        const probe = ToolAvailabilityService.checkBinaryInPath('trivy');
+        return {
+          detected: probe.detected,
+          configured: Boolean(process.env.TRIVY_SERVER_URL) || probe.detected,
+          detectedVersion: probe.versionOutput,
+        };
+      },
+      description: 'Requer binário trivy instalado no PATH do host.',
       supportedLanguages: ['Docker', 'Terraform', 'Kubernetes', 'JSON'],
     },
     {
@@ -135,11 +167,15 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
       analysisType: 'SCA & NVD API CPE Matching',
       executionMethod: 'CLI_BINARY',
       canonicalFormat: 'SARIF_2_1_0',
-      binaryOrEnvCheck: () => ({
-        detected: checkBinaryInPath('dependency-check.sh'),
-        configured: Boolean(process.env.NVD_API_KEY),
-      }),
-      description: 'Verificador de dependências via NVD API. Não simula resultados quando binário/chave NVD estão ausentes.',
+      binaryOrEnvCheck: () => {
+        const probe = ToolAvailabilityService.checkBinaryInPath('dependency-check.sh');
+        return {
+          detected: probe.detected,
+          configured: Boolean(process.env.NVD_API_KEY),
+          detectedVersion: probe.versionOutput,
+        };
+      },
+      description: 'Requer script dependency-check.sh e chave NVD_API_KEY configurada.',
       supportedLanguages: ['Java', 'JavaScript', 'Python', '.NET'],
     },
     {
@@ -151,10 +187,14 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
       analysisType: 'Análise Semântica de Fluxo de Dados (Dataflow / Taint)',
       executionMethod: 'CLI_BINARY',
       canonicalFormat: 'SARIF_2_1_0',
-      binaryOrEnvCheck: () => ({
-        detected: checkBinaryInPath('codeql'),
-        configured: Boolean(process.env.CODEQL_CLI_PATH),
-      }),
+      binaryOrEnvCheck: () => {
+        const probe = ToolAvailabilityService.checkBinaryInPath('codeql');
+        return {
+          detected: probe.detected,
+          configured: Boolean(process.env.CODEQL_CLI_PATH) || probe.detected,
+          detectedVersion: probe.versionOutput,
+        };
+      },
       description: 'Requer CodeQL CLI instalado no worker para compilação de banco semântico.',
       supportedLanguages: ['TypeScript', 'JavaScript', 'Python', 'Java', 'C#', 'C++'],
     },
@@ -164,13 +204,17 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
       vendor: 'OWASP Foundation',
       version: '2.17.0',
       category: 'SECURITY_DEVSECOPS',
-      analysisType: 'DAST & API Security Testing com Authentication Helper v0.42.0',
+      analysisType: 'DAST & API Security Testing',
       executionMethod: 'EXTERNAL_API',
       canonicalFormat: 'SARIF_2_1_0',
-      binaryOrEnvCheck: () => ({
-        detected: checkBinaryInPath('zap.sh'),
-        configured: Boolean(process.env.OWASP_ZAP_API_URL),
-      }),
+      binaryOrEnvCheck: () => {
+        const probe = ToolAvailabilityService.checkBinaryInPath('zap.sh');
+        return {
+          detected: probe.detected,
+          configured: Boolean(process.env.OWASP_ZAP_API_URL),
+          detectedVersion: probe.versionOutput,
+        };
+      },
       description: 'Scanner DAST dinâmico sob escopo autorizado. Requer daemon ZAP ativo.',
       supportedLanguages: ['Web', 'REST API', 'GraphQL', 'OpenAPI'],
     },
@@ -199,11 +243,15 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
       analysisType: 'Validação Baseada em Templates YAML Não-Destrutivos',
       executionMethod: 'CLI_BINARY',
       canonicalFormat: 'SARIF_2_1_0',
-      binaryOrEnvCheck: () => ({
-        detected: checkBinaryInPath('nuclei'),
-        configured: Boolean(process.env.NUCLEI_TEMPLATES_DIR),
-      }),
-      description: 'Validador rápido de exposições e configurações inseguras dentro da allowlist.',
+      binaryOrEnvCheck: () => {
+        const probe = ToolAvailabilityService.checkBinaryInPath('nuclei');
+        return {
+          detected: probe.detected,
+          configured: Boolean(process.env.NUCLEI_TEMPLATES_DIR),
+          detectedVersion: probe.versionOutput,
+        };
+      },
+      description: 'Requer binário nuclei e templates instalados no host.',
       supportedLanguages: ['HTTP', 'TCP', 'DNS', 'SSL'],
     },
     {
@@ -215,11 +263,15 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
       analysisType: 'Mapeamento de Superfície de Rede, Portas e Serviços Expostos',
       executionMethod: 'CLI_BINARY',
       canonicalFormat: 'SARIF_2_1_0',
-      binaryOrEnvCheck: () => ({
-        detected: checkBinaryInPath('nmap'),
-        configured: checkBinaryInPath('nmap'),
-      }),
-      description: 'Auditoria de portas abertas e serviços restrita à allowlist da sandbox.',
+      binaryOrEnvCheck: () => {
+        const probe = ToolAvailabilityService.checkBinaryInPath('nmap');
+        return {
+          detected: probe.detected,
+          configured: probe.detected,
+          detectedVersion: probe.versionOutput,
+        };
+      },
+      description: 'Auditoria de portas abertas restrita à allowlist quando binário nmap está instalado.',
       supportedLanguages: ['TCP/IP', 'TLS'],
     },
     {
@@ -231,24 +283,35 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
       analysisType: 'Verificação Não-Destrutiva de Controles (Modo Check-Only em MicroVM)',
       executionMethod: 'EXTERNAL_API',
       canonicalFormat: 'SARIF_2_1_0',
-      binaryOrEnvCheck: () => ({
-        detected: checkBinaryInPath('msfconsole'),
-        configured: Boolean(process.env.MSF_RPC_HOST),
-      }),
-      description: 'Conector RPC restrito a verificação de superfície (check-only) em MicroVM descartável isolada.',
+      binaryOrEnvCheck: () => {
+        const probe = ToolAvailabilityService.checkBinaryInPath('msfconsole');
+        return {
+          detected: probe.detected,
+          configured: Boolean(process.env.MSF_RPC_HOST),
+          detectedVersion: probe.versionOutput,
+        };
+      },
+      description: 'Conector RPC restrito a verificação de superfície em MicroVM isolada.',
       supportedLanguages: ['Network', 'Services'],
     },
     {
       id: 'k6-resilience',
-      name: 'Grafana k6 Load & Stress Profiler',
-      vendor: 'Grafana Labs',
+      name: 'Grafana k6 / WinHood Load & Stress Runner',
+      vendor: 'Grafana Labs / WinHood',
       version: '0.54.0',
       category: 'PERFORMANCE',
-      analysisType: 'Testes de Estresse, Resiliência, Rate Limiting e Recuperação',
+      analysisType: 'Testes de Estresse HTTP, P50/P95/P99, RPS, CPU e Memória',
       executionMethod: 'SANDBOX_WORKER',
       canonicalFormat: 'OTLP_METRICS',
-      binaryOrEnvCheck: () => ({ detected: true, configured: true }),
-      description: 'Avalia degradação de latência P95/P99 e capacidade de recuperação sob carga equivalente.',
+      binaryOrEnvCheck: () => {
+        const probe = ToolAvailabilityService.checkBinaryInPath('k6');
+        return {
+          detected: probe.detected,
+          configured: true, // Runner HTTP nativo configurado em ControlledTestAndPerfRunner
+          detectedVersion: probe.versionOutput,
+        };
+      },
+      description: 'Executa medição real de P50/P95/P99 quando k6 ou runner controlado é acionado.',
       supportedLanguages: ['JavaScript', 'TypeScript', 'HTTP'],
     },
     {
@@ -260,10 +323,14 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
       analysisType: 'Baterias de Carga Concorrente Multi-Protocolo (HTTP/JDBC)',
       executionMethod: 'CLI_BINARY',
       canonicalFormat: 'OTLP_METRICS',
-      binaryOrEnvCheck: () => ({
-        detected: checkBinaryInPath('jmeter'),
-        configured: Boolean(process.env.JMETER_HOME),
-      }),
+      binaryOrEnvCheck: () => {
+        const probe = ToolAvailabilityService.checkBinaryInPath('jmeter');
+        return {
+          detected: probe.detected,
+          configured: Boolean(process.env.JMETER_HOME),
+          detectedVersion: probe.versionOutput,
+        };
+      },
       description: 'Requer binário JMeter e runtime Java 21+ instalado no worker de carga.',
       supportedLanguages: ['HTTP', 'JDBC', 'REST'],
     },
@@ -273,11 +340,19 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
       vendor: 'Microsoft',
       version: '1.49.0',
       category: 'QA_FUNCTIONAL',
-      analysisType: 'Validação de Fluxos de Autenticação, Sessão e Detecção de Mockups',
-      executionMethod: 'SANDBOX_WORKER',
+      analysisType: 'Validação E2E de Fluxos Web em Browser Real',
+      executionMethod: 'CLI_BINARY',
       canonicalFormat: 'JUNIT_XML',
-      binaryOrEnvCheck: () => ({ detected: true, configured: true }),
-      description: 'Verifica controles de sessão, persistência real no backend e equivalência funcional.',
+      binaryOrEnvCheck: () => {
+        const cli = ToolAvailabilityService.checkBinaryInPath('playwright-cli');
+        const pw = ToolAvailabilityService.checkBinaryInPath('playwright');
+        return {
+          detected: cli.detected || pw.detected,
+          configured: cli.detected || pw.detected,
+          detectedVersion: cli.versionOutput || pw.versionOutput,
+        };
+      },
+      description: 'Executa verificação E2E real via Playwright quando instalado no ambiente.',
       supportedLanguages: ['TypeScript', 'JavaScript', 'Web'],
     },
     {
@@ -286,24 +361,35 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
       vendor: 'Postman',
       version: '6.2.1',
       category: 'QA_FUNCTIONAL',
-      analysisType: 'Testes de Segurança de API, BOLA/IDOR e Contratos de Autorização',
-      executionMethod: 'SANDBOX_WORKER',
+      analysisType: 'Testes de Segurança de API e Contratos de Autorização',
+      executionMethod: 'CLI_BINARY',
       canonicalFormat: 'JUNIT_XML',
-      binaryOrEnvCheck: () => ({ detected: true, configured: true }),
-      description: 'Executa coleções padronizadas de validação de autenticação e autorização em APIs.',
+      binaryOrEnvCheck: () => {
+        const probe = ToolAvailabilityService.checkBinaryInPath('newman');
+        return {
+          detected: probe.detected,
+          configured: probe.detected,
+          detectedVersion: probe.versionOutput,
+        };
+      },
+      description: 'Requer binário newman instalado no host para execução de coleções.',
       supportedLanguages: ['REST', 'GraphQL', 'JSON'],
     },
     {
       id: 'opentelemetry-collector',
-      name: 'OpenTelemetry (OTel Collector & OTLP)',
-      vendor: 'CNCF',
+      name: 'OpenTelemetry / Node Perf Hooks Collector',
+      vendor: 'CNCF / Node.js',
       version: '1.11.0',
       category: 'PERFORMANCE',
-      analysisType: 'Instrumentação de Traces, Logs de Auditoria e Métricas de Recursos',
+      analysisType: 'Coleta real de RSS, Heap, CPU e Latência via process/perf_hooks',
       executionMethod: 'SANDBOX_WORKER',
       canonicalFormat: 'OTLP_METRICS',
-      binaryOrEnvCheck: () => ({ detected: true, configured: true }),
-      description: 'Coleta telemetria determinística durante os testes de segurança e resiliência.',
+      binaryOrEnvCheck: () => ({
+        detected: true,
+        configured: true,
+        detectedVersion: `node-${process.version}`,
+      }),
+      description: 'Coleta métricas reais de processo e hardware durante execuções controladas.',
       supportedLanguages: ['All'],
     },
     {
@@ -315,11 +401,15 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
       analysisType: 'Coleta de Séries Temporais de CPU, RAM, I/O e Disponibilidade',
       executionMethod: 'EXTERNAL_API',
       canonicalFormat: 'OTLP_METRICS',
-      binaryOrEnvCheck: () => ({
-        detected: checkBinaryInPath('prometheus'),
-        configured: Boolean(process.env.PROMETHEUS_URL || true),
-      }),
-      description: 'Monitora consumo de recursos e recuperação pós-estresse dos softwares A e B.',
+      binaryOrEnvCheck: () => {
+        const probe = ToolAvailabilityService.checkBinaryInPath('prometheus');
+        return {
+          detected: probe.detected,
+          configured: Boolean(process.env.PROMETHEUS_URL),
+          detectedVersion: probe.versionOutput,
+        };
+      },
+      description: 'Requer PROMETHEUS_URL configurado ou binário prometheus local.',
       supportedLanguages: ['PromQL', 'OTLP'],
     },
     {
@@ -335,20 +425,26 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
         detected: false,
         configured: Boolean(process.env.GRAFANA_API_URL),
       }),
-      description: 'Conector para exportação de painéis OTLP/Prometheus quando GRAFANA_API_URL está definido.',
+      description: 'Conector para exportação quando GRAFANA_API_URL está definido.',
       supportedLanguages: ['JSON', 'PromQL'],
     },
     {
       id: 'sysinternals-sandbox',
-      name: 'Microsoft Sysinternals (ProcMon, Autoruns & WPR Snapshot)',
+      name: 'Microsoft Sysinternals (ProcMon, Autoruns & T0/T1/T2 Snapshot)',
       vendor: 'Microsoft Sysinternals',
       version: '2026.11',
       category: 'OS_INSTALL',
-      analysisType: 'Windows Security Assessment, Registro, Serviços, Processos e Snapshots T0/T1/T2',
+      analysisType: 'Windows Security Assessment, Registro, Serviços e Snapshots T0/T1/T2',
       executionMethod: 'SANDBOX_WORKER',
       canonicalFormat: 'SNAPSHOT_DIFF',
-      binaryOrEnvCheck: () => ({ detected: true, configured: true }),
-      description: 'Auditoria forense de mutações no sistema operacional, chaves de Run/Serviços e resíduos.',
+      binaryOrEnvCheck: () => {
+        const procmon = isWindowsHost && ToolAvailabilityService.checkBinaryInPath('procmon').detected;
+        return {
+          detected: procmon,
+          configured: isWindowsHost,
+        };
+      },
+      description: 'Execução dinâmica de registro/serviços requer host Windows Sandbox; em Linux executa apenas inspeção estática de manifestos.',
       supportedLanguages: ['Windows PE', 'MSI', 'TypeScript', 'C#'],
     },
   ];
@@ -365,7 +461,7 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
       id: d.id,
       name: d.name,
       vendor: d.vendor,
-      version: d.version,
+      version: check.detectedVersion || d.version,
       category: d.category,
       analysisType: d.analysisType,
       executionMethod: d.executionMethod,
@@ -373,7 +469,7 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
       status,
       binaryDetected: check.detected,
       configured: check.configured,
-      signatureHash: computeSha256(`${d.id}:${d.version}:sigstore-verified`),
+      signatureHash: computeSha256(`${d.id}:${d.version}:${check.detected ? 'verified' : 'absent'}`),
       description: d.description,
       supportedLanguages: d.supportedLanguages,
       lastExecutionAt: check.detected ? nowIso : null,
@@ -383,8 +479,13 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
 }
 
 /**
- * Executa os 15 módulos obrigatórios de avaliação comparativa de segurança (A vs. B)
- * aplicando exatamente os mesmos parâmetros e controles de escopo.
+ * Executa os 15 módulos de avaliação comparativa de segurança (A vs. B)
+ * aplicando regras estritas de veracidade:
+ * - Achados exclusivamente estáticos NÃO são marcados como vulnerabilidades reproduzidas (CONFIRMADA),
+ *   recebendo estado PROVAVEL até verificação dinâmica real.
+ * - Caminhos de ataque usam exclusivamente fluxos reais do AST/TaintAnalyzer (zero linhas fixas).
+ * - Cobertura de testes é lida apenas de relatórios reais (LCOV/JaCoCo/Cobertura/Istanbul).
+ * - Durações são medidas com performance.now() real.
  */
 export function executeSecurityAssessmentSuite(params: {
   runId: string;
@@ -393,10 +494,17 @@ export function executeSecurityAssessmentSuite(params: {
   scopeAllowlist?: string[];
   emergencyStopTriggered?: boolean;
 }): SecurityAssessmentSuiteBundle {
+  const suiteStart = performance.now();
   const nowIso = new Date().toISOString();
   const allowlist = params.scopeAllowlist?.length
     ? params.scopeAllowlist
     : ['sandbox://local-isolated-worker/*', '127.0.0.1:3000/isolated-bench/*'];
+
+  const adaptersCatalog = buildFull21SecurityAdaptersCatalog();
+  const externalToolsNotInstalledCount = adaptersCatalog.filter(
+    (t) => t.status === 'FERRAMENTA NÃO INSTALADA'
+  ).length;
+  const isWindowsHost = os.platform() === 'win32';
 
   const sandboxControl: ExecutionSandboxControl = {
     isolationMode: 'DISPOSABLE_MICROVM',
@@ -418,6 +526,7 @@ export function executeSecurityAssessmentSuite(params: {
   const comparisonMetrics: SoftwareSecurityComparisonMetrics[] = [];
 
   for (const sw of params.softwares) {
+    const swStart = performance.now();
     const filesMap = sw.sourceFilesContent || {};
     const swFindings = params.findings.filter((f) => f.softwareId === sw.id);
 
@@ -432,22 +541,22 @@ export function executeSecurityAssessmentSuite(params: {
       const lines = content.split(/\r?\n/);
       lines.forEach((line, idx) => {
         const ln = idx + 1;
-        if (/export\s+function\s+\w+/i.test(line)) {
+        if (/export\s+(?:async\s+)?function\s+\w+|^\s*def\s+\w+|public\s+.*\(/i.test(line)) {
           exposedEntryPoints.push(`${filePath}:${ln}`);
         }
-        if (/controller|handleInspect|searchCredentials/i.test(filePath + line)) {
+        if (/controller|router|endpoint|handle|Controller/i.test(filePath + ' ' + line)) {
           publicApisAndControllers.push(`${filePath}:${ln}`);
         }
-        if (/SELECT\s+|CREATE\s+TABLE|sqlite3|MemoryStore/i.test(line)) {
+        if (/SELECT\s+|CREATE\s+TABLE|sqlite3|preparedStore|memoryStore/i.test(line)) {
           databaseConnectors.push(`${filePath}:${ln}`);
         }
-        if (/execSync|spawn|child_process/i.test(line)) {
+        if (/execSync|spawn|child_process|os\.system|Runtime\.getRuntime/i.test(line)) {
           externalProcessInvocations.push(`${filePath}:${ln}`);
           privilegedOperations.push(`Invocação de Shell/Processo em ${filePath}:${ln}`);
         }
-        if (/https?:\/\/[^\s'"]+/i.test(line)) {
-          const match = line.match(/https?:\/\/[^\s'"]+/i);
-          if (match) networkEndpoints.push(match[0]);
+        const urlMatch = line.match(/https?:\/\/[^\s'"]+/i);
+        if (urlMatch) {
+          networkEndpoints.push(urlMatch[0]);
         }
       });
     }
@@ -474,152 +583,84 @@ export function executeSecurityAssessmentSuite(params: {
       surfaceRiskIndex,
     });
 
-    // Construir Attack Path Analysis (Cadeias de propagação de falha no grafo do código)
-    const hasUiToDbBypass = Object.entries(filesMap).some(
-      ([p, c]) => p.includes('ui/') && /from\s+['"]\.\.\/db\//i.test(c)
-    );
-    const sqlFinding = swFindings.find((f) => f.cwe === 'CWE-89');
-    const rceFinding = swFindings.find((f) => f.cwe === 'CWE-94');
-    const cryptoWeakFinding = swFindings.find((f) => f.cwe === 'CWE-327' || f.cwe === 'CWE-798');
-
-    if (sqlFinding && hasUiToDbBypass) {
-      const chainHash = computeSha256(`${params.runId}|${sw.id}|PATH-SQLI-BYPASS`);
-      attackPaths.push({
-        id: `path-${chainHash.slice(0, 10)}`,
-        softwareId: sw.id,
-        softwareName: sw.name,
-        title: 'Propagação de Entrada Não Sanitizada da Camada UI Direto ao Banco SQL',
-        severity: 'CRITICAL',
-        validationState: 'CONFIRMADA',
-        reproducibilityEase: 'ALTA',
-        potentialImpact:
-          'Comprometimento da confidencialidade dos registros do cofre via bypass da camada de serviço e concatenação SQL.',
-        nodes: [
-          {
-            stepOrder: 1,
-            layer: 'ENTRY_POINT',
-            component: 'searchCredentialsController(userInput)',
-            filePath: 'src/ui/vaultController.ts',
-            lineNumber: 12,
-            weaknessCwe: 'CWE-20 (Validação de Entrada Ausente)',
-            evidenceSnippet: 'export function searchCredentialsController(userInput: string)',
-          },
-          {
-            stepOrder: 2,
-            layer: 'CONTROLLER_UI',
-            component: 'Violação de Camada (UI -> DB Repository)',
-            filePath: 'src/ui/vaultController.ts',
-            lineNumber: 15,
-            weaknessCwe: 'Arch-Layer-Bypass',
-            evidenceSnippet: 'return queryVaultEntriesRaw(userInput, hashed);',
-          },
-          {
-            stepOrder: 3,
-            layer: 'PERSISTENCE_OS_SINK',
-            component: 'Concatenação Direta em Query SQL',
-            filePath: sqlFinding.filePath,
-            lineNumber: sqlFinding.lineNumber,
-            weaknessCwe: 'CWE-89 (SQL Injection)',
-            evidenceSnippet: maskSecretsInText(sqlFinding.snippet),
-          },
-        ],
-        mitigationControl:
-          'Introduzir validação de schema (ex: Zod) na camada de entrada, isolar o repositório atrás de Application Service e parametrizar consultas SQL.',
-        evidenceSha256: chainHash,
-      });
+    // Construir Attack Paths exclusivamente a partir dos fluxos reais de Taint/AST detectados nos achados
+    for (const f of swFindings) {
+      if (f.executionFlows && f.executionFlows.length >= 2) {
+        const chainHash = computeSha256(`${params.runId}|${sw.id}|${f.id}|ATTACK_PATH`);
+        attackPaths.push({
+          id: `path-${chainHash.slice(0, 10)}`,
+          softwareId: sw.id,
+          softwareName: sw.name,
+          title: f.title,
+          severity: f.severity === 'BLOCKER' ? 'CRITICAL' : f.severity,
+          validationState: 'PROVAVEL', // Achado estático/taint não reproduzido dinamicamente é PROVAVEL
+          reproducibilityEase: f.confidence === 'HIGH' ? 'ALTA' : 'MEDIA',
+          potentialImpact: f.description,
+          nodes: f.executionFlows.map((step, idx) => ({
+            stepOrder: idx + 1,
+            layer:
+              step.nodeType === 'SOURCE'
+                ? 'ENTRY_POINT'
+                : step.nodeType === 'SINK'
+                  ? 'PERSISTENCE_OS_SINK'
+                  : 'CONTROLLER_UI',
+            component: step.symbolName,
+            filePath: step.filePath,
+            lineNumber: step.lineNumber,
+            weaknessCwe: f.cwe || f.originalRuleId,
+            evidenceSnippet: maskSecretsInText(step.snippet || step.codeSnippet || ''),
+          })),
+          mitigationControl: f.remediation,
+          evidenceSha256: chainHash,
+        });
+      } else if (f.category === 'SECRETS' || f.cwe === 'CWE-798') {
+        const chainHash = computeSha256(`${params.runId}|${sw.id}|${f.id}|SECRET_PATH`);
+        attackPaths.push({
+          id: `path-${chainHash.slice(0, 10)}`,
+          softwareId: sw.id,
+          softwareName: sw.name,
+          title: f.title,
+          severity: 'HIGH',
+          validationState: 'PROVAVEL',
+          reproducibilityEase: 'ALTA',
+          potentialImpact: f.description,
+          nodes: [
+            {
+              stepOrder: 1,
+              layer: 'SERVICE_DOMAIN',
+              component: f.originalRuleId,
+              filePath: f.filePath,
+              lineNumber: f.lineNumber,
+              weaknessCwe: f.cwe || 'CWE-798',
+              evidenceSnippet: maskSecretsInText(f.snippet),
+            },
+          ],
+          mitigationControl: f.remediation,
+          evidenceSha256: chainHash,
+        });
+      }
     }
 
-    if (rceFinding) {
-      const chainHash = computeSha256(`${params.runId}|${sw.id}|PATH-OS-COMMAND`);
-      attackPaths.push({
-        id: `path-${chainHash.slice(0, 10)}`,
-        softwareId: sw.id,
-        softwareName: sw.name,
-        title: 'Caminho de Execução de Comando de Sistema via Rotina de Diagnóstico',
-        severity: 'CRITICAL',
-        validationState: 'CONFIRMADA',
-        reproducibilityEase: 'ALTA',
-        potentialImpact:
-          'Execução de comandos arbitrários no contexto do processo da aplicação por interpolação direta em chamada de shell.',
-        nodes: [
-          {
-            stepOrder: 1,
-            layer: 'ENTRY_POINT',
-            component: 'exportDiagnosticArchive(targetFile)',
-            filePath: rceFinding.filePath,
-            lineNumber: rceFinding.lineNumber - 2,
-            weaknessCwe: 'CWE-78 / CWE-94',
-            evidenceSnippet: 'export function exportDiagnosticArchive(targetFile: string)',
-          },
-          {
-            stepOrder: 2,
-            layer: 'PERSISTENCE_OS_SINK',
-            component: 'Invocação Síncrona de Shell (child_process.execSync)',
-            filePath: rceFinding.filePath,
-            lineNumber: rceFinding.lineNumber,
-            weaknessCwe: 'CWE-94',
-            evidenceSnippet: maskSecretsInText(rceFinding.snippet),
-          },
-        ],
-        mitigationControl:
-          'Eliminar chamadas ao shell do sistema operacional e utilizar bibliotecas nativas de compactação em memória com caminhos estritamente validados.',
-        evidenceSha256: chainHash,
-      });
-    }
-
-    if (cryptoWeakFinding) {
-      const chainHash = computeSha256(`${params.runId}|${sw.id}|PATH-CRYPTO-KDF`);
-      attackPaths.push({
-        id: `path-${chainHash.slice(0, 10)}`,
-        softwareId: sw.id,
-        softwareName: sw.name,
-        title: 'Enfraquecimento da Derivação de Chave Mestra por Segredo Fixo e Hash Rápido',
-        severity: 'HIGH',
-        validationState: 'CONFIRMADA',
-        reproducibilityEase: 'ALTA',
-        potentialImpact:
-          'Reversão acelerada de hashes de senha mestra devido à ausência de salt aleatório e uso de primitiva MD5 com chave estática.',
-        nodes: [
-          {
-            stepOrder: 1,
-            layer: 'SERVICE_DOMAIN',
-            component: 'Chave Mestra Estática no Código',
-            filePath: cryptoWeakFinding.filePath,
-            lineNumber: 5,
-            weaknessCwe: 'CWE-798',
-            evidenceSnippet: maskSecretsInText('const masterKey = "VC_***";'),
-          },
-          {
-            stepOrder: 2,
-            layer: 'PERSISTENCE_OS_SINK',
-            component: 'Derivação MD5 sem Iterações de Custo de Memória',
-            filePath: cryptoWeakFinding.filePath,
-            lineNumber: cryptoWeakFinding.lineNumber,
-            weaknessCwe: 'CWE-327',
-            evidenceSnippet: maskSecretsInText(cryptoWeakFinding.snippet),
-          },
-        ],
-        mitigationControl:
-          'Substituir por Argon2id ou PBKDF2-HMAC-SHA512 (>= 600.000 iterações) com salt criptográfico único de 256 bits por cofre.',
-        evidenceSha256: chainHash,
-      });
-    }
-
-    // Converter achados em registros padronizados de execução com os 6 estados de validação
+    // Regra 5: Achado estático NUNCA é classificado como vulnerabilidade reproduzida ("CONFIRMADA") sem execução dinâmica real
     let confirmedCount = 0;
     let probableCount = 0;
     let fpCount = 0;
     let inconclusiveCount = 0;
 
     for (const f of swFindings) {
-      const initialValidationState: VulnerabilityValidationState =
-        f.validationStatus === 'FALSE_POSITIVE_REVIEWED' || f.validationStatus === 'ACCEPTED'
-          ? 'FALSO_POSITIVO'
-          : f.confidence === 'HIGH' && (f.severity === 'BLOCKER' || f.severity === 'CRITICAL' || f.severity === 'HIGH')
-            ? 'CONFIRMADA'
-            : f.confidence === 'HIGH'
-              ? 'PROVAVEL'
-              : 'INCONCLUSIVA';
+      const recStart = performance.now();
+      const isExempted =
+        f.validationStatus === 'FALSE_POSITIVE_REVIEWED' ||
+        f.validationStatus === 'ACCEPTED' ||
+        f.lifecycleState === 'FALSE_POSITIVE';
+
+      const initialValidationState: VulnerabilityValidationState = isExempted
+        ? 'FALSO_POSITIVO'
+        : f.detectionMethod === 'RUNTIME_EXECUTION' || f.originType === 'RUNTIME_REPRODUCED'
+          ? 'CONFIRMADA'
+          : f.confidence === 'HIGH'
+            ? 'PROVAVEL'
+            : 'INCONCLUSIVA';
 
       if (initialValidationState === 'CONFIRMADA') confirmedCount += 1;
       else if (initialValidationState === 'PROVAVEL') probableCount += 1;
@@ -629,6 +670,7 @@ export function executeSecurityAssessmentSuite(params: {
       const recHash = computeSha256(
         `${params.runId}|${sw.id}|${f.id}|${initialValidationState}`
       );
+      const recDurationMs = Math.max(1, Math.round((performance.now() - recStart) * 100) / 100);
 
       executionRecords.push({
         id: `sec-rec-${recHash.slice(0, 10)}`,
@@ -636,7 +678,7 @@ export function executeSecurityAssessmentSuite(params: {
         softwareId: sw.id,
         softwareName: sw.name,
         softwareVersion: sw.version,
-        environmentDescriptor: 'MicroVM Isolada (4 vCPUs, 4096 MB RAM, Allowlist Ativa)',
+        environmentDescriptor: `Análise Estática AST/Taint (${f.detectionMethod || 'AST_ANALYSIS'}) — sem reprodução dinâmica`,
         configurationHash: computeSha256(JSON.stringify(allowlist)),
         toolId: f.toolId,
         toolName: f.toolName,
@@ -649,61 +691,62 @@ export function executeSecurityAssessmentSuite(params: {
               : f.category === 'DATABASE'
                 ? 'DATABASE_SECURITY_ASSESSMENT'
                 : 'VULNERABILITY_VALIDATION',
-        scenarioExecuted: `[${f.originalRuleId}] Verificação não-destrutiva em ${f.filePath}:${f.lineNumber}`,
+        scenarioExecuted: `[${f.originalRuleId}] Inspeção estrutural estática em ${f.filePath}:${f.lineNumber}`,
         startedAt: f.collectedAt,
         completedAt: nowIso,
-        durationMs: 42,
-        resultStatus: 'EXECUTED_VALIDATED',
+        durationMs: recDurationMs,
+        resultStatus: 'EXECUTED_STATIC_ONLY',
         technicalEvidence: `${f.filePath}:${f.lineNumber} -> ${maskSecretsInText(f.snippet)}`,
         logs: [
-          `[${nowIso}] Escopo validado contra allowlist (${allowlist[0]})`,
-          `[${nowIso}] Evidência verificada de forma controlada e não-destrutiva (${f.cwe || f.originalRuleId})`,
-          `[${nowIso}] Estado atribuído: ${initialValidationState}`,
+          `[${nowIso}] Escopo validado (${allowlist[0]})`,
+          `[${nowIso}] Achado estático (${f.cwe || f.originalRuleId}) classificado como ${initialValidationState} (não reproduzido dinamicamente)`,
         ],
         severity: f.severity,
         impactDescription: f.description,
         reproducibility:
           initialValidationState === 'CONFIRMADA'
             ? 'ALTA_DETERMINISTICA'
-            : 'MEDIA_CONDICIONAL',
+            : 'STATIC_ANALYSIS_ONLY',
         validationState: initialValidationState,
         reexecutionHistory: [
           {
             timestamp: nowIso,
-            actor: 'WinHood Vulnerability Validator v2.5',
+            actor: 'WinHood Static & Veracity Validator',
             previousState: 'NAO_TESTADA',
             newState: initialValidationState,
             verificationNote:
-              'Verificação estática/comportamental determinística concluída em sandbox.',
+              'Regra P0-5: Achado estático classificado como PROVAVEL até execução dinâmica controlada.',
             evidenceHash: f.evidenceSha256,
           },
         ],
       });
     }
 
-    // Cálculo das métricas comparativas (sem favorecer softwares que deixaram de rodar testes)
     const eligibleFiles =
       sw.inventory?.eligibleFiles ?? Object.keys(sw.sourceFilesContent || {}).length;
-    const testCoveragePercent = eligibleFiles > 0 ? 100 : 0;
-    const externalToolsNotInstalledCount = 2; // Ferramentas externas opcionais não instaladas no container local
+    const parsedCov = CoverageReportParser.parseFromFilesMap(filesMap);
+    const realCoveragePercent = parsedCov.found && parsedCov.lineCoveragePercent !== null
+      ? parsedCov.lineCoveragePercent
+      : 0;
+
     const comparisonConfidencePercent =
       eligibleFiles === 0
         ? 0
         : Math.max(
-            40,
+            20,
             Math.round(
-              testCoveragePercent * 0.88 -
+              (parsedCov.found ? 85 : 55) -
                 inconclusiveCount * 4 -
-                externalToolsNotInstalledCount * 2
+                externalToolsNotInstalledCount * 1.5
             )
           );
 
     const recoveryCapabilityScore =
-      confirmedCount === 0 ? 4.8 : Math.max(1.5, 4.2 - confirmedCount * 0.65);
-    const performanceUnderStressScore =
-      confirmedCount === 0 ? 4.7 : Math.max(2.1, 4.3 - confirmedCount * 0.4);
+      confirmedCount === 0 && probableCount === 0
+        ? 4.6
+        : Math.max(1.5, 4.2 - (confirmedCount * 0.7 + probableCount * 0.45));
+    const performanceUnderStressScore = 0; // NOT_MEASURED sem execução de carga real
 
-    // Se a cobertura for 0%, a nota de maturidade nunca é inflada (trava em 0.00)
     const rawMaturity =
       eligibleFiles === 0
         ? 0
@@ -712,11 +755,13 @@ export function executeSecurityAssessmentSuite(params: {
             Math.min(
               5.0,
               5.0 -
-                confirmedCount * 1.15 -
-                probableCount * 0.45 -
-                (100 - comparisonConfidencePercent) * 0.02
+                confirmedCount * 1.2 -
+                probableCount * 0.65 -
+                (parsedCov.found ? 0 : 0.4)
             )
           );
+
+    const swElapsedMs = Math.max(1, Math.round(performance.now() - swStart));
 
     comparisonMetrics.push({
       softwareId: sw.id,
@@ -728,35 +773,43 @@ export function executeSecurityAssessmentSuite(params: {
       falsePositivesCount: fpCount,
       inconclusiveCount,
       notTestedCount: externalToolsNotInstalledCount,
-      reproducibilityScore: confirmedCount > 0 ? 4.6 : 1.0,
+      reproducibilityScore: confirmedCount > 0 ? 4.6 : 0, // 0 quando nenhuma vulnerabilidade foi reproduzida dinamicamente
       potentialImpactIndex: surfaceRiskIndex,
-      testCoveragePercent,
+      testCoveragePercent: realCoveragePercent,
       comparisonConfidencePercent,
-      totalExecutionTimeMs: 380 + eligibleFiles * 24,
+      totalExecutionTimeMs: swElapsedMs,
       securityFailuresCount: confirmedCount + probableCount,
       recoveryCapabilityScore: Math.round(recoveryCapabilityScore * 100) / 100,
-      performanceUnderStressScore: Math.round(performanceUnderStressScore * 100) / 100,
+      performanceUnderStressScore,
       overallSecurityMaturityScore: Math.round(rawMaturity * 100) / 100,
     });
   }
 
+  const zapReady = adaptersCatalog.some((a) => a.id === 'owasp-zap' && a.status === 'OPERATIONAL');
+  const pwReady = adaptersCatalog.some((a) => a.id === 'playwright-e2e' && a.status === 'OPERATIONAL');
+  const newmanReady = adaptersCatalog.some((a) => a.id === 'postman-newman' && a.status === 'OPERATIONAL');
+  const staticCoveragePct = params.softwares.length > 0 ? 100 : 0;
+
   const modulesCatalog: SecurityAssessmentSuiteBundle['modulesCatalog'] = [
-    { key: 'SECURITY_ASSESSMENT', title: '01. Security Assessment', status: 'OPERATIONAL', coveragePercent: 100 },
-    { key: 'AUTOMATED_PENTEST', title: '02. Automated Pentest (Sandbox Verifier)', status: 'OPERATIONAL', coveragePercent: 92 },
-    { key: 'RED_TEAM_SIMULATION', title: '03. Red Team Simulation (Control Validation)', status: 'OPERATIONAL', coveragePercent: 90 },
-    { key: 'ATTACK_SURFACE_ANALYSIS', title: '04. Attack Surface Analysis', status: 'OPERATIONAL', coveragePercent: 100 },
-    { key: 'VULNERABILITY_VALIDATION', title: '05. Vulnerability Validation (6 States)', status: 'OPERATIONAL', coveragePercent: 100 },
-    { key: 'ATTACK_PATH_ANALYSIS', title: '06. Attack Path Analysis', status: 'OPERATIONAL', coveragePercent: 100 },
-    { key: 'API_SECURITY_TESTING', title: '07. API Security Testing', status: 'OPERATIONAL', coveragePercent: 95 },
-    { key: 'AUTH_AUTHZ_TESTING', title: '08. Authentication & Authorization Testing', status: 'OPERATIONAL', coveragePercent: 100 },
-    { key: 'DATABASE_SECURITY_ASSESSMENT', title: '09. Database Security Assessment', status: 'OPERATIONAL', coveragePercent: 100 },
-    { key: 'CRYPTOGRAPHY_ASSESSMENT', title: '10. Cryptography Assessment', status: 'OPERATIONAL', coveragePercent: 100 },
-    { key: 'DEPENDENCY_SUPPLY_CHAIN', title: '11. Dependency & Supply Chain Security', status: 'OPERATIONAL', coveragePercent: 100 },
-    { key: 'STRESS_RESILIENCE_TESTING', title: '12. Stress & Resilience Testing', status: 'OPERATIONAL', coveragePercent: 100 },
-    { key: 'WINDOWS_SECURITY_ASSESSMENT', title: '13. Windows Security Assessment (T0/T1/T2)', status: 'OPERATIONAL', coveragePercent: 100 },
-    { key: 'EVIDENCE_COLLECTION', title: '14. Evidence Collection (SHA-256 Chain)', status: 'OPERATIONAL', coveragePercent: 100 },
-    { key: 'SECURITY_BENCHMARK_COMPARISON', title: '15. Security Benchmark Comparison', status: 'OPERATIONAL', coveragePercent: 100 },
+    { key: 'SECURITY_ASSESSMENT', title: '01. Security Assessment', status: 'OPERATIONAL', coveragePercent: staticCoveragePct },
+    { key: 'AUTOMATED_PENTEST', title: '02. Automated Pentest (DAST Externo)', status: zapReady ? 'OPERATIONAL' : 'EXTERNAL_TOOL_REQUIRED', coveragePercent: zapReady ? 100 : 0 },
+    { key: 'RED_TEAM_SIMULATION', title: '03. Red Team Simulation', status: 'EXTERNAL_TOOL_REQUIRED', coveragePercent: 0 },
+    { key: 'ATTACK_SURFACE_ANALYSIS', title: '04. Attack Surface Analysis', status: 'OPERATIONAL', coveragePercent: staticCoveragePct },
+    { key: 'VULNERABILITY_VALIDATION', title: '05. Vulnerability Validation (6 States)', status: 'OPERATIONAL', coveragePercent: staticCoveragePct },
+    { key: 'ATTACK_PATH_ANALYSIS', title: '06. Attack Path Analysis (AST Taint)', status: 'OPERATIONAL', coveragePercent: staticCoveragePct },
+    { key: 'API_SECURITY_TESTING', title: '07. API Security Testing (Newman/ZAP)', status: newmanReady ? 'OPERATIONAL' : 'EXTERNAL_TOOL_REQUIRED', coveragePercent: newmanReady ? 100 : 0 },
+    { key: 'AUTH_AUTHZ_TESTING', title: '08. Authentication & Authorization Testing', status: pwReady ? 'PARTIAL_COVERAGE' : 'EXTERNAL_TOOL_REQUIRED', coveragePercent: pwReady ? 50 : 0 },
+    { key: 'DATABASE_SECURITY_ASSESSMENT', title: '09. Database Security Assessment', status: 'OPERATIONAL', coveragePercent: staticCoveragePct },
+    { key: 'CRYPTOGRAPHY_ASSESSMENT', title: '10. Cryptography Assessment', status: 'OPERATIONAL', coveragePercent: staticCoveragePct },
+    { key: 'DEPENDENCY_SUPPLY_CHAIN', title: '11. Dependency & Supply Chain Security (SBOM/SCA)', status: 'OPERATIONAL', coveragePercent: staticCoveragePct },
+    { key: 'STRESS_RESILIENCE_TESTING', title: '12. Stress & Resilience Testing', status: 'EXTERNAL_TOOL_REQUIRED', coveragePercent: 0 },
+    { key: 'WINDOWS_SECURITY_ASSESSMENT', title: '13. Windows Security Assessment (T0/T1/T2)', status: isWindowsHost ? 'PARTIAL_COVERAGE' : 'EXTERNAL_TOOL_REQUIRED', coveragePercent: isWindowsHost ? 50 : 0 },
+    { key: 'EVIDENCE_COLLECTION', title: '14. Evidence Collection (SHA-256 Chain)', status: 'OPERATIONAL', coveragePercent: staticCoveragePct },
+    { key: 'SECURITY_BENCHMARK_COMPARISON', title: '15. Security Benchmark Comparison', status: 'OPERATIONAL', coveragePercent: staticCoveragePct },
   ];
+
+  // Keep reference to suiteStart to ensure measurement consistency
+  void suiteStart;
 
   return {
     runId: params.runId,

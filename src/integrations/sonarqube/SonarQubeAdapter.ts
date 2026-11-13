@@ -1,4 +1,6 @@
+import fs from 'node:fs';
 import http from 'node:http';
+import path from 'node:path';
 import type {
   IntegrationTestStepResult,
   Software,
@@ -14,6 +16,7 @@ import type {
 import { computeSha256 } from '../../engine/scoringEngine';
 import { executeRealStaticAnalysisOnSource } from '../../engine/staticAnalyzer';
 import { ExternalToolLifecycleManager } from '../../services/tools/ExternalToolLifecycleManager';
+import { ToolAvailabilityService } from '../../services/tools/ToolAvailabilityService';
 import { ToolCacheManager } from '../../services/tools/ToolCacheManager';
 import { ToolResourceMonitor } from '../../services/tools/ToolResourceMonitor';
 import { SonarAnalysisRunner } from './SonarAnalysisRunner';
@@ -24,6 +27,7 @@ import { SonarQubeConnection } from './SonarQubeConnection';
 import { SonarQubeInstallationManager } from './SonarQubeInstallationManager';
 import { SonarQubeVersionManager } from './SonarQubeVersionManager';
 import { SonarResultParser } from './SonarResultParser';
+import { SonarScannerExecutor } from './SonarScannerExecutor';
 import { SonarScannerManager } from './SonarScannerManager';
 
 /**
@@ -458,10 +462,45 @@ export class SonarQubeIntegrationService {
           );
         }
 
-        // 2. Aguardar processamento assíncrono no Compute Engine (/api/ce/task)
-        const ceTaskId = `ce-${computeSha256(`${scannerConfig.projectKey}|${params.software.commitHash}`).slice(0, 12)}`;
+        // 2. Executar scanner real quando binário e diretório local estiverem disponíveis em instância real
+        const isTestContractInstance = params.instance.id === 'sonar-contract-verified-instance';
+        let ceTaskId = `ce-${computeSha256(`${scannerConfig.projectKey}|${params.software.commitHash}`).slice(0, 12)}`;
         const executionId = `exec-${Date.now()}-${params.role.toLowerCase()}`;
 
+        if (!isTestContractInstance && fs.existsSync(scannerConfig.projectBaseDir)) {
+          const scannersInv = ToolAvailabilityService.discoverScannersInventory();
+          const matchedScanner = scannersInv.find(
+            (s) => s.scannerType === scannerConfig.scannerType && s.binaryDetected
+          );
+          if (matchedScanner) {
+            const limits = this.lifecycleManager.getLimits();
+            const execRes = await SonarScannerExecutor.executeIsolatedScanner({
+              scannerType: scannerConfig.scannerType,
+              executablePath: matchedScanner.executablePath,
+              projectBaseDir: scannerConfig.projectBaseDir,
+              propertiesContent: scannerConfig.propertiesContent,
+              sonarToken: params.token,
+              timeoutMs: limits.analysisTimeoutSeconds * 1000,
+              maxMemoryMb: limits.scannerMemoryLimitMb,
+            });
+            if (execRes.reportTask?.ceTaskId) {
+              ceTaskId = execRes.reportTask.ceTaskId;
+              this.lifecycleManager.appendLog(
+                'SONAR_SCANNER',
+                'INFO',
+                'REAL_SCANNER_REPORT_TASK_CAPTURED',
+                `Scanner real (${matchedScanner.displayName}) executado com sucesso em ${execRes.durationMs}ms; ceTaskId=${ceTaskId}.`
+              );
+            } else if (execRes.executed && execRes.exitCode !== 0) {
+              throw new Error(
+                execRes.errorMessage ||
+                  `Execução real do SonarScanner falhou (exitCode=${execRes.exitCode}).`
+              );
+            }
+          }
+        }
+
+        // 3. Aguardar processamento assíncrono no Compute Engine (/api/ce/task)
         const taskRecord = await SonarAnalysisRunner.waitForComputeEngineTask({
           executionId,
           ceTaskId,
@@ -526,6 +565,37 @@ export class SonarQubeIntegrationService {
           projectStatus: qgRes.data?.projectStatus,
         });
         params.toolsDb.sonar_quality_gates.unshift(qgRecord);
+
+        // Persistir payloads originais da Web API com hashes SHA-256 para auditabilidade integral
+        try {
+          const reportsDir = path.resolve(process.cwd(), '.winhood_data', 'sonar_reports');
+          fs.mkdirSync(reportsDir, { recursive: true });
+          const rawBundle = {
+            analysisId,
+            projectKey: scannerConfig.projectKey,
+            softwareId: params.software.id,
+            capturedAt: new Date().toISOString(),
+            hashes: {
+              measuresSha256: measRes.rawHash,
+              issuesSha256: issuesRes.rawHash,
+              hotspotsSha256: hotspotsRes.rawHash,
+              qualityGateSha256: qgRes.rawHash,
+            },
+            rawPayloads: {
+              measures: measRes.data,
+              issues: issuesRes.data,
+              hotspots: hotspotsRes.data,
+              qualityGate: qgRes.data,
+            },
+          };
+          fs.writeFileSync(
+            path.join(reportsDir, `${analysisId}.json`),
+            JSON.stringify(rawBundle, null, 2),
+            'utf8'
+          );
+        } catch {
+          // Ignore disk persistence error in read-only test contexts
+        }
 
         const nowIso = new Date().toISOString();
         const projectRecord: SonarProjectRecord = {
@@ -1043,8 +1113,9 @@ export class SonarQubeIntegrationService {
     toolsDb: SonarAndToolsDatabaseBundle;
     compositeScoreA: number;
     compositeScoreB: number;
+    allowTestContractServer?: boolean;
   }): Promise<SonarABComparisonResult> {
-    // Verificar se existe instância remota/local já READY; caso contrário, executar contra o servidor Web API de contrato alimentado pelos arquivos reais de A e B
+    // Nunca recorrer silenciosamente ao servidor de contrato quando não houver instância real conectada
     let activeInstance = params.toolsDb.sonar_instances.find(
       (i) => i.connectionState === 'READY' || i.connectionState === 'CONNECTED'
     );
@@ -1057,7 +1128,7 @@ export class SonarQubeIntegrationService {
 
     if (activeInstance) {
       tokenToUse = this.getDecryptedToken(activeInstance.id);
-    } else {
+    } else if (params.allowTestContractServer === true) {
       ephemeralServer =
         await SonarQubeIntegrationService.startEphemeralSonarWebApiContractServer([
           params.softwareA,
@@ -1066,7 +1137,7 @@ export class SonarQubeIntegrationService {
       tokenToUse = ephemeralServer.validToken;
       activeInstance = {
         id: 'sonar-contract-verified-instance',
-        name: 'SonarQube Community Build Web API Contract Runner (Sequencial A/B)',
+        name: 'SonarQube Web API Test Contract Runner (Exclusivo para Testes)',
         mode: 'LOCAL',
         serverUrl: ephemeralServer.serverUrl,
         port: ephemeralServer.port,
@@ -1086,6 +1157,10 @@ export class SonarQubeIntegrationService {
           provisioning: true,
         },
       };
+    } else {
+      throw new Error(
+        'SONARQUBE_NOT_CONNECTED: Nenhuma instância real do SonarQube (Server, Docker ou Cloud) está conectada e autenticada (READY). O servidor de contrato existe exclusivamente para testes e nunca é usado como fallback silencioso em produção.'
+      );
     }
 
     try {
@@ -1451,6 +1526,7 @@ export class SonarQubeIntegrationService {
         toolsDb: params.toolsDb,
         compositeScoreA: params.compositeScoreA,
         compositeScoreB: params.compositeScoreB,
+        allowTestContractServer: true,
       });
       const elapsedAb = performance.now() - t8;
 

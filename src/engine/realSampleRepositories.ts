@@ -439,6 +439,32 @@ export function verifyStoreAndReadUseCase() {
   return Boolean(saved && loaded && loaded.id === 'rec-001');
 }
 `,
+  'coverage/lcov.info': `TN:keesafe-open-kdbx
+SF:src/domain/kdfEngine.ts
+LF:20
+LH:19
+BRF:4
+BRH:4
+end_of_record
+SF:src/service/vaultApplicationService.ts
+LF:24
+LH:22
+BRF:2
+BRH:2
+end_of_record
+SF:src/ui/unlockViewController.ts
+LF:8
+LH:7
+BRF:2
+BRH:2
+end_of_record
+SF:src/db/kdbxStorageRepo.ts
+LF:12
+LH:12
+BRF:2
+BRH:2
+end_of_record
+`,
 };
 
 const ALL_12_ENABLED = [

@@ -90,6 +90,15 @@ import {
 } from './src/workers/ExternalReportImportWorker';
 import { GitarReviewWorker } from './src/workers/GitarReviewWorker';
 import { getHardwareProfile, updateHardwareProfile } from './src/engine/workerPool';
+import { KeyManagementService } from './src/security/KeyManagementService';
+import { ReferenceRegistry } from './src/intelligence/reference/ReferenceRegistry';
+import { ReferenceSynchronizer } from './src/intelligence/synchronization/ReferenceSynchronizer';
+import { BenchmarkMatcher } from './src/intelligence/comparison/BenchmarkMatcher';
+import { GoldenDatasetRunner } from './src/validation/GoldenDatasetRunner';
+import { ControlledTestAndPerfRunner } from './src/execution/ControlledTestAndPerfRunner';
+import { CoverageReportParser } from './src/execution/CoverageReportParser';
+import { SbomGenerator } from './src/analyzers/sca/SbomGenerator';
+import { ScaCorrelator } from './src/analyzers/sca/ScaCorrelator';
 
 const PORT = 3000;
 const DATA_DIR = path.resolve(process.cwd(), '.winhood_data');
@@ -865,11 +874,19 @@ async function startServer() {
       ['CODE_QUALITY', 'ARCHITECTURE'].includes(f.category)
     ).length;
 
+    const measuredPerfCards = latestRun
+      ? latestRun.scoreCards.filter(
+          (s) =>
+            s.categoryScores?.performance !== null &&
+            s.categoryDetails?.performance?.measurementState !== 'NOT_MEASURED'
+        )
+      : [];
+
     const avgPerformance =
-      latestRun && latestRun.scoreCards.length > 0
+      measuredPerfCards.length > 0
         ? Math.round(
-            (latestRun.scoreCards.reduce((acc, s) => acc + s.groupedScores.performanceScore, 0) /
-              latestRun.scoreCards.length) *
+            (measuredPerfCards.reduce((acc, s) => acc + s.groupedScores.performanceScore, 0) /
+              measuredPerfCards.length) *
               100
           ) / 100
         : null;
@@ -993,11 +1010,10 @@ async function startServer() {
     }
     const strictAuth = req.headers['x-winhood-strict-auth'] === 'true';
     const adminToken = req.headers['x-winhood-admin-token'] as string | undefined;
-    const expectedToken = process.env.WINHOOD_ADMIN_TOKEN || 'winhood-admin-authorized';
-    if (strictAuth && adminToken !== expectedToken) {
+    if (strictAuth && !KeyManagementService.verifyStrictAdminToken(adminToken)) {
       return res.status(403).json({
         error: 'ROLE_ELEVATION_BLOCKED',
-        message: 'Elevação de privilégio RBAC bloqueada: token administrativo ausente ou inválido em modo estrito.',
+        message: 'Elevação de privilégio RBAC bloqueada: configure WINHOOD_ADMIN_TOKEN ou informe token administrativo válido.',
       });
     }
     db.currentUser.role = role;
@@ -5919,17 +5935,21 @@ async function startServer() {
       saveDatabase(db);
       return res.json({ comparison, toolsDb: db.toolsDb });
     } catch (err: any) {
-      return res.status(500).json({
-        error: err?.message || 'Erro durante a execução da comparação A/B do SonarQube.',
+      const msg = err?.message || 'Erro durante a execução da comparação A/B do SonarQube.';
+      const isNotConnected = msg.includes('SONARQUBE_NOT_CONNECTED');
+      return res.status(isNotConnected ? 400 : 500).json({
+        error: isNotConnected ? 'SONARQUBE_NOT_CONNECTED' : 'SONARQUBE_AB_ERROR',
+        message: msg,
       });
     }
   });
 
   app.post('/api/sonarqube/import-sarif', (req, res) => {
     if (!requireWritePermission(res)) return;
-    const { toolId, softwareId } = req.body as {
+    const { toolId, softwareId, customSarifFindings } = req.body as {
       toolId?: SarifExternalReportPayload['toolId'];
       softwareId?: string;
+      customSarifFindings?: SarifExternalReportPayload['sarifFindings'];
     };
 
     const targetSw =
@@ -5951,14 +5971,14 @@ async function startServer() {
         importedIssuesCount: 0,
       };
 
-    // Extrair achados reais do software para o pacote SARIF
     const matchingFindings = (latestRun?.findings || []).filter(
       (f) => f.softwareId === targetSw.id
     );
 
     const sarifFindings =
-      matchingFindings.length > 0
-        ? matchingFindings.slice(0, 4).map((f) => ({
+      Array.isArray(customSarifFindings) && customSarifFindings.length > 0
+        ? customSarifFindings
+        : matchingFindings.map((f) => ({
             ruleId: f.originalRuleId,
             message: f.title,
             severity: f.severity,
@@ -5966,24 +5986,20 @@ async function startServer() {
             filePath: f.filePath,
             lineNumber: f.lineNumber,
             snippet: f.snippet,
-          }))
-        : [
-            {
-              ruleId: `${effectiveToolId.toUpperCase()}-SEC-001`,
-              message: `Achado importado via relatório externo SARIF 2.1.0 (${toolMeta.toolName})`,
-              severity: 'HIGH' as const,
-              confidence: 'HIGH' as const,
-              filePath: 'src/index.ts',
-              lineNumber: 10,
-              snippet: 'import crypto from "node:crypto";',
-            },
-          ];
+          }));
+
+    if (sarifFindings.length === 0) {
+      return res.status(400).json({
+        error: 'SARIF_NO_FINDINGS',
+        message: `Nenhum achado real existente para ${targetSw.name} e nenhum payload SARIF fornecido para importação.`,
+      });
+    }
 
     const importResult = ExternalReportImportWorker.importExternalSarifFindings({
       payload: {
         toolId: effectiveToolId,
         toolName: toolMeta.toolName,
-        toolVersion: '2026.11 (SARIF 2.1.0)',
+        toolVersion: 'SARIF 2.1.0',
         softwareId: targetSw.id,
         softwareName: targetSw.name,
         projectKey: `winhood-sarif-${targetSw.id}`,
@@ -6319,6 +6335,234 @@ async function startServer() {
       attached: true,
       runId: targetRun.id,
       attachedAt: new Date().toISOString(),
+    });
+  });
+
+  // 17. Reference Intelligence, Comparability Matcher, Golden Validation, Real Execution, SBOM & Key Management
+  const refRegistry = new ReferenceRegistry(DATA_DIR);
+  const refSynchronizer = new ReferenceSynchronizer(DATA_DIR);
+  let latestGoldenValidation: import('./src/types/benchmark').GoldenValidationSuiteReport | null = null;
+
+  app.get('/api/intelligence/references', (_req, res) => {
+    const snapshots = refRegistry.listSnapshots(db.runs.length);
+    res.json({
+      snapshots,
+      totalSources: snapshots.length,
+      freshCount: snapshots.filter((s) => s.freshnessStatus === 'FRESH').length,
+      cachedCount: snapshots.filter((s) => s.freshnessStatus === 'CACHED_VALID' || s.freshnessStatus === 'UNAVAILABLE_USING_CACHED').length,
+      staleCount: snapshots.filter((s) => s.freshnessStatus === 'STALE').length,
+    });
+  });
+
+  app.post('/api/intelligence/sync', async (req, res) => {
+    if (!requireWritePermission(res, req)) return;
+    const { sources, sonarServerUrl } = (req.body || {}) as {
+      sources?: import('./src/types/benchmark').ReferenceSourceKey[];
+      sonarServerUrl?: string;
+    };
+    const outcome = await refSynchronizer.syncSources({
+      sources,
+      sonarServerUrl,
+      internalRunsCount: db.runs.length,
+    });
+    appendAuditLog(
+      db,
+      'REFERENCE_INTELLIGENCE_SYNCED',
+      'REFERENCE_REGISTRY',
+      'global',
+      `Sincronização de referências: ${outcome.liveFetchedSources.length} fonte(s) ao vivo, ${outcome.cachedFallbackSources.length} em cache válido.`
+    );
+    saveDatabase(db);
+    res.json(outcome);
+  });
+
+  app.post('/api/intelligence/match', (req, res) => {
+    const { softwareIds, mode = 'AB_SOFTWARE' } = (req.body || {}) as {
+      softwareIds?: string[];
+      mode?: import('./src/types/benchmark').BenchmarkMatchDecision['mode'];
+    };
+    const selectedSoftwares =
+      Array.isArray(softwareIds) && softwareIds.length > 0
+        ? db.softwares.filter((s) => softwareIds.includes(s.id))
+        : db.softwares.slice(0, 2);
+    const latestRun = db.runs[0];
+    const decision = BenchmarkMatcher.evaluate({
+      mode,
+      softwares: selectedSoftwares,
+      profile: {
+        enabledCategories: latestRun?.enabledCategories || ALL_BENCHMARK_CATEGORIES,
+        notApplicableCategories: latestRun?.notApplicableCategories || [],
+        qualityGateId: latestRun?.qualityGateId || 'qg-sonar-way',
+      },
+      scoreCards: latestRun?.scoreCards || [],
+      algorithmVersion: ALGORITHM_VERSION,
+      environmentEquivalent: latestRun?.environmentEquivalent ?? true,
+    });
+    res.json({ decision, softwaresEvaluated: selectedSoftwares.map((s) => ({ id: s.id, name: s.name })) });
+  });
+
+  app.get('/api/validation/latest', (_req, res) => {
+    if (!latestGoldenValidation) {
+      latestGoldenValidation = GoldenDatasetRunner.runValidationSuite();
+    }
+    res.json({ report: latestGoldenValidation });
+  });
+
+  app.post('/api/validation/run-golden', (req, res) => {
+    if (!requireWritePermission(res, req)) return;
+    const report = GoldenDatasetRunner.runValidationSuite();
+    latestGoldenValidation = report;
+    appendAuditLog(
+      db,
+      'GOLDEN_DATASET_VALIDATED',
+      'VALIDATION_SUITE',
+      report.validationId,
+      `Golden Dataset executado: Precision=${report.precision}, Recall=${report.recall}, F1=${report.f1Score} (${report.truePositives} TP / ${report.falsePositives} FP / ${report.trueNegatives} TN / ${report.falseNegatives} FN) em ${report.totalDurationMs}ms.`
+    );
+    saveDatabase(db);
+    res.json({ report });
+  });
+
+  app.post('/api/execution/run-tests', (req, res) => {
+    if (!requireWritePermission(res, req)) return;
+    const { softwareId } = (req.body || {}) as { softwareId?: string };
+    const sw = db.softwares.find((s) => s.id === softwareId) || db.softwares[0];
+    if (!sw) {
+      return res.status(404).json({ error: 'Software não encontrado.' });
+    }
+    const result = ControlledTestAndPerfRunner.runIsolatedTestSuite({
+      softwareName: sw.name,
+      filesMap: sw.sourceFilesContent || {},
+    });
+    appendAuditLog(
+      db,
+      'CONTROLLED_TEST_EXECUTION',
+      'SOFTWARE',
+      sw.id,
+      `Execução isolada de testes (${result.runnerUsed}): ${result.testsPassed}/${result.testsTotal} aprovados (estado: ${result.provenance.state}).`
+    );
+    saveDatabase(db);
+    return res.json({ softwareId: sw.id, softwareName: sw.name, result });
+  });
+
+  app.post('/api/execution/import-coverage', (req, res) => {
+    if (!requireWritePermission(res, req)) return;
+    const { filePath = 'coverage/lcov.info', content } = (req.body || {}) as {
+      filePath?: string;
+      content?: string;
+    };
+    if (!content || typeof content !== 'string') {
+      return res.status(400).json({ error: 'Conteúdo do relatório de cobertura (LCOV/JaCoCo/Cobertura/Istanbul) obrigatório.' });
+    }
+    const parsed = CoverageReportParser.parseFromFilesMap({ [filePath]: content });
+    return res.json({ coverage: parsed });
+  });
+
+  app.post('/api/execution/run-perf', async (req, res) => {
+    if (!requireWritePermission(res, req)) return;
+    const { targetUrl, requestsCount = 20, concurrency = 4 } = (req.body || {}) as {
+      targetUrl?: string;
+      requestsCount?: number;
+      concurrency?: number;
+    };
+    if (!targetUrl) {
+      return res.status(400).json({
+        error: 'TARGET_URL_REQUIRED',
+        message: 'Informe targetUrl HTTP/HTTPS real para medição controlada de P50/P95/P99, RPS, CPU e RSS.',
+      });
+    }
+    const result = await ControlledTestAndPerfRunner.measureHttpWorkload({
+      targetUrl,
+      requestsCount,
+      concurrency,
+    });
+    appendAuditLog(
+      db,
+      'CONTROLLED_PERF_MEASUREMENT',
+      'RUNTIME_PERF',
+      targetUrl,
+      `Medição HTTP em ${targetUrl}: status=${result.status}, P95=${result.p95LatencyMs}ms, RPS=${result.throughputRps}.`
+    );
+    saveDatabase(db);
+    return res.json({ result });
+  });
+
+  app.get('/api/runs/:runId/sbom', (req, res) => {
+    const run = db.runs.find((r) => r.id === req.params.runId) || db.runs[0];
+    const format = req.query.format === 'spdx' ? 'spdx' : 'cyclonedx';
+    const softwareId =
+      typeof req.query.softwareId === 'string'
+        ? req.query.softwareId
+        : run?.softwareIds[0] || db.softwares[0]?.id;
+
+    let sbom = softwareId ? run?.sbomsBySoftware?.[softwareId] : undefined;
+    let correlations = softwareId ? run?.scaCorrelationsBySoftware?.[softwareId] : undefined;
+
+    if (!sbom && softwareId) {
+      const sw = db.softwares.find((s) => s.id === softwareId);
+      if (sw) {
+        sbom = SbomGenerator.generateFromSoftware(sw);
+        const correlated = ScaCorrelator.correlateSbom({
+          software: sw,
+          sbom,
+          runId: run?.id || 'on-demand',
+        });
+        correlations = correlated.correlations;
+      }
+    }
+    if (!sbom) {
+      return res.status(404).json({ error: 'SBOM não disponível para o software informado.' });
+    }
+
+    return res.json({
+      runId: run?.id || 'on-demand',
+      softwareId,
+      format,
+      document: format === 'spdx' ? sbom.spdx23Json : sbom.cyclonedx15Json,
+      documentSha256: format === 'spdx' ? sbom.spdxSha256 : sbom.cyclonedxSha256,
+      componentsCount: sbom.componentsCount,
+      directCount: sbom.directCount,
+      transitiveCount: sbom.transitiveCount,
+      scaCorrelations: correlations || [],
+    });
+  });
+
+  app.get('/api/security/keys/status', (_req, res) => {
+    res.json({ keys: KeyManagementService.getStatus() });
+  });
+
+  app.post('/api/security/keys/rotate', (req, res) => {
+    if (!requireWritePermission(res, req)) return;
+    const { purpose } = (req.body || {}) as {
+      purpose?: 'evidence-hmac' | 'sonar-vault-aes' | 'EVIDENCE_HMAC' | 'TOKEN_VAULT_AES256';
+    };
+    const purposeMap: Record<string, 'EVIDENCE_HMAC' | 'TOKEN_VAULT_AES256'> = {
+      'evidence-hmac': 'EVIDENCE_HMAC',
+      EVIDENCE_HMAC: 'EVIDENCE_HMAC',
+      'sonar-vault-aes': 'TOKEN_VAULT_AES256',
+      TOKEN_VAULT_AES256: 'TOKEN_VAULT_AES256',
+    };
+    const mappedPurpose = purpose ? purposeMap[purpose] : undefined;
+    if (!mappedPurpose) {
+      return res.status(400).json({
+        error: 'Informe purpose: "EVIDENCE_HMAC" ("evidence-hmac") ou "TOKEN_VAULT_AES256" ("sonar-vault-aes").',
+      });
+    }
+    const newRecord = KeyManagementService.rotateKey(mappedPurpose);
+    appendAuditLog(
+      db,
+      'CRYPTO_KEY_ROTATED',
+      'KEY_MANAGEMENT',
+      newRecord.keyId,
+      `Chave criptográfica para ${mappedPurpose} rotacionada com sucesso (novo keyId: ${newRecord.keyId}; chaves anteriores mantidas para verificação histórica).`
+    );
+    saveDatabase(db);
+    return res.json({
+      rotated: true,
+      newKeyId: newRecord.keyId,
+      purpose: newRecord.purpose,
+      createdAt: newRecord.createdAt,
+      keys: KeyManagementService.getStatus(),
     });
   });
 

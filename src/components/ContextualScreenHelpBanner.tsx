@@ -341,6 +341,31 @@ const SCREEN_HELP_CATALOG: Record<Exclude<AppNavSection, 'user_guide'>, ScreenGu
       },
     ],
   },
+  reference_intelligence: {
+    stepBadge: 'INTELIGÊNCIA & GOLDEN SUITE',
+    screenTitle: 'Como usar Inteligência de Referência, Golden Dataset, SBOM & Chaves',
+    plainSummary:
+      'Centraliza as 10 fontes externas oficiais versionadas, valida comparabilidade em 11 critérios, executa o corpus Golden TP/TN (OWASP), gera SBOM CycloneDX/SPDX com correlação CVE/EPSS/KEV e controla execução isolada de testes e rotação de chaves.',
+    howToSteps: [
+      '1. Sincronize as 10 fontes de referência (OSV, NVD, EPSS, CISA KEV, MITRE CWE, OWASP, Sonar) verificando frescor e fallback offline.',
+      '2. Execute a Suíte Golden (20 casos TP/TN) para auditar Precision, Recall e F1 do motor real AST + Taint sobre código sanitizado vs vulnerável.',
+      '3. Inspecione o SBOM (CycloneDX/SPDX) e rotacione chaves HMAC/AES-256-GCM preservando chaves antigas para auditoria histórica.',
+    ],
+    abInterpretationTip:
+      'Antes de aceitar qualquer vencedor A/B oficial, verifique se o BenchmarkMatcher aprova todos os critérios bloqueantes de linguagem, domínio, versão do motor e cobertura.',
+    guideChapterId: 'glossary-faq',
+    guideChapterLabel: 'Inteligência & Calibração Empírica',
+    glossaryTerms: [
+      {
+        term: 'Precision / Recall / F1',
+        meaning: 'Métricas empíricas medidas no Golden Dataset comparando True Positives, False Positives, True Negatives e False Negatives.',
+      },
+      {
+        term: 'SBOM CycloneDX & SPDX',
+        meaning: 'Inventário formal de componentes diretos e transitivos com hashes SHA-256 e correlação CVE/EPSS/CISA KEV.',
+      },
+    ],
+  },
   reports: {
     stepBadge: 'PASSO 6 DA JORNADA',
     screenTitle: 'Como gerar e exportar Relatórios Técnicos & Laudos A/B',

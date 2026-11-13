@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   Cpu,
   Crosshair,
+  Database,
   FileText,
   FolderGit2,
   Github,
@@ -108,6 +109,11 @@ const HardwareAndDisplayBenchmarkModule = lazy(() =>
 const MarketResearchAndCompetitorsModule = lazy(() =>
   import('./components/MarketResearchAndCompetitorsModule').then((m) => ({
     default: m.MarketResearchAndCompetitorsModule,
+  }))
+);
+const ReferenceIntelligenceModule = lazy(() =>
+  import('./components/ReferenceIntelligenceModule').then((m) => ({
+    default: m.ReferenceIntelligenceModule,
   }))
 );
 
@@ -435,6 +441,7 @@ export default function App() {
       groupLabel: 'Auditoria, Laudos & Manual',
       items: [
         { id: 'veracity', stepBadge: '5', label: 'Veracidade & Adaptadores', icon: ShieldCheck },
+        { id: 'reference_intelligence', stepBadge: '5B', label: 'Inteligência & Golden', icon: Database },
         { id: 'reports', stepBadge: '6', label: 'Relatórios & Auditoria', icon: FileText },
         { id: 'user_guide', label: 'Guia de Utilização', icon: BookOpen },
       ],
@@ -818,6 +825,14 @@ export default function App() {
                 adapters={adapters}
                 auditLogs={auditLogs}
                 initialTab="veracity"
+              />
+            )}
+
+            {activeNav === 'reference_intelligence' && (
+              <ReferenceIntelligenceModule
+                latestRun={dashboardData?.latestRun || null}
+                softwares={softwares}
+                onNotify={notify}
               />
             )}
 

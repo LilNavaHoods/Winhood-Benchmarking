@@ -268,7 +268,9 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
             {kpis.avgPerformance !== null ? `${kpis.avgPerformance.toFixed(2)} / 5.00` : 'N/A'}
           </div>
           <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            Ambiente equivalente validado
+            {kpis.avgPerformance !== null
+              ? 'Ambiente equivalente validado'
+              : 'Não medido (análise estática)'}
           </div>
         </div>
 
@@ -423,6 +425,43 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
             </div>
           )}
 
+          {/* Avaliação Parcial Banner (Contrato P0/P4 — Sem Fabricação de Métricas Não Medidas) */}
+          {(latestRun.isPartialEvaluation ||
+            latestRun.scoreCards.some(
+              (sc) => sc.isPartialEvaluation || (sc.unmeasuredCategories && sc.unmeasuredCategories.length > 0)
+            )) && (
+            <div
+              data-testid="partial-evaluation-banner"
+              className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-xs space-y-1.5"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-bold text-amber-600 dark:text-amber-300 flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>
+                    Avaliação Parcial — Categorias sem execução dinâmica/medição real permanecem explícitas como NOT_MEASURED
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onNavigate('reference_intelligence')}
+                  className="px-2.5 py-1 rounded border border-amber-500/40 text-amber-700 dark:text-amber-200 font-semibold hover:bg-amber-500/20 transition-colors cursor-pointer"
+                >
+                  Executar Medição Controlada →
+                </button>
+              </div>
+              <div className="text-slate-700 dark:text-slate-300 flex flex-wrap gap-2">
+                {latestRun.scoreCards.map((sc) =>
+                  sc.unmeasuredCategories && sc.unmeasuredCategories.length > 0 ? (
+                    <span key={sc.softwareId} className="font-mono text-[11px]">
+                      <strong>{sc.softwareName}:</strong>{' '}
+                      {sc.unmeasuredCategories.map((c) => CATEGORY_LABELS[c] || c).join(', ')}
+                    </span>
+                  ) : null
+                )}
+              </div>
+            </div>
+          )}
+
           {/* 1. Comparação Direta de Pontuação Entre Softwares, 5 Indicadores Separados & Travas Matemáticas */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             {latestRun.scoreCards.map((sc) => {
@@ -548,9 +587,11 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                         <div className="text-[10px] text-slate-400 font-sans">4. Quality Gate</div>
                         <div
                           className={`font-bold ${
-                            sep.qualityGateDecision === 'APPROVED'
+                            sep.qualityGateDecision === 'APPROVED' || sep.qualityGateDecision === 'APROVADO'
                               ? 'text-emerald-500'
-                              : sep.qualityGateDecision === 'REJECTED'
+                              : sep.qualityGateDecision === 'REJECTED' ||
+                                  sep.qualityGateDecision === 'REPROVADO' ||
+                                  sep.qualityGateDecision === 'BLOCKED'
                                 ? 'text-rose-500'
                                 : 'text-amber-500'
                           }`}
@@ -567,35 +608,126 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                     </div>
                   )}
 
+                  {/* Separação Estrita: SonarQube Nativo vs WinHood Composto (Regra 9) */}
+                  {(sc.sonarNativeResults || sc.winhoodCalculatedResults) && (
+                    <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-[11px]">
+                      <div className="p-2.5 rounded border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-[#080b10] space-y-1">
+                        <div className="flex items-center justify-between font-bold text-slate-800 dark:text-slate-200">
+                          <span>SonarQube Nativo</span>
+                          <span
+                            className={`font-mono text-[10px] px-1.5 py-0.5 rounded ${
+                              sc.sonarNativeResults?.available
+                                ? 'bg-emerald-500/15 text-emerald-500'
+                                : 'bg-slate-200 dark:bg-slate-800 text-slate-500'
+                            }`}
+                          >
+                            {sc.sonarNativeResults?.available ? 'CONECTADO' : 'NOT_MEASURED'}
+                          </span>
+                        </div>
+                        {sc.sonarNativeResults?.available ? (
+                          <div className="font-mono text-slate-600 dark:text-slate-300 space-y-0.5">
+                            <div>
+                              Nota Nativa: {sc.sonarNativeResults.nativeScore?.toFixed(2) ?? 'N/A'} · QG:{' '}
+                              {sc.sonarNativeResults.qualityGateStatus || 'N/A'}
+                            </div>
+                            <div className="text-[10px] text-slate-400">
+                              Ratings S/R/M: {sc.sonarNativeResults.securityRating || '-'}/
+                              {sc.sonarNativeResults.reliabilityRating || '-'}/
+                              {sc.sonarNativeResults.maintainabilityRating || '-'} · v
+                              {sc.sonarNativeResults.sonarVersion || '-'}
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="text-slate-500 leading-snug">
+                            {sc.sonarNativeResults?.note ||
+                              'Sem instância SonarQube real conectada — nunca substituído por mock.'}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="p-2.5 rounded border border-[#31d6c4]/30 bg-[#31d6c4]/5 space-y-1">
+                        <div className="flex items-center justify-between font-bold text-slate-900 dark:text-slate-100">
+                          <span>WinHood Composto</span>
+                          <span className="font-mono text-[10px] text-[#31d6c4]">
+                            {sc.winhoodCalculatedResults?.assessedCategoriesCount ??
+                              Object.values(sc.categoryScores).filter((v) => v !== null).length}
+                            /
+                            {sc.winhoodCalculatedResults?.totalCategoriesCount ?? 12} dims
+                          </span>
+                        </div>
+                        <div className="font-mono text-slate-700 dark:text-slate-200">
+                          Nota: {(sc.winhoodCalculatedResults?.compositeScore ?? sc.groupedScores.overallScore).toFixed(2)} / 5.00
+                        </div>
+                        <div className="font-mono text-[10px] text-slate-500 truncate">
+                          {sc.winhoodCalculatedResults?.algorithmVersion || latestRun.algorithmVersion}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Grouped Dimension Bars */}
                   <div className="mt-5 space-y-3">
                     {[
-                      { label: 'Nota de Segurança & DevSecOps', val: sc.groupedScores.securityScore },
-                      { label: 'Nota de Qualidade de Código', val: sc.groupedScores.qualityScore },
-                      { label: 'Nota de Arquitetura & Modularidade', val: sc.groupedScores.architectureScore },
-                      { label: 'Nota Funcional (Equivalência)', val: sc.groupedScores.functionalScore },
-                      { label: 'Nota de Desempenho (P95 / RPS)', val: sc.groupedScores.performanceScore },
-                      { label: 'Nota Técnica Consolidada', val: sc.groupedScores.technicalScore },
+                      {
+                        label: 'Nota de Segurança & DevSecOps',
+                        val: sc.groupedScores.securityScore,
+                        isNotMeasured: sc.categoryScores.security === null,
+                      },
+                      {
+                        label: 'Nota de Qualidade de Código',
+                        val: sc.groupedScores.qualityScore,
+                        isNotMeasured: sc.categoryScores.code_quality === null,
+                      },
+                      {
+                        label: 'Nota de Arquitetura & Modularidade',
+                        val: sc.groupedScores.architectureScore,
+                        isNotMeasured: sc.categoryScores.architecture === null,
+                      },
+                      {
+                        label: 'Nota Funcional (Equivalência)',
+                        val: sc.groupedScores.functionalScore,
+                        isNotMeasured: sc.categoryScores.functionality === null,
+                      },
+                      {
+                        label: 'Nota de Desempenho (P95 / RPS)',
+                        val: sc.groupedScores.performanceScore,
+                        isNotMeasured: sc.categoryScores.performance === null,
+                      },
+                      {
+                        label: 'Nota Técnica Consolidada',
+                        val: sc.groupedScores.technicalScore,
+                        isNotMeasured: false,
+                      },
                     ].map((row) => {
-                      const pct = Math.max(2, Math.min(100, (row.val / 5) * 100));
+                      const pct = row.isNotMeasured
+                        ? 0
+                        : Math.max(2, Math.min(100, (row.val / 5) * 100));
                       return (
                         <div key={row.label}>
                           <div className="flex items-center justify-between text-xs mb-1">
                             <span className="text-slate-700 dark:text-slate-300 font-medium">
                               {row.label}
                             </span>
-                            <span className="font-mono tabular-nums font-semibold text-slate-900 dark:text-slate-100">
-                              {row.val.toFixed(2)} / 5.00
-                            </span>
+                            {row.isNotMeasured ? (
+                              <span className="font-mono text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                                NOT_MEASURED (N/A)
+                              </span>
+                            ) : (
+                              <span className="font-mono tabular-nums font-semibold text-slate-900 dark:text-slate-100">
+                                {row.val.toFixed(2)} / 5.00
+                              </span>
+                            )}
                           </div>
                           <div className="h-2 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
                             <div
                               className={`h-full rounded-full ${
-                                row.val >= 4.0
-                                  ? 'bg-[#31d6c4]'
-                                  : row.val >= 3.0
-                                    ? 'bg-amber-500'
-                                    : 'bg-rose-500'
+                                row.isNotMeasured
+                                  ? 'bg-slate-400/30'
+                                  : row.val >= 4.0
+                                    ? 'bg-[#31d6c4]'
+                                    : row.val >= 3.0
+                                      ? 'bg-amber-500'
+                                      : 'bg-rose-500'
                               }`}
                               style={{ width: `${pct}%` }}
                             />
@@ -697,6 +829,7 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                             const val = sc.categoryScores[catKey];
                             const reasonsCount =
                               sc.categoryDetails?.[catKey]?.evaluationReasons?.length || 0;
+                            const mState = sc.categoryDetails?.[catKey]?.measurementState;
                             return (
                               <td
                                 key={sc.softwareId}
@@ -710,11 +843,18 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                                         : 'text-rose-500'
                                 }`}
                               >
-                                {val !== null ? val.toFixed(2) : 'Não Avaliado'}
-                                {reasonsCount > 0 && (
-                                  <span className="ml-1 text-[10px] text-slate-400">
-                                    ({reasonsCount})
-                                  </span>
+                                <div>
+                                  {val !== null ? val.toFixed(2) : 'Não Medido'}
+                                  {reasonsCount > 0 && (
+                                    <span className="ml-1 text-[10px] text-slate-400">
+                                      ({reasonsCount})
+                                    </span>
+                                  )}
+                                </div>
+                                {mState && (
+                                  <div className="text-[9px] font-mono text-slate-400 font-normal">
+                                    {mState}
+                                  </div>
                                 )}
                               </td>
                             );

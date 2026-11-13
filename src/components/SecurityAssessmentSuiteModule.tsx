@@ -369,9 +369,13 @@ export const SecurityAssessmentSuiteModule: React.FC<
               {latestRun.findings.map((f) => {
                 const currentVal =
                   validationMap[f.id] ||
-                  (f.validationStatus === 'FALSE_POSITIVE_REVIEWED'
+                  (f.validationStatus === 'FALSE_POSITIVE_REVIEWED' || f.validationStatus === 'FALSE_POSITIVE'
                     ? 'FALSO_POSITIVO'
-                    : 'CONFIRMADA');
+                    : f.validationStatus === 'INCONCLUSIVE'
+                      ? 'INCONCLUSIVA'
+                      : f.validationStatus === 'NOT_REPRODUCIBLE'
+                        ? 'NAO_REPRODUZIVEL'
+                        : 'PROVAVEL');
                 return (
                   <tr key={f.id}>
                     <td className="py-3 pr-3 font-semibold text-slate-900 dark:text-slate-100 whitespace-nowrap">

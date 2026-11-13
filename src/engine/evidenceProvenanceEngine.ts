@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { KeyManagementService } from '../security/KeyManagementService';
 import {
   EvidenceRecord,
   NormalizedFinding,
@@ -9,16 +10,12 @@ import {
 } from '../types/benchmark';
 
 export const GENESIS_EVIDENCE_HASH = '0'.repeat(64);
-const DEFAULT_SERVER_HMAC_SECRET =
-  process.env.WINHOOD_EVIDENCE_HMAC_SECRET ||
-  'winhood-enterprise-veracity-hmac-key-2026-protected-server-secret';
-const DEFAULT_SIGNING_KEY_ID = 'WINHOOD-HMAC-SHA256-KEY-2026-V4';
 
 function sha256Hex(payload: string): string {
   return crypto.createHash('sha256').update(payload, 'utf8').digest('hex');
 }
 
-function hmacSha256Hex(payload: string, secret: string = DEFAULT_SERVER_HMAC_SECRET): string {
+function hmacSha256Hex(payload: string, secret: string): string {
   return crypto.createHmac('sha256', secret).update(payload, 'utf8').digest('hex');
 }
 
@@ -203,13 +200,14 @@ export function signEvidenceManifestHmacSha256(params: {
   generatedAt?: string;
   secret?: string;
 }): SignedEvidenceManifest {
+  const activeKey = KeyManagementService.getActiveEvidenceHmacKey();
   const {
     runId,
     algorithmVersion,
     evidenceChain,
-    signingKeyId = DEFAULT_SIGNING_KEY_ID,
+    signingKeyId = activeKey.keyId,
     generatedAt = new Date().toISOString(),
-    secret = DEFAULT_SERVER_HMAC_SECRET,
+    secret = activeKey.secret,
   } = params;
 
   const merkleOrChainRootSha256 =
@@ -275,7 +273,7 @@ export interface EvidenceChainVerificationResult {
 export function verifyEvidenceChainAndManifest(
   evidenceChain: EvidenceRecord[],
   signedManifest?: SignedEvidenceManifest,
-  secret: string = DEFAULT_SERVER_HMAC_SECRET
+  secret?: string
 ): EvidenceChainVerificationResult {
   const tamperedRecordIds: string[] = [];
   const tamperedIndicesSet = new Set<number>();
@@ -343,13 +341,18 @@ export function verifyEvidenceChainAndManifest(
       );
     }
 
+    const resolvedSecret =
+      secret ||
+      KeyManagementService.getEvidenceSecretByKeyId(signedManifest.signingKeyId) ||
+      KeyManagementService.getActiveEvidenceHmacKey().secret;
+
     const recomputedManifest = signEvidenceManifestHmacSha256({
       runId: signedManifest.runId,
       algorithmVersion: signedManifest.algorithmVersion,
       evidenceChain,
       signingKeyId: signedManifest.signingKeyId,
       generatedAt: signedManifest.generatedAt,
-      secret,
+      secret: resolvedSecret,
     });
 
     if (

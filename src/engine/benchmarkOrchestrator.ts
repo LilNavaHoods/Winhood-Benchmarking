@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import os from 'node:os';
 import type {
   AppEnvironment,
   ArchitectureGraphData,
@@ -11,6 +12,8 @@ import type {
   EvidenceRecord,
   FunctionalEquivalenceRow,
   NormalizedFinding,
+  SbomDocumentBundle,
+  ScaVulnerabilityCorrelation,
   Software,
   SoftwareScoreCard,
   ToolAdapterInfo,
@@ -40,6 +43,9 @@ import {
   evaluateSoftwareComparability,
   getProfileByIdOrDomain,
 } from './methodologyCatalogEngine';
+import { ToolAvailabilityService } from '../services/tools/ToolAvailabilityService';
+import { BenchmarkMatcher } from '../intelligence/comparison/BenchmarkMatcher';
+import { ReferenceRegistry } from '../intelligence/reference/ReferenceRegistry';
 
 export const DEFAULT_BENCHMARK_PROFILES: BenchmarkProfileConfig[] = [
   {
@@ -159,84 +165,103 @@ export const DEFAULT_BENCHMARK_PROFILES: BenchmarkProfileConfig[] = [
 
 export function buildToolAdaptersCatalog(): ToolAdapterInfo[] {
   const nowIso = new Date().toISOString();
+  const isWin = os.platform() === 'win32';
+  const probeSemgrep = ToolAvailabilityService.checkBinaryInPath('semgrep');
+  const probeOpengrep = ToolAvailabilityService.checkBinaryInPath('opengrep');
+  const probeGitleaks = ToolAvailabilityService.checkBinaryInPath('gitleaks');
+  const probeSonarScanner = ToolAvailabilityService.checkBinaryInPath('sonar-scanner');
+  const probeSyft = ToolAvailabilityService.checkBinaryInPath('syft');
+  const probeGrype = ToolAvailabilityService.checkBinaryInPath('grype');
+  const probeTrivy = ToolAvailabilityService.checkBinaryInPath('trivy');
+  const probeOsv = ToolAvailabilityService.checkBinaryInPath('osv-scanner');
+  const probeK6 = ToolAvailabilityService.checkBinaryInPath('k6');
+  const probeNode = ToolAvailabilityService.checkBinaryInPath('node');
+
   return [
     {
       id: 'opengrep-sast',
-      name: 'Opengrep SAST Engine (Core AST/Pattern)',
-      vendor: 'Opengrep / WinHood Security',
-      version: '1.9.2',
+      name: 'WinHood AST/Taint SAST + Semgrep/Opengrep Adapter',
+      vendor: 'WinHood Security / Semgrep',
+      version: probeSemgrep.versionOutput || probeOpengrep.versionOutput || '4.1.0-native-ast',
       category: 'SECURITY_DEVSECOPS',
-      analysisType: 'SAST (SQLi, RCE, Criptografia Fraca, PRNG Inseguro)',
-      executionMethod: 'NATIVE_AST_ENGINE',
+      analysisType: 'SAST AST & Cross-File Taint (SQLi, RCE, CWE Top 25)',
+      executionMethod: probeSemgrep.detected || probeOpengrep.detected ? 'CLI_BINARY' : 'NATIVE_AST_ENGINE',
       canonicalFormat: 'SARIF_2_1_0',
       status: 'OPERATIONAL',
       binaryDetected: true,
       configured: true,
-      signatureHash: computeSha256('opengrep-sast-1.9.2-verified'),
-      description: 'Motor estático de regras SAST com saída normalizada SARIF 2.1.0 e correlação CWE/CVSS.',
-      supportedLanguages: ['TypeScript', 'JavaScript', 'Python', 'SQL', 'C#', 'Java'],
+      signatureHash: computeSha256('winhood-ast-taint-4.1.0'),
+      description:
+        probeSemgrep.detected || probeOpengrep.detected
+          ? 'Binário CLI externo detectado no host e integrado ao pipeline AST nativo WinHood.'
+          : 'Motor AST Compiler nativo WinHood (TypeScript/Python/Java/SQL) operacional; CLI externo semgrep/opengrep não instalado no container.',
+      supportedLanguages: ['TypeScript', 'JavaScript', 'Python', 'SQL', 'C#', 'Java', 'Go', 'Rust'],
       lastExecutionAt: nowIso,
       lastExitCode: 0,
     },
     {
       id: 'gitleaks-secrets',
-      name: 'Gitleaks Secret & Entropy Scanner',
-      vendor: 'Gitleaks / WinHood SecOps',
-      version: '8.21.2',
+      name: 'WinHood Secret Scanner + Gitleaks CLI Adapter',
+      vendor: 'WinHood SecOps / Gitleaks',
+      version: probeGitleaks.versionOutput || '4.1.0-native-ast',
       category: 'SECURITY_DEVSECOPS',
       analysisType: 'Secret Scanning & Redaction (Chaves, Tokens, Senhas Fixas)',
-      executionMethod: 'NATIVE_AST_ENGINE',
+      executionMethod: probeGitleaks.detected ? 'CLI_BINARY' : 'NATIVE_AST_ENGINE',
       canonicalFormat: 'SARIF_2_1_0',
       status: 'OPERATIONAL',
       binaryDetected: true,
       configured: true,
-      signatureHash: computeSha256('gitleaks-secrets-8.21.2-verified'),
-      description: 'Detecção de credenciais hardcoded com mascaramento automático de segredos nas evidências.',
+      signatureHash: computeSha256('winhood-secret-scanner-4.1.0'),
+      description: probeGitleaks.detected
+        ? 'Binário Gitleaks CLI detectado no host com mascaramento automático de evidências.'
+        : 'Detector nativo WinHood por AST e entropia ativo; binário gitleaks CLI não instalado neste host.',
       supportedLanguages: ['TypeScript', 'JavaScript', 'Python', 'JSON', 'YAML', 'SQL'],
       lastExecutionAt: nowIso,
       lastExitCode: 0,
     },
     {
       id: 'sonarqube-quality',
-      name: 'SonarQube Static Quality Analyzer',
+      name: 'SonarQube Server / Cloud & Native MQR Parity Engine',
       vendor: 'SonarSource / WinHood Quality',
-      version: '10.7.0',
+      version: probeSonarScanner.versionOutput || 'WINHOOD-SONAR-MQR-v3.0.0',
       category: 'CODE_QUALITY',
       analysisType: 'Bugs, Code Smells, Complexidade Ciclomática/Cognitiva, Duplicação',
-      executionMethod: 'NATIVE_AST_ENGINE',
+      executionMethod: probeSonarScanner.detected ? 'CLI_BINARY' : 'NATIVE_AST_ENGINE',
       canonicalFormat: 'SARIF_2_1_0',
       status: 'OPERATIONAL',
       binaryDetected: true,
       configured: true,
-      signatureHash: computeSha256('sonarqube-quality-10.7.0-verified'),
-      description: 'Avaliação estática de qualidade de código, dívida técnica e blocos de exceção silenciados.',
-      supportedLanguages: ['TypeScript', 'JavaScript', 'Python', 'Java', 'C#'],
+      signatureHash: computeSha256('winhood-sonar-mqr-3.0.0'),
+      description: probeSonarScanner.detected
+        ? 'SonarScanner CLI detectado no host para submissão real à instância SonarQube conectada.'
+        : 'Cálculo estático nativo MQR ativo; conecte instância SonarQube Server/Cloud ou instale sonar-scanner para métricas remotas nativas.',
+      supportedLanguages: ['TypeScript', 'JavaScript', 'Python', 'Java', 'C#', 'Go', 'Rust'],
       lastExecutionAt: nowIso,
       lastExitCode: 0,
     },
     {
       id: 'syft-grype-sca',
-      name: 'Syft SBOM & Grype Vulnerability Scanner',
-      vendor: 'Anchore / WinHood SCA',
-      version: '0.84.0',
+      name: 'WinHood CycloneDX/SPDX SBOM & OSV/NVD/EPSS/KEV SCA',
+      vendor: 'WinHood SCA / OSV / Anchore',
+      version: probeOsv.versionOutput || probeGrype.versionOutput || '4.1.0-native-sbom',
       category: 'SECURITY_DEVSECOPS',
-      analysisType: 'SCA & SBOM CycloneDX 1.5 (CVE, CVSS, EPSS, CISA KEV)',
-      executionMethod: 'NATIVE_AST_ENGINE',
+      analysisType: 'SCA & SBOM CycloneDX 1.5 / SPDX 2.3 (CVE, GHSA, EPSS, CISA KEV)',
+      executionMethod: probeOsv.detected || probeGrype.detected || probeSyft.detected ? 'CLI_BINARY' : 'NATIVE_AST_ENGINE',
       canonicalFormat: 'CYCLONEDX_1_5',
       status: 'OPERATIONAL',
       binaryDetected: true,
       configured: true,
-      signatureHash: computeSha256('syft-grype-sca-0.84.0-verified'),
-      description: 'Inspeção de manifesto de dependências, geração de SBOM CycloneDX e correlação de CVEs.',
-      supportedLanguages: ['JSON', 'TypeScript', 'JavaScript', 'Python'],
+      signatureHash: computeSha256('winhood-sbom-sca-4.1.0'),
+      description: 'Gerador real CycloneDX 1.5 e SPDX 2.3 a partir de lockfiles/manifestos + correlação OSV/NVD/EPSS/CISA KEV.',
+      supportedLanguages: ['JSON', 'TypeScript', 'JavaScript', 'Python', 'Go', 'Rust', 'Java'],
       lastExecutionAt: nowIso,
       lastExitCode: 0,
     },
     {
       id: 'archunit-cruiser',
-      name: 'Dependency Cruiser & ArchUnit Graph Engine',
+      name: 'WinHood Architecture Graph Analyzer',
       vendor: 'WinHood Architecture Lab',
-      version: '16.4.0',
+      version: '4.1.0-native-ast',
       category: 'ARCHITECTURE',
       analysisType: 'Acoplamento Ca/Ce, Instabilidade, Ciclos e Violações de Camada',
       executionMethod: 'NATIVE_AST_ENGINE',
@@ -244,17 +269,17 @@ export function buildToolAdaptersCatalog(): ToolAdapterInfo[] {
       status: 'OPERATIONAL',
       binaryDetected: true,
       configured: true,
-      signatureHash: computeSha256('archunit-cruiser-16.4.0-verified'),
-      description: 'Mapeamento estrutural de módulos, detecção de ciclos e auditoria de camadas Clean/Hexagonal.',
+      signatureHash: computeSha256('winhood-arch-graph-4.1.0'),
+      description: 'Mapeamento estrutural real de importações, detecção de ciclos e auditoria de camadas.',
       supportedLanguages: ['TypeScript', 'JavaScript', 'Python'],
       lastExecutionAt: nowIso,
       lastExitCode: 0,
     },
     {
       id: 'sqlfluff-db',
-      name: 'SQLFluff & Relational Schema Auditor',
-      vendor: 'SQLFluff / WinHood DB',
-      version: '3.2.0',
+      name: 'WinHood SQL & Relational Schema Auditor',
+      vendor: 'WinHood DB',
+      version: '4.1.0-native-ast',
       category: 'DATABASE',
       analysisType: 'Auditoria de Schemas, Índices, Projeções SELECT * e Criptografia de Colunas',
       executionMethod: 'NATIVE_AST_ENGINE',
@@ -262,47 +287,49 @@ export function buildToolAdaptersCatalog(): ToolAdapterInfo[] {
       status: 'OPERATIONAL',
       binaryDetected: true,
       configured: true,
-      signatureHash: computeSha256('sqlfluff-db-3.2.0-verified'),
-      description: 'Inspeção estática de scripts DDL/DML SQL, índices de chaves estrangeiras e proteção de colunas sensíveis.',
+      signatureHash: computeSha256('winhood-sql-auditor-4.1.0'),
+      description: 'Parser estrutural DDL/DML SQL, índices de chaves estrangeiras e proteção de colunas sensíveis.',
       supportedLanguages: ['SQL'],
       lastExecutionAt: nowIso,
       lastExitCode: 0,
     },
     {
       id: 'junit-functional',
-      name: 'JUnit / Node Test Equivalence Runner',
-      vendor: 'WinHood QA Automation',
-      version: '5.11.0',
+      name: 'WinHood Controlled Test & Coverage Parser (LCOV/JaCoCo/Cobertura)',
+      vendor: 'WinHood QA Execution',
+      version: probeNode.versionOutput || '4.1.0',
       category: 'QA_FUNCTIONAL',
-      analysisType: 'Matriz de Equivalência Funcional & Detecção de Componentes VISUAL_ONLY',
+      analysisType: 'Execução Isolada de Testes & Leitura Real de Relatórios de Cobertura',
       executionMethod: 'SANDBOX_WORKER',
       canonicalFormat: 'JUNIT_XML',
-      status: 'OPERATIONAL',
-      binaryDetected: true,
-      configured: true,
-      signatureHash: computeSha256('junit-functional-5.11.0-verified'),
-      description: 'Valida equivalência funcional entre softwares e classifica interfaces sem backend como VISUAL_ONLY.',
-      supportedLanguages: ['TypeScript', 'JavaScript', 'Python'],
-      lastExecutionAt: nowIso,
-      lastExitCode: 0,
+      status: probeNode.detected ? 'OPERATIONAL' : 'FERRAMENTA NÃO INSTALADA',
+      binaryDetected: probeNode.detected,
+      configured: probeNode.detected,
+      signatureHash: computeSha256('winhood-test-cov-4.1.0'),
+      description: 'Executa suítes reais em sandbox temporário e analisa LCOV/JaCoCo/Cobertura/Istanbul sem fabricar cobertura.',
+      supportedLanguages: ['TypeScript', 'JavaScript', 'Python', 'Java'],
+      lastExecutionAt: null,
+      lastExitCode: null,
     },
     {
       id: 'k6-perf-equivalent',
-      name: 'k6 & OpenTelemetry Controlled Load Profiler',
-      vendor: 'Grafana Labs / WinHood Perf',
-      version: '0.54.0',
+      name: 'WinHood HTTP Load Profiler & k6 Adapter',
+      vendor: 'WinHood Perf / Grafana Labs',
+      version: probeK6.versionOutput || '4.1.0-http-profiler',
       category: 'PERFORMANCE',
-      analysisType: 'Latência P50/P95/P99, Throughput RPS, Memória, CPU e Inicialização',
-      executionMethod: 'SANDBOX_WORKER',
+      analysisType: 'Latência P50/P95/P99, Throughput RPS, Memória RSS e CPU reais',
+      executionMethod: probeK6.detected ? 'CLI_BINARY' : 'SANDBOX_WORKER',
       canonicalFormat: 'OTLP_METRICS',
       status: 'OPERATIONAL',
       binaryDetected: true,
       configured: true,
-      signatureHash: computeSha256('k6-perf-0.54.0-verified'),
-      description: 'Perfilamento sob condições experimentais equivalentes com validação prévia de hardware/limites.',
-      supportedLanguages: ['TypeScript', 'JavaScript', 'Python', 'Go'],
-      lastExecutionAt: nowIso,
-      lastExitCode: 0,
+      signatureHash: computeSha256('winhood-http-perf-4.1.0'),
+      description: probeK6.detected
+        ? 'Binário k6 detectado no host para testes de carga.'
+        : 'Profiler HTTP controlado ativo via /api/execution/run-perf (análise estática não fabrica P95/RPS).',
+      supportedLanguages: ['HTTP', 'API'],
+      lastExecutionAt: null,
+      lastExitCode: null,
     },
     {
       id: 'win-sandbox-snapshot',
@@ -313,14 +340,16 @@ export function buildToolAdaptersCatalog(): ToolAdapterInfo[] {
       analysisType: 'Snapshots T0 (Base), T1 (Pós-Instalação), T2 (Pós-Desinstalação) & Resíduos',
       executionMethod: 'SANDBOX_WORKER',
       canonicalFormat: 'SNAPSHOT_DIFF',
-      status: 'OPERATIONAL',
-      binaryDetected: true,
-      configured: true,
-      signatureHash: computeSha256('win-sandbox-snapshot-2026.11-verified'),
-      description: 'Compara estados T0, T1 e T2 de arquivos, chaves de registro e serviços para detectar resíduos órfãos.',
-      supportedLanguages: ['TypeScript', 'C#', 'Python'],
-      lastExecutionAt: nowIso,
-      lastExitCode: 0,
+      status: isWin ? 'OPERATIONAL' : 'FERRAMENTA NÃO INSTALADA',
+      binaryDetected: isWin,
+      configured: isWin,
+      signatureHash: computeSha256('win-sandbox-snapshot-host-gated'),
+      description: isWin
+        ? 'Host Windows detectado para inspeção de instalação/registro.'
+        : 'Sandbox Windows indisponível em host Linux; executa apenas inspeção estática de manifesto (STATIC_MANIFEST_INSPECTION).',
+      supportedLanguages: ['Windows', 'Manifests'],
+      lastExecutionAt: null,
+      lastExitCode: null,
     },
     {
       id: 'owasp-zap-dast',
@@ -332,7 +361,7 @@ export function buildToolAdaptersCatalog(): ToolAdapterInfo[] {
       executionMethod: 'EXTERNAL_API',
       canonicalFormat: 'SARIF_2_1_0',
       status: process.env.OWASP_ZAP_API_URL ? 'OPERATIONAL' : 'INTEGRAÇÃO NÃO CONFIGURADA',
-      binaryDetected: false,
+      binaryDetected: Boolean(process.env.OWASP_ZAP_API_URL),
       configured: Boolean(process.env.OWASP_ZAP_API_URL),
       signatureHash: computeSha256('owasp-zap-2.15.0'),
       description: 'Requer endpoint externo OWASP_ZAP_API_URL e autorização formal do proprietário do ambiente.',
@@ -344,16 +373,18 @@ export function buildToolAdaptersCatalog(): ToolAdapterInfo[] {
       id: 'trivy-container-cli',
       name: 'Aqua Trivy Container & Filesystem Binary CLI',
       vendor: 'Aqua Security',
-      version: '0.56.2',
+      version: probeTrivy.versionOutput || 'not-installed',
       category: 'SECURITY_DEVSECOPS',
       analysisType: 'Container Image & IaC Security Scanner',
       executionMethod: 'CLI_BINARY',
       canonicalFormat: 'SARIF_2_1_0',
-      status: 'FERRAMENTA NÃO INSTALADA',
-      binaryDetected: false,
-      configured: false,
-      signatureHash: computeSha256('trivy-cli-0.56.2'),
-      description: 'Binário nativo /usr/local/bin/trivy ausente no container Linux atual; análise SCA coberta pelo adaptador Syft/Grype.',
+      status: probeTrivy.detected ? 'OPERATIONAL' : 'FERRAMENTA NÃO INSTALADA',
+      binaryDetected: probeTrivy.detected,
+      configured: probeTrivy.detected,
+      signatureHash: computeSha256(`trivy-cli-${probeTrivy.detected}`),
+      description: probeTrivy.detected
+        ? `Binário trivy detectado em ${probeTrivy.executablePath}.`
+        : 'Binário nativo trivy ausente no container atual; análise SCA coberta pelo SbomGenerator/ScaCorrelator nativo.',
       supportedLanguages: ['Docker', 'Terraform', 'Kubernetes'],
       lastExecutionAt: null,
       lastExitCode: null,
@@ -394,7 +425,6 @@ export function createInitialRunningBenchmark(params: {
     (acc, s) => acc + (s.inventory?.eligibleFiles || s.inventory?.totalFiles || 1),
     0
   );
-  const estimatedSeconds = Math.max(8, Math.min(60, Math.ceil(totalFiles * 0.45 + 5)));
 
   return {
     id: runId,
@@ -417,7 +447,8 @@ export function createInitialRunningBenchmark(params: {
     progress: {
       percent: 5,
       stageLabel: 'Inicializando workers e verificando hashes SHA-256 dos artefatos...',
-      estimatedRemainingSeconds: estimatedSeconds,
+      estimatedRemainingSeconds: null,
+      estimationBasis: 'UNAVAILABLE_FIRST_RUN',
       currentTool: 'WinHood Genesis & Ingestion',
       processedFiles: 0,
       totalFiles,
@@ -484,6 +515,9 @@ export function executeBenchmarkRunOrchestration(params: {
   const sandboxDiffs: WindowsSandboxSnapshotDiff[] = [];
   const criteriaOutcomesBySoftware: Record<string, import('../types/benchmark').CriterionEvaluationOutcome[]> = {};
 
+  const sbomsBySoftware: Record<string, SbomDocumentBundle> = {};
+  const scaCorrelationsBySoftware: Record<string, ScaVulnerabilityCorrelation[]> = {};
+
   const totalFiles = params.softwares.reduce(
     (acc, s) => acc + (s.inventory?.eligibleFiles || s.inventory?.totalFiles || 1),
     0
@@ -491,12 +525,13 @@ export function executeBenchmarkRunOrchestration(params: {
 
   let processedFilesCounter = 0;
 
-  // Initial stage notification
+  // Initial stage notification (never fabricates fixed ETA without historical runs)
   params.onProgress?.({
     percent: 10,
-    stageLabel: 'Inventariando arquivos e analisando regras SAST / Secrets...',
-    estimatedRemainingSeconds: Math.max(6, Math.ceil(totalFiles * 0.4)),
-    currentTool: 'Opengrep SAST & Gitleaks',
+    stageLabel: 'Inventariando arquivos e analisando regras AST/Taint & Secrets...',
+    estimatedRemainingSeconds: null,
+    estimationBasis: 'UNAVAILABLE_FIRST_RUN',
+    currentTool: 'WinHood Native AST & Taint Engine',
     processedFiles: 0,
     totalFiles,
   });
@@ -660,21 +695,22 @@ export function executeBenchmarkRunOrchestration(params: {
       if (status === 'VISUAL_ONLY') {
         visualOnlyCount += 1;
       }
+      const hasDynamicTestsExecuted = bundle.computedMetrics.functionalTestsTotal > 0;
       functionalMatrix[idx].resultsBySoftware[sw.id] = {
         status,
         verificationLevel:
           status === 'PASSED_VALIDATED'
-            ? hasRealTests
+            ? hasDynamicTestsExecuted
               ? 'VALIDATED_BY_TEST'
               : 'IMPLEMENTATION_FOUND'
             : status === 'VISUAL_ONLY'
             ? 'POTENTIAL_IMPLEMENTATION'
             : 'NOT_FOUND',
         executionTimeMs: measuredMs,
-        assertionCount: status === 'PASSED_VALIDATED' ? (hasRealTests ? 4 : 2) : 1,
+        assertionCount: hasDynamicTestsExecuted ? bundle.computedMetrics.functionalTestsTotal : 0,
         evidenceLog:
           status === 'PASSED_VALIDATED'
-            ? `Contrato funcional inspecionado no código${hasRealTests ? ' e testes' : ''} de ${sw.name} v${sw.version}.`
+            ? `Contrato funcional inspecionado estaticamente no código${hasRealTests ? ' (arquivos de teste presentes; execução dinâmica isolada requerida para asserções)' : ''} de ${sw.name} v${sw.version}.`
             : status === 'VISUAL_ONLY'
             ? `Interface declarada sem persistência append-only verificada no backend (VISUAL_ONLY).`
             : `Reprovado na inspeção estática de contrato funcional e segurança (${feat.featureId}).`,
@@ -713,6 +749,13 @@ export function executeBenchmarkRunOrchestration(params: {
       cleanUninstall: !isEligible ? null : !hasUnsafeShellOrTempDump,
     });
 
+    if (bundle.sbomSummary) {
+      sbomsBySoftware[sw.id] = bundle.sbomSummary;
+    }
+    if (bundle.scaCorrelations) {
+      scaCorrelationsBySoftware[sw.id] = bundle.scaCorrelations;
+    }
+
     // Calculate deterministic scorecard with Penalty Caps, MQR Evaluation Reasons, and SonarQube Ratings
     const scoreCard = calculateDeterministicScoreCard(
       {
@@ -737,6 +780,9 @@ export function executeBenchmarkRunOrchestration(params: {
         qualityGateId: params.qualityGateId,
         runtimeMetrics: bundle.runtimeMetrics,
         staticMetrics: bundle.staticMetrics,
+        metricProvenance: bundle.metricProvenance,
+        sbomSummary: bundle.sbomSummary ?? null,
+        scaCorrelations: bundle.scaCorrelations || [],
       },
       normalizedWeights,
       params.enablePenaltyCaps
@@ -755,7 +801,7 @@ export function executeBenchmarkRunOrchestration(params: {
     totalFiles,
   });
 
-  // Evaluate Impartiality & Comparability across softwares
+  // Evaluate Impartiality & Comparability across softwares + BenchmarkMatcher
   const comparabilityReport = evaluateSoftwareComparability({
     softwares: params.softwares,
     profile: {
@@ -773,6 +819,29 @@ export function executeBenchmarkRunOrchestration(params: {
     environmentEquivalent,
     criteriaOutcomesBySoftware,
   });
+
+  const mode = params.assessmentMode || (params.softwares.length === 1 ? 'INDIVIDUAL' : 'AB_COMPARE');
+  const matcherMode = mode === 'INDIVIDUAL' ? 'INDIVIDUAL' : 'AB_SOFTWARE';
+  const benchmarkMatchDecision = BenchmarkMatcher.evaluate({
+    mode: matcherMode,
+    softwares: params.softwares,
+    profile: {
+      enabledCategories,
+      notApplicableCategories,
+      qualityProfileIds: specializedProfile ? [specializedProfile.id] : ['qp-sonar-way-ts'],
+      qualityGateId: params.qualityGateId || 'qg-sonar-way',
+    },
+    scoreCards,
+    algorithmVersion: ALGORITHM_VERSION,
+    environmentEquivalent,
+  });
+
+  let referenceSnapshotsUsed: import('../types/benchmark').ReferenceSnapshotRecord[] = [];
+  try {
+    referenceSnapshotsUsed = new ReferenceRegistry().listSnapshots();
+  } catch {
+    referenceSnapshotsUsed = [];
+  }
 
   // Build Verifiable Hash Chain & HMAC-SHA256 Signed Manifest
   const evidenceChain = buildVerifiableEvidenceChain({
@@ -800,19 +869,21 @@ export function executeBenchmarkRunOrchestration(params: {
   const canHaveWinner =
     params.softwares.length === 1
       ? Boolean(topCandidate)
-      : comparabilityReport.canDeclareOfficialWinner && Boolean(topCandidate);
+      : comparabilityReport.canDeclareOfficialWinner &&
+        benchmarkMatchDecision.canDeclareOfficialWinner &&
+        Boolean(topCandidate);
 
   const winner = canHaveWinner ? topCandidate : null;
+  const isPartialEvaluation = scoreCards.some((sc) => sc.isPartialEvaluation);
 
   const completedAt = new Date().toISOString();
-  const mode = params.assessmentMode || (params.softwares.length === 1 ? 'INDIVIDUAL' : 'AB_COMPARE');
   const executiveSummary =
     !topCandidate
       ? `Execução inconclusiva sob ${ALGORITHM_VERSION}: nenhum software apresentou código-fonte íntegro e elegível para pontuação numérica.`
       : mode === 'INDIVIDUAL' && winner
-      ? `Avaliação individual concluída sob o algoritmo determinístico ${ALGORITHM_VERSION}. O software "${winner.softwareName} (${winner.softwareVersion})" obteve pontuação técnica ${winner.groupedScores.overallScore.toFixed(2)} / 5.00 (${winner.classificationLabel} | Cobertura de Escopo: ${winner.separatedIndicators?.scopeCoveragePercent ?? 0}% | Quality Gate: ${winner.separatedIndicators?.qualityGateDecision}). Foram geradas ${evidenceChain.length} evidências encadeadas SHA-256 com manifesto assinado HMAC-SHA256.`
-      : !comparabilityReport.canDeclareOfficialWinner && params.softwares.length > 1
-      ? `Comparação técnica concluída sob ${ALGORITHM_VERSION}, porém a declaração de vencedor oficial foi BLOQUEADA pelo Motor de Imparcialidade (${comparabilityReport.blockingReasons.join(' ')}). Pontuações individuais: ${scoreCards.map((s) => `${s.softwareName}: ${s.separatedIndicators?.technicalScore !== null ? s.groupedScores.overallScore.toFixed(2) : 'N/A'}`).join(' vs ')}.`
+      ? `Avaliação individual${isPartialEvaluation ? ' parcial (dimensões dinâmicas não medidas)' : ''} concluída sob o algoritmo determinístico ${ALGORITHM_VERSION}. O software "${winner.softwareName} (${winner.softwareVersion})" obteve pontuação técnica ${winner.groupedScores.overallScore.toFixed(2)} / 5.00 (${winner.classificationLabel} | Cobertura de Escopo: ${winner.separatedIndicators?.scopeCoveragePercent ?? 0}% | Quality Gate: ${winner.separatedIndicators?.qualityGateDecision}). Foram geradas ${evidenceChain.length} evidências encadeadas SHA-256 com manifesto assinado HMAC-SHA256.`
+      : !canHaveWinner && params.softwares.length > 1
+      ? `Comparação técnica concluída sob ${ALGORITHM_VERSION}, porém a declaração de vencedor oficial foi BLOQUEADA pelo Motor de Imparcialidade (${[...comparabilityReport.blockingReasons, ...benchmarkMatchDecision.blockingReasons].join(' ')}). Pontuações individuais: ${scoreCards.map((s) => `${s.softwareName}: ${s.separatedIndicators?.technicalScore !== null ? s.groupedScores.overallScore.toFixed(2) : 'N/A'}`).join(' vs ')}.`
       : winner && runnerUp
       ? `Benchmark comparativo A/B concluído sob o algoritmo determinístico ${ALGORITHM_VERSION}. O software "${winner.softwareName} (${winner.softwareVersion})" obteve a maior pontuação geral (${winner.groupedScores.overallScore.toFixed(2)} / 5.00 — ${winner.classificationLabel}), superando "${runnerUp.softwareName} (${runnerUp.softwareVersion})" (${runnerUp.groupedScores.overallScore.toFixed(2)} / 5.00 — ${runnerUp.classificationLabel}). Foram registradas ${evidenceChain.length} evidências encadeadas SHA-256 e manifesto HMAC-SHA256.`
       : `Execução concluída com ${scoreCards.length} software(s) analisado(s).`;
@@ -830,7 +901,7 @@ export function executeBenchmarkRunOrchestration(params: {
     status:
       eligibleCards.length === 0
         ? 'INCOMPLETE'
-        : environmentEquivalent && comparabilityReport. blockingReasons.length === 0
+        : environmentEquivalent && comparabilityReport.blockingReasons.length === 0 && !isPartialEvaluation
         ? 'COMPLETED'
         : 'COMPLETED_WITH_WARNINGS',
     startedAt,
@@ -845,6 +916,11 @@ export function executeBenchmarkRunOrchestration(params: {
     equivalenceEnvironment: params.equivalenceEnvironment,
     environmentEquivalent,
     comparabilityReport,
+    benchmarkMatchDecision,
+    isPartialEvaluation,
+    sbomsBySoftware,
+    scaCorrelationsBySoftware,
+    referenceSnapshotsUsed,
     signedManifest,
     criteriaOutcomesBySoftware,
     assessmentMode: mode,
@@ -967,6 +1043,10 @@ export function recalculateBenchmarkRunScoreCards(
         qualityGateId: run.qualityGateId,
         runtimeMetrics: oldCard.runtimeMetrics,
         staticMetrics: oldCard.staticMetrics,
+        metricProvenance: oldCard.metricProvenance,
+        sbomSummary: oldCard.sbomSummary,
+        scaCorrelations: oldCard.scaCorrelations,
+        sonarNativeResults: oldCard.sonarNativeResults,
       },
       normalizedWeights,
       true
@@ -996,6 +1076,7 @@ export function recalculateBenchmarkRunScoreCards(
   run.scoreCards = updatedScoreCards;
   run.algorithmVersion = ALGORITHM_VERSION;
   run.winnerSoftwareId = winner ? winner.softwareId : null;
+  run.isPartialEvaluation = updatedScoreCards.some((s) => Boolean(s.isPartialEvaluation));
   run.categoryDetails = (winner || topCandidate || updatedScoreCards[0])?.categoryDetails;
   run.qualityGate = (winner || topCandidate || updatedScoreCards[0])?.qualityGate;
   run.ratings = (winner || topCandidate || updatedScoreCards[0])?.ratings;

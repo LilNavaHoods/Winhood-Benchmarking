@@ -5,10 +5,14 @@ import type {
   CategoryEvaluationReason,
   CategoryScoreDetail,
   CleanCodeAttribute,
+  MetricMeasurementState,
+  MetricProvenanceRecord,
   MqrCategoryImpact,
   NormalizedFinding,
   PenaltyCapTriggered,
   QualityGateConditionDetail,
+  SbomDocumentBundle,
+  ScaVulnerabilityCorrelation,
   SeverityLevel,
   SoftwareQualityAttribute,
   SoftwareScoreCard,
@@ -541,6 +545,10 @@ export interface RawEvaluationInput {
     layerViolationsCount: number;
     riskIndicators: string[];
   };
+  metricProvenance?: Record<string, MetricProvenanceRecord>;
+  sbomSummary?: SbomDocumentBundle | null;
+  scaCorrelations?: ScaVulnerabilityCorrelation[];
+  sonarNativeResults?: SoftwareScoreCard['sonarNativeResults'];
 }
 
 export function calculateDeterministicScoreCard(
@@ -1116,19 +1124,44 @@ export function calculateDeterministicScoreCard(
   }
 
   // 7. RELIABILITY metric thresholds
-  const coverageRatio = Math.min(1, m.testCoveragePercent / 85);
-  const reliabilityBaseTarget = round2(4.6 * (0.5 * passRatio + 0.5 * coverageRatio));
-  const reliabilityCoverageGap = round2(reliabilityBaseTarget - 5.0);
-  if (reliabilityCoverageGap < 0) {
+  const hasMeasuredTests = m.functionalTestsTotal > 0;
+  const hasMeasuredCoverage =
+    input.metricProvenance?.testCoveragePercent?.state === 'MEASURED' ||
+    m.testCoveragePercent > 0;
+
+  if (hasMeasuredTests || hasMeasuredCoverage) {
+    const coverageRatio = Math.min(1, m.testCoveragePercent / 85);
+    const activeFactor =
+      hasMeasuredTests && hasMeasuredCoverage
+        ? 0.5 * passRatio + 0.5 * coverageRatio
+        : hasMeasuredTests
+          ? passRatio
+          : coverageRatio;
+    const reliabilityBaseTarget = round2(4.8 * activeFactor);
+    const reliabilityCoverageGap = round2(reliabilityBaseTarget - 5.0);
+    if (reliabilityCoverageGap < 0) {
+      pushReason('reliability', {
+        impactType: 'METRIC_THRESHOLD',
+        scoreDelta: reliabilityCoverageGap,
+        severity: m.testCoveragePercent < 50 ? 'HIGH' : 'LOW',
+        ruleId: 'metric.reliability.coverage-and-pass-rate',
+        title: `Cobertura de testes verificada (${m.testCoveragePercent.toFixed(1)}%) e taxa de aprovação funcional (${Math.round(passRatio * 100)}%)`,
+        whyExplanation: `O modelo determinístico de Confiabilidade pondera as métricas reais medidas (cobertura ${m.testCoveragePercent.toFixed(1)}% vs 85% e taxa funcional ${(passRatio * 100).toFixed(1)}%), resultando em ajuste de ${reliabilityCoverageGap.toFixed(2)} pts sobre o teto 5.00.`,
+        remediationSummary: 'Ampliar testes unitários e de integração para atingir >= 85% de cobertura e resiliência.',
+        remediationEffortMinutes: m.testCoveragePercent < 80 ? 45 : 10,
+      });
+    }
+  } else if (reasonsByCat.reliability.length === 0) {
     pushReason('reliability', {
       impactType: 'METRIC_THRESHOLD',
-      scoreDelta: reliabilityCoverageGap,
-      severity: m.testCoveragePercent < 50 ? 'HIGH' : 'LOW',
-      ruleId: 'metric.reliability.coverage-and-pass-rate',
-      title: `Cobertura de testes verificada (${m.testCoveragePercent.toFixed(1)}%) e taxa de aprovação funcional (${Math.round(passRatio * 100)}%)`,
-      whyExplanation: `O modelo determinístico de Confiabilidade pondera a cobertura estática de testes (${m.testCoveragePercent.toFixed(1)}% vs meta de 85%) e a taxa de aprovação funcional (${(passRatio * 100).toFixed(1)}%), resultando em ajuste estrutural de ${reliabilityCoverageGap.toFixed(2)} pts sobre o teto 5.00.`,
-      remediationSummary: 'Ampliar testes unitários e de integração para atingir >= 85% de cobertura e resiliência.',
-      remediationEffortMinutes: m.testCoveragePercent < 80 ? 45 : 10,
+      scoreDelta: -0.2,
+      severity: 'INFO',
+      ruleId: 'metric.reliability.static-only-baseline',
+      title: 'Confiabilidade estática verificada (0 bugs AST); testes dinâmicos/cobertura LCOV não medidos',
+      whyExplanation:
+        'Nenhum bug estático ou falha de tratamento de exceção foi detectado na análise AST. Ajuste conservador de -0.20 pts aplicado pela ausência de execução dinâmica/relatório de cobertura (NOT_MEASURED).',
+      remediationSummary: 'Importar relatório LCOV/JaCoCo/Cobertura ou executar testes isolados para medição completa.',
+      remediationEffortMinutes: 15,
     });
   }
 
@@ -1685,10 +1718,26 @@ export function calculateDeterministicScoreCard(
   const outcomesFor = (cat: BenchmarkCategoryKey) =>
     (input.criteriaOutcomes || []).filter((o) => o.dimension === cat);
 
+  const resolveMeasurementState = (
+    cat: BenchmarkCategoryKey,
+    status: CategoryScoreDetail['status']
+  ): MetricMeasurementState => {
+    if (status === 'NOT_APPLICABLE') return 'NOT_APPLICABLE';
+    if (status === 'INCONCLUSIVE') return 'INCONCLUSIVE';
+    if (status === 'NOT_ASSESSED') return 'NOT_MEASURED';
+    if (cat === 'performance' && isPerformanceMeasured) return 'MEASURED';
+    if (cat === 'functionality' && m.functionalTestsTotal > 0) return 'MEASURED';
+    return 'STATIC_DERIVED';
+  };
+
   const categoryDetails: Record<BenchmarkCategoryKey, CategoryScoreDetail> = {
     functionality: {
       category: 'functionality',
-      status: buildStatus('functionality', m.functionalTestsTotal > 0),
+      status: buildStatus('functionality', m.functionalTestsTotal > 0 || input.essentialFeaturesMissing > 0),
+      measurementState: resolveMeasurementState(
+        'functionality',
+        buildStatus('functionality', m.functionalTestsTotal > 0 || input.essentialFeaturesMissing > 0)
+      ),
       rawScore: rawCategoryScores.functionality,
       finalScore: categoryScores.functionality,
       score: categoryScores.functionality,
@@ -1952,6 +2001,10 @@ export function calculateDeterministicScoreCard(
   };
 
   const applicableCategoriesCount = Math.max(1, enabledList.length);
+  const unmeasuredCategories = enabledList.filter(
+    (k) => categoryDetails[k].status === 'NOT_ASSESSED' || categoryDetails[k].status === 'INCONCLUSIVE'
+  );
+  const isPartialEvaluation = !isEligibleForScoring || unmeasuredCategories.length > 0;
   const scopeCoveragePercent = isEligibleForScoring
     ? Math.round((assessedCategories.length / applicableCategoriesCount) * 100)
     : 0;
@@ -1961,6 +2014,33 @@ export function calculateDeterministicScoreCard(
       : scopeCoveragePercent >= 80 && input.coveragePercent >= 80
       ? 'HIGH'
       : 'MEDIUM';
+
+  for (const catKey of ALL_BENCHMARK_CATEGORIES) {
+    const det = categoryDetails[catKey];
+    if (!det.measurementState) {
+      det.measurementState = resolveMeasurementState(catKey, det.status);
+    }
+    if (!det.metricProvenance) {
+      det.metricProvenance = [
+        {
+          metricKey: `category.${catKey}`,
+          value: det.finalScore,
+          state: det.measurementState,
+          origin: det.toolsUsed[0] || 'WinHood Scoring Engine',
+          method:
+            det.measurementState === 'MEASURED'
+              ? 'Medição dinâmica controlada em runtime'
+              : det.measurementState === 'STATIC_DERIVED'
+              ? 'Cálculo determinístico sobre achados AST/estáticos'
+              : `Categoria não avaliada (${det.status})`,
+          toolName: det.toolsUsed[0] || 'WinHood Deterministic Scoring Engine',
+          toolVersion: ALGORITHM_VERSION,
+          measuredAt: new Date().toISOString(),
+          scope: `${input.softwareName} (${catKey})`,
+        },
+      ];
+    }
+  }
 
   return {
     softwareId: input.softwareId,
@@ -2027,5 +2107,27 @@ export function calculateDeterministicScoreCard(
       security: securityRating,
       maintainability: maintainabilityRating,
     },
+    isPartialEvaluation,
+    unmeasuredCategories,
+    metricProvenance: input.metricProvenance,
+    sonarNativeResults: input.sonarNativeResults || {
+      available: false,
+      sourceInstanceUrl: null,
+      sonarVersion: null,
+      nativeScore: null,
+      reliabilityRating: null,
+      securityRating: null,
+      maintainabilityRating: null,
+      qualityGateStatus: null,
+      note: 'Resultados nativos do SonarQube ainda não sincronizados de uma instância externa conectada.',
+    },
+    winhoodCalculatedResults: {
+      compositeScore: isEligibleForScoring ? overallScore : null,
+      algorithmVersion: ALGORITHM_VERSION,
+      assessedCategoriesCount: assessedCategories.length,
+      totalCategoriesCount: applicableCategoriesCount,
+    },
+    sbomSummary: input.sbomSummary ?? null,
+    scaCorrelations: input.scaCorrelations || [],
   };
 }

@@ -557,7 +557,8 @@ test('executeSecurityAssessmentSuite generates attack surfaces, attack paths, an
   const metricsA = suite.comparisonMetrics.find((m) => m.softwareId === 'sw-vaultcore-legacy');
   const metricsB = suite.comparisonMetrics.find((m) => m.softwareId === 'sw-keesafe');
   assert.ok(metricsA && metricsB);
-  assert.ok(metricsA.vulnerabilitiesConfirmed >= 2);
+  assert.equal(metricsA.vulnerabilitiesConfirmed, 0);
+  assert.ok(metricsA.vulnerabilitiesProbable >= 2);
   assert.equal(metricsB.vulnerabilitiesConfirmed, 0);
   assert.ok(metricsA.overallSecurityMaturityScore < metricsB.overallSecurityMaturityScore);
 });
@@ -905,10 +906,11 @@ test('Remediated VaultCore Internal (v2.5.0) and non-vault projects (keeweb / Au
   assert.equal(scVault.penaltyCapsTriggered.length, 0);
   assert.ok(scVault.groupedScores.overallScore >= 4.7);
 
-  // 2. Non-vault clean application has 0 false-positive CAP-FUNC or Privacy penalties
+  // 2. Non-vault clean application has 0 false-positive CAP-FUNC or Privacy penalties (functionality remains NOT_MEASURED without dynamic execution)
   assert.equal(scGateway.qualityGate?.status, 'PASSED');
   assert.equal(scGateway.penaltyCapsTriggered.length, 0);
-  assert.equal(scGateway.categoryDetails?.functionality.finalScore, 5.0);
+  assert.equal(scGateway.categoryDetails?.functionality.finalScore, null);
+  assert.equal(scGateway.categoryDetails?.functionality.measurementState, 'NOT_MEASURED');
   assert.equal(scGateway.categoryDetails?.privacy.finalScore, 4.8);
   assert.equal(scGateway.categoryDetails?.privacy.rating, 'A');
 });

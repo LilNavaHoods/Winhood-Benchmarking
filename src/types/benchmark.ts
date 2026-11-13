@@ -161,6 +161,7 @@ export interface CodeExecutionFlowStep {
   columnEnd?: number;
   symbolName: string;
   codeSnippet: string;
+  snippet?: string;
   contextBefore?: string[];
   contextAfter?: string[];
   explanation: string;
@@ -254,8 +255,12 @@ export type FindingValidationLifecycleState =
 export type CriterionVerificationMethod =
   | 'STATIC_ANALYSIS'
   | 'AST_ANALYSIS'
+  | 'TAINT_ANALYSIS'
+  | 'STATIC_PATTERN'
+  | 'SBOM_CORRELATION'
   | 'FUNCTIONAL_TEST'
   | 'RUNTIME_TEST'
+  | 'RUNTIME_EXECUTION'
   | 'PERFORMANCE_TEST'
   | 'EXTERNAL_TOOL'
   | 'MANUAL_ASSESSMENT'
@@ -534,7 +539,14 @@ export interface NormalizedFinding {
   toolName: string;
   toolVersion: string;
   detectionMethod?: CriterionVerificationMethod;
-  originType?: 'WINHOOD_NATIVE_STATIC' | 'EXTERNAL_TOOL_EXECUTION' | 'IMPORTED_REPORT' | 'MANUAL_AUDIT';
+  originType?:
+    | 'WINHOOD_NATIVE_STATIC'
+    | 'WINHOOD_TAINT_AST'
+    | 'WINHOOD_SCA_ENGINE'
+    | 'EXTERNAL_TOOL_EXECUTION'
+    | 'IMPORTED_REPORT'
+    | 'MANUAL_AUDIT'
+    | 'RUNTIME_REPRODUCED';
   category: 'CODE_QUALITY' | 'SAST' | 'SCA' | 'SECRETS' | 'SBOM' | 'ARCHITECTURE' | 'DATABASE' | 'DAST' | 'IAC' | 'OS_SANDBOX';
   originalRuleId: string;
   title: string;
@@ -692,6 +704,8 @@ export interface CategoryScoreDetail {
   testsFailed?: number;
   testsNotExecuted?: number;
   rawMetricSummary?: Record<string, any>;
+  measurementState?: MetricMeasurementState;
+  metricProvenance?: MetricProvenanceRecord[];
 }
 
 export interface MarketCompetitorCandidate {
@@ -879,6 +893,28 @@ export interface SoftwareScoreCard {
     security: 'A' | 'B' | 'C' | 'D' | 'E';
     maintainability: 'A' | 'B' | 'C' | 'D' | 'E';
   };
+  isPartialEvaluation?: boolean;
+  unmeasuredCategories?: BenchmarkCategoryKey[];
+  metricProvenance?: Record<string, MetricProvenanceRecord>;
+  sonarNativeResults?: {
+    available: boolean;
+    sourceInstanceUrl?: string | null;
+    sonarVersion?: string | null;
+    nativeScore?: number | null;
+    reliabilityRating?: 'A' | 'B' | 'C' | 'D' | 'E' | null;
+    securityRating?: 'A' | 'B' | 'C' | 'D' | 'E' | null;
+    maintainabilityRating?: 'A' | 'B' | 'C' | 'D' | 'E' | null;
+    qualityGateStatus?: string | null;
+    note?: string;
+  };
+  winhoodCalculatedResults?: {
+    compositeScore: number | null;
+    algorithmVersion: string;
+    assessedCategoriesCount: number;
+    totalCategoriesCount: number;
+  };
+  sbomSummary?: SbomDocumentBundle | null;
+  scaCorrelations?: ScaVulnerabilityCorrelation[];
 }
 
 export interface BenchmarkRunProgress {
@@ -1085,6 +1121,11 @@ export interface BenchmarkRun {
     security: 'A' | 'B' | 'C' | 'D' | 'E';
     maintainability: 'A' | 'B' | 'C' | 'D' | 'E';
   };
+  isPartialEvaluation?: boolean;
+  benchmarkMatchDecision?: BenchmarkMatchDecision;
+  sbomsBySoftware?: Record<string, SbomDocumentBundle>;
+  scaCorrelationsBySoftware?: Record<string, ScaVulnerabilityCorrelation[]>;
+  referenceSnapshotsUsed?: ReferenceSnapshotRecord[];
   executiveSummary: string;
 }
 
@@ -1141,12 +1182,18 @@ export interface StandardizedExecutionRecord {
   startedAt: string;
   completedAt: string;
   durationMs: number;
-  resultStatus: 'EXECUTED_VALIDATED' | 'TOOL_NOT_INSTALLED' | 'OUT_OF_SCOPE_BLOCKED' | 'ABORTED_EMERGENCY' | 'INCONCLUSIVE';
+  resultStatus:
+    | 'EXECUTED_VALIDATED'
+    | 'EXECUTED_STATIC_ONLY'
+    | 'TOOL_NOT_INSTALLED'
+    | 'OUT_OF_SCOPE_BLOCKED'
+    | 'ABORTED_EMERGENCY'
+    | 'INCONCLUSIVE';
   technicalEvidence: string;
   logs: string[];
   severity: SeverityLevel;
   impactDescription: string;
-  reproducibility: 'ALTA_DETERMINISTICA' | 'MEDIA_CONDICIONAL' | 'BAIXA' | 'NAO_REPRODUZIVEL';
+  reproducibility: 'ALTA_DETERMINISTICA' | 'MEDIA_CONDICIONAL' | 'BAIXA' | 'NAO_REPRODUZIVEL' | 'STATIC_ANALYSIS_ONLY';
   validationState: VulnerabilityValidationState;
   reexecutionHistory: Array<{
     timestamp: string;
@@ -1807,6 +1854,234 @@ export interface SonarTokenVerificationResult {
   statusLabel: SonarTokenStatusLabel;
   message: string;
 }
+
+// ============================================================================
+// FORMAL VERACITY, PROVENANCE, SBOM/SCA, REFERENCE INTELLIGENCE & GOLDEN TYPES
+// ============================================================================
+
+export type MetricMeasurementState =
+  | 'MEASURED'
+  | 'STATIC_DERIVED'
+  | 'IMPORTED'
+  | 'INFERRED'
+  | 'NOT_MEASURED'
+  | 'NOT_APPLICABLE'
+  | 'FAILED'
+  | 'INCONCLUSIVE';
+
+export interface MetricProvenanceRecord {
+  metricKey: string;
+  value: number | string | boolean | null;
+  state: MetricMeasurementState;
+  origin: string;
+  method: string;
+  toolName: string;
+  toolVersion: string;
+  measuredAt: string;
+  scope: string;
+  evidenceFile?: string | null;
+  evidenceHash?: string | null;
+  notes?: string | null;
+}
+
+export interface SbomComponentRecord {
+  bomRef: string;
+  name: string;
+  version: string;
+  purl: string;
+  ecosystem: 'npm' | 'pypi' | 'maven' | 'golang' | 'cargo' | 'nuget' | 'generic';
+  license: string;
+  dependencyScope: 'DIRECT' | 'TRANSITIVE' | 'UNKNOWN';
+  manifestFile: string;
+  sha256?: string | null;
+}
+
+export interface SbomDocumentBundle {
+  softwareId: string;
+  softwareName: string;
+  softwareVersion: string;
+  generatedAt: string;
+  sourceMethod: 'LOCKFILE_AND_MANIFEST_PARSER' | 'SYFT_CLI' | 'TRIVY_CLI';
+  componentsCount: number;
+  directCount: number;
+  transitiveCount: number;
+  components: SbomComponentRecord[];
+  cyclonedx15Json: Record<string, unknown>;
+  spdx23Json: Record<string, unknown>;
+  cyclonedxSha256: string;
+  spdxSha256: string;
+}
+
+export interface ScaVulnerabilityCorrelation {
+  id: string;
+  softwareId: string;
+  packageName: string;
+  installedVersion: string;
+  ecosystem: SbomComponentRecord['ecosystem'];
+  dependencyScope: SbomComponentRecord['dependencyScope'];
+  license: string;
+  cveId: string | null;
+  ghsaId: string | null;
+  cweIds: string[];
+  cvssScore: number | null;
+  epssScore: number | null;
+  epssPercentile: number | null;
+  cisaKev: boolean;
+  affectedVersionRange: string;
+  fixedVersion: string | null;
+  severity: 'BLOCKER' | 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
+  dbSource: 'OSV.dev' | 'NVD' | 'FIRST_EPSS' | 'CISA_KEV' | 'GRYPE_DB' | 'OSV_SCANNER' | 'TRIVY_DB';
+  dbVersion: string;
+  dbSnapshotAt: string;
+  summary: string;
+  evidenceSha256: string;
+}
+
+export type ReferenceSourceKey =
+  | 'SONARQUBE_SERVER'
+  | 'SONARQUBE_CLOUD'
+  | 'OWASP_BENCHMARK'
+  | 'OSV_DEV'
+  | 'NVD_NIST'
+  | 'FIRST_EPSS'
+  | 'CISA_KEV'
+  | 'MITRE_CWE'
+  | 'PUBLIC_REPOS_VERSIONED'
+  | 'INTERNAL_HISTORY';
+
+export type ReferenceFreshnessState =
+  | 'FRESH'
+  | 'CACHED_VALID'
+  | 'STALE'
+  | 'UNAVAILABLE_USING_CACHED'
+  | 'UNAVAILABLE_NO_CACHE';
+
+export interface ReferenceSnapshotRecord {
+  id: string;
+  sourceKey: ReferenceSourceKey;
+  sourceName: string;
+  version: string;
+  fetchedAt: string;
+  originUrl: string;
+  license: string;
+  sha256: string;
+  recordsCount: number;
+  rulesIncluded: string[];
+  toolsReferenced: string[];
+  environmentTag: string;
+  freshnessStatus: ReferenceFreshnessState;
+  ttlHours: number;
+  isOfflineFallback: boolean;
+  lastError?: string | null;
+  payloadSummary: Record<string, unknown>;
+}
+
+export interface BenchmarkMatchDecision {
+  matchId: string;
+  mode:
+    | 'INDIVIDUAL'
+    | 'AB_SOFTWARE'
+    | 'VS_SONARQUBE'
+    | 'VS_PUBLIC_REFERENCE'
+    | 'VS_INTERNAL_HISTORY';
+  comparable: boolean;
+  canDeclareOfficialWinner: boolean;
+  compatibilityScorePercent: number;
+  checks: Array<{
+    criterion:
+      | 'LANGUAGES'
+      | 'FRAMEWORKS'
+      | 'DOMAIN'
+      | 'SCOPE'
+      | 'COMMIT_BASELINE'
+      | 'ENGINE_VERSIONS'
+      | 'QUALITY_PROFILES'
+      | 'QUALITY_GATES'
+      | 'AVAILABLE_REPORTS'
+      | 'EXECUTION_ENVIRONMENT'
+      | 'TEST_COVERAGE';
+    passed: boolean;
+    severity: 'BLOCKING' | 'WARNING' | 'INFO';
+    detail: string;
+  }>;
+  blockingReasons: string[];
+  warnings: string[];
+}
+
+export interface GoldenValidationCaseResult {
+  caseId: string;
+  title: string;
+  language: 'TypeScript' | 'JavaScript' | 'Python' | 'Java' | 'C#' | 'Go' | 'Rust' | 'SQL';
+  category: string;
+  cwe: string;
+  expectedVulnerable: boolean;
+  detectedVulnerable: boolean;
+  classification: 'TP' | 'FP' | 'TN' | 'FN';
+  durationMs: number;
+  detectedRules: string[];
+}
+
+export interface GoldenValidationSuiteReport {
+  validationId: string;
+  executedAt: string;
+  engineVersion: string;
+  datasetVersion: string;
+  totalCases: number;
+  truePositives: number;
+  falsePositives: number;
+  trueNegatives: number;
+  falseNegatives: number;
+  precision: number;
+  recall: number;
+  f1Score: number;
+  falsePositiveRate: number;
+  falseNegativeRate: number;
+  totalDurationMs: number;
+  memoryDeltaMb: number;
+  byLanguage: Record<
+    string,
+    {
+      cases: number;
+      tp: number;
+      fp: number;
+      tn: number;
+      fn: number;
+      precision: number;
+      recall: number;
+      f1Score: number;
+    }
+  >;
+  byCategory: Record<
+    string,
+    {
+      cases: number;
+      tp: number;
+      fp: number;
+      tn: number;
+      fn: number;
+      precision: number;
+      recall: number;
+      f1Score: number;
+    }
+  >;
+  cases: GoldenValidationCaseResult[];
+  reportSha256: string;
+}
+
+export interface ParsedCoverageReportSummary {
+  found: boolean;
+  format: 'LCOV' | 'JACOCO_XML' | 'COBERTURA_XML' | 'ISTANBUL_JSON' | 'NONE';
+  sourceFiles: string[];
+  linesFound: number;
+  linesHit: number;
+  branchesFound: number;
+  branchesHit: number;
+  lineCoveragePercent: number | null;
+  branchCoveragePercent: number | null;
+  state: MetricMeasurementState;
+  evidenceHash: string | null;
+}
+
 
 
 

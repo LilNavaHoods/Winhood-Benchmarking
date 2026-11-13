@@ -619,6 +619,56 @@ export const VeracityAdaptersReportsModule: React.FC<
                       </div>
                     )}
 
+                    {/* Proveniência Formal de Métricas (MEASURED / STATIC_DERIVED / NOT_MEASURED) */}
+                    {(() => {
+                      const matchingCard = latestRun.scoreCards.find((sc) => sc.softwareId === v.softwareId);
+                      const provEntries = matchingCard?.metricProvenance
+                        ? Object.values(matchingCard.metricProvenance)
+                        : [];
+                      if (!matchingCard) return null;
+                      return (
+                        <div className="p-3 rounded border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10] space-y-2 text-[11px]">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="font-bold text-slate-800 dark:text-slate-200">
+                              Proveniência &amp; Estados Formais de Medição
+                            </span>
+                            <span
+                              className={`font-mono text-[10px] font-bold px-2 py-0.5 rounded ${
+                                matchingCard.isPartialEvaluation
+                                  ? 'bg-amber-500/15 text-amber-500'
+                                  : 'bg-emerald-500/15 text-emerald-500'
+                              }`}
+                            >
+                              {matchingCard.isPartialEvaluation ? 'AVALIAÇÃO PARCIAL' : 'COBERTURA COMPLETA'}
+                            </span>
+                          </div>
+                          {provEntries.length > 0 && (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 font-mono text-[10px]">
+                              {provEntries.slice(0, 8).map((p) => (
+                                <div
+                                  key={p.metricKey}
+                                  className="flex items-center justify-between gap-2 px-2 py-1 rounded bg-white dark:bg-[#0f141c] border border-slate-200/70 dark:border-slate-800"
+                                >
+                                  <span className="truncate text-slate-600 dark:text-slate-300">{p.metricKey}</span>
+                                  <span
+                                    className={`font-bold shrink-0 ${
+                                      p.state === 'MEASURED'
+                                        ? 'text-emerald-500'
+                                        : p.state === 'STATIC_DERIVED' || p.state === 'IMPORTED'
+                                          ? 'text-[#31d6c4]'
+                                          : 'text-amber-500'
+                                    }`}
+                                  >
+                                    {p.state}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+
                     {/* 19-Point Audit Matrix: Claimed vs Observed vs Reconciled (Seção 3.4) */}
                     {v.auditMatrix && v.auditMatrix.length > 0 && (
                       <details className="rounded border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10] p-2.5 text-[11px]">

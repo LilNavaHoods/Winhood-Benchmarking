@@ -27,6 +27,7 @@ export type AppNavSection =
   | 'arch_qa_perf'
   | 'hardware_benchmark'
   | 'veracity'
+  | 'reference_intelligence'
   | 'reports'
   | 'user_guide';
 
@@ -128,7 +129,7 @@ export const StepByStepJourneyBar: React.FC<StepByStepJourneyBarProps> = ({
       relatedNavs: ['sonar_hub', 'tools_integrations'],
       completed: step3Done,
       icon: Wrench,
-      badgeText: 'Qualidade & Docker',
+      badgeText: 'Sonar & Docker',
     },
     {
       stepNumber: 4,
@@ -277,9 +278,9 @@ export const StepByStepJourneyBar: React.FC<StepByStepJourneyBarProps> = ({
                         : 'bg-white/60 dark:bg-[#0c1017] border-slate-200 dark:border-slate-800/80 hover:border-slate-300 dark:hover:border-slate-700'
                   }`}
                 >
-                  <div className="flex items-center justify-between gap-1.5">
+                  <div className="flex flex-wrap items-center justify-between gap-1">
                     <span
-                      className={`inline-flex items-center gap-1 text-[11px] font-mono font-bold tabular-nums ${
+                      className={`inline-flex items-center gap-1 min-w-0 text-[11px] font-mono font-bold tabular-nums ${
                         isCurrentScreen
                           ? 'text-[#0e9f8e] dark:text-[#31d6c4]'
                           : step.completed
@@ -292,7 +293,7 @@ export const StepByStepJourneyBar: React.FC<StepByStepJourneyBarProps> = ({
                       {step.completed ? (
                         <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-500" />
                       ) : (
-                        <span className="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-800 text-[11px] flex items-center justify-center">
+                        <span className="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-800 text-[11px] flex items-center justify-center shrink-0">
                           {step.stepNumber}
                         </span>
                       )}
@@ -300,12 +301,12 @@ export const StepByStepJourneyBar: React.FC<StepByStepJourneyBarProps> = ({
                     </span>
 
                     {isRecommended && (
-                      <span className="text-[11px] font-mono font-semibold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-600 dark:text-amber-300 border border-amber-500/30">
+                      <span className="text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-600 dark:text-amber-300 border border-amber-500/30 whitespace-nowrap shrink-0">
                         Próximo
                       </span>
                     )}
                     {isCurrentScreen && (
-                      <span className="text-[11px] font-mono font-semibold px-1.5 py-0.5 rounded bg-[#31d6c4]/15 text-[#0e9f8e] dark:text-[#31d6c4]">
+                      <span className="text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded bg-[#31d6c4]/15 text-[#0e9f8e] dark:text-[#31d6c4] whitespace-nowrap shrink-0">
                         Atual
                       </span>
                     )}
