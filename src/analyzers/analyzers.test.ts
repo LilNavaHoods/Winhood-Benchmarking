@@ -182,4 +182,116 @@ test('CoverageReportParser parses LCOV, JaCoCo XML, Cobertura XML and Istanbul J
   });
   assert.equal(istanbul.format, 'ISTANBUL_JSON');
   assert.equal(istanbul.lineCoveragePercent, 50);
+
+  // Cobertura without lines-valid must NOT fabricate line counts (linesFound === null)
+  const coberturaOnlyRate = CoverageReportParser.parseFromFilesMap({
+    'coverage/cobertura.xml': '<coverage line-rate="0.75"></coverage>',
+  });
+  assert.equal(coberturaOnlyRate.state, 'MEASURED');
+  assert.equal(coberturaOnlyRate.lineCoveragePercent, 75);
+  assert.equal(coberturaOnlyRate.linesFound, null);
+  assert.equal(coberturaOnlyRate.linesHit, null);
+
+  // Duplicate SF entries across aggregated LCOV blocks deduplicated accurately
+  const dupLcov = CoverageReportParser.parseFromFilesMap({
+    'coverage/lcov.info': [
+      'SF:src/dup.ts',
+      'DA:1,1',
+      'DA:2,0',
+      'end_of_record',
+      'SF:src/dup.ts',
+      'DA:1,3',
+      'DA:2,2',
+      'end_of_record',
+    ].join('\n'),
+  });
+  assert.equal(dupLcov.state, 'MEASURED');
+  assert.equal(dupLcov.linesFound, 2);
+  assert.equal(dupLcov.linesHit, 2);
+  assert.equal(dupLcov.lineCoveragePercent, 100);
 });
+
+test('TaintAnalyzer enforces sink-aware sanitization (encodeURIComponent/parseInt/escapeHtml/basename) and 2-hop interprocedural flows', () => {
+  // 1. encodeURIComponent does NOT neutralize SQLi (CWE-89)
+  const urlEncodedSqlFiles = {
+    'src/api/search.ts': [
+      'export function searchUser(userQuery: string, db: any) {',
+      '  const encoded = encodeURIComponent(userQuery);',
+      '  const sql = "SELECT * FROM users WHERE q = \'" + encoded + "\'";',
+      '  return db.query(sql);',
+      '}',
+    ].join('\n'),
+  };
+  const encAst = Object.entries(urlEncodedSqlFiles).map(([p, c]) => ParserRegistry.parseFile(p, c));
+  const encTaints = TaintAnalyzer.analyzeFlows(encAst, urlEncodedSqlFiles);
+  assert.ok(encTaints.some((i) => i.cwe === 'CWE-89'), 'encodeURIComponent must not clear SQLi taint');
+
+  // 2. parseInt neutralizes numeric SQLi
+  const numericSanitizedFiles = {
+    'src/api/byId.ts': [
+      'export function findById(userQuery: string, db: any) {',
+      '  const numericId = parseInt(userQuery, 10);',
+      '  return db.query("SELECT * FROM users WHERE id = " + numericId);',
+      '}',
+    ].join('\n'),
+  };
+  const numAst = Object.entries(numericSanitizedFiles).map(([p, c]) => ParserRegistry.parseFile(p, c));
+  const numTaints = TaintAnalyzer.analyzeFlows(numAst, numericSanitizedFiles);
+  assert.equal(numTaints.filter((i) => i.cwe === 'CWE-89').length, 0);
+
+  // 3. escapeHtml sanitizes XSS (CWE-79)
+  const escapedXssFiles = {
+    'src/web/greet.ts': [
+      'declare function escapeHtml(v: string): string;',
+      'declare function renderHtml(v: string): void;',
+      'export function greetUser(userName: string) {',
+      '  const safe = escapeHtml(userName);',
+      '  return renderHtml(safe);',
+      '}',
+    ].join('\n'),
+  };
+  const xssAst = Object.entries(escapedXssFiles).map(([p, c]) => ParserRegistry.parseFile(p, c));
+  const xssTaints = TaintAnalyzer.analyzeFlows(xssAst, escapedXssFiles);
+  assert.equal(xssTaints.filter((i) => i.cwe === 'CWE-79').length, 0);
+
+  // 4. path.basename sanitizes Path Traversal (CWE-22)
+  const safePathFiles = {
+    'src/files/readDoc.ts': [
+      'import path from "node:path";',
+      'import fs from "node:fs";',
+      'export function readDoc(fileName: string) {',
+      '  const safeName = path.basename(fileName);',
+      '  return fs.readFileSync(safeName, "utf8");',
+      '}',
+    ].join('\n'),
+  };
+  const pathAst = Object.entries(safePathFiles).map(([p, c]) => ParserRegistry.parseFile(p, c));
+  const pathTaints = TaintAnalyzer.analyzeFlows(pathAst, safePathFiles);
+  assert.equal(pathTaints.filter((i) => i.cwe === 'CWE-22').length, 0);
+
+  // 5. Two-hop interprocedural propagation (controller -> service -> repo -> SQLi sink)
+  const twoHopFiles = {
+    'src/ctrl.ts': [
+      'import { dispatchLookup } from "./svc";',
+      'export function apiHandler(userQuery: string, db: any) {',
+      '  const term = userQuery.trim();',
+      '  return dispatchLookup(term, db);',
+      '}',
+    ].join('\n'),
+    'src/svc.ts': [
+      'import { runRepoQuery } from "./repo";',
+      'export function dispatchLookup(filter: string, db: any) {',
+      '  return runRepoQuery(filter, db);',
+      '}',
+    ].join('\n'),
+    'src/repo.ts': [
+      'export function runRepoQuery(rawFilter: string, db: any) {',
+      '  return db.query("SELECT * FROM items WHERE label = \'" + rawFilter + "\'");',
+      '}',
+    ].join('\n'),
+  };
+  const twoHopAst = Object.entries(twoHopFiles).map(([p, c]) => ParserRegistry.parseFile(p, c));
+  const twoHopTaints = TaintAnalyzer.analyzeFlows(twoHopAst, twoHopFiles);
+  assert.ok(twoHopTaints.some((i) => i.cwe === 'CWE-89'));
+});
+

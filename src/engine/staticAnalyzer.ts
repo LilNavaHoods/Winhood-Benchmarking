@@ -6,6 +6,7 @@ import type {
   FileInventoryItem,
   MetricProvenanceRecord,
   MqrCategoryImpact,
+  MultiLayerCoverageBreakdown,
   NormalizedFinding,
   ParsedCoverageReportSummary,
   SbomDocumentBundle,
@@ -191,7 +192,15 @@ export function buildTechnicalInventory(
     const eligibleForAnalysis = ELIGIBLE_EXTENSIONS.has(ext);
 
     if (!eligibleForAnalysis) {
-      if (ext === '.md' || ext === '.yml' || ext === '.yaml' || ext === '.txt') {
+      if (
+        ext === '.md' ||
+        ext === '.yml' ||
+        ext === '.yaml' ||
+        ext === '.txt' ||
+        ext === '.info' ||
+        ext === '.xml' ||
+        ext === '.lock'
+      ) {
         ignoredFilesCount += 1;
       } else {
         unsupportedFilesCount += 1;
@@ -1598,8 +1607,20 @@ export function executeRealStaticAnalysisOnSource(
     totalCodeLines > 0 ? Math.round((duplicatedLines / totalCodeLines) * 1000) / 10 : 0;
 
   const totalVulnerabilities = criticalVulns + highVulns + mediumVulns + lowVulns;
+  const parseErrorsCount = inventorySnapshot.errorFilesCount;
+  const babelAstFiles = Array.from(parsedAstMap.values()).filter((p) => p.parserKind === 'BABEL_AST').length;
+  const structuralParserFiles = Array.from(parsedAstMap.values()).filter((p) => p.parserKind === 'STRUCTURAL_PARSER').length;
+  const successfullyParsedFiles = babelAstFiles + structuralParserFiles;
+  const totalNonIgnoredDiscovered = Math.max(
+    0,
+    inventorySnapshot.discoveredFilesCount - inventorySnapshot.ignoredFilesCount - inventorySnapshot.excludedFilesCount
+  );
   const coveragePercent =
-    eligibleEntries.length > 0 ? 100 : 0;
+    eligibleEntries.length === 0
+      ? 0
+      : totalNonIgnoredDiscovered > 0
+        ? Math.round((Math.min(eligibleEntries.length, Math.max(0, eligibleEntries.length - parseErrorsCount)) / totalNonIgnoredDiscovered) * 1000) / 10
+        : 0;
 
   const analysisCompletedMs = performance.now();
   const completedAtIso = new Date().toISOString();
@@ -1934,6 +1955,64 @@ export function executeRealStaticAnalysisOnSource(
     coverageReportSummary.found && coverageReportSummary.lineCoveragePercent !== null
       ? coverageReportSummary.lineCoveragePercent
       : 0;
+
+  const ingestionPct =
+    inventorySnapshot.discoveredFilesCount > 0
+      ? Math.round((inventorySnapshot.receivedFilesCount / inventorySnapshot.discoveredFilesCount) * 1000) / 10
+      : 0;
+  const parsingPct =
+    eligibleEntries.length > 0
+      ? Math.round((Math.min(eligibleEntries.length, successfullyParsedFiles) / eligibleEntries.length) * 1000) / 10
+      : 0;
+
+  const coverageBreakdown: MultiLayerCoverageBreakdown = {
+    ingestion: {
+      label: 'Ingestão de Artefatos',
+      percent: inventorySnapshot.discoveredFilesCount > 0 ? ingestionPct : null,
+      state: inventorySnapshot.receivedFilesCount > 0 ? 'MEASURED' : 'NOT_MEASURED',
+      numerator: inventorySnapshot.receivedFilesCount,
+      denominator: inventorySnapshot.discoveredFilesCount,
+      detail: `${inventorySnapshot.receivedFilesCount} de ${inventorySnapshot.discoveredFilesCount} arquivo(s) descobertos ingeridos (${uploadCheck.blockedFiles.length} bloqueados).`,
+    },
+    analysis: {
+      label: 'Cobertura de Análise Estática (Elegíveis vs Não Suportados)',
+      percent: totalNonIgnoredDiscovered > 0 ? coveragePercent : null,
+      state: eligibleEntries.length > 0 ? 'STATIC_DERIVED' : 'NOT_MEASURED',
+      numerator: eligibleEntries.length,
+      denominator: totalNonIgnoredDiscovered,
+      detail: `${eligibleEntries.length} elegível(is) de ${totalNonIgnoredDiscovered} arquivo(s) não ignorados (${inventorySnapshot.unsupportedFilesCount} não suportados).`,
+    },
+    parsing: {
+      label: 'Cobertura de Parsing (AST vs Estrutural)',
+      percent: eligibleEntries.length > 0 ? parsingPct : null,
+      state: eligibleEntries.length > 0 ? 'STATIC_DERIVED' : 'NOT_MEASURED',
+      numerator: successfullyParsedFiles,
+      denominator: eligibleEntries.length,
+      detail: `Babel AST real: ${babelAstFiles} arquivo(s) TS/JS | Parser estrutural: ${structuralParserFiles} arquivo(s) | Erros de parse: ${parseErrorsCount}.`,
+    },
+    language: {
+      label: 'Cobertura por Linguagem',
+      percent: Object.keys(inventorySnapshot.languageBreakdown).length > 0 ? coveragePercent : null,
+      state: eligibleEntries.length > 0 ? 'STATIC_DERIVED' : 'NOT_MEASURED',
+      numerator: Object.keys(inventorySnapshot.languageBreakdown).length,
+      denominator: Object.keys(inventorySnapshot.languageBreakdown).length || null,
+      detail: Object.entries(inventorySnapshot.languageBreakdown)
+        .map(([lang, loc]) => `${lang}: ${loc} LOC`)
+        .join(' | ') || 'Nenhuma linguagem identificada.',
+    },
+    test: {
+      label: 'Cobertura de Testes (Relatório Real LCOV/JaCoCo/Cobertura/Istanbul)',
+      percent: coverageReportSummary.found ? coverageReportSummary.lineCoveragePercent : null,
+      state: coverageReportSummary.state,
+      numerator: coverageReportSummary.linesHit,
+      denominator: coverageReportSummary.linesFound,
+      detail: coverageReportSummary.found
+        ? `${coverageReportSummary.format}: ${coverageReportSummary.lineCoveragePercent}% (${coverageReportSummary.linesHit ?? '?'}/${coverageReportSummary.linesFound ?? '?'} linhas)`
+        : 'Nenhum relatório real de cobertura de testes fornecido (NOT_MEASURED).',
+    },
+  };
+
+  veracity.coverageBreakdown = coverageBreakdown;
 
   // Testes funcionais executados na análise estática são 0 / NOT_MEASURED até execução controlada real
   const functionalTestsTotal = 0;

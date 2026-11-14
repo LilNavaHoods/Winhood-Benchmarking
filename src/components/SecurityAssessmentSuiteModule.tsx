@@ -169,43 +169,83 @@ export const SecurityAssessmentSuiteModule: React.FC<
 
       {/* Barra de Governança do Ambiente Isolado */}
       {suite && (
-        <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs font-mono tabular-nums">
-          <div>
-            <div className="text-slate-400 font-sans text-[11px]">Isolamento</div>
-            <div className="font-bold text-[#31d6c4] mt-0.5">
-              {suite.sandboxControl.isolationMode}
+        <div className="space-y-3">
+          <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs font-mono tabular-nums">
+            <div>
+              <div className="text-slate-400 font-sans text-[11px]">Isolamento Real</div>
+              <div className="font-bold text-[#31d6c4] mt-0.5">
+                {suite.sandboxControl.isolationMode} ({suite.sandboxControl.isolationState || 'N/A'})
+              </div>
+            </div>
+            <div>
+              <div className="text-slate-400 font-sans text-[11px]">Escopo Autorizado</div>
+              <div className="font-bold text-slate-900 dark:text-slate-100 mt-0.5 truncate">
+                {suite.sandboxControl.scopeAllowlist[0]}
+              </div>
+            </div>
+            <div>
+              <div className="text-slate-400 font-sans text-[11px]">Política de Rede</div>
+              <div className="font-bold text-slate-900 dark:text-slate-100 mt-0.5">
+                {suite.sandboxControl.networkPolicy}
+              </div>
+            </div>
+            <div>
+              <div className="text-slate-400 font-sans text-[11px]">Limites de Recursos</div>
+              <div className="font-bold text-slate-900 dark:text-slate-100 mt-0.5">
+                {suite.sandboxControl.cpuLimitCores} vCPU / {suite.sandboxControl.memoryLimitMb} MB
+              </div>
+            </div>
+            <div>
+              <div className="text-slate-400 font-sans text-[11px]">Snapshot Baseline</div>
+              <div className="font-bold text-slate-900 dark:text-slate-100 mt-0.5">
+                {suite.sandboxControl.snapshotBaselineId}
+              </div>
+            </div>
+            <div>
+              <div className="text-slate-400 font-sans text-[11px]">Timeout &amp; Recuperação</div>
+              <div
+                className={`font-bold mt-0.5 ${
+                  suite.sandboxControl.recoveryVerified ? 'text-emerald-500' : 'text-amber-500'
+                }`}
+              >
+                {suite.sandboxControl.timeoutSeconds}s /{' '}
+                {suite.sandboxControl.recoveryVerified ? 'Verificada' : 'Não Exercitada'}
+              </div>
             </div>
           </div>
-          <div>
-            <div className="text-slate-400 font-sans text-[11px]">Escopo Autorizado</div>
-            <div className="font-bold text-slate-900 dark:text-slate-100 mt-0.5 truncate">
-              {suite.sandboxControl.scopeAllowlist[0]}
+
+          {suite.modules && suite.modules.length > 0 && (
+            <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-4 flex flex-wrap items-center justify-between gap-3 text-xs">
+              <div>
+                <span className="font-bold text-slate-900 dark:text-slate-100">
+                  Módulos da Suíte (Implementados vs Ativos em Execução Real):
+                </span>{' '}
+                <span className="font-mono text-slate-500">
+                  {suite.modules.filter((m) => m.implementationState === 'IMPLEMENTED').length} implementados ·{' '}
+                  {suite.modules.filter((m) => m.status === 'ACTIVE').length} ativos ·{' '}
+                  {suite.modules.filter((m) => m.status === 'NOT_CONFIGURED').length} não configurados ·{' '}
+                  {suite.modules.filter((m) => m.status === 'BLOCKED').length} bloqueados
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-1.5 font-mono text-[10px]">
+                {suite.modules.map((mod) => (
+                  <span
+                    key={mod.moduleId}
+                    title={mod.reason || mod.label}
+                    className={`px-2 py-0.5 rounded border ${
+                      mod.status === 'ACTIVE'
+                        ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-500'
+                        : mod.status === 'BLOCKED'
+                          ? 'border-rose-500/30 bg-rose-500/10 text-rose-500'
+                          : 'border-amber-500/30 bg-amber-500/10 text-amber-500'
+                    }`}
+                  >
+                    {mod.moduleId}: {mod.status}
+                  </span>
+                ))}
+              </div>
             </div>
-          </div>
-          <div>
-            <div className="text-slate-400 font-sans text-[11px]">Política de Rede</div>
-            <div className="font-bold text-slate-900 dark:text-slate-100 mt-0.5">
-              {suite.sandboxControl.networkPolicy}
-            </div>
-          </div>
-          <div>
-            <div className="text-slate-400 font-sans text-[11px]">Limites de Recursos</div>
-            <div className="font-bold text-slate-900 dark:text-slate-100 mt-0.5">
-              {suite.sandboxControl.cpuLimitCores} vCPU / {suite.sandboxControl.memoryLimitMb} MB
-            </div>
-          </div>
-          <div>
-            <div className="text-slate-400 font-sans text-[11px]">Snapshot Baseline</div>
-            <div className="font-bold text-slate-900 dark:text-slate-100 mt-0.5">
-              {suite.sandboxControl.snapshotBaselineId}
-            </div>
-          </div>
-          <div>
-            <div className="text-slate-400 font-sans text-[11px]">Timeout &amp; Recuperação</div>
-            <div className="font-bold text-emerald-500 mt-0.5">
-              {suite.sandboxControl.timeoutSeconds}s / Verificada
-            </div>
-          </div>
+          )}
         </div>
       )}
 
@@ -251,14 +291,21 @@ export const SecurityAssessmentSuiteModule: React.FC<
                 </div>
                 <div className="p-2.5 rounded bg-slate-50 dark:bg-[#080b10] border border-slate-200 dark:border-slate-800">
                   <div className="text-[10px] font-sans text-slate-400">Cobertura de Testes</div>
-                  <div className="font-bold text-sm text-emerald-500 mt-0.5">
-                    {m.testCoveragePercent}% ({m.totalExecutionTimeMs}ms)
-                  </div>
+                  {m.testCoverageState === 'MEASURED' || (m.testCoveragePercent !== null && m.testCoveragePercent > 0) ? (
+                    <div className="font-bold text-sm text-emerald-500 mt-0.5">
+                      {m.testCoveragePercent}% ({m.totalExecutionTimeMs}ms)
+                    </div>
+                  ) : (
+                    <div className="font-bold text-xs text-amber-500 mt-1">
+                      NÃO MEDIDO ({m.testCoverageState || 'NOT_MEASURED'})
+                    </div>
+                  )}
                 </div>
                 <div className="p-2.5 rounded bg-slate-50 dark:bg-[#080b10] border border-slate-200 dark:border-slate-800">
                   <div className="text-[10px] font-sans text-slate-400">Recuperação / Resiliência</div>
                   <div className="font-bold text-sm text-[#31d6c4] mt-0.5">
-                    {m.recoveryCapabilityScore.toFixed(1)} / {m.performanceUnderStressScore.toFixed(1)}
+                    {m.recoveryCapabilityScore !== null ? m.recoveryCapabilityScore.toFixed(1) : 'N/A'} /{' '}
+                    {m.performanceUnderStressScore !== null ? m.performanceUnderStressScore.toFixed(1) : 'N/A'}
                   </div>
                 </div>
               </div>

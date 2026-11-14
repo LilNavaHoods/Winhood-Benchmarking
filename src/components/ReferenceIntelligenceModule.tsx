@@ -16,6 +16,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import type {
+  AuthorizedPerfTarget,
   BenchmarkMatchDecision,
   BenchmarkRun,
   GoldenValidationSuiteReport,
@@ -26,7 +27,7 @@ import type {
 
 interface KeyStatusRecord {
   keyId: string;
-  purpose: 'EVIDENCE_HMAC' | 'TOKEN_VAULT_AES256' | 'ADMIN_RBAC';
+  purpose: 'EVIDENCE_HMAC' | 'EVIDENCE_ED25519' | 'TOKEN_VAULT_AES256' | 'ADMIN_RBAC';
   createdAt: string;
   rotatedAt?: string | null;
   status: 'ACTIVE' | 'RETIRED_VERIFY_ONLY';
@@ -37,6 +38,7 @@ interface KeyStatusPayload {
   keystorePath: string;
   keyOrigin: string;
   activeEvidenceKeyId: string;
+  activeEd25519KeyId?: string;
   activeVaultKeyId: string;
   adminTokenConfigured: boolean;
   totalKeysTracked: number;
@@ -101,11 +103,18 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
   const [execSwId, setExecSwId] = useState<string>('');
   const [testExecResult, setTestExecResult] = useState<any>(null);
   const [testExecLoading, setTestExecLoading] = useState(false);
-  const [perfUrl, setPerfUrl] = useState('http://localhost:3000/api/health');
+  const [perfUrl, setPerfUrl] = useState('http://127.0.0.1:3000/api/health');
   const [perfRequests, setPerfRequests] = useState(20);
   const [perfConcurrency, setPerfConcurrency] = useState(4);
   const [perfResult, setPerfResult] = useState<any>(null);
   const [perfLoading, setPerfLoading] = useState(false);
+  const [targets, setTargets] = useState<AuthorizedPerfTarget[]>([]);
+  const [selectedTargetId, setSelectedTargetId] = useState<string>('');
+  const [newTargetLabel, setNewTargetLabel] = useState('');
+  const [newTargetOrigin, setNewTargetOrigin] = useState('http://127.0.0.1:3000');
+  const [newTargetPurpose, setNewTargetPurpose] = useState('Profiling HTTP controlado');
+  const [allowLocalhostInTest, setAllowLocalhostInTest] = useState(true);
+  const [savingTarget, setSavingTarget] = useState(false);
   const [keyStatus, setKeyStatus] = useState<KeyStatusPayload | null>(null);
   const [rotatingKey, setRotatingKey] = useState<string | null>(null);
 
@@ -171,6 +180,23 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
     }
   }, []);
 
+  const fetchPerfTargets = useCallback(async () => {
+    try {
+      const res = await fetch('/api/execution/targets');
+      if (res.ok) {
+        const data = await res.json();
+        const list = (data.targets || []) as AuthorizedPerfTarget[];
+        setTargets(list);
+        if (list.length > 0 && !selectedTargetId) {
+          setSelectedTargetId(list[0].id);
+          setPerfUrl(`${list[0].origin}/api/health`);
+        }
+      }
+    } catch {
+      // Ignore transient error
+    }
+  }, [selectedTargetId]);
+
   const fetchSbom = useCallback(async () => {
     if (!latestRun && softwares.length === 0) {
       setSbomData(null);
@@ -203,7 +229,8 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
   useEffect(() => {
     void fetchReferences();
     void fetchKeyStatus();
-  }, [fetchReferences, fetchKeyStatus]);
+    void fetchPerfTargets();
+  }, [fetchReferences, fetchKeyStatus, fetchPerfTargets]);
 
   useEffect(() => {
     if (subTab === 'golden' && !goldenReport) {
@@ -212,8 +239,9 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
       void fetchSbom();
     } else if (subTab === 'execution_keys') {
       void fetchKeyStatus();
+      void fetchPerfTargets();
     }
-  }, [subTab, goldenReport, fetchGoldenLatest, fetchSbom, fetchKeyStatus]);
+  }, [subTab, goldenReport, fetchGoldenLatest, fetchSbom, fetchKeyStatus, fetchPerfTargets]);
 
   const handleSyncReferences = async () => {
     setSyncingRefs(true);
@@ -345,6 +373,58 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
     }
   };
 
+  const handleRegisterPerfTarget = async () => {
+    if (!newTargetOrigin.trim()) {
+      onNotify('Informe a origem HTTP/HTTPS do alvo autorizado.', 'error');
+      return;
+    }
+    setSavingTarget(true);
+    try {
+      const res = await fetch('/api/execution/targets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          label: newTargetLabel.trim() || newTargetOrigin.trim(),
+          origin: newTargetOrigin.trim(),
+          purpose: newTargetPurpose.trim() || 'Medição controlada de latência HTTP',
+          allowLocalhostInTest,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.target) {
+        setNewTargetLabel('');
+        await fetchPerfTargets();
+        setSelectedTargetId(data.target.id);
+        setPerfUrl(`${data.target.origin}/api/health`);
+        onNotify(`Alvo autorizado "${data.target.label}" homologado com proteção SSRF.`, 'success');
+      } else {
+        onNotify(data.message || data.error || 'Alvo bloqueado por política SSRF.', 'error');
+      }
+    } catch {
+      onNotify('Erro ao cadastrar alvo autorizado.', 'error');
+    } finally {
+      setSavingTarget(false);
+    }
+  };
+
+  const handleDeletePerfTarget = async (id: string) => {
+    try {
+      const res = await fetch(`/api/execution/targets/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        if (selectedTargetId === id) setSelectedTargetId('');
+        await fetchPerfTargets();
+        onNotify('Alvo autorizado removido.', 'success');
+      } else {
+        const data = await res.json();
+        onNotify(data.message || data.error || 'Erro ao remover alvo.', 'error');
+      }
+    } catch {
+      onNotify('Erro de rede ao remover alvo.', 'error');
+    }
+  };
+
   const handleRunHttpPerf = async () => {
     setPerfLoading(true);
     try {
@@ -352,9 +432,12 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          softwareId: execSwId || undefined,
+          targetId: selectedTargetId || undefined,
           targetUrl: perfUrl,
           requestsCount: perfRequests,
           concurrency: perfConcurrency,
+          allowExplicitLoopback: allowLocalhostInTest,
         }),
       });
       const data = await res.json();
@@ -363,11 +446,11 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
         onNotify(
           data.result.status === 'MEASURED'
             ? `Medição HTTP real concluída: P95 ${data.result.p95LatencyMs}ms · ${data.result.throughputRps} req/s.`
-            : 'Medição HTTP retornou NOT_MEASURED (verifique URL alvo).',
+            : `Medição HTTP retornou ${data.result.status} (${data.result.errorMessage || 'verifique alvo autorizado'}).`,
           data.result.status === 'MEASURED' ? 'success' : 'error'
         );
       } else {
-        onNotify(data.message || data.error || 'Falha no profiler HTTP.', 'error');
+        onNotify(data.message || data.error || 'Alvo recusado pelo SSRF Guard ou sem autorização.', 'error');
       }
     } catch {
       onNotify('Erro ao executar medição HTTP.', 'error');
@@ -376,7 +459,9 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
     }
   };
 
-  const handleRotateKey = async (purpose: 'EVIDENCE_HMAC' | 'TOKEN_VAULT_AES256') => {
+  const handleRotateKey = async (
+    purpose: 'EVIDENCE_HMAC' | 'EVIDENCE_ED25519' | 'TOKEN_VAULT_AES256'
+  ) => {
     setRotatingKey(purpose);
     try {
       const res = await fetch('/api/security/keys/rotate', {
@@ -389,7 +474,7 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
         setKeyStatus(data.keys);
         onNotify(`Chave ${purpose} rotacionada para ${data.newKeyId}. Chaves anteriores preservadas para auditoria.`, 'success');
       } else {
-        onNotify(data.error || 'Falha ao rotacionar chave.', 'error');
+        onNotify(data.message || data.error || 'Falha ao rotacionar chave.', 'error');
       }
     } catch {
       onNotify('Erro ao rotacionar chave criptográfica.', 'error');
@@ -768,17 +853,17 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
                     { label: 'False Neg (FN)', val: goldenReport.falseNegatives, cls: 'text-rose-500' },
                     {
                       label: 'Precision',
-                      val: `${(goldenReport.precision * 100).toFixed(1)}%`,
+                      val: goldenReport.precision !== null ? `${(goldenReport.precision * 100).toFixed(1)}%` : 'N/A',
                       cls: 'text-[#31d6c4]',
                     },
                     {
                       label: 'Recall',
-                      val: `${(goldenReport.recall * 100).toFixed(1)}%`,
+                      val: goldenReport.recall !== null ? `${(goldenReport.recall * 100).toFixed(1)}%` : 'N/A',
                       cls: 'text-[#31d6c4]',
                     },
                     {
                       label: 'F1 Score',
-                      val: `${(goldenReport.f1Score * 100).toFixed(1)}%`,
+                      val: goldenReport.f1Score !== null ? `${(goldenReport.f1Score * 100).toFixed(1)}%` : 'N/A',
                       cls: 'text-[#31d6c4]',
                     },
                     {
@@ -797,10 +882,29 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
                   ))}
                 </div>
 
+                <div className="p-3 rounded-lg border border-amber-500/30 bg-amber-500/10 text-xs text-amber-600 dark:text-amber-300 space-y-1">
+                  <div className="font-bold">
+                    Origem do Corpus: {goldenReport.datasetOriginLabel || 'WINHOOD_INTERNAL_CALIBRATION_CORPUS'}
+                  </div>
+                  <p className="text-[11px]">
+                    {goldenReport.sampleWarning ||
+                      'Corpus interno de calibração (N=20 casos pareados TP/TN): não substitui benchmark estatístico externo (NIST SARD / OWASP Benchmark oficial).'}
+                  </p>
+                  {goldenReport.datasetSha256 && (
+                    <div className="font-mono text-[10px]">
+                      SHA-256 Corpus: {goldenReport.datasetSha256}
+                    </div>
+                  )}
+                </div>
+
                 <div className="text-[11px] font-mono text-slate-500 flex flex-wrap gap-4">
                   <span>Dataset: {goldenReport.datasetVersion}</span>
-                  <span>FPR: {(goldenReport.falsePositiveRate * 100).toFixed(2)}%</span>
-                  <span>FNR: {(goldenReport.falseNegativeRate * 100).toFixed(2)}%</span>
+                  <span>
+                    FPR: {goldenReport.falsePositiveRate !== null ? `${(goldenReport.falsePositiveRate * 100).toFixed(2)}%` : 'N/A'}
+                  </span>
+                  <span>
+                    FNR: {goldenReport.falseNegativeRate !== null ? `${(goldenReport.falseNegativeRate * 100).toFixed(2)}%` : 'N/A'}
+                  </span>
                   <span>Delta RAM: {goldenReport.memoryDeltaMb} MB</span>
                   <span className="text-[#31d6c4]">SHA-256: {goldenReport.reportSha256.slice(0, 20)}...</span>
                 </div>
@@ -1073,11 +1177,98 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
               )}
             </div>
 
-            {/* Real HTTP Load Profiler */}
+            {/* Real HTTP Load Profiler + Authorized Targets (SSRF Guard) */}
             <div className="p-4 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10] space-y-3">
-              <div className="text-xs font-bold text-slate-800 dark:text-slate-200">
-                2. Medição Real de Carga HTTP (P50 / P95 / P99 / RPS / RSS)
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                  2. Medição Real de Carga HTTP com SSRF Guard &amp; Alvos Autorizados
+                </div>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-500">
+                  Anti-SSRF Ativo
+                </span>
               </div>
+
+              {/* Register New Target */}
+              <div className="p-2.5 rounded border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] space-y-2 text-xs">
+                <div className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+                  Cadastrar Alvo Autorizado (obrigatório antes de medir carga HTTP)
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <input
+                    type="text"
+                    aria-label="Rótulo do alvo autorizado"
+                    placeholder="Ex.: API Local WinHood"
+                    value={newTargetLabel}
+                    onChange={(e) => setNewTargetLabel(e.target.value)}
+                    className="rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-2.5 py-1.5 text-xs"
+                  />
+                  <input
+                    type="url"
+                    aria-label="Origem do alvo autorizado"
+                    placeholder="https://alvo.exemplo.com"
+                    value={newTargetOrigin}
+                    onChange={(e) => setNewTargetOrigin(e.target.value)}
+                    className="rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-2.5 py-1.5 font-mono text-xs"
+                  />
+                  <input
+                    type="text"
+                    aria-label="Finalidade do alvo autorizado"
+                    placeholder="Profiling HTTP controlado"
+                    value={newTargetPurpose}
+                    onChange={(e) => setNewTargetPurpose(e.target.value)}
+                    className="rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-2.5 py-1.5 text-xs"
+                  />
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <label className="flex items-center gap-1.5 text-[11px] text-slate-600 dark:text-slate-400 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={allowLocalhostInTest}
+                      onChange={(e) => setAllowLocalhostInTest(e.target.checked)}
+                    />
+                    <span>Permitir loopback em modo de teste (127.0.0.1 / localhost) para diagnóstico local</span>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleRegisterPerfTarget}
+                    disabled={savingTarget}
+                    className="px-3 py-1 rounded text-xs font-semibold bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-950 cursor-pointer disabled:opacity-50"
+                  >
+                    {savingTarget ? 'Validando...' : 'Autorizar Alvo'}
+                  </button>
+                </div>
+                {targets.length > 0 && (
+                  <div className="space-y-1 pt-1">
+                    {targets.map((t) => (
+                      <div
+                        key={t.id}
+                        className="flex items-center justify-between gap-2 px-2 py-1 rounded bg-slate-50 dark:bg-[#080b10] font-mono text-[10px]"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedTargetId(t.id);
+                            setPerfUrl(`${t.origin}/api/health`);
+                          }}
+                          className={`text-left truncate cursor-pointer ${
+                            selectedTargetId === t.id ? 'text-[#31d6c4] font-bold' : 'text-slate-600 dark:text-slate-300'
+                          }`}
+                        >
+                          {t.label} — {t.origin} ({t.purpose} · {t.authorizedBy})
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeletePerfTarget(t.id)}
+                          className="text-rose-500 hover:underline shrink-0 cursor-pointer"
+                        >
+                          Remover
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
                 <input
                   type="url"
@@ -1123,8 +1314,10 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
                     P50: {perfResult.p50LatencyMs}ms · P95: {perfResult.p95LatencyMs}ms · P99: {perfResult.p99LatencyMs}ms
                   </div>
                   <div className="text-slate-500">
-                    CPU: {perfResult.cpuPercent}% · RSS: {perfResult.memoryRssMb} MB · Hash:{' '}
-                    {perfResult.provenance?.evidenceHash?.slice(0, 14)}...
+                    CPU/RSS Agente: {perfResult.agentMetrics?.runnerCpuPercent ?? 0}% /{' '}
+                    {perfResult.agentMetrics?.runnerMemoryRssMb ?? 0} MB · Alvo CPU/RAM:{' '}
+                    {perfResult.targetMetrics?.cpuPercent ?? 'NÃO MEDIDO'} · Hash:{' '}
+                    {perfResult.provenance?.evidenceHash?.slice(0, 14) || 'N/A'}...
                   </div>
                 </div>
               )}
@@ -1136,7 +1329,7 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h2 className="text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
                 <KeyRound className="w-4 h-4 text-[#31d6c4]" />
-                <span>Gestão &amp; Rotação de Chaves Criptográficas</span>
+                <span>Gestão &amp; Rotação de Chaves Criptográficas (HMAC + Ed25519 + AES-GCM)</span>
               </h2>
               <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-[#31d6c4]/15 text-[#31d6c4]">
                 Zero Segredos Hardcoded
@@ -1154,6 +1347,12 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
                     <span className="text-slate-500">HMAC Ativa:</span>{' '}
                     <span className="text-[#31d6c4] font-bold">{keyStatus.activeEvidenceKeyId}</span>
                   </div>
+                  {keyStatus.activeEd25519KeyId && (
+                    <div>
+                      <span className="text-slate-500">Ed25519 Assimétrica Ativa:</span>{' '}
+                      <span className="text-[#31d6c4] font-bold">{keyStatus.activeEd25519KeyId}</span>
+                    </div>
+                  )}
                   <div>
                     <span className="text-slate-500">AES-256-GCM Vault Ativa:</span>{' '}
                     <span className="text-[#31d6c4] font-bold">{keyStatus.activeVaultKeyId}</span>
@@ -1171,7 +1370,16 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
                     className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] transition-colors cursor-pointer disabled:opacity-50"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 ${rotatingKey === 'EVIDENCE_HMAC' ? 'animate-spin' : ''}`} />
-                    <span>Rotacionar Chave HMAC</span>
+                    <span>Rotacionar HMAC</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleRotateKey('EVIDENCE_ED25519')}
+                    disabled={rotatingKey !== null}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold border border-[#31d6c4]/50 text-[#0e9f8e] dark:text-[#31d6c4] hover:bg-[#31d6c4]/10 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${rotatingKey === 'EVIDENCE_ED25519' ? 'animate-spin' : ''}`} />
+                    <span>Rotacionar Ed25519</span>
                   </button>
                   <button
                     type="button"
@@ -1180,7 +1388,7 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
                     className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold border border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-200 hover:border-[#31d6c4] transition-colors cursor-pointer disabled:opacity-50"
                   >
                     <ShieldAlert className="w-3.5 h-3.5 text-[#31d6c4]" />
-                    <span>Rotacionar Chave AES-Vault</span>
+                    <span>Rotacionar AES-Vault (Re-criptografar)</span>
                   </button>
                 </div>
 

@@ -67,6 +67,23 @@ export class SonarQubeIntegrationService {
     return SonarQubeConnection.decryptToken(enc) || undefined;
   }
 
+  public reencryptAllTokens(ctx: {
+    oldKeyId: string;
+    oldKeyBuffer: Buffer;
+    newKeyId: string;
+    newKeyBuffer: Buffer;
+  }): number {
+    let count = 0;
+    for (const [instId, enc] of this.encryptedTokensByInstanceId.entries()) {
+      const next = SonarQubeConnection.reencryptToken(enc, ctx);
+      if (next) {
+        this.encryptedTokensByInstanceId.set(instId, next);
+        count += 1;
+      }
+    }
+    return count;
+  }
+
   /**
    * Cria o estado inicial das tabelas SonarQube e Gitar sem exibir todas as ferramentas como
    * instaladas por padrão (Seção 13 e Seção 17).
@@ -463,41 +480,70 @@ export class SonarQubeIntegrationService {
         }
 
         // 2. Executar scanner real quando binário e diretório local estiverem disponíveis em instância real
+        const isTestEnv =
+          process.env.NODE_ENV === 'test' ||
+          process.env.WINHOOD_TEST_MODE === '1' ||
+          Boolean(process.env.NODE_TEST_CONTEXT);
         const isTestContractInstance = params.instance.id === 'sonar-contract-verified-instance';
-        let ceTaskId = `ce-${computeSha256(`${scannerConfig.projectKey}|${params.software.commitHash}`).slice(0, 12)}`;
+        if (isTestContractInstance && !isTestEnv) {
+          throw new Error(
+            'SONAR_CONTRACT_FORBIDDEN_IN_PRODUCTION: Instância de contrato de teste não pode ser executada fora do ambiente de testes (NODE_ENV=test ou WINHOOD_TEST_MODE=1).'
+          );
+        }
+
+        let ceTaskId: string | null = null;
         const executionId = `exec-${Date.now()}-${params.role.toLowerCase()}`;
 
-        if (!isTestContractInstance && fs.existsSync(scannerConfig.projectBaseDir)) {
+        if (!isTestContractInstance) {
+          if (!fs.existsSync(scannerConfig.projectBaseDir)) {
+            throw new Error(
+              `SONAR_PROJECT_DIR_NOT_FOUND: Diretório do projeto (${scannerConfig.projectBaseDir}) não existe no host para executar o sonar-scanner real e obter ceTaskId via report-task.txt.`
+            );
+          }
           const scannersInv = ToolAvailabilityService.discoverScannersInventory();
           const matchedScanner = scannersInv.find(
             (s) => s.scannerType === scannerConfig.scannerType && s.binaryDetected
           );
-          if (matchedScanner) {
-            const limits = this.lifecycleManager.getLimits();
-            const execRes = await SonarScannerExecutor.executeIsolatedScanner({
-              scannerType: scannerConfig.scannerType,
-              executablePath: matchedScanner.executablePath,
-              projectBaseDir: scannerConfig.projectBaseDir,
-              propertiesContent: scannerConfig.propertiesContent,
-              sonarToken: params.token,
-              timeoutMs: limits.analysisTimeoutSeconds * 1000,
-              maxMemoryMb: limits.scannerMemoryLimitMb,
-            });
-            if (execRes.reportTask?.ceTaskId) {
-              ceTaskId = execRes.reportTask.ceTaskId;
-              this.lifecycleManager.appendLog(
-                'SONAR_SCANNER',
-                'INFO',
-                'REAL_SCANNER_REPORT_TASK_CAPTURED',
-                `Scanner real (${matchedScanner.displayName}) executado com sucesso em ${execRes.durationMs}ms; ceTaskId=${ceTaskId}.`
-              );
-            } else if (execRes.executed && execRes.exitCode !== 0) {
-              throw new Error(
-                execRes.errorMessage ||
-                  `Execução real do SonarScanner falhou (exitCode=${execRes.exitCode}).`
-              );
-            }
+          if (!matchedScanner) {
+            throw new Error(
+              `SONAR_SCANNER_UNAVAILABLE: Binário real (${scannerConfig.scannerType}) não detectado no PATH; impossível executar scanner e capturar ceTaskId real.`
+            );
           }
+          const limits = this.lifecycleManager.getLimits();
+          const execRes = await SonarScannerExecutor.executeIsolatedScanner({
+            scannerType: scannerConfig.scannerType,
+            executablePath: matchedScanner.executablePath,
+            projectBaseDir: scannerConfig.projectBaseDir,
+            propertiesContent: scannerConfig.propertiesContent,
+            sonarToken: params.token,
+            timeoutMs: limits.analysisTimeoutSeconds * 1000,
+            maxMemoryMb: limits.scannerMemoryLimitMb,
+          });
+          if (execRes.executed && execRes.exitCode !== 0) {
+            throw new Error(
+              execRes.errorMessage ||
+                `Execução real do SonarScanner falhou (exitCode=${execRes.exitCode}).`
+            );
+          }
+          if (!execRes.reportTask?.ceTaskId) {
+            throw new Error(
+              'SONAR_REPORT_TASK_MISSING: Execução do scanner não produziu .scannerwork/report-task.txt com ceTaskId real do Compute Engine.'
+            );
+          }
+          ceTaskId = execRes.reportTask.ceTaskId;
+          this.lifecycleManager.appendLog(
+            'SONAR_SCANNER',
+            'INFO',
+            'REAL_SCANNER_REPORT_TASK_CAPTURED',
+            `Scanner real (${matchedScanner.displayName}) executado com sucesso em ${execRes.durationMs}ms; ceTaskId=${ceTaskId}.`
+          );
+        } else {
+          // Modo estritamente de teste contra servidor de contrato Web API: obter task ID do servidor de contrato
+          ceTaskId = `ce-contract-${computeSha256(`${scannerConfig.projectKey}|${params.software.commitHash}`).slice(0, 12)}`;
+        }
+
+        if (!ceTaskId) {
+          throw new Error('SONAR_CE_TASK_ID_MISSING: Nenhum ceTaskId real obtido para consultar o Compute Engine.');
         }
 
         // 3. Aguardar processamento assíncrono no Compute Engine (/api/ce/task)
@@ -650,6 +696,8 @@ export class SonarQubeIntegrationService {
           startedAt: taskRecord.submittedAt,
           completedAt: nowIso,
           status: 'COMPLETED',
+          sonarExecutionState: 'RESULTS_IMPORTED',
+          isContractTestInstance: isTestContractInstance,
           cacheHit: false,
           cacheKeySha256,
           measuresId: measuresRecord.id,
@@ -693,6 +741,16 @@ export class SonarQubeIntegrationService {
     validToken: string;
     close: () => Promise<void>;
   }> {
+    const isTestEnv =
+      process.env.NODE_ENV === 'test' ||
+      process.env.WINHOOD_TEST_MODE === '1' ||
+      Boolean(process.env.NODE_TEST_CONTEXT);
+    if (!isTestEnv) {
+      throw new Error(
+        'SONAR_CONTRACT_FORBIDDEN_IN_PRODUCTION: startEphemeralSonarWebApiContractServer só pode ser executado em suítes de teste (NODE_ENV=test ou WINHOOD_TEST_MODE=1).'
+      );
+    }
+
     // Analisar os arquivos reais de cada software para produzir respostas de API 100% fundamentadas no código real
     const realStatsByProjectKey = new Map<
       string,

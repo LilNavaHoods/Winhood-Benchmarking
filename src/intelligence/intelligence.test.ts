@@ -83,6 +83,49 @@ test('BenchmarkMatcher checks 11 criteria and blocks official winner when domain
   assert.equal(decision.checks.length, 11);
   assert.equal(decision.canDeclareOfficialWinner, false);
   assert.ok(decision.blockingReasons.length >= 1);
+
+  // Doc-only vs Full source blocked on AVAILABLE_REPORTS
+  const swDocOnly: Software = {
+    ...swA,
+    id: 'sw-doc-only-match',
+    name: 'ClosedDocs',
+    sourceType: 'PUBLIC_DOCUMENTATION_ONLY',
+    sourceAvailability: 'PUBLIC_DOCUMENTATION_ONLY',
+    sourceFilesContent: undefined,
+  };
+  const docDecision = BenchmarkMatcher.evaluate({
+    mode: 'AB_SOFTWARE',
+    softwares: [swA, swDocOnly],
+    profile: {
+      enabledCategories: ALL_BENCHMARK_CATEGORIES,
+      notApplicableCategories: [],
+      qualityGateId: 'qg-sonar-way',
+    },
+    algorithmVersion: 'WINHOOD-SONAR-MQR-v3.0.0',
+    environmentEquivalent: true,
+  });
+  assert.equal(docDecision.checks.find((c) => c.criterion === 'AVAILABLE_REPORTS')?.passed, false);
+  assert.equal(docDecision.canDeclareOfficialWinner, false);
+
+  // Measured coverage vs null coverage blocked on TEST_COVERAGE
+  const swA2: Software = { ...swA, id: 'sw-cov-b', name: 'VaultB' };
+  const covDecision = BenchmarkMatcher.evaluate({
+    mode: 'AB_SOFTWARE',
+    softwares: [swA, swA2],
+    profile: {
+      enabledCategories: ALL_BENCHMARK_CATEGORIES,
+      notApplicableCategories: [],
+      qualityGateId: 'qg-sonar-way',
+    },
+    scoreCards: [
+      { softwareName: 'VaultA', metricsSummary: { testCoveragePercent: 85 } } as any,
+      { softwareName: 'VaultB', metricsSummary: { testCoveragePercent: null } } as any,
+    ],
+    algorithmVersion: 'WINHOOD-SONAR-MQR-v3.0.0',
+    environmentEquivalent: true,
+  });
+  assert.equal(covDecision.checks.find((c) => c.criterion === 'TEST_COVERAGE')?.passed, false);
+  assert.equal(covDecision.canDeclareOfficialWinner, false);
 });
 
 test('KeyManagementService generates external keystore, rotates keys preserving history, and validates strict admin token', () => {
@@ -117,7 +160,7 @@ test('KeyManagementService generates external keystore, rotates keys preserving 
   }
 });
 
-test('ControlledTestAndPerfRunner runs isolated node --test and measures real HTTP P50/P95/P99 latency', async () => {
+test('ControlledTestAndPerfRunner runs isolated node --test, blocks unauthorized SSRF, and separates agent vs target telemetry on explicit loopback', async () => {
   const testResult = ControlledTestAndPerfRunner.runIsolatedTestSuite({
     softwareName: 'UnitRunnerCheck',
     filesMap: {
@@ -139,25 +182,51 @@ test('ControlledTestAndPerfRunner runs isolated node --test and measures real HT
   try {
     const addr = server.address();
     assert.ok(addr && typeof addr === 'object');
+
+    // Unauthorized loopback & metadata must be blocked by SsrfGuard
+    const blockedLoopback = await ControlledTestAndPerfRunner.measureHttpWorkload({
+      targetUrl: `http://127.0.0.1:${addr.port}/health`,
+      requestsCount: 5,
+      concurrency: 1,
+    });
+    assert.equal(blockedLoopback.status, 'BLOCKED_SSRF');
+
+    const blockedMeta = await ControlledTestAndPerfRunner.measureHttpWorkload({
+      targetUrl: 'http://169.254.169.254/latest/meta-data',
+      requestsCount: 5,
+      concurrency: 1,
+    });
+    assert.equal(blockedMeta.status, 'BLOCKED_SSRF');
+
+    // Explicit authorized loopback executes and cleanly separates agentMetrics vs null targetMetrics
     const perf = await ControlledTestAndPerfRunner.measureHttpWorkload({
       targetUrl: `http://127.0.0.1:${addr.port}/health`,
       requestsCount: 10,
       concurrency: 2,
+      allowExplicitLoopback: true,
     });
     assert.equal(perf.status, 'MEASURED');
     assert.equal(perf.successfulResponses, 10);
-    assert.ok(perf.throughputRps > 0);
+    assert.ok((perf.throughputRps ?? 0) > 0);
+    assert.ok(perf.agentMetrics.runnerMemoryRssMb > 0);
+    assert.equal(perf.targetMetrics.cpuPercent, null);
+    assert.equal(perf.targetMetrics.memoryRssMb, null);
+    assert.equal(perf.cpuPercent, null);
+    assert.equal(perf.memoryRssMb, null);
     assert.equal(perf.provenance.state, 'MEASURED');
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
 
-test('GoldenDatasetRunner executes 20 paired TP/TN cases with >= 85% Precision, Recall and F1', () => {
+test('GoldenDatasetRunner executes 20 paired TP/TN cases with >= 85% Precision, Recall and F1 and honest origin disclosures', () => {
   const report = GoldenDatasetRunner.runValidationSuite();
   assert.equal(report.totalCases, 20);
-  assert.ok(report.precision >= 0.85, `Expected precision >= 0.85, got ${report.precision}`);
-  assert.ok(report.recall >= 0.85, `Expected recall >= 0.85, got ${report.recall}`);
-  assert.ok(report.f1Score >= 0.85, `Expected F1 >= 0.85, got ${report.f1Score}`);
+  assert.equal(report.datasetOriginLabel, 'WINHOOD_INTERNAL_CALIBRATION_CORPUS');
+  assert.equal(report.datasetSha256.length, 64);
+  assert.ok(Boolean(report.sampleWarning));
+  assert.ok((report.precision ?? 0) >= 0.85, `Expected precision >= 0.85, got ${report.precision}`);
+  assert.ok((report.recall ?? 0) >= 0.85, `Expected recall >= 0.85, got ${report.recall}`);
+  assert.ok((report.f1Score ?? 0) >= 0.85, `Expected F1 >= 0.85, got ${report.f1Score}`);
   assert.equal(report.reportSha256.length, 64);
 });

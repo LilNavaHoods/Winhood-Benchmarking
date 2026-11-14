@@ -1,8 +1,5 @@
-import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
+import { SandboxExecutor } from '../execution/SandboxExecutor';
 import { ToolAvailabilityService } from '../services/tools/ToolAvailabilityService';
 import type { NormalizedFinding, SeverityLevel } from '../types/benchmark';
 import { FindingNormalizer } from './FindingNormalizer';
@@ -139,7 +136,7 @@ export class AnalyzerRegistry {
       durationMs,
       exitCode: 0,
       filesProcessed: astFilesCount,
-      filesFailed: 0,
+      filesFailed: parseResults.filter((p) => (p.errorCount || 0) > 0).length,
       measurementState: astFilesCount > 0 ? 'STATIC_DERIVED' : 'NOT_MEASURED',
       rawOutputSha256: crypto
         .createHash('sha256')
@@ -190,8 +187,8 @@ export class AnalyzerRegistry {
   }
 
   /**
-   * Executes installed external analyzers safely in an isolated temporary directory
-   * using spawnSync(..., { shell: false, timeout }). Never fakes results if not installed.
+   * Executes installed external analyzers strictly inside SandboxExecutor (bwrap/Docker OS sandbox).
+   * Blocks host fallback cleanly if OS isolation is absent, and validates exitCode + stdout JSON schema.
    */
   public static runInstalledExternalAnalyzers(
     scope: AnalysisScope,
@@ -199,16 +196,15 @@ export class AnalyzerRegistry {
   ): AnalyzerResult[] {
     const results: AnalyzerResult[] = [];
     const availability = AnalyzerRegistry.discoverExternalEngineAvailability();
-    const installed = availability.filter((a) => a.binaryDetected);
 
-    if (installed.length === 0 || Object.keys(scope.filesMap).length === 0) {
+    if (Object.keys(scope.filesMap || {}).length === 0) {
       return availability.map((item) => ({
         execution: {
           analyzerId: item.id,
           analyzerName: item.name,
           analyzerVersion: item.versionOutput || 'NOT_INSTALLED',
           executionMethod: 'NOT_EXECUTED',
-          binaryDetected: false,
+          binaryDetected: item.binaryDetected,
           startedAt: new Date().toISOString(),
           completedAt: new Date().toISOString(),
           durationMs: 0,
@@ -216,103 +212,120 @@ export class AnalyzerRegistry {
           filesProcessed: 0,
           filesFailed: 0,
           measurementState: 'NOT_MEASURED',
-          rawOutputSha256: crypto.createHash('sha256').update(`${item.id}:NOT_INSTALLED`).digest('hex'),
+          rawOutputSha256: crypto.createHash('sha256').update(`${item.id}:EMPTY_SCOPE`).digest('hex'),
         },
         findings: [],
-        limitations: [`Binário ${item.name} não encontrado no PATH do host.`],
+        limitations: ['Escopo vazio para análise externa.'],
       }));
     }
 
-    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'winhood-ext-'));
-    try {
-      for (const [relPath, content] of Object.entries(scope.filesMap)) {
-        const safeRel = relPath.replace(/^\/+/, '');
-        const dest = path.resolve(tmpRoot, safeRel);
-        if (!dest.startsWith(tmpRoot + path.sep)) continue;
-        fs.mkdirSync(path.dirname(dest), { recursive: true });
-        fs.writeFileSync(dest, content, 'utf8');
+    for (const item of availability) {
+      const desc = EXTERNAL_STATIC_ENGINES.find((e) => e.id === item.id)!;
+      if (!item.binaryDetected) {
+        results.push({
+          execution: {
+            analyzerId: item.id,
+            analyzerName: item.name,
+            analyzerVersion: 'NOT_INSTALLED',
+            executionMethod: 'NOT_EXECUTED',
+            binaryDetected: false,
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+            durationMs: 0,
+            exitCode: null,
+            filesProcessed: 0,
+            filesFailed: 0,
+            measurementState: 'NOT_MEASURED',
+            rawOutputSha256: crypto.createHash('sha256').update(`${item.id}:NOT_INSTALLED`).digest('hex'),
+          },
+          findings: [],
+          limitations: [`Binário ${item.name} não instalado no host.`],
+        });
+        continue;
       }
 
-      for (const item of availability) {
-        const desc = EXTERNAL_STATIC_ENGINES.find((e) => e.id === item.id)!;
-        if (!item.binaryDetected) {
-          results.push({
-            execution: {
-              analyzerId: item.id,
-              analyzerName: item.name,
-              analyzerVersion: 'NOT_INSTALLED',
-              executionMethod: 'NOT_EXECUTED',
-              binaryDetected: false,
-              startedAt: new Date().toISOString(),
-              completedAt: new Date().toISOString(),
-              durationMs: 0,
-              exitCode: null,
-              filesProcessed: 0,
-              filesFailed: 0,
-              measurementState: 'NOT_MEASURED',
-              rawOutputSha256: crypto.createHash('sha256').update(`${item.id}:NOT_INSTALLED`).digest('hex'),
-            },
-            findings: [],
-            limitations: [`Binário ${item.name} não instalado no host.`],
-          });
-          continue;
-        }
+      const sbxRes = SandboxExecutor.runSandboxedCliBinary({
+        executablePath: item.executablePath,
+        argsBuilder: desc.argsBuilder,
+        filesMap: scope.filesMap,
+        timeoutMs,
+      });
 
-        const startedAt = new Date().toISOString();
-        const startPerf = performance.now();
-        const args = desc.argsBuilder(tmpRoot);
-        const proc = spawnSync(item.executablePath, args, {
-          shell: false,
-          encoding: 'utf8',
-          timeout: timeoutMs,
-          maxBuffer: 8 * 1024 * 1024,
-        });
-        const durationMs = Math.max(1, Math.round(performance.now() - startPerf));
-        const stdout = proc.stdout || '';
-        const stderr = proc.stderr || '';
-        const parsedFindings = AnalyzerRegistry.parseExternalJsonOutput(
-          desc,
-          stdout,
-          scope,
-          item.versionOutput || 'CLI'
-        );
-
+      if (sbxRes.blocked || !sbxRes.executed) {
         results.push({
           execution: {
             analyzerId: item.id,
             analyzerName: item.name,
             analyzerVersion: item.versionOutput || 'CLI',
-            executionMethod: 'CLI_BINARY',
+            executionMethod: 'NOT_EXECUTED',
             binaryDetected: true,
-            startedAt,
-            completedAt: new Date().toISOString(),
-            durationMs,
-            exitCode: proc.status,
-            filesProcessed: Object.keys(scope.filesMap).length,
-            filesFailed: proc.error ? 1 : 0,
-            measurementState: proc.error ? 'FAILED' : 'MEASURED',
-            stdout: stdout.slice(0, 4000),
-            stderr: stderr.slice(0, 2000),
-            rawOutputSha256: crypto.createHash('sha256').update(stdout || stderr || 'empty').digest('hex'),
+            startedAt: sbxRes.startedAt,
+            completedAt: sbxRes.completedAt,
+            durationMs: sbxRes.durationMs,
+            exitCode: sbxRes.exitCode,
+            filesProcessed: 0,
+            filesFailed: Object.keys(scope.filesMap).length,
+            measurementState: 'NOT_MEASURED',
+            stdout: sbxRes.stdout.slice(0, 4000),
+            stderr: sbxRes.stderr.slice(0, 2000),
+            rawOutputSha256: sbxRes.stderrSha256,
           },
-          findings: parsedFindings,
-          limitations: proc.error ? [proc.error.message] : [],
+          findings: [],
+          limitations: sbxRes.limitations.length > 0 ? sbxRes.limitations : [sbxRes.stderr],
         });
+        continue;
       }
-    } finally {
-      fs.rmSync(tmpRoot, { recursive: true, force: true });
+
+      const parsedOut = AnalyzerRegistry.parseExternalJsonOutputWithValidation(
+        desc,
+        sbxRes.stdout,
+        scope,
+        item.versionOutput || 'CLI'
+      );
+
+      const nonZeroUnexpected = sbxRes.exitCode !== null && sbxRes.exitCode > 1 && !parsedOut.validSchema;
+      const executionFailed = nonZeroUnexpected || (!parsedOut.validSchema && sbxRes.stdout.trim().length > 0);
+      const measurementState = executionFailed
+        ? 'FAILED'
+        : !parsedOut.validSchema
+          ? 'INCONCLUSIVE'
+          : 'MEASURED';
+
+      results.push({
+        execution: {
+          analyzerId: item.id,
+          analyzerName: item.name,
+          analyzerVersion: item.versionOutput || 'CLI',
+          executionMethod: 'CLI_BINARY',
+          binaryDetected: true,
+          startedAt: sbxRes.startedAt,
+          completedAt: sbxRes.completedAt,
+          durationMs: sbxRes.durationMs,
+          exitCode: sbxRes.exitCode,
+          filesProcessed: parsedOut.validSchema ? Object.keys(scope.filesMap).length : 0,
+          filesFailed: executionFailed ? Object.keys(scope.filesMap).length : 0,
+          measurementState,
+          stdout: sbxRes.stdout.slice(0, 4000),
+          stderr: sbxRes.stderr.slice(0, 2000),
+          rawOutputSha256: sbxRes.stdoutSha256,
+        },
+        findings: parsedOut.findings,
+        limitations: parsedOut.validSchema
+          ? sbxRes.limitations
+          : [`Saída do analisador ${item.name} inválida ou vazia (exitCode=${sbxRes.exitCode}).`],
+      });
     }
 
     return results;
   }
 
-  private static parseExternalJsonOutput(
+  private static parseExternalJsonOutputWithValidation(
     desc: ExternalEngineDescriptor,
     stdout: string,
     scope: AnalysisScope,
     toolVersion: string
-  ): NormalizedFinding[] {
-    if (!stdout || !stdout.trim()) return [];
+  ): { validSchema: boolean; findings: NormalizedFinding[] } {
+    if (!stdout || !stdout.trim()) return { validSchema: false, findings: [] };
     const findings: NormalizedFinding[] = [];
     try {
       const json = JSON.parse(stdout);
@@ -377,10 +390,17 @@ export class AnalyzerRegistry {
             })
           );
         });
+      } else {
+        const schemaValid =
+          (desc.outputFormat === 'ESLINT_JSON' && Array.isArray(json)) ||
+          (desc.outputFormat === 'RUFF_JSON' && Array.isArray(json)) ||
+          (desc.outputFormat === 'BANDIT_JSON' && Array.isArray(json?.results)) ||
+          (desc.outputFormat === 'SARIF' && Array.isArray(json?.runs));
+        return { validSchema: schemaValid, findings };
       }
+      return { validSchema: true, findings };
     } catch {
-      return [];
+      return { validSchema: false, findings: [] };
     }
-    return findings;
   }
 }

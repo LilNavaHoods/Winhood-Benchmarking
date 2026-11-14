@@ -85,6 +85,60 @@ export class SonarQubeConnection {
     }
   }
 
+  public static reencryptToken(
+    cipherText: string,
+    ctx: {
+      oldKeyId: string;
+      oldKeyBuffer: Buffer;
+      newKeyId: string;
+      newKeyBuffer: Buffer;
+    }
+  ): string | null {
+    try {
+      const parts = cipherText.split(':');
+      let keyBuffer: Buffer | null = null;
+      let ivHex = '';
+      let tagHex = '';
+      let dataHex = '';
+
+      if (parts.length === 4) {
+        const [keyId, iv, tag, data] = parts;
+        keyBuffer =
+          keyId === ctx.oldKeyId
+            ? ctx.oldKeyBuffer
+            : KeyManagementService.getVaultKeyBufferByKeyId(keyId!);
+        ivHex = iv!;
+        tagHex = tag!;
+        dataHex = data!;
+      } else if (parts.length === 3) {
+        keyBuffer = ctx.oldKeyBuffer;
+        [ivHex, tagHex, dataHex] = parts as [string, string, string];
+      } else {
+        return null;
+      }
+
+      if (!keyBuffer || !ivHex || !tagHex || !dataHex) return null;
+      const decipher = crypto.createDecipheriv(
+        'aes-256-gcm',
+        keyBuffer,
+        Buffer.from(ivHex, 'hex')
+      );
+      decipher.setAuthTag(Buffer.from(tagHex, 'hex'));
+      const decrypted = Buffer.concat([
+        decipher.update(Buffer.from(dataHex, 'hex')),
+        decipher.final(),
+      ]).toString('utf8');
+
+      const newIv = crypto.randomBytes(12);
+      const cipher = crypto.createCipheriv('aes-256-gcm', ctx.newKeyBuffer, newIv);
+      const encrypted = Buffer.concat([cipher.update(decrypted, 'utf8'), cipher.final()]);
+      const authTag = cipher.getAuthTag();
+      return `${ctx.newKeyId}:${newIv.toString('hex')}:${authTag.toString('hex')}:${encrypted.toString('hex')}`;
+    } catch {
+      return null;
+    }
+  }
+
   private static stripTrailingSlashes(url: string): string {
     let s = url.trim();
     while (s.endsWith('/')) {

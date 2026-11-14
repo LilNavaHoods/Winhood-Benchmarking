@@ -13,6 +13,7 @@ import type {
   VulnerabilityValidationState,
 } from '../types/benchmark';
 import { CoverageReportParser } from '../execution/CoverageReportParser';
+import { SandboxExecutor } from '../execution/SandboxExecutor';
 import { ToolAvailabilityService } from '../services/tools/ToolAvailabilityService';
 import { computeSha256, maskSecretsInText } from './scoringEngine';
 
@@ -451,6 +452,24 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
 
   return definitions.map((d) => {
     const check = d.binaryOrEnvCheck();
+    const isNativeInProcess = d.executionMethod === 'NATIVE_AST_ENGINE';
+    const availabilityState: ToolAdapterInfo['availabilityState'] = isNativeInProcess
+      ? 'AVAILABLE'
+      : check.detected
+        ? 'AVAILABLE'
+        : 'UNAVAILABLE';
+    const configurationState: ToolAdapterInfo['configurationState'] = isNativeInProcess
+      ? 'CONFIGURED'
+      : check.configured
+        ? 'CONFIGURED'
+        : 'UNCONFIGURED';
+    const readinessState: ToolAdapterInfo['readinessState'] =
+      availabilityState === 'AVAILABLE' && configurationState === 'CONFIGURED'
+        ? 'READY'
+        : configurationState === 'CONFIGURED'
+          ? 'PARTIAL'
+          : 'NOT_READY';
+
     const status: ToolAdapterInfo['status'] = check.detected
       ? 'OPERATIONAL'
       : check.configured
@@ -467,13 +486,19 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
       executionMethod: d.executionMethod,
       canonicalFormat: d.canonicalFormat,
       status,
+      availabilityState,
+      configurationState,
+      readinessState,
+      executionState: isNativeInProcess ? 'NOT_EXECUTED' : 'NOT_EXECUTED',
       binaryDetected: check.detected,
       configured: check.configured,
-      signatureHash: computeSha256(`${d.id}:${d.version}:${check.detected ? 'verified' : 'absent'}`),
+      signatureHash: check.detected
+        ? computeSha256(`${d.id}:${check.detectedVersion || d.version}:detected`)
+        : null,
       description: d.description,
       supportedLanguages: d.supportedLanguages,
-      lastExecutionAt: check.detected ? nowIso : null,
-      lastExitCode: check.detected ? 0 : null,
+      lastExecutionAt: null,
+      lastExitCode: null,
     };
   });
 }
@@ -506,19 +531,12 @@ export function executeSecurityAssessmentSuite(params: {
   ).length;
   const isWindowsHost = os.platform() === 'win32';
 
-  const sandboxControl: ExecutionSandboxControl = {
-    isolationMode: 'DISPOSABLE_MICROVM',
-    scopeAllowlist: allowlist,
-    networkPolicy: 'ALLOWLIST_ONLY',
-    cpuLimitCores: 4,
-    memoryLimitMb: 4096,
-    timeoutSeconds: 180,
-    snapshotBaselineId: `SNAP-T0-${computeSha256(params.runId).slice(0, 12)}`,
-    recoveryVerified: true,
-    emergencyStopTriggered: Boolean(params.emergencyStopTriggered),
+  const sandboxControl: ExecutionSandboxControl = SandboxExecutor.buildControlDescriptor({
+    allowlist,
+    emergencyStopTriggered: params.emergencyStopTriggered,
     emergencyStopAt: params.emergencyStopTriggered ? nowIso : null,
     emergencyStopActor: params.emergencyStopTriggered ? 'Operador SecOps' : null,
-  };
+  });
 
   const attackSurfaces: AttackSurfaceProfile[] = [];
   const attackPaths: AttackPathChain[] = [];
@@ -725,9 +743,10 @@ export function executeSecurityAssessmentSuite(params: {
     const eligibleFiles =
       sw.inventory?.eligibleFiles ?? Object.keys(sw.sourceFilesContent || {}).length;
     const parsedCov = CoverageReportParser.parseFromFilesMap(filesMap);
-    const realCoveragePercent = parsedCov.found && parsedCov.lineCoveragePercent !== null
-      ? parsedCov.lineCoveragePercent
-      : 0;
+    const realCoveragePercent =
+      parsedCov.found && parsedCov.lineCoveragePercent !== null
+        ? parsedCov.lineCoveragePercent
+        : null;
 
     const comparisonConfidencePercent =
       eligibleFiles === 0
@@ -741,11 +760,9 @@ export function executeSecurityAssessmentSuite(params: {
             )
           );
 
-    const recoveryCapabilityScore =
-      confirmedCount === 0 && probableCount === 0
-        ? 4.6
-        : Math.max(1.5, 4.2 - (confirmedCount * 0.7 + probableCount * 0.45));
-    const performanceUnderStressScore = 0; // NOT_MEASURED sem execução de carga real
+    // Recovery & Stress capabilities are NOT measured without real dynamic stress/failover execution
+    const recoveryCapabilityScore: number | null = null;
+    const performanceUnderStressScore: number | null = null;
 
     const rawMaturity =
       eligibleFiles === 0
@@ -779,7 +796,7 @@ export function executeSecurityAssessmentSuite(params: {
       comparisonConfidencePercent,
       totalExecutionTimeMs: swElapsedMs,
       securityFailuresCount: confirmedCount + probableCount,
-      recoveryCapabilityScore: Math.round(recoveryCapabilityScore * 100) / 100,
+      recoveryCapabilityScore,
       performanceUnderStressScore,
       overallSecurityMaturityScore: Math.round(rawMaturity * 100) / 100,
     });
@@ -788,24 +805,167 @@ export function executeSecurityAssessmentSuite(params: {
   const zapReady = adaptersCatalog.some((a) => a.id === 'owasp-zap' && a.status === 'OPERATIONAL');
   const pwReady = adaptersCatalog.some((a) => a.id === 'playwright-e2e' && a.status === 'OPERATIONAL');
   const newmanReady = adaptersCatalog.some((a) => a.id === 'postman-newman' && a.status === 'OPERATIONAL');
-  const staticCoveragePct = params.softwares.length > 0 ? 100 : 0;
+  const hasSoftwares = params.softwares.length > 0;
+  const staticCoveragePct = hasSoftwares ? 100 : null;
+  const staticExecState = hasSoftwares ? 'EXECUTED_STATIC' as const : 'NOT_EXECUTED' as const;
 
   const modulesCatalog: SecurityAssessmentSuiteBundle['modulesCatalog'] = [
-    { key: 'SECURITY_ASSESSMENT', title: '01. Security Assessment', status: 'OPERATIONAL', coveragePercent: staticCoveragePct },
-    { key: 'AUTOMATED_PENTEST', title: '02. Automated Pentest (DAST Externo)', status: zapReady ? 'OPERATIONAL' : 'EXTERNAL_TOOL_REQUIRED', coveragePercent: zapReady ? 100 : 0 },
-    { key: 'RED_TEAM_SIMULATION', title: '03. Red Team Simulation', status: 'EXTERNAL_TOOL_REQUIRED', coveragePercent: 0 },
-    { key: 'ATTACK_SURFACE_ANALYSIS', title: '04. Attack Surface Analysis', status: 'OPERATIONAL', coveragePercent: staticCoveragePct },
-    { key: 'VULNERABILITY_VALIDATION', title: '05. Vulnerability Validation (6 States)', status: 'OPERATIONAL', coveragePercent: staticCoveragePct },
-    { key: 'ATTACK_PATH_ANALYSIS', title: '06. Attack Path Analysis (AST Taint)', status: 'OPERATIONAL', coveragePercent: staticCoveragePct },
-    { key: 'API_SECURITY_TESTING', title: '07. API Security Testing (Newman/ZAP)', status: newmanReady ? 'OPERATIONAL' : 'EXTERNAL_TOOL_REQUIRED', coveragePercent: newmanReady ? 100 : 0 },
-    { key: 'AUTH_AUTHZ_TESTING', title: '08. Authentication & Authorization Testing', status: pwReady ? 'PARTIAL_COVERAGE' : 'EXTERNAL_TOOL_REQUIRED', coveragePercent: pwReady ? 50 : 0 },
-    { key: 'DATABASE_SECURITY_ASSESSMENT', title: '09. Database Security Assessment', status: 'OPERATIONAL', coveragePercent: staticCoveragePct },
-    { key: 'CRYPTOGRAPHY_ASSESSMENT', title: '10. Cryptography Assessment', status: 'OPERATIONAL', coveragePercent: staticCoveragePct },
-    { key: 'DEPENDENCY_SUPPLY_CHAIN', title: '11. Dependency & Supply Chain Security (SBOM/SCA)', status: 'OPERATIONAL', coveragePercent: staticCoveragePct },
-    { key: 'STRESS_RESILIENCE_TESTING', title: '12. Stress & Resilience Testing', status: 'EXTERNAL_TOOL_REQUIRED', coveragePercent: 0 },
-    { key: 'WINDOWS_SECURITY_ASSESSMENT', title: '13. Windows Security Assessment (T0/T1/T2)', status: isWindowsHost ? 'PARTIAL_COVERAGE' : 'EXTERNAL_TOOL_REQUIRED', coveragePercent: isWindowsHost ? 50 : 0 },
-    { key: 'EVIDENCE_COLLECTION', title: '14. Evidence Collection (SHA-256 Chain)', status: 'OPERATIONAL', coveragePercent: staticCoveragePct },
-    { key: 'SECURITY_BENCHMARK_COMPARISON', title: '15. Security Benchmark Comparison', status: 'OPERATIONAL', coveragePercent: staticCoveragePct },
+    {
+      key: 'SECURITY_ASSESSMENT',
+      title: '01. Security Assessment',
+      status: 'OPERATIONAL',
+      availabilityState: 'AVAILABLE',
+      configurationState: 'CONFIGURED',
+      readinessState: 'READY',
+      executionState: staticExecState,
+      coveragePercent: staticCoveragePct,
+    },
+    {
+      key: 'AUTOMATED_PENTEST',
+      title: '02. Automated Pentest (DAST Externo)',
+      status: zapReady ? 'OPERATIONAL' : 'EXTERNAL_TOOL_REQUIRED',
+      availabilityState: zapReady ? 'AVAILABLE' : 'UNAVAILABLE',
+      configurationState: zapReady ? 'CONFIGURED' : 'UNCONFIGURED',
+      readinessState: zapReady ? 'READY' : 'NOT_READY',
+      executionState: 'NOT_EXECUTED',
+      coveragePercent: zapReady ? 0 : null,
+      limitations: zapReady ? undefined : ['Binário OWASP ZAP não instalado ou DAST não executado.'],
+    },
+    {
+      key: 'RED_TEAM_SIMULATION',
+      title: '03. Red Team Simulation',
+      status: 'EXTERNAL_TOOL_REQUIRED',
+      availabilityState: 'UNAVAILABLE',
+      configurationState: 'UNCONFIGURED',
+      readinessState: 'NOT_READY',
+      executionState: 'NOT_EXECUTED',
+      coveragePercent: null,
+      limitations: ['Simulação adversarial controlada requer ambiente dedicado autorizado e ferramentas externas.'],
+    },
+    {
+      key: 'ATTACK_SURFACE_ANALYSIS',
+      title: '04. Attack Surface Analysis',
+      status: 'OPERATIONAL',
+      availabilityState: 'AVAILABLE',
+      configurationState: 'CONFIGURED',
+      readinessState: 'READY',
+      executionState: staticExecState,
+      coveragePercent: staticCoveragePct,
+    },
+    {
+      key: 'VULNERABILITY_VALIDATION',
+      title: '05. Vulnerability Validation (6 States)',
+      status: 'OPERATIONAL',
+      availabilityState: 'AVAILABLE',
+      configurationState: 'CONFIGURED',
+      readinessState: 'READY',
+      executionState: staticExecState,
+      coveragePercent: staticCoveragePct,
+    },
+    {
+      key: 'ATTACK_PATH_ANALYSIS',
+      title: '06. Attack Path Analysis (AST Taint)',
+      status: 'OPERATIONAL',
+      availabilityState: 'AVAILABLE',
+      configurationState: 'CONFIGURED',
+      readinessState: 'READY',
+      executionState: staticExecState,
+      coveragePercent: staticCoveragePct,
+    },
+    {
+      key: 'API_SECURITY_TESTING',
+      title: '07. API Security Testing (Newman/ZAP)',
+      status: newmanReady ? 'OPERATIONAL' : 'EXTERNAL_TOOL_REQUIRED',
+      availabilityState: newmanReady ? 'AVAILABLE' : 'UNAVAILABLE',
+      configurationState: newmanReady ? 'CONFIGURED' : 'UNCONFIGURED',
+      readinessState: newmanReady ? 'READY' : 'NOT_READY',
+      executionState: 'NOT_EXECUTED',
+      coveragePercent: null,
+      limitations: newmanReady ? ['Aguardando coleção Postman/Newman executada contra alvo autorizado.'] : ['Binário newman ausente no host.'],
+    },
+    {
+      key: 'AUTH_AUTHZ_TESTING',
+      title: '08. Authentication & Authorization Testing',
+      status: pwReady ? 'PARTIAL_COVERAGE' : 'EXTERNAL_TOOL_REQUIRED',
+      availabilityState: pwReady ? 'AVAILABLE' : 'UNAVAILABLE',
+      configurationState: pwReady ? 'CONFIGURED' : 'UNCONFIGURED',
+      readinessState: pwReady ? 'PARTIAL' : 'NOT_READY',
+      executionState: 'NOT_EXECUTED',
+      coveragePercent: null,
+      limitations: ['Testes dinâmicos de AuthN/AuthZ E2E requerem execução Playwright contra aplicação ativa.'],
+    },
+    {
+      key: 'DATABASE_SECURITY_ASSESSMENT',
+      title: '09. Database Security Assessment',
+      status: 'OPERATIONAL',
+      availabilityState: 'AVAILABLE',
+      configurationState: 'CONFIGURED',
+      readinessState: 'READY',
+      executionState: staticExecState,
+      coveragePercent: staticCoveragePct,
+    },
+    {
+      key: 'CRYPTOGRAPHY_ASSESSMENT',
+      title: '10. Cryptography Assessment',
+      status: 'OPERATIONAL',
+      availabilityState: 'AVAILABLE',
+      configurationState: 'CONFIGURED',
+      readinessState: 'READY',
+      executionState: staticExecState,
+      coveragePercent: staticCoveragePct,
+    },
+    {
+      key: 'DEPENDENCY_SUPPLY_CHAIN',
+      title: '11. Dependency & Supply Chain Security (SBOM/SCA)',
+      status: 'OPERATIONAL',
+      availabilityState: 'AVAILABLE',
+      configurationState: 'CONFIGURED',
+      readinessState: 'READY',
+      executionState: staticExecState,
+      coveragePercent: staticCoveragePct,
+    },
+    {
+      key: 'STRESS_RESILIENCE_TESTING',
+      title: '12. Stress & Resilience Testing',
+      status: 'EXTERNAL_TOOL_REQUIRED',
+      availabilityState: 'AVAILABLE',
+      configurationState: 'PARTIAL',
+      readinessState: 'PARTIAL',
+      executionState: 'NOT_EXECUTED',
+      coveragePercent: null,
+      limitations: ['Requer execução controlada via ControlledTestAndPerfRunner contra destino autorizado.'],
+    },
+    {
+      key: 'WINDOWS_SECURITY_ASSESSMENT',
+      title: '13. Windows Security Assessment (T0/T1/T2)',
+      status: isWindowsHost ? 'PARTIAL_COVERAGE' : 'EXTERNAL_TOOL_REQUIRED',
+      availabilityState: isWindowsHost ? 'AVAILABLE' : 'UNAVAILABLE',
+      configurationState: isWindowsHost ? 'PARTIAL' : 'UNCONFIGURED',
+      readinessState: isWindowsHost ? 'PARTIAL' : 'NOT_READY',
+      executionState: hasSoftwares ? 'EXECUTED_STATIC' : 'NOT_EXECUTED',
+      coveragePercent: null,
+      limitations: [isWindowsHost ? 'Sysinternals ProcMon requer execução elevada em Windows Sandbox.' : 'Host Linux: apenas inspeção estática de manifestos.'],
+    },
+    {
+      key: 'EVIDENCE_COLLECTION',
+      title: '14. Evidence Collection (SHA-256 Chain)',
+      status: 'OPERATIONAL',
+      availabilityState: 'AVAILABLE',
+      configurationState: 'CONFIGURED',
+      readinessState: 'READY',
+      executionState: hasSoftwares ? 'EXECUTED_DYNAMIC' : 'NOT_EXECUTED',
+      coveragePercent: staticCoveragePct,
+    },
+    {
+      key: 'SECURITY_BENCHMARK_COMPARISON',
+      title: '15. Security Benchmark Comparison',
+      status: 'OPERATIONAL',
+      availabilityState: 'AVAILABLE',
+      configurationState: 'CONFIGURED',
+      readinessState: 'READY',
+      executionState: staticExecState,
+      coveragePercent: staticCoveragePct,
+    },
   ];
 
   // Keep reference to suiteStart to ensure measurement consistency

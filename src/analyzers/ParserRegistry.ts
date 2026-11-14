@@ -27,21 +27,45 @@ const SECRET_IDENTIFIER_HINT =
 const PLACEHOLDER_SECRET_HINT =
   /^(example|placeholder|changeme|your[_-]|dummy|mock|test[_-]?token|xxx+|000+)$/i;
 
-const SANITIZER_NAMES = new Set([
-  'parseInt',
-  'Number',
-  'parseFloat',
-  'Boolean',
-  'encodeURIComponent',
-  'escapeHtml',
-  'sanitize',
-  'sanitizeHtml',
-  'basename',
-  'pbkdf2Sync',
-  'scryptSync',
-  'createHmac',
-  'zodParse',
+const SANITIZER_CONTEXT_MAP = new Map<
+  string,
+  'NUMERIC' | 'URL_ENCODE' | 'HTML_ESCAPE' | 'PATH_BASENAME' | 'CRYPTO_KDF' | 'SQL_PREPARED' | 'GENERIC_SCHEMA'
+>([
+  ['parseInt', 'NUMERIC'],
+  ['Number', 'NUMERIC'],
+  ['parseFloat', 'NUMERIC'],
+  ['Boolean', 'NUMERIC'],
+  ['encodeURIComponent', 'URL_ENCODE'],
+  ['encodeURI', 'URL_ENCODE'],
+  ['escapeHtml', 'HTML_ESCAPE'],
+  ['sanitizeHtml', 'HTML_ESCAPE'],
+  ['basename', 'PATH_BASENAME'],
+  ['pbkdf2Sync', 'CRYPTO_KDF'],
+  ['scryptSync', 'CRYPTO_KDF'],
+  ['createHmac', 'CRYPTO_KDF'],
+  ['zodParse', 'GENERIC_SCHEMA'],
+  ['sanitize', 'GENERIC_SCHEMA'],
 ]);
+
+function classifySanitizerContext(
+  calleeTxt: string,
+  shortCallee: string
+):
+  | 'NUMERIC'
+  | 'URL_ENCODE'
+  | 'HTML_ESCAPE'
+  | 'PATH_BASENAME'
+  | 'CRYPTO_KDF'
+  | 'SQL_PREPARED'
+  | 'GENERIC_SCHEMA'
+  | undefined {
+  const direct = SANITIZER_CONTEXT_MAP.get(shortCallee) || SANITIZER_CONTEXT_MAP.get(calleeTxt);
+  if (direct) return direct;
+  if (/escapeHtml|sanitizeHtml/i.test(calleeTxt)) return 'HTML_ESCAPE';
+  if (/prepared|parameterized|prepareStatement/i.test(calleeTxt)) return 'SQL_PREPARED';
+  if (/sanitize|allowlist|validateSchema|zod/i.test(calleeTxt)) return 'GENERIC_SCHEMA';
+  return undefined;
+}
 
 const SQL_KEYWORD_PATTERN = /\b(SELECT|INSERT|UPDATE|DELETE|DROP|ALTER|MERGE|EXEC)\b/i;
 
@@ -203,6 +227,8 @@ export class ParserRegistry {
       filePath,
       language,
       astParsed: false,
+      parserKind: 'UNSUPPORTED',
+      errorCount: 0,
       parserEngine: 'UNSUPPORTED_EXTENSION',
       loc: lines.filter((l) => l.trim().length > 0).length,
       cyclomaticComplexity: 1,
@@ -253,6 +279,8 @@ export class ParserRegistry {
         filePath,
         language,
         astParsed: false,
+        parserKind: 'UNSUPPORTED',
+        errorCount: 1,
         parserEngine: 'babel-parser-parse-error',
         loc: lines.filter((l) => l.trim().length > 0 && !l.trim().startsWith('//')).length,
         cyclomaticComplexity: 1,
@@ -527,15 +555,23 @@ export class ParserRegistry {
 
           let isSanitized = false;
           let sanitizerName: string | undefined;
+          let sanitizerContext:
+            | 'NUMERIC'
+            | 'URL_ENCODE'
+            | 'HTML_ESCAPE'
+            | 'PATH_BASENAME'
+            | 'CRYPTO_KDF'
+            | 'SQL_PREPARED'
+            | 'GENERIC_SCHEMA'
+            | undefined;
           if (node.init.type === 'CallExpression' || node.init.type === 'OptionalCallExpression') {
             const calleeTxt = getCalleeText(node.init.callee);
             const shortCallee = calleeTxt.split('.').pop() || calleeTxt;
-            if (
-              SANITIZER_NAMES.has(shortCallee) ||
-              /sanitize|escape|prepared|parameterized|allowlist/i.test(calleeTxt)
-            ) {
+            const ctx = classifySanitizerContext(calleeTxt, shortCallee);
+            if (ctx) {
               isSanitized = true;
               sanitizerName = calleeTxt;
+              sanitizerContext = ctx;
             }
           }
 
@@ -546,6 +582,7 @@ export class ParserRegistry {
             dependencies: deps,
             isSanitized,
             sanitizerName,
+            sanitizerContext,
           });
 
           // Hardcoded high-entropy secret literal in AST
@@ -974,6 +1011,8 @@ export class ParserRegistry {
       filePath,
       language,
       astParsed: true,
+      parserKind: 'BABEL_AST',
+      errorCount: Array.isArray(ast?.errors) ? ast.errors.length : 0,
       parserEngine: '@babel/parser-ts-js-ast',
       loc: lines.filter((l) => l.trim().length > 0 && !l.trim().startsWith('//')).length,
       cyclomaticComplexity: Math.max(1, totalCyclomatic),
@@ -1197,7 +1236,7 @@ export class ParserRegistry {
             effortMinutes: 25,
           });
         }
-        if (tok.value === 'execute' && site.snippet.includes('f"') || (tok.value === 'execute' && site.snippet.includes('+'))) {
+        if (tok.value === 'execute' && (site.snippet.includes('f"') || site.snippet.includes('+'))) {
           issues.push({
             ruleId: 'py:B608',
             title: 'SQL construído com f-string ou concatenação em cursor.execute()',
@@ -1218,6 +1257,9 @@ export class ParserRegistry {
         if (/pbkdf2_hmac|AES|Fernet/i.test(prevIdent)) hasCrypto = true;
         if (tok.value === 'execute' && (site.snippet.includes('?') || site.snippet.includes('%s'))) hasPrepared = true;
         if (/audit/i.test(prevIdent)) hasAudit = true;
+
+        const fnObj = functions.find((f) => f.name === currentFn);
+        if (fnObj) fnObj.callsMade.push(site);
       }
     }
 
@@ -1225,6 +1267,8 @@ export class ParserRegistry {
       filePath,
       language: 'Python',
       astParsed: true,
+      parserKind: 'STRUCTURAL_PARSER',
+      errorCount: 0,
       parserEngine: 'winhood-python-structural-ast-v1',
       loc: lines.filter((l) => l.trim().length > 0 && !l.trim().startsWith('#')).length,
       cyclomaticComplexity: cyclomatic,
@@ -1433,6 +1477,8 @@ export class ParserRegistry {
       filePath,
       language,
       astParsed: true,
+      parserKind: 'STRUCTURAL_PARSER',
+      errorCount: 0,
       parserEngine: `winhood-${language.toLowerCase()}-structural-ast-v1`,
       loc: lines.filter((l) => l.trim().length > 0 && !l.trim().startsWith('//')).length,
       cyclomaticComplexity: cyclomatic,
@@ -1542,6 +1588,8 @@ export class ParserRegistry {
       filePath,
       language: 'SQL',
       astParsed: true,
+      parserKind: 'STRUCTURAL_PARSER',
+      errorCount: 0,
       parserEngine: 'winhood-sql-token-ast-v1',
       loc: lines.filter((l) => l.trim().length > 0 && !l.trim().startsWith('--')).length,
       cyclomaticComplexity: 1,

@@ -1542,13 +1542,17 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
       {/* ===================================================================== */}
       {subView === 'integration_tests' && (
         <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-5 space-y-4">
+          <div className="p-3 rounded-lg border border-amber-500/30 bg-amber-500/10 text-xs text-amber-600 dark:text-amber-300">
+            <strong>Modo Harness de Contrato (isContractTestInstance):</strong>{' '}
+            A execução dos 27 cenários de falha/contrato do SonarQube é bloqueada em produção (<code className="font-mono">HTTP 403 CONTRACT_TEST_ONLY_IN_TEST_MODE</code>) e liberada exclusivamente em ambiente <code className="font-mono">TEST</code> / <code className="font-mono">NODE_ENV=test</code>.
+          </div>
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 border-b border-slate-200 dark:border-slate-800 pb-3">
             <div>
               <h2 className="text-base font-bold text-slate-900 dark:text-slate-100">
-                Suíte de Testes Reais de Integração do SonarQube &amp; Injeção de Falhas (Seção 14)
+                Suíte de Testes de Contrato &amp; Injeção de Falhas SonarQube (Seção 14)
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Valida as 15 etapas do fluxo completo e os 12 cenários obrigatórios de erro (Token inválido, Servidor indisponível, Versão incompatível, Timeout, etc.).
+                Valida as 15 etapas do fluxo completo e os 12 cenários obrigatórios de erro (Token inválido, Servidor indisponível, Versão incompatível, Timeout, etc.) em modo TEST.
               </p>
             </div>
             <button
@@ -1556,7 +1560,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
               onClick={handleRun27IntegrationTests}
               className="px-4 py-1.5 rounded text-xs font-semibold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] transition-colors cursor-pointer"
             >
-              Executar Todos os 27 Testes Agora
+              Executar Todos os 27 Testes (Modo TEST)
             </button>
           </div>
 

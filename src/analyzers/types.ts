@@ -34,6 +34,14 @@ export interface AstFunctionNode {
     dependencies: string[];
     isSanitized: boolean;
     sanitizerName?: string;
+    sanitizerContext?:
+      | 'NUMERIC'
+      | 'URL_ENCODE'
+      | 'HTML_ESCAPE'
+      | 'PATH_BASENAME'
+      | 'CRYPTO_KDF'
+      | 'SQL_PREPARED'
+      | 'GENERIC_SCHEMA';
   }>;
 }
 
@@ -77,6 +85,8 @@ export interface AstParseResult {
   filePath: string;
   language: SupportedAstLanguage;
   astParsed: boolean;
+  parserKind: 'BABEL_AST' | 'STRUCTURAL_PARSER' | 'UNSUPPORTED';
+  errorCount?: number;
   parserEngine: string;
   loc: number;
   cyclomaticComplexity: number;

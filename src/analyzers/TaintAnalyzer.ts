@@ -1,24 +1,32 @@
 import type { CodeExecutionFlowStep } from '../types/benchmark';
 import type { AstFunctionNode, AstIssueCandidate, AstParseResult } from './types';
 
+type TaintSinkType =
+  | 'SQL_INJECTION'
+  | 'COMMAND_INJECTION'
+  | 'CODE_INJECTION'
+  | 'PATH_TRAVERSAL'
+  | 'XSS';
+
 interface TaintedVarState {
   originFile: string;
   originLine: number;
   originFunction: string;
   originSymbol: string;
   originSnippet: string;
+  sanitizedFor: Set<TaintSinkType>;
   steps: CodeExecutionFlowStep[];
 }
 
 const SOURCE_PARAM_HINT =
-  /(input|query|filter|path|target|cmd|command|url|req|request|body|param|user|title|name|payload|raw|sql|expr|file)/i;
+  /(input|query|filter|path|target|cmd|command|url|req|request|body|param|user|title|name|payload|raw|sql|expr|file|html|tpl)/i;
 
 const SINK_RULES: Array<{
   calleePattern: RegExp;
   ruleId: string;
   title: string;
   cwe: string;
-  sinkType: 'SQL_INJECTION' | 'COMMAND_INJECTION' | 'CODE_INJECTION' | 'PATH_TRAVERSAL' | 'XSS';
+  sinkType: TaintSinkType;
   remediation: string;
 }> = [
   {
@@ -45,13 +53,56 @@ const SINK_RULES: Array<{
     sinkType: 'SQL_INJECTION',
     remediation: 'Utilizar Prepared Statements parametrizados (? / $1) em vez de concatenação.',
   },
+  {
+    calleePattern: /^(readFile|readFileSync|writeFile|writeFileSync|createReadStream|createWriteStream)$/i,
+    ruleId: 'taint:S2083',
+    title: 'Fluxo Taint até operação de sistema de arquivos (Path Traversal CWE-22)',
+    cwe: 'CWE-22',
+    sinkType: 'PATH_TRAVERSAL',
+    remediation: 'Normalizar com path.basename/path.resolve e validar fronteira de diretório raiz permitido.',
+  },
+  {
+    calleePattern: /^(renderHtml|sendHtml|writeHtml|dangerouslySetInnerHTML)$/i,
+    ruleId: 'taint:S5131',
+    title: 'Fluxo Taint até renderização HTML não escapada (XSS CWE-79)',
+    cwe: 'CWE-79',
+    sinkType: 'XSS',
+    remediation: 'Aplicar escape HTML contextual (escapeHtml/DOMPurify) antes de renderizar conteúdo.',
+  },
 ];
 
+function getSanitizedSinksForContext(
+  ctx: NonNullable<AstFunctionNode['variableBindings'][number]['sanitizerContext']> | undefined
+): TaintSinkType[] {
+  switch (ctx) {
+    case 'NUMERIC':
+      return ['SQL_INJECTION', 'COMMAND_INJECTION', 'CODE_INJECTION', 'PATH_TRAVERSAL', 'XSS'];
+    case 'SQL_PREPARED':
+      return ['SQL_INJECTION'];
+    case 'HTML_ESCAPE':
+      return ['XSS'];
+    case 'PATH_BASENAME':
+      return ['PATH_TRAVERSAL'];
+    case 'URL_ENCODE':
+      // encodeURIComponent ONLY encodes URL query components; it MUST NOT clear SQL/CMD/CODE/PATH taint!
+      return [];
+    case 'CRYPTO_KDF':
+      return ['SQL_INJECTION', 'XSS'];
+    case 'GENERIC_SCHEMA':
+      return ['SQL_INJECTION', 'COMMAND_INJECTION', 'PATH_TRAVERSAL', 'XSS'];
+    default:
+      return [];
+  }
+}
+
 /**
- * TaintAnalyzer (P1)
- * Rastreamento real intraprocedural e interprocedural (cross-file) a partir dos nós AST:
- * SOURCE -> PROPAGATOR -> SANITIZER / SANITIZER_MISSING -> SINK.
- * Nunca utiliza caminhos de arquivos ou números de linhas fixos/hardcoded.
+ * TaintAnalyzer (P1/P2)
+ * Rastreamento intraprocedural e interprocedural (até 2 saltos + retorno de helper)
+ * com sanitização sensível ao contexto de sink:
+ * - encodeURIComponent não neutraliza SQLi / Command Injection.
+ * - Number/parseInt neutralizam numericamente SQL/Shell/Path.
+ * - escapeHtml neutraliza apenas XSS.
+ * - basename neutraliza apenas Path Traversal.
  */
 export class TaintAnalyzer {
   public static analyzeFlows(
@@ -60,8 +111,10 @@ export class TaintAnalyzer {
   ): AstIssueCandidate[] {
     const taintIssues: AstIssueCandidate[] = [];
     const fnByName = new Map<string, AstFunctionNode[]>();
+    const astIssuesByFile = new Map<string, AstIssueCandidate[]>();
 
     for (const parsed of parseResults) {
+      astIssuesByFile.set(parsed.filePath, parsed.issues);
       for (const fn of parsed.functions) {
         const list = fnByName.get(fn.name) || [];
         list.push(fn);
@@ -75,17 +128,133 @@ export class TaintAnalyzer {
       return (lines[lineNo - 1] || '').trim();
     };
 
-    const dedup = new Set<string>();
-
-    // Helper: check if a function itself safely sanitizes or uses prepared statements
     const functionHasSafeSqlHandling = (fn: AstFunctionNode, fileContent: string): boolean => {
       const lines = fileContent.split(/\r?\n/).slice(Math.max(0, fn.startLine - 1), fn.endLine);
       const body = lines.join('\n');
-      const usesParamPlaceholder = (body.includes('VALUES (?') || body.includes('= ?') || /\$\d+/.test(body)) && !body.includes('+');
+      const usesParamPlaceholder =
+        (body.includes('VALUES (?') || body.includes('= ?') || /\$\d+/.test(body)) && !body.includes('+');
       return usesParamPlaceholder && !body.includes('${');
     };
 
-    // Analyze each parsed function for intraprocedural & 1-hop/multi-hop interprocedural flows
+    // Precompute functions whose return values propagate tainted parameters (for helper return propagation)
+    const fnReturnsTaint = new Map<string, boolean>();
+    for (const parsed of parseResults) {
+      for (const fn of parsed.functions) {
+        if (fn.returnValues.length === 0) continue;
+        const paramSet = new Set(fn.params);
+        const taintedLocal = new Set<string>(fn.params);
+        for (const b of fn.variableBindings) {
+          if (b.isSanitized && getSanitizedSinksForContext(b.sanitizerContext).length >= 3) {
+            taintedLocal.delete(b.varName);
+          } else if (b.dependencies.some((d) => taintedLocal.has(d) || paramSet.has(d))) {
+            taintedLocal.add(b.varName);
+          }
+        }
+        if (fn.returnValues.some((rv) => taintedLocal.has(rv))) {
+          fnReturnsTaint.set(fn.name, true);
+        }
+      }
+    }
+
+    const dedup = new Set<string>();
+
+    const resolveDeepSink = (
+      fn: AstFunctionNode,
+      depth: number,
+      visited: Set<string>
+    ): {
+      targetFn: AstFunctionNode;
+      sinkLine: number;
+      sinkSnippet: string;
+      sinkCwe: string;
+      sinkType: TaintSinkType;
+      sinkCallee: string;
+      hopChain: Array<{ caller: AstFunctionNode; callLine: number; calleeText: string; snippet: string }>;
+    } | null => {
+      if (depth > 2) return null;
+      const visitKey = `${fn.filePath}:${fn.name}`;
+      if (visited.has(visitKey)) return null;
+      visited.add(visitKey);
+
+      const fileContent = filesMap[fn.filePath] || '';
+      const safeSql = functionHasSafeSqlHandling(fn, fileContent);
+
+      const directSinkCall = fn.callsMade.find((c) => {
+        const rule = SINK_RULES.find((r) => r.calleePattern.test(c.calleeBase || c.callee));
+        if (!rule) return false;
+        if (rule.sinkType === 'SQL_INJECTION' && safeSql) return false;
+        return true;
+      });
+      if (directSinkCall) {
+        const rule = SINK_RULES.find((r) => r.calleePattern.test(directSinkCall.calleeBase || directSinkCall.callee))!;
+        return {
+          targetFn: fn,
+          sinkLine: directSinkCall.lineNumber,
+          sinkSnippet: directSinkCall.snippet,
+          sinkCwe: rule.cwe,
+          sinkType: rule.sinkType,
+          sinkCallee: directSinkCall.callee,
+          hopChain: [],
+        };
+      }
+
+      const astSastIssue = (astIssuesByFile.get(fn.filePath) || []).find(
+        (iss) =>
+          iss.category === 'SAST' &&
+          (iss.cwe === 'CWE-89' || iss.cwe === 'CWE-78' || iss.cwe === 'CWE-95' || iss.cwe === 'CWE-22' || iss.cwe === 'CWE-79') &&
+          iss.lineNumber >= fn.startLine &&
+          iss.lineNumber <= fn.endLine &&
+          !(iss.cwe === 'CWE-89' && safeSql)
+      );
+      if (astSastIssue) {
+        const sinkType: TaintSinkType =
+          astSastIssue.cwe === 'CWE-78'
+            ? 'COMMAND_INJECTION'
+            : astSastIssue.cwe === 'CWE-95'
+              ? 'CODE_INJECTION'
+              : astSastIssue.cwe === 'CWE-22'
+                ? 'PATH_TRAVERSAL'
+                : astSastIssue.cwe === 'CWE-79'
+                  ? 'XSS'
+                  : 'SQL_INJECTION';
+        return {
+          targetFn: fn,
+          sinkLine: astSastIssue.lineNumber,
+          sinkSnippet: getLineSnippet(fn.filePath, astSastIssue.lineNumber),
+          sinkCwe: astSastIssue.cwe,
+          sinkType,
+          sinkCallee: astSastIssue.ruleId,
+          hopChain: [],
+        };
+      }
+
+      if (depth < 2) {
+        for (const call of fn.callsMade) {
+          const nextName = call.calleeBase || call.callee;
+          const nextTargets = fnByName.get(nextName) || [];
+          for (const nextFn of nextTargets) {
+            const sub = resolveDeepSink(nextFn, depth + 1, new Set(visited));
+            if (sub) {
+              return {
+                ...sub,
+                hopChain: [
+                  {
+                    caller: fn,
+                    callLine: call.lineNumber,
+                    calleeText: call.callee,
+                    snippet: call.snippet,
+                  },
+                  ...sub.hopChain,
+                ],
+              };
+            }
+          }
+        }
+      }
+
+      return null;
+    };
+
     for (const parsed of parseResults) {
       const fileContent = filesMap[parsed.filePath] || '';
       const fileAstIssues = parsed.issues;
@@ -95,7 +264,6 @@ export class TaintAnalyzer {
 
         const taintedVars = new Map<string, TaintedVarState>();
 
-        // 1. Seed taint from function parameters matching source hints or controller/handler entrypoints
         for (const param of fn.params) {
           if (SOURCE_PARAM_HINT.test(param) || fn.isExported) {
             const snippet = getLineSnippet(parsed.filePath, fn.startLine);
@@ -105,6 +273,7 @@ export class TaintAnalyzer {
               originFunction: fn.name,
               originSymbol: param,
               originSnippet: snippet,
+              sanitizedFor: new Set<TaintSinkType>(),
               steps: [
                 {
                   stepOrder: 1,
@@ -121,49 +290,57 @@ export class TaintAnalyzer {
           }
         }
 
-        // 2. Propagate or sanitize across local variable bindings in function AST
         for (const binding of fn.variableBindings) {
+          const matchingDeps = binding.dependencies.filter((d) => taintedVars.has(d));
+          const helperCallDep = binding.dependencies.find((d) => fnReturnsTaint.get(d));
+
+          if (matchingDeps.length === 0 && !helperCallDep) continue;
+          const upstream =
+            (matchingDeps[0] ? taintedVars.get(matchingDeps[0]) : undefined) ||
+            Array.from(taintedVars.values())[0];
+          if (!upstream) continue;
+
+          const nextSanitizedFor = new Set(upstream.sanitizedFor);
           if (binding.isSanitized) {
-            taintedVars.delete(binding.varName);
-            continue;
-          }
-          for (const dep of binding.dependencies) {
-            const upstream = taintedVars.get(dep);
-            if (upstream) {
-              const snippet = getLineSnippet(parsed.filePath, binding.lineNumber);
-              taintedVars.set(binding.varName, {
-                ...upstream,
-                steps: [
-                  ...upstream.steps,
-                  {
-                    stepOrder: upstream.steps.length + 1,
-                    nodeType: 'PROPAGATOR',
-                    filePath: parsed.filePath,
-                    lineNumber: binding.lineNumber,
-                    symbolName: binding.varName,
-                    codeSnippet: snippet,
-                    snippet,
-                    explanation: `Variável "${binding.varName}" propaga dado não sanitizado originado de "${dep}".`,
-                  },
-                ],
-              });
-              break;
+            for (const sinkType of getSanitizedSinksForContext(binding.sanitizerContext)) {
+              nextSanitizedFor.add(sinkType);
             }
           }
+
+          const snippet = getLineSnippet(parsed.filePath, binding.lineNumber);
+          const depLabel = matchingDeps[0] || helperCallDep || upstream.originSymbol;
+          const explanation = binding.isSanitized
+            ? `Variável "${binding.varName}" aplica "${binding.sanitizerName || 'sanitizador'}" (contexto: ${binding.sanitizerContext || 'parcial'}) sobre "${depLabel}".`
+            : `Variável "${binding.varName}" propaga dado não sanitizado originado de "${depLabel}".`;
+
+          taintedVars.set(binding.varName, {
+            ...upstream,
+            sanitizedFor: nextSanitizedFor,
+            steps: [
+              ...upstream.steps,
+              {
+                stepOrder: upstream.steps.length + 1,
+                nodeType: 'PROPAGATOR',
+                filePath: parsed.filePath,
+                lineNumber: binding.lineNumber,
+                symbolName: binding.varName,
+                codeSnippet: snippet,
+                snippet,
+                explanation,
+              },
+            ],
+          });
         }
 
-        // 3. Evaluate call sites within this function:
-        //    Case A: Direct sink in this function (e.g. execSync(cmd), eval(x))
-        //    Case B: Cross-function / cross-file propagation (e.g. controller calls repo function which hits sink)
         for (const call of fn.callsMade) {
           const matchedArg = call.argIdentifiers.find((id) => taintedVars.has(id));
           if (!matchedArg) continue;
           const taint = taintedVars.get(matchedArg)!;
 
-          // Check direct sinks inside same function
+          // Case A: Direct sink inside same function
           const sinkRule = SINK_RULES.find((r) => r.calleePattern.test(call.calleeBase || call.callee));
           if (sinkRule) {
-            // Confirm unsafe sink if SQL (don't flag parameterized queries)
+            if (taint.sanitizedFor.has(sinkRule.sinkType)) continue;
             if (sinkRule.sinkType === 'SQL_INJECTION' && functionHasSafeSqlHandling(fn, fileContent)) {
               continue;
             }
@@ -180,7 +357,7 @@ export class TaintAnalyzer {
                   symbolName: matchedArg,
                   codeSnippet: call.snippet,
                   snippet: call.snippet,
-                  explanation: `Nenhuma validação/sanitização estrutural interceptou "${matchedArg}" antes do sink.`,
+                  explanation: `Nenhuma sanitização válida para ${sinkRule.sinkType} interceptou "${matchedArg}" antes do sink.`,
                 },
                 {
                   stepOrder: taint.steps.length + 2,
@@ -199,7 +376,7 @@ export class TaintAnalyzer {
                 title: sinkRule.title,
                 description: `Fluxo de taint rastreado via AST de ${taint.originFile}:${taint.originLine} (${taint.originFunction}) até ${call.filePath}:${call.lineNumber} (${call.callee}).`,
                 category: 'SAST',
-                severity: 'BLOCKER',
+                severity: sinkRule.sinkType === 'XSS' ? 'HIGH' : 'BLOCKER',
                 cwe: sinkRule.cwe,
                 filePath: call.filePath,
                 lineNumber: call.lineNumber,
@@ -215,103 +392,102 @@ export class TaintAnalyzer {
             continue;
           }
 
-          // Case B: Interprocedural / Cross-file propagation to callee function in project
+          // Case B: Interprocedural / Cross-file propagation (1 or 2 hops)
           const calleeName = call.calleeBase || call.callee;
           const targetFns = fnByName.get(calleeName) || [];
           for (const targetFn of targetFns) {
             if (targetFn.filePath === fn.filePath && targetFn.name === fn.name) continue;
-            const targetFileContent = filesMap[targetFn.filePath] || '';
-            if (functionHasSafeSqlHandling(targetFn, targetFileContent)) {
-              continue;
-            }
 
-            // Does targetFn have a direct sink or an AST SAST issue within its line span?
-            const targetDirectSink = targetFn.callsMade.find((c) =>
-              SINK_RULES.some((r) => r.calleePattern.test(c.calleeBase || c.callee))
-            );
-            const targetAstSqliOrRce = parseResults
-              .find((p) => p.filePath === targetFn.filePath)
-              ?.issues.find(
-                (iss) =>
-                  iss.category === 'SAST' &&
-                  (iss.cwe === 'CWE-89' || iss.cwe === 'CWE-78' || iss.cwe === 'CWE-95') &&
-                  iss.lineNumber >= targetFn.startLine &&
-                  iss.lineNumber <= targetFn.endLine
-              );
+            const resolvedSink = resolveDeepSink(targetFn, 1, new Set([`${fn.filePath}:${fn.name}`]));
+            if (!resolvedSink) continue;
+            if (taint.sanitizedFor.has(resolvedSink.sinkType)) continue;
 
-            if (targetDirectSink || targetAstSqliOrRce) {
-              const sinkLine = targetDirectSink?.lineNumber || targetAstSqliOrRce!.lineNumber;
-              const sinkSnippet =
-                targetDirectSink?.snippet || getLineSnippet(targetFn.filePath, sinkLine);
-              const sinkCwe = targetAstSqliOrRce?.cwe || 'CWE-89';
-              const ruleId = sinkCwe === 'CWE-78' ? 'taint:S2076' : 'taint:S3649';
-              const key = `${ruleId}|${targetFn.filePath}|${sinkLine}|${fn.filePath}`;
-              if (dedup.has(key)) continue;
-              dedup.add(key);
+            const ruleId =
+              SINK_RULES.find((r) => r.sinkType === resolvedSink.sinkType)?.ruleId || 'taint:S3649';
+            const key = `${ruleId}|${resolvedSink.targetFn.filePath}|${resolvedSink.sinkLine}|${fn.filePath}`;
+            if (dedup.has(key)) continue;
+            dedup.add(key);
 
-              const flowSteps: CodeExecutionFlowStep[] = [
-                ...taint.steps,
-                {
-                  stepOrder: taint.steps.length + 1,
-                  nodeType: 'PROPAGATOR',
-                  filePath: call.filePath,
-                  lineNumber: call.lineNumber,
-                  symbolName: `${call.callee}(${matchedArg})`,
-                  codeSnippet: call.snippet,
-                  snippet: call.snippet,
-                  explanation: `Função "${fn.name}" propaga "${matchedArg}" para "${targetFn.name}" em ${targetFn.filePath}.`,
-                },
-                {
-                  stepOrder: taint.steps.length + 2,
-                  nodeType: 'SANITIZER_MISSING',
-                  filePath: targetFn.filePath,
-                  lineNumber: targetFn.startLine,
-                  symbolName: targetFn.params[0] || matchedArg,
-                  codeSnippet: getLineSnippet(targetFn.filePath, targetFn.startLine),
-                  snippet: getLineSnippet(targetFn.filePath, targetFn.startLine),
-                  explanation: `Entrada entra em "${targetFn.name}" sem parametrização ou sanitização.`,
-                },
-                {
-                  stepOrder: taint.steps.length + 3,
-                  nodeType: 'SINK',
-                  filePath: targetFn.filePath,
-                  lineNumber: sinkLine,
-                  symbolName: targetDirectSink?.callee || 'SQL/Sink',
-                  codeSnippet: sinkSnippet,
-                  snippet: sinkSnippet,
-                  explanation: `Sink vulnerável executado em ${targetFn.filePath}:${sinkLine} (${sinkCwe}).`,
-                },
-              ];
+            const flowSteps: CodeExecutionFlowStep[] = [
+              ...taint.steps,
+              {
+                stepOrder: taint.steps.length + 1,
+                nodeType: 'PROPAGATOR',
+                filePath: call.filePath,
+                lineNumber: call.lineNumber,
+                symbolName: `${call.callee}(${matchedArg})`,
+                codeSnippet: call.snippet,
+                snippet: call.snippet,
+                explanation: `Função "${fn.name}" propaga "${matchedArg}" para "${targetFn.name}" em ${targetFn.filePath}.`,
+              },
+            ];
 
-              taintIssues.push({
-                ruleId,
-                title:
-                  sinkCwe === 'CWE-78'
-                    ? `Command Injection interprocedural (${fn.name} → ${targetFn.name})`
-                    : `SQL Injection interprocedural (${fn.name} → ${targetFn.name})`,
-                description: `Fluxo Source-to-Sink cross-file rastreado de ${taint.originFile}:${taint.originLine} até ${targetFn.filePath}:${sinkLine}.`,
-                category: 'SAST',
-                severity: 'BLOCKER',
-                cwe: sinkCwe,
-                filePath: targetFn.filePath,
-                lineNumber: sinkLine,
-                endLineNumber: sinkLine,
-                snippet: sinkSnippet,
-                remediation:
-                  sinkCwe === 'CWE-78'
-                    ? 'Evitar shell e validar argumentos com allowlist.'
-                    : 'Utilizar Prepared Statements parametrizados com placeholders (? / $1).',
-                detectionMethod: 'TAINT_ANALYSIS',
-                confidence: 'HIGH',
-                effortMinutes: 35,
-                executionFlows: flowSteps,
+            for (const hop of resolvedSink.hopChain) {
+              flowSteps.push({
+                stepOrder: flowSteps.length + 1,
+                nodeType: 'PROPAGATOR',
+                filePath: hop.caller.filePath,
+                lineNumber: hop.callLine,
+                symbolName: hop.calleeText,
+                codeSnippet: hop.snippet,
+                snippet: hop.snippet,
+                explanation: `Propagação interprocedural intermediária de "${hop.caller.name}" para "${hop.calleeText}".`,
               });
             }
+
+            flowSteps.push(
+              {
+                stepOrder: flowSteps.length + 1,
+                nodeType: 'SANITIZER_MISSING',
+                filePath: resolvedSink.targetFn.filePath,
+                lineNumber: resolvedSink.targetFn.startLine,
+                symbolName: resolvedSink.targetFn.params[0] || matchedArg,
+                codeSnippet: getLineSnippet(resolvedSink.targetFn.filePath, resolvedSink.targetFn.startLine),
+                snippet: getLineSnippet(resolvedSink.targetFn.filePath, resolvedSink.targetFn.startLine),
+                explanation: `Entrada entra em "${resolvedSink.targetFn.name}" sem parametrização ou sanitização compatível com ${resolvedSink.sinkType}.`,
+              },
+              {
+                stepOrder: flowSteps.length + 2,
+                nodeType: 'SINK',
+                filePath: resolvedSink.targetFn.filePath,
+                lineNumber: resolvedSink.sinkLine,
+                symbolName: resolvedSink.sinkCallee,
+                codeSnippet: resolvedSink.sinkSnippet,
+                snippet: resolvedSink.sinkSnippet,
+                explanation: `Sink vulnerável executado em ${resolvedSink.targetFn.filePath}:${resolvedSink.sinkLine} (${resolvedSink.sinkCwe}).`,
+              }
+            );
+
+            taintIssues.push({
+              ruleId,
+              title:
+                resolvedSink.sinkType === 'COMMAND_INJECTION'
+                  ? `Command Injection interprocedural (${fn.name} → ${resolvedSink.targetFn.name})`
+                  : resolvedSink.sinkType === 'PATH_TRAVERSAL'
+                    ? `Path Traversal interprocedural (${fn.name} → ${resolvedSink.targetFn.name})`
+                    : resolvedSink.sinkType === 'XSS'
+                      ? `Cross-Site Scripting interprocedural (${fn.name} → ${resolvedSink.targetFn.name})`
+                      : `SQL Injection interprocedural (${fn.name} → ${resolvedSink.targetFn.name})`,
+              description: `Fluxo Source-to-Sink cross-file rastreado de ${taint.originFile}:${taint.originLine} até ${resolvedSink.targetFn.filePath}:${resolvedSink.sinkLine}.`,
+              category: 'SAST',
+              severity: resolvedSink.sinkType === 'XSS' ? 'HIGH' : 'BLOCKER',
+              cwe: resolvedSink.sinkCwe,
+              filePath: resolvedSink.targetFn.filePath,
+              lineNumber: resolvedSink.sinkLine,
+              endLineNumber: resolvedSink.sinkLine,
+              snippet: resolvedSink.sinkSnippet,
+              remediation:
+                SINK_RULES.find((r) => r.sinkType === resolvedSink.sinkType)?.remediation ||
+                'Aplicar validação e parametrização estrita antes do sink.',
+              detectionMethod: 'TAINT_ANALYSIS',
+              confidence: 'HIGH',
+              effortMinutes: 35,
+              executionFlows: flowSteps,
+            });
           }
         }
       }
 
-      // Attach AST flows to same-file AST SAST issues that lacked flows when taint reached them
       for (const iss of fileAstIssues) {
         if (iss.category === 'SAST' && (!iss.executionFlows || iss.executionFlows.length === 0)) {
           const enclosingFn = parsed.functions.find(

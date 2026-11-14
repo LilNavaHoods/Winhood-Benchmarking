@@ -1046,7 +1046,20 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                         </div>
                       )}
                       <div className="text-slate-600 dark:text-slate-400">
-                        <span>Cobertura Testes: {sc.metricsSummary.testCoveragePercent}%</span>
+                        {sc.veracity?.coverageBreakdown?.test?.state === 'MEASURED' &&
+                        sc.veracity.coverageBreakdown.test.percent !== null ? (
+                          <span>
+                            Cobertura Testes ({sc.veracity.coverageBreakdown.test.sourceFormat || 'LCOV'}):{' '}
+                            <strong className="text-emerald-500">
+                              {sc.veracity.coverageBreakdown.test.percent}%
+                            </strong>
+                          </span>
+                        ) : (
+                          <span className="text-amber-600 dark:text-amber-400 font-sans">
+                            Cobertura Testes: <strong>NÃO MEDIDO</strong> (Ingestão/Análise:{' '}
+                            {sc.veracity?.coverageBreakdown?.analysis?.percent ?? 100}%)
+                          </span>
+                        )}
                         <span className="mx-1.5">·</span>
                         <span>Dívida: {sc.metricsSummary.technicalDebtMinutes} min</span>
                       </div>

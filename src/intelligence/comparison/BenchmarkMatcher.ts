@@ -182,7 +182,13 @@ export class BenchmarkMatcher {
     });
 
     // 9. AVAILABLE_REPORTS (Source & Coverage symmetry)
-    const eligibleFlags = softwares.map((s) => Object.keys(s.sourceFilesContent || {}).length > 0);
+    const eligibleFlags = softwares.map(
+      (s) =>
+        s.sourceType !== 'PUBLIC_DOCUMENTATION_ONLY' &&
+        s.sourceAvailability !== 'PUBLIC_DOCUMENTATION_ONLY' &&
+        s.sourceAvailability !== 'CLOSED_SOURCE' &&
+        Object.keys(s.sourceFilesContent || {}).length > 0
+    );
     const hasIneligible = eligibleFlags.some((f) => !f);
     const reportsSymmetric = !hasIneligible;
     checks.push({
@@ -191,7 +197,7 @@ export class BenchmarkMatcher {
       severity: reportsSymmetric ? 'INFO' : 'BLOCKING',
       detail: reportsSymmetric
         ? 'Todos os alvos possuem artefatos de código-fonte elegíveis e inventário verificado.'
-        : 'Ao menos um software não possui código-fonte elegível completo para inspeção equivalente.',
+        : 'Ao menos um software não possui código-fonte elegível completo (ex.: documentação pública ou metadados apenas).',
     });
     if (!reportsSymmetric) {
       blockingReasons.push('Assimetria de disponibilidade de código-fonte/relatórios entre os softwares.');
@@ -214,20 +220,25 @@ export class BenchmarkMatcher {
       name: sc.softwareName,
       cov: sc.metricsSummary.testCoveragePercent,
     }));
+    const measuredCovs = covList.filter((c): c is { name: string; cov: number } => typeof c.cov === 'number');
+    const unmeasuredOrZero = covList.filter((c) => c.cov === null || c.cov === 0);
     const covMismatch =
       multiTarget &&
       covList.length >= 2 &&
-      Math.max(...covList.map((c) => c.cov)) > 0 &&
-      Math.min(...covList.map((c) => c.cov)) === 0;
+      measuredCovs.some((c) => c.cov > 0) &&
+      unmeasuredOrZero.length > 0;
     checks.push({
       criterion: 'TEST_COVERAGE',
       passed: !covMismatch,
-      severity: covMismatch ? 'WARNING' : 'INFO',
+      severity: covMismatch ? 'BLOCKING' : 'INFO',
       detail: covMismatch
-        ? `Assimetria de relatórios reais de cobertura (${covList.map((c) => `${c.name}: ${c.cov}%`).join(' vs ')}).`
-        : `Simetria de relatórios de cobertura verificada (${covList.map((c) => `${c.name}: ${c.cov}%`).join(' vs ') || 'aguardando scorecard'}).`,
+        ? `Assimetria de relatórios reais de cobertura (${covList.map((c) => `${c.name}: ${c.cov === null ? 'NOT_MEASURED' : `${c.cov}%`}`).join(' vs ')}).`
+        : `Simetria de relatórios de cobertura verificada (${covList.map((c) => `${c.name}: ${c.cov === null ? 'NOT_MEASURED' : `${c.cov}%`}`).join(' vs ') || 'aguardando scorecard'}).`,
     });
     if (covMismatch) {
+      blockingReasons.push(
+        'Assimetria de cobertura de testes: um alvo possui relatório real medido e outro está NOT_MEASURED / 0%.'
+      );
       warnings.push('Um dos alvos possui relatório real de cobertura (LCOV/JaCoCo) e o outro não (NOT_MEASURED).');
     }
 

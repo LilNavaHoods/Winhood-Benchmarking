@@ -471,8 +471,21 @@ test('buildFull21SecurityAdaptersCatalog returns 21 real security adapters witho
   catalog.forEach((adapter) => {
     assert.ok(adapter.name.length > 0);
     assert.ok(adapter.category.length > 0);
-    assert.ok(['OPERATIONAL', 'FERRAMENTA NÃO INSTALADA', 'INTEGRAÇÃO CONFIGURADA', 'DISABLED'].includes(adapter.status));
-    assert.equal(adapter.signatureHash.length, 64);
+    assert.ok(
+      [
+        'OPERATIONAL',
+        'FERRAMENTA NÃO INSTALADA',
+        'INTEGRAÇÃO CONFIGURADA',
+        'INTEGRAÇÃO NÃO CONFIGURADA',
+        'ACESSO NÃO AUTORIZADO',
+        'DISABLED',
+      ].includes(adapter.status)
+    );
+    if (adapter.binaryDetected) {
+      assert.equal(adapter.signatureHash?.length, 64);
+    } else {
+      assert.equal(adapter.signatureHash, null);
+    }
   });
 });
 
@@ -823,7 +836,24 @@ test('Remediated VaultCore Internal (v2.5.0) and non-vault projects (keeweb / Au
     repositoryUrl: 'https://git.corp.internal/sec/vaultcore-internal.git',
     description: 'VaultCore Internal v2.5.0 remediated',
     createdAt: new Date().toISOString(),
-    sourceFilesContent: VAULTCORE_INTERNAL_FILES,
+    sourceFilesContent: {
+      ...VAULTCORE_INTERNAL_FILES,
+      'coverage/lcov.info': [
+        'TN:vaultcore-internal-enterprise',
+        'SF:src/domain/cryptoVault.ts',
+        'LF:28',
+        'LH:27',
+        'end_of_record',
+        'SF:src/ui/vaultController.ts',
+        'LF:16',
+        'LH:15',
+        'end_of_record',
+        'SF:src/db/vaultRepository.ts',
+        'LF:20',
+        'LH:19',
+        'end_of_record',
+      ].join('\n'),
+    },
   } as unknown as Software;
 
   const nonVaultApp: Software = {
@@ -867,6 +897,13 @@ test('Remediated VaultCore Internal (v2.5.0) and non-vault projects (keeweb / Au
         '  assert.equal(verifyTokenClaims({ sub: "usr-1", exp: 9999999999 }, 1000), true);',
         '  assert.equal(verifyTokenClaims({ sub: "usr-1", exp: 500 }, 1000), false);',
         '});',
+      ].join('\n'),
+      'coverage/lcov.info': [
+        'TN:auth-gateway',
+        'SF:src/domain/tokenVerifier.ts',
+        'LF:5',
+        'LH:5',
+        'end_of_record',
       ].join('\n'),
     },
   } as unknown as Software;
@@ -1106,12 +1143,21 @@ test('Scenario 7 & 19: HMAC-SHA256 Signed Evidence Manifest and Tamper Detection
   });
 
   assert.ok(run.signedManifest);
-  assert.equal(run.signedManifest?.signatureAlgorithm, 'HMAC-SHA256');
+  assert.ok(
+    run.signedManifest?.signatureAlgorithm === 'HMAC-SHA256+ED25519' ||
+      run.signedManifest?.signatureAlgorithm === 'HMAC-SHA256'
+  );
+  assert.equal(run.signedManifest?.verified, false);
+  assert.equal(run.signedManifest?.verificationState, 'SIGNED');
   assert.equal(run.evidenceChain[0]?.previousRecordSha256, GENESIS_EVIDENCE_HASH);
 
   const validCheck = verifyEvidenceChainAndManifest(run.evidenceChain, run.signedManifest);
   assert.equal(validCheck.valid, true);
+  assert.equal(validCheck.verificationState, 'VERIFIED');
   assert.equal(validCheck.signatureValid, true);
+  if (run.signedManifest?.ed25519Signature) {
+    assert.equal(validCheck.ed25519SignatureValid, true);
+  }
   assert.equal(validCheck.tamperedIndices.length, 0);
 
   // Tamper with a middle record's resultSummary without updating hashes
@@ -1120,6 +1166,7 @@ test('Scenario 7 & 19: HMAC-SHA256 Signed Evidence Manifest and Tamper Detection
   );
   const tamperedCheck = verifyEvidenceChainAndManifest(tamperedChain, run.signedManifest);
   assert.equal(tamperedCheck.valid, false);
+  assert.equal(tamperedCheck.verificationState, 'TAMPERED');
   assert.ok(tamperedCheck.tamperedIndices.includes(2));
   assert.equal(tamperedCheck.signatureValid, false);
 });

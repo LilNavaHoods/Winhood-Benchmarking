@@ -863,13 +863,14 @@ export function calculateDeterministicScoreCard(
   if (m.functionalTestsTotal === 0) {
     pushReason('functionality', {
       impactType: 'METRIC_THRESHOLD',
-      scoreDelta: -5.0,
-      severity: 'HIGH',
-      ruleId: 'metric.func.no-tests-executed',
-      title: 'Ausência de suíte de testes funcionais automatizados',
-      whyExplanation: 'Nenhum teste funcional automatizado foi encontrado ou executado (0/0 testes), resultando em dedução integral (-5.00 pts) na categoria Funcionalidade.',
-      remediationSummary: 'Implementar testes automatizados de contrato funcional em tests/*.spec.ts.',
-      remediationEffortMinutes: 120,
+      scoreDelta: 0,
+      severity: 'INFO',
+      ruleId: 'metric.func.tests-not-measured',
+      title: 'Testes funcionais dinâmicos não executados (NOT_MEASURED)',
+      whyExplanation:
+        'Nenhum teste funcional foi executado dinamicamente no sandbox isolado; a dimensão não é penalizada como falha e permanece NOT_MEASURED.',
+      remediationSummary: 'Executar testes funcionais automatizados isolados no ControlledTestAndPerfRunner.',
+      remediationEffortMinutes: 0,
     });
   } else if (passRatio < 1) {
     const failedRatioDelta = -round2(5.0 * (1 - passRatio));
@@ -1654,16 +1655,27 @@ export function calculateDeterministicScoreCard(
       metricKey: 'new_coverage',
       label: 'Cobertura de Testes no Código Elegível',
       threshold: '>= 80.0%',
-      actualValue: isEligibleForScoring ? `${m.testCoveragePercent.toFixed(1)}%` : 'N/A',
+      actualValue: !isEligibleForScoring
+        ? 'N/A'
+        : hasMeasuredCoverage
+          ? `${m.testCoveragePercent.toFixed(1)}%`
+          : 'NOT_MEASURED',
       status: !isEligibleForScoring
         ? 'NOT_EVALUATED'
-        : m.testCoveragePercent < 80.0
+        : !hasMeasuredCoverage
           ? fudgeFactorApplied
             ? 'WARN_FUDGE_FACTOR'
-            : 'FAILED'
-          : 'PASSED',
-      failureReason:
-        m.testCoveragePercent < 80.0
+            : 'NOT_EVALUATED'
+          : m.testCoveragePercent < 80.0
+            ? fudgeFactorApplied
+              ? 'WARN_FUDGE_FACTOR'
+              : 'FAILED'
+            : 'PASSED',
+      failureReason: !hasMeasuredCoverage
+        ? fudgeFactorApplied
+          ? 'Fudge Factor SonarQube ativo (< 20 linhas novas): ausência de relatório de cobertura suprimida.'
+          : 'Relatório real de cobertura de testes ausente (NOT_MEASURED) — condição obrigatória não avaliada.'
+        : m.testCoveragePercent < 80.0
           ? fudgeFactorApplied
             ? `Fudge Factor SonarQube ativo (< 20 linhas novas): falha de cobertura (${m.testCoveragePercent.toFixed(1)}%) suprimida.`
             : `Cobertura de testes (${m.testCoveragePercent.toFixed(1)}%) abaixo do mínimo exigido pelo Quality Gate Sonar way (80.0%).`
@@ -1672,6 +1684,7 @@ export function calculateDeterministicScoreCard(
   ];
 
   const failedConditions: string[] = [];
+  const unmeasuredMandatoryConditions: string[] = [];
   if (isEligibleForScoring) {
     if (m.criticalVulns > 0) failedConditions.push(`Vulnerabilidades Críticas: ${m.criticalVulns} > 0`);
     if (m.secretsExposed > 0) failedConditions.push(`Segredos Hardcoded Expostos: ${m.secretsExposed} > 0`);
@@ -1682,19 +1695,26 @@ export function calculateDeterministicScoreCard(
     if (securityRating === 'D' || securityRating === 'E') {
       failedConditions.push(`Security Rating reprovado (${securityRating})`);
     }
+    if (!hasMeasuredCoverage && !fudgeFactorApplied) {
+      unmeasuredMandatoryConditions.push('Cobertura de Testes: NOT_MEASURED (obrigatório relatório LCOV/JaCoCo/Cobertura/Istanbul >= 80%)');
+    } else if (hasMeasuredCoverage && m.testCoveragePercent < 80 && !fudgeFactorApplied) {
+      failedConditions.push(`Cobertura de Testes: ${m.testCoveragePercent.toFixed(1)}% < 80.0%`);
+    }
   }
 
   const qualityGateStatus: 'PASSED' | 'FAILED' | 'WARN' | 'INCONCLUSIVE' | 'NOT_EVALUATED' =
     !isEligibleForScoring
       ? 'NOT_EVALUATED'
-      : failedConditions.length === 0
+      : failedConditions.length === 0 && unmeasuredMandatoryConditions.length === 0
       ? 'PASSED'
-      : failedConditions.length === 1 && m.criticalVulns === 0 && m.secretsExposed === 0
+      : unmeasuredMandatoryConditions.length > 0 && failedConditions.length === 0
+      ? 'INCONCLUSIVE'
+      : failedConditions.length === 1 && m.criticalVulns === 0 && m.secretsExposed === 0 && unmeasuredMandatoryConditions.length === 0
       ? 'WARN'
       : 'FAILED';
 
   const executiveDecision: import('../types/benchmark').ExecutiveQualityGateDecision =
-    !isEligibleForScoring
+    !isEligibleForScoring || qualityGateStatus === 'INCONCLUSIVE'
       ? 'INCONCLUSIVE'
       : input.coveragePercent < 50
       ? 'INCONCLUSIVE'

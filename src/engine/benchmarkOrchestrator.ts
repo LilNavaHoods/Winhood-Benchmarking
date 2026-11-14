@@ -18,9 +18,15 @@ import type {
   SoftwareScoreCard,
   ToolAdapterInfo,
   ToolExecutionRecord,
+  UnifiedExecutionRecord,
   VeracityCheckResult,
   WindowsSandboxSnapshotDiff,
 } from '../types/benchmark';
+import {
+  ControlledTestAndPerfRunner,
+  type ControlledPerfMeasurementResult,
+  type ControlledTestExecutionResult,
+} from '../execution/ControlledTestAndPerfRunner';
 import {
   ALGORITHM_VERSION,
   ALL_BENCHMARK_CATEGORIES,
@@ -485,6 +491,10 @@ export function executeBenchmarkRunOrchestration(params: {
   assessmentMode?: 'INDIVIDUAL' | 'AB_COMPARE' | 'MARKET_COMPETITOR';
   environmentMode?: AppEnvironment;
   dataOrigin?: any;
+  executeDynamicIsolatedTests?: boolean;
+  testResultsBySoftware?: Record<string, ControlledTestExecutionResult>;
+  perfResultsBySoftware?: Record<string, ControlledPerfMeasurementResult>;
+  unifiedExecutions?: UnifiedExecutionRecord[];
   onProgress?: (progress: BenchmarkRunProgress) => void;
 }): BenchmarkRun {
   const runId = params.runId || `run-${crypto.randomUUID().slice(0, 8)}`;
@@ -517,6 +527,7 @@ export function executeBenchmarkRunOrchestration(params: {
 
   const sbomsBySoftware: Record<string, SbomDocumentBundle> = {};
   const scaCorrelationsBySoftware: Record<string, ScaVulnerabilityCorrelation[]> = {};
+  const collectedUnifiedExecutions: UnifiedExecutionRecord[] = [...(params.unifiedExecutions || [])];
 
   const totalFiles = params.softwares.reduce(
     (acc, s) => acc + (s.inventory?.eligibleFiles || s.inventory?.totalFiles || 1),
@@ -646,6 +657,105 @@ export function executeBenchmarkRunOrchestration(params: {
       isolatedStoragePath: sw.inventory?.isolatedStoragePath || `/isolated/${sw.id}`,
     });
 
+    // Integrar execução dinâmica de testes/cobertura/perf quando fornecida ou solicitada para este software/sourceHash/commitHash
+    const dynamicTestRes =
+      params.testResultsBySoftware?.[sw.id] ||
+      (params.executeDynamicIsolatedTests && bundle.veracity.checks.eligibleForScoring
+        ? ControlledTestAndPerfRunner.runIsolatedTestSuite({
+            softwareName: sw.name,
+            filesMap,
+          })
+        : undefined);
+
+    if (dynamicTestRes) {
+      bundle.metricProvenance = bundle.metricProvenance || {};
+      if (dynamicTestRes.executed) {
+        bundle.computedMetrics.functionalTestsTotal = dynamicTestRes.testsTotal;
+        bundle.computedMetrics.functionalTestsPassed = dynamicTestRes.testsPassed;
+        bundle.computedMetrics.functionalTestsFailed = dynamicTestRes.testsFailed;
+        bundle.metricProvenance.functionalTestsTotal = dynamicTestRes.provenance;
+      }
+      if (
+        dynamicTestRes.coverageReport.found &&
+        dynamicTestRes.coverageReport.lineCoveragePercent !== null &&
+        !bundle.coverageReportSummary?.found
+      ) {
+        bundle.computedMetrics.testCoveragePercent = dynamicTestRes.coverageReport.lineCoveragePercent;
+        bundle.staticMetrics.testCoveragePercent = dynamicTestRes.coverageReport.lineCoveragePercent;
+      }
+      collectedUnifiedExecutions.push({
+        executionId: `uexec-test-${runId}-${sw.id}`,
+        runId,
+        softwareId: sw.id,
+        sourceHash: sw.packageSha256 || '',
+        commitHash: sw.commitHash || '',
+        kind: 'ISOLATED_TEST_SUITE',
+        state: dynamicTestRes.executed
+          ? 'MEASURED'
+          : dynamicTestRes.blocked
+            ? 'FAILED'
+            : 'NOT_MEASURED',
+        isolationMode: dynamicTestRes.isolationMode,
+        recoveryVerified: dynamicTestRes.recoveryVerified,
+        summary: dynamicTestRes.provenance.method,
+        executedAt: dynamicTestRes.provenance.measuredAt,
+        metricsPayload: {
+          testsTotal: dynamicTestRes.testsTotal,
+          testsPassed: dynamicTestRes.testsPassed,
+          testsFailed: dynamicTestRes.testsFailed,
+          runnerUsed: dynamicTestRes.runnerUsed,
+        },
+        evidenceHash: dynamicTestRes.provenance.evidenceHash || null,
+      });
+    }
+
+    const dynamicPerfRes = params.perfResultsBySoftware?.[sw.id];
+    if (dynamicPerfRes && dynamicPerfRes.status === 'MEASURED') {
+      bundle.metricProvenance = bundle.metricProvenance || {};
+      bundle.computedMetrics.p50LatencyMs = dynamicPerfRes.p50LatencyMs ?? 0;
+      bundle.computedMetrics.p95LatencyMs = dynamicPerfRes.p95LatencyMs ?? 0;
+      bundle.computedMetrics.p99LatencyMs = dynamicPerfRes.p99LatencyMs ?? 0;
+      bundle.computedMetrics.throughputRps = dynamicPerfRes.throughputRps ?? 0;
+      if (dynamicPerfRes.targetMetrics.memoryRssMb !== null) {
+        bundle.computedMetrics.memoryMb = dynamicPerfRes.targetMetrics.memoryRssMb;
+      }
+      if (dynamicPerfRes.targetMetrics.cpuPercent !== null) {
+        bundle.computedMetrics.cpuPercent = dynamicPerfRes.targetMetrics.cpuPercent;
+      }
+      if (dynamicPerfRes.targetMetrics.startupTimeMs !== null) {
+        bundle.computedMetrics.startupTimeMs = dynamicPerfRes.targetMetrics.startupTimeMs;
+      }
+      (bundle as { runtimeMetrics: unknown }).runtimeMetrics = {
+        status: 'MEASURED',
+        p50LatencyMs: dynamicPerfRes.p50LatencyMs ?? 0,
+        p95LatencyMs: dynamicPerfRes.p95LatencyMs ?? 0,
+        p99LatencyMs: dynamicPerfRes.p99LatencyMs ?? 0,
+        throughputRps: dynamicPerfRes.throughputRps ?? 0,
+        memoryMb: dynamicPerfRes.targetMetrics.memoryRssMb ?? undefined,
+        cpuPercent: dynamicPerfRes.targetMetrics.cpuPercent ?? undefined,
+        startupTimeMs: dynamicPerfRes.targetMetrics.startupTimeMs ?? undefined,
+      };
+      bundle.metricProvenance.p95LatencyMs = dynamicPerfRes.provenance;
+      collectedUnifiedExecutions.push({
+        executionId: `uexec-perf-${runId}-${sw.id}`,
+        runId,
+        softwareId: sw.id,
+        sourceHash: sw.packageSha256 || '',
+        commitHash: sw.commitHash || '',
+        kind: 'HTTP_PERF_WORKLOAD',
+        state: 'MEASURED',
+        summary: dynamicPerfRes.provenance.method,
+        executedAt: dynamicPerfRes.measuredAt,
+        metricsPayload: {
+          p50LatencyMs: dynamicPerfRes.p50LatencyMs,
+          p95LatencyMs: dynamicPerfRes.p95LatencyMs,
+          p99LatencyMs: dynamicPerfRes.p99LatencyMs,
+          throughputRps: dynamicPerfRes.throughputRps,
+        },
+        evidenceHash: dynamicPerfRes.provenance.evidenceHash || null,
+      });
+    }
+
     processedFilesCounter += eligibleCount;
 
     findings.push(...bundle.findings);
@@ -720,20 +830,15 @@ export function executeBenchmarkRunOrchestration(params: {
     // Honest Static Manifest / Lifecycle Inspection (Windows Sandbox is not executed on Linux host)
     const hasUnsafeShellOrTempDump =
       bundle.computedMetrics.criticalVulns > 0 || /execSync\(|\/tmp\/backup_|tar\s+-czf/.test(combinedSourceText);
-    const t0Hash = computeSha256(`T0-STATIC-BASELINE-${sw.id}`);
-    const t1Hash = computeSha256(`T1-MANIFEST-${sw.id}-${sw.packageSha256 || 'UNVERIFIED'}`);
-    const t2Hash = hasUnsafeShellOrTempDump
-      ? computeSha256(`T2-UNSAFE-LIFECYCLE-${sw.id}`)
-      : t0Hash;
 
     sandboxDiffs.push({
       softwareId: sw.id,
       softwareName: sw.name,
       sandboxEnvironment: 'Inspeção Estática de Manifesto & Ciclo de Vida (Host Linux — Windows Sandbox Não Executado)',
       executionStatus: 'STATIC_MANIFEST_INSPECTION',
-      t0BaselineHash: t0Hash,
-      t1PostInstallHash: t1Hash,
-      t2PostUninstallHash: t2Hash,
+      t0BaselineHash: null,
+      t1PostInstallHash: null,
+      t2PostUninstallHash: null,
       filesCreatedT1: Object.keys(filesMap).slice(0, 5),
       registryKeysModifiedT1: [],
       servicesRegisteredT1: [],
@@ -944,6 +1049,7 @@ export function executeBenchmarkRunOrchestration(params: {
     functionalMatrix,
     sandboxDiffs,
     evidenceChain,
+    unifiedExecutions: collectedUnifiedExecutions,
     winnerSoftwareId: winner ? winner.softwareId : null,
     qualityGate: (winner || topCandidate || scoreCards[0])?.qualityGate,
     ratings: (winner || topCandidate || scoreCards[0])?.ratings,

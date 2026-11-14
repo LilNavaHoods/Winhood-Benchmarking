@@ -1,8 +1,6 @@
-import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
+import { SandboxExecutor } from '../../execution/SandboxExecutor';
+import { ReferenceRegistry } from '../../intelligence/reference/ReferenceRegistry';
 import { ToolAvailabilityService } from '../../services/tools/ToolAvailabilityService';
 import type {
   NormalizedFinding,
@@ -131,6 +129,14 @@ const ADVISORY_INTELLIGENCE_DB: VulnerabilityAdvisorySeed[] = [
   },
 ];
 
+function scoreToSeverity(cvss: number | null, kev: boolean): ScaVulnerabilityCorrelation['severity'] {
+  if (kev || (cvss !== null && cvss >= 9.5)) return 'BLOCKER';
+  if (cvss !== null && cvss >= 8.5) return 'CRITICAL';
+  if (cvss !== null && cvss >= 7.0) return 'HIGH';
+  if (cvss !== null && cvss >= 4.0) return 'MEDIUM';
+  return 'LOW';
+}
+
 export class ScaCorrelator {
   public static getScaToolsAvailability() {
     const tools = ['syft', 'grype', 'osv-scanner', 'trivy'];
@@ -150,62 +156,229 @@ export class ScaCorrelator {
     sbom: SbomDocumentBundle;
     dbVersion?: string;
     runId?: string;
+    dataDir?: string;
   }): {
     correlations: ScaVulnerabilityCorrelation[];
     findings: NormalizedFinding[];
     toolsAvailability: ReturnType<typeof ScaCorrelator.getScaToolsAvailability>;
   } {
-    const { software, sbom, dbVersion = 'OSV-NVD-EPSS-KEV-2026.11', runId = 'sca-scan' } = params;
+    const {
+      software,
+      sbom,
+      dbVersion = 'OSV-NVD-EPSS-KEV-2026.11',
+      runId = 'sca-scan',
+      dataDir,
+    } = params;
     const toolsAvailability = ScaCorrelator.getScaToolsAvailability();
     const correlations: ScaVulnerabilityCorrelation[] = [];
     const findings: NormalizedFinding[] = [];
+    const seenKeys = new Set<string>();
     const nowIso = new Date().toISOString();
 
-    // Optionally run osv-scanner or trivy if binary is installed on host
+    // Load live-synced OSV/NVD/EPSS/KEV cache from ReferenceRegistry if available
+    let syncedBundle = {
+      updatedAt: '',
+      advisories: [] as any[],
+      kevCveIds: [] as string[],
+      epssByCve: {} as Record<string, { epss: number; percentile: number }>,
+      nvdByCve: {} as Record<string, { cvssScore: number | null; summary: string; cweIds: string[] }>,
+    };
+    try {
+      const reg = new ReferenceRegistry(dataDir);
+      syncedBundle = reg.loadSyncedAdvisoryCache();
+    } catch {
+      // Ignore if snapshot dir unavailable
+    }
+
+    // Run osv-scanner inside SandboxExecutor ONLY when binary + OS sandbox available
     const osvInstalled = toolsAvailability.find((t) => t.toolId === 'osv-scanner' && t.binaryDetected);
     if (osvInstalled && software.sourceFilesContent && Object.keys(software.sourceFilesContent).length > 0) {
-      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'winhood-sca-'));
-      try {
-        for (const [rel, content] of Object.entries(software.sourceFilesContent)) {
-          if (
-            rel.endsWith('package-lock.json') ||
-            rel.endsWith('requirements.txt') ||
-            rel.endsWith('go.mod') ||
-            rel.endsWith('Cargo.toml')
-          ) {
-            const dest = path.resolve(tmpDir, rel.replace(/^\/+/, ''));
-            if (dest.startsWith(tmpDir + path.sep)) {
-              fs.mkdirSync(path.dirname(dest), { recursive: true });
-              fs.writeFileSync(dest, content, 'utf8');
+      const manifestFiles: Record<string, string> = {};
+      for (const [rel, content] of Object.entries(software.sourceFilesContent)) {
+        if (
+          rel.endsWith('package-lock.json') ||
+          rel.endsWith('requirements.txt') ||
+          rel.endsWith('go.mod') ||
+          rel.endsWith('Cargo.toml')
+        ) {
+          manifestFiles[rel] = content;
+        }
+      }
+      if (Object.keys(manifestFiles).length > 0) {
+        const sbxRes = SandboxExecutor.runSandboxedCliBinary({
+          executablePath: osvInstalled.executablePath,
+          argsBuilder: (dir) => ['--format=json', '-r', dir],
+          filesMap: manifestFiles,
+          timeoutMs: 8000,
+        });
+        if (sbxRes.executed && sbxRes.stdout.trim()) {
+          try {
+            const osvCliJson = JSON.parse(sbxRes.stdout);
+            for (const res of osvCliJson?.results || []) {
+              for (const pkgEntry of res?.packages || []) {
+                const pkgName = String(pkgEntry?.package?.name || '');
+                const pkgVer = String(pkgEntry?.package?.version || '');
+                for (const vuln of pkgEntry?.vulnerabilities || []) {
+                  const idStr = String(vuln?.id || 'OSV-ADVISORY');
+                  const key = `${pkgName}@${pkgVer}:${idStr}`;
+                  if (seenKeys.has(key)) continue;
+                  seenKeys.add(key);
+
+                  const cve = (vuln?.aliases || []).find((a: string) => /^CVE-/i.test(a)) || null;
+                  const kev = cve ? syncedBundle.kevCveIds.includes(cve) : false;
+                  const epssEntry = cve ? syncedBundle.epssByCve[cve] : undefined;
+                  const nvdEntry = cve ? syncedBundle.nvdByCve[cve] : undefined;
+                  const cvss = nvdEntry?.cvssScore ?? null;
+                  const severity = scoreToSeverity(cvss, kev);
+
+                  const evidenceSha256 = crypto
+                    .createHash('sha256')
+                    .update(JSON.stringify({ softwareId: software.id, pkgName, pkgVer, idStr, source: 'osv-scanner' }))
+                    .digest('hex');
+
+                  correlations.push({
+                    id: `sca-${software.id}-${idStr}`,
+                    softwareId: software.id,
+                    packageName: pkgName,
+                    installedVersion: pkgVer,
+                    ecosystem: 'npm',
+                    dependencyScope: 'TRANSITIVE',
+                    license: 'UNKNOWN',
+                    cveId: cve,
+                    ghsaId: idStr.startsWith('GHSA-') ? idStr : null,
+                    cweIds: nvdEntry?.cweIds || ['CWE-1395'],
+                    cvssScore: cvss,
+                    epssScore: epssEntry?.epss ?? null,
+                    epssPercentile: epssEntry?.percentile ?? null,
+                    cisaKev: kev,
+                    affectedVersionRange: `== ${pkgVer}`,
+                    fixedVersion: null,
+                    severity,
+                    dbSource: 'OSV_SCANNER',
+                    dbVersion: osvInstalled.version || dbVersion,
+                    dbSnapshotAt: nowIso,
+                    summary: String(vuln?.summary || nvdEntry?.summary || idStr),
+                    evidenceSha256,
+                  });
+                }
+              }
             }
+          } catch {
+            // Invalid CLI JSON ignored safely
           }
         }
-        spawnSync(osvInstalled.executablePath, ['--format=json', '-r', tmpDir], {
-          shell: false,
-          encoding: 'utf8',
-          timeout: 8000,
-        });
-      } catch {
-        // Ignore transient CLI failure; continue with curated snapshot correlation
-      } finally {
-        fs.rmSync(tmpDir, { recursive: true, force: true });
       }
     }
 
+    // Correlate against live-synced OSV cache + curated baseline
     for (const comp of sbom.components) {
+      // 1. Live-synced OSV entries for exact package + version
+      for (const adv of syncedBundle.advisories) {
+        if (
+          adv.packageName?.toLowerCase() === comp.name.toLowerCase() &&
+          adv.affectedVersionRange === `== ${comp.version}`
+        ) {
+          const idKey = `${comp.name}@${comp.version}:${adv.cveId || adv.ghsaId}`;
+          if (seenKeys.has(idKey)) continue;
+          seenKeys.add(idKey);
+
+          const cve = adv.cveId;
+          const kev = cve ? syncedBundle.kevCveIds.includes(cve) || adv.cisaKev : false;
+          const epssEntry = cve ? syncedBundle.epssByCve[cve] : undefined;
+          const nvdEntry = cve ? syncedBundle.nvdByCve[cve] : undefined;
+          const cvss = nvdEntry?.cvssScore ?? adv.cvssScore ?? null;
+          const severity = scoreToSeverity(cvss, kev);
+
+          const evidenceSha256 = crypto
+            .createHash('sha256')
+            .update(JSON.stringify({ softwareId: software.id, pkg: comp.name, ver: comp.version, cve, ghsa: adv.ghsaId, syncedAt: adv.syncedAt }))
+            .digest('hex');
+
+          const corr: ScaVulnerabilityCorrelation = {
+            id: `sca-${software.id}-${cve || adv.ghsaId || comp.name}`,
+            softwareId: software.id,
+            packageName: comp.name,
+            installedVersion: comp.version,
+            ecosystem: comp.ecosystem,
+            dependencyScope: comp.dependencyScope,
+            license: comp.license,
+            cveId: cve,
+            ghsaId: adv.ghsaId,
+            cweIds: nvdEntry?.cweIds?.length ? nvdEntry.cweIds : adv.cweIds || ['CWE-1395'],
+            cvssScore: cvss,
+            epssScore: epssEntry?.epss ?? adv.epssScore ?? null,
+            epssPercentile: epssEntry?.percentile ?? adv.epssPercentile ?? null,
+            cisaKev: kev,
+            affectedVersionRange: adv.affectedVersionRange || `== ${comp.version}`,
+            fixedVersion: adv.fixedVersion ?? null,
+            severity,
+            dbSource: 'OSV.dev',
+            dbVersion: `LIVE_SYNCED@${adv.syncedAt.slice(0, 10)}`,
+            dbSnapshotAt: adv.syncedAt || nowIso,
+            summary: nvdEntry?.summary || adv.summary,
+            evidenceSha256,
+          };
+          correlations.push(corr);
+
+          findings.push(
+            enrichLegacyOrExternalFinding({
+              id: `f-sca-${runId}-${software.id}-${cve || adv.ghsaId || comp.name}`,
+              runId,
+              softwareId: software.id,
+              softwareName: software.name,
+              softwareVersion: software.version,
+              toolName: 'WinHood SCA & SBOM Correlator (Live Synced OSV/NVD/EPSS/KEV)',
+              toolVersion: corr.dbVersion,
+              originType: 'WINHOOD_SCA_ENGINE',
+              detectionMethod: 'SBOM_CORRELATION',
+              originalRuleId: cve || adv.ghsaId || 'OSV-ADVISORY',
+              category: 'SCA',
+              cwe: corr.cweIds[0] || 'CWE-1395',
+              severity: corr.severity,
+              confidence: 'HIGH',
+              validationStatus: 'VALIDATED',
+              lifecycleState: 'CONFIRMED',
+              title: `${cve || adv.ghsaId} em ${comp.name}@${comp.version} [${comp.dependencyScope}]`,
+              description: `${corr.summary} Origem: ${corr.dbSource} (${corr.dbVersion})${kev ? ' | CISA KEV ATIVO' : ''}.`,
+              filePath: comp.manifestFile,
+              lineNumber: 1,
+              snippet: `"${comp.name}": "${comp.version}"`,
+              remediation: corr.fixedVersion
+                ? `Atualizar "${comp.name}" para >= ${corr.fixedVersion}.`
+                : `Revisar advisory OSV/NVD para "${comp.name}@${comp.version}" e atualizar para release corrigida.`,
+              remediationEffortMinutes: 20,
+              collectedAt: nowIso,
+            })
+          );
+        }
+      }
+
+      // 2. Deterministic offline cached advisory baseline enriched with any live KEV/EPSS/NVD updates
       for (const adv of ADVISORY_INTELLIGENCE_DB) {
         if (
           comp.ecosystem === adv.ecosystem &&
           comp.name.toLowerCase() === adv.packageName.toLowerCase() &&
           adv.isVulnerable(comp.version)
         ) {
+          const idKey = `${comp.name}@${comp.version}:${adv.cveId}`;
+          if (seenKeys.has(idKey)) continue;
+          seenKeys.add(idKey);
+
+          const kev = syncedBundle.kevCveIds.includes(adv.cveId) || adv.cisaKev;
+          const epssLive = syncedBundle.epssByCve[adv.cveId];
+          const nvdLive = syncedBundle.nvdByCve[adv.cveId];
+          const cvssScore = nvdLive?.cvssScore ?? adv.cvssScore;
+          const epssScore = epssLive?.epss ?? adv.epssScore;
+          const epssPercentile = epssLive?.percentile ?? adv.epssPercentile;
+          const sourceLabel = syncedBundle.updatedAt ? `${dbVersion} (CACHED+KEV/EPSS)` : `${dbVersion} (CACHED_BASELINE)`;
+
           const payloadForHash = {
             softwareId: software.id,
             pkg: comp.name,
             ver: comp.version,
             cve: adv.cveId,
             ghsa: adv.ghsaId,
-            dbVersion,
+            dbVersion: sourceLabel,
           };
           const evidenceSha256 = crypto
             .createHash('sha256')
@@ -223,17 +396,17 @@ export class ScaCorrelator {
             cveId: adv.cveId,
             ghsaId: adv.ghsaId,
             cweIds: adv.cweIds,
-            cvssScore: adv.cvssScore,
-            epssScore: adv.epssScore,
-            epssPercentile: adv.epssPercentile,
-            cisaKev: adv.cisaKev,
+            cvssScore,
+            epssScore,
+            epssPercentile,
+            cisaKev: kev,
             affectedVersionRange: adv.affectedVersionRange,
             fixedVersion: adv.fixedVersion,
-            severity: adv.severity,
+            severity: kev ? 'BLOCKER' : adv.severity,
             dbSource: 'OSV.dev',
-            dbVersion,
-            dbSnapshotAt: nowIso,
-            summary: adv.summary,
+            dbVersion: sourceLabel,
+            dbSnapshotAt: syncedBundle.updatedAt || nowIso,
+            summary: nvdLive?.summary || adv.summary,
             evidenceSha256,
           };
           correlations.push(corr);
@@ -246,18 +419,18 @@ export class ScaCorrelator {
               softwareName: software.name,
               softwareVersion: software.version,
               toolName: 'WinHood SCA & SBOM Correlator (OSV/NVD/EPSS/KEV)',
-              toolVersion: dbVersion,
+              toolVersion: sourceLabel,
               originType: 'WINHOOD_SCA_ENGINE',
               detectionMethod: 'SBOM_CORRELATION',
               originalRuleId: adv.cveId,
               category: 'SCA',
               cwe: adv.cweIds[0] || 'CWE-1395',
-              severity: adv.severity,
+              severity: corr.severity,
               confidence: 'HIGH',
               validationStatus: 'VALIDATED',
               lifecycleState: 'CONFIRMED',
               title: `${adv.cveId} (${adv.ghsaId}) em ${comp.name}@${comp.version} [${comp.dependencyScope}]`,
-              description: `${adv.summary} CVSS ${adv.cvssScore} | EPSS ${(adv.epssScore * 100).toFixed(1)}%${adv.cisaKev ? ' | CISA KEV ATIVO' : ''}. Origem: ${corr.dbSource} (${dbVersion}).`,
+              description: `${corr.summary} CVSS ${cvssScore} | EPSS ${(epssScore * 100).toFixed(1)}%${kev ? ' | CISA KEV ATIVO' : ''}. Origem: ${corr.dbSource} (${sourceLabel}).`,
               filePath: comp.manifestFile,
               lineNumber: 1,
               snippet: `"${comp.name}": "${comp.version}" (Corrigido em >= ${adv.fixedVersion})`,

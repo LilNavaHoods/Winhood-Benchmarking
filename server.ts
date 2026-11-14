@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { exec } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
@@ -26,6 +27,7 @@ import type {
   SonarTokenVerificationResult,
   SourceManifest,
   ToolAdapterInfo,
+  UnifiedExecutionRecord,
   VulnerabilityValidationState,
 } from './src/types/benchmark';
 import {
@@ -91,6 +93,14 @@ import {
 import { GitarReviewWorker } from './src/workers/GitarReviewWorker';
 import { getHardwareProfile, updateHardwareProfile } from './src/engine/workerPool';
 import { KeyManagementService } from './src/security/KeyManagementService';
+import {
+  AuthService,
+  type PublicUserView,
+  type RbacPermission,
+  type RbacRole,
+} from './src/security/AuthService';
+import { PersistentDatabaseManager } from './src/storage/PersistentDatabaseManager';
+import { SsrfGuard, type AuthorizedPerfTarget } from './src/execution/SsrfGuard';
 import { ReferenceRegistry } from './src/intelligence/reference/ReferenceRegistry';
 import { ReferenceSynchronizer } from './src/intelligence/synchronization/ReferenceSynchronizer';
 import { BenchmarkMatcher } from './src/intelligence/comparison/BenchmarkMatcher';
@@ -100,10 +110,32 @@ import { CoverageReportParser } from './src/execution/CoverageReportParser';
 import { SbomGenerator } from './src/analyzers/sca/SbomGenerator';
 import { ScaCorrelator } from './src/analyzers/sca/ScaCorrelator';
 
-const PORT = 3000;
-const DATA_DIR = path.resolve(process.cwd(), '.winhood_data');
-const ISOLATED_ARTIFACTS_DIR = path.join(DATA_DIR, 'isolated_artifacts');
-const STORE_FILE = path.join(DATA_DIR, 'winhood_persistent_db.json');
+const PORT = Number(process.env.PORT || 3000);
+const DEFAULT_DATA_DIR = path.resolve(process.cwd(), '.winhood_data');
+const DATA_DIR = DEFAULT_DATA_DIR;
+const ISOLATED_ARTIFACTS_DIR = path.join(DEFAULT_DATA_DIR, 'isolated_artifacts');
+const STORE_FILE = path.join(DEFAULT_DATA_DIR, 'winhood_persistent_db.json');
+
+function isTestRuntimeEnvironment(): boolean {
+  return process.env.NODE_ENV === 'test' || process.env.WINHOOD_TEST_MODE === '1';
+}
+
+function parseCookies(cookieHeader: string | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!cookieHeader) return out;
+  for (const part of cookieHeader.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx <= 0) continue;
+    const key = part.slice(0, idx).trim();
+    const rawVal = part.slice(idx + 1).trim();
+    try {
+      out[key] = decodeURIComponent(rawVal);
+    } catch {
+      out[key] = rawVal;
+    }
+  }
+  return out;
+}
 
 const REPORT_TYPE_LITERALS: Record<
   string,
@@ -181,14 +213,9 @@ function stripTrailingSlashes(url: string): string {
 }
 
 interface PersistentDatabaseState {
+  schemaVersion?: number;
+  storageKind?: string;
   environmentMode: AppEnvironment;
-  currentUser: {
-    id: string;
-    name: string;
-    email: string;
-    role: 'ADMIN' | 'SECURITY_LEAD' | 'AUDITOR' | 'QA_ENGINEER';
-    mfaVerified: boolean;
-  };
   projects: Project[];
   softwares: Software[];
   profiles: BenchmarkProfileConfig[];
@@ -197,6 +224,7 @@ interface PersistentDatabaseState {
   auditLogs: AuditLogEntry[];
   toolsDb: SonarAndToolsDatabaseBundle;
   savedSonarProjects?: SavedSonarProjectProfile[];
+  authorizedTargets?: AuthorizedPerfTarget[];
   demoData?: {
     projects: Project[];
     softwares: Software[];
@@ -355,19 +383,24 @@ function validateSonarServerOrigin(rawServerUrl: string, platform: 'SONARCLOUD' 
   return parsed.origin;
 }
 
-function ensureDirectories() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
+function ensureDirectories(dataDir = DATA_DIR, artifactsDir = ISOLATED_ARTIFACTS_DIR) {
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true });
   }
-  if (!fs.existsSync(ISOLATED_ARTIFACTS_DIR)) {
-    fs.mkdirSync(ISOLATED_ARTIFACTS_DIR, { recursive: true });
+  if (!fs.existsSync(artifactsDir)) {
+    fs.mkdirSync(artifactsDir, { recursive: true });
   }
 }
 
-function writeIsolatedArtifactsToDisk(softwareSlug: string, filesMap: Record<string, string>): string {
+function writeIsolatedArtifactsToDisk(
+  softwareSlug: string,
+  filesMap: Record<string, string>,
+  artifactsDir = ISOLATED_ARTIFACTS_DIR
+): string {
+  ensureDirectories(path.dirname(artifactsDir), artifactsDir);
   const safeSlug = softwareSlug.replace(/[^a-zA-Z0-9_-]/g, '_');
-  const targetDir = path.resolve(ISOLATED_ARTIFACTS_DIR, safeSlug);
-  const rootCanonical = path.resolve(ISOLATED_ARTIFACTS_DIR);
+  const targetDir = path.resolve(artifactsDir, safeSlug);
+  const rootCanonical = path.resolve(artifactsDir);
   if (!targetDir.startsWith(rootCanonical + path.sep) && targetDir !== rootCanonical) {
     throw new Error('Tentativa de Directory Traversal no softwareSlug bloqueada.');
   }
@@ -390,8 +423,13 @@ function writeIsolatedArtifactsToDisk(softwareSlug: string, filesMap: Record<str
   return targetDir;
 }
 
-function createInitialRealWorkspaceState(): PersistentDatabaseState {
-  ensureDirectories();
+function createInitialRealWorkspaceState(
+  dataDir = DATA_DIR,
+  dbManager = new PersistentDatabaseManager()
+): PersistentDatabaseState {
+  const artifactsDir = path.join(dataDir, 'isolated_artifacts');
+  const storeFile = path.join(dataDir, 'winhood_persistent_db.json');
+  ensureDirectories(dataDir, artifactsDir);
   const nowIso = new Date().toISOString();
   const projectId = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
 
@@ -421,10 +459,10 @@ function createInitialRealWorkspaceState(): PersistentDatabaseState {
   };
 
   // Write real files to isolated disk storage and compute real technical inventory
-  const vaultCorePath = writeIsolatedArtifactsToDisk('vaultcore_internal_v2_5_0', VAULTCORE_INTERNAL_FILES);
+  const vaultCorePath = writeIsolatedArtifactsToDisk('vaultcore_internal_v2_5_0', VAULTCORE_INTERNAL_FILES, artifactsDir);
   const vaultCoreInv = buildTechnicalInventory(VAULTCORE_INTERNAL_FILES, vaultCorePath);
 
-  const keeSafePath = writeIsolatedArtifactsToDisk('keesafe_open_v2_56_0', KEESAFE_OPEN_FILES);
+  const keeSafePath = writeIsolatedArtifactsToDisk('keesafe_open_v2_56_0', KEESAFE_OPEN_FILES, artifactsDir);
   const keeSafeInv = buildTechnicalInventory(KEESAFE_OPEN_FILES, keeSafePath);
 
   const softwareA: Software = {
@@ -544,22 +582,18 @@ function createInitialRealWorkspaceState(): PersistentDatabaseState {
   ];
 
   const state: PersistentDatabaseState = {
+    schemaVersion: PersistentDatabaseManager.SCHEMA_VERSION,
+    storageKind: PersistentDatabaseManager.STORAGE_KIND,
     environmentMode: 'PRODUCTION',
-    currentUser: {
-      id: 'usr-admin-01',
-      name: 'Lohan Silva (Lead Security Architect)',
-      email: 'admin@winhood.sec',
-      role: 'ADMIN',
-      mfaVerified: true,
-    },
     projects: [initialProject],
     softwares: [softwareA, softwareB],
     profiles: [...DEFAULT_BENCHMARK_PROFILES],
     runs: [initialRun],
     adapters: buildFull21SecurityAdaptersCatalog(),
     auditLogs,
-    toolsDb: SonarQubeIntegrationService.createInitialToolsDatabaseState(DATA_DIR),
+    toolsDb: SonarQubeIntegrationService.createInitialToolsDatabaseState(dataDir),
     savedSonarProjects: createDefaultSavedSonarProjects(),
+    authorizedTargets: [],
     telemetry: {
       startedAt: nowIso,
       totalApiRequests: 1,
@@ -569,22 +603,22 @@ function createInitialRealWorkspaceState(): PersistentDatabaseState {
     },
   };
 
-  fs.writeFileSync(STORE_FILE, JSON.stringify(state, null, 2), 'utf8');
+  dbManager.writeAtomicChecksummed(storeFile, state);
   return state;
 }
 
-function createInitialCleanWorkspaceState(): PersistentDatabaseState {
-  ensureDirectories();
+function createInitialCleanWorkspaceState(
+  dataDir = DATA_DIR,
+  dbManager = new PersistentDatabaseManager()
+): PersistentDatabaseState {
+  const artifactsDir = path.join(dataDir, 'isolated_artifacts');
+  const storeFile = path.join(dataDir, 'winhood_persistent_db.json');
+  ensureDirectories(dataDir, artifactsDir);
   const nowIso = new Date().toISOString();
   const state: PersistentDatabaseState = {
+    schemaVersion: PersistentDatabaseManager.SCHEMA_VERSION,
+    storageKind: PersistentDatabaseManager.STORAGE_KIND,
     environmentMode: 'PRODUCTION',
-    currentUser: {
-      id: 'usr-admin-01',
-      name: 'Lohan Silva (Lead Security Architect)',
-      email: 'admin@winhood.sec',
-      role: 'ADMIN',
-      mfaVerified: true,
-    },
     projects: [],
     softwares: [],
     profiles: [...DEFAULT_BENCHMARK_PROFILES],
@@ -595,7 +629,7 @@ function createInitialCleanWorkspaceState(): PersistentDatabaseState {
         id: `aud-${crypto.randomUUID().slice(0, 8)}`,
         timestamp: nowIso,
         actor: 'Sistema WinHood Analyzer',
-        role: 'ADMIN',
+        role: 'SYSTEM',
         action: 'PLATFORM_INITIALIZED_CLEAN',
         entityType: 'SYSTEM',
         entityId: 'global',
@@ -603,8 +637,9 @@ function createInitialCleanWorkspaceState(): PersistentDatabaseState {
         integrityHash: computeSha256(`AUDIT|0|CLEAN_INIT|${nowIso}`),
       },
     ],
-    toolsDb: SonarQubeIntegrationService.createInitialToolsDatabaseState(DATA_DIR),
+    toolsDb: SonarQubeIntegrationService.createInitialToolsDatabaseState(dataDir),
     savedSonarProjects: createDefaultSavedSonarProjects(),
+    authorizedTargets: [],
     telemetry: {
       startedAt: nowIso,
       totalApiRequests: 0,
@@ -613,19 +648,29 @@ function createInitialCleanWorkspaceState(): PersistentDatabaseState {
       workerExecutionsCount: 0,
     },
   };
-  fs.writeFileSync(STORE_FILE, JSON.stringify(state, null, 2), 'utf8');
+  dbManager.writeAtomicChecksummed(storeFile, state);
   return state;
 }
 
-function loadDatabase(): PersistentDatabaseState {
-  ensureDirectories();
-  if (fs.existsSync(STORE_FILE)) {
+function loadDatabase(
+  dataDir = DATA_DIR,
+  dbManager = new PersistentDatabaseManager()
+): { state: PersistentDatabaseState; integrityStatus: string; recoveredFromBackup: boolean } {
+  const artifactsDir = path.join(dataDir, 'isolated_artifacts');
+  const storeFile = path.join(dataDir, 'winhood_persistent_db.json');
+  ensureDirectories(dataDir, artifactsDir);
+  const readOutcome = dbManager.readWithChecksumRecovery<PersistentDatabaseState>(storeFile);
+  if (readOutcome.data) {
     try {
-      const raw = fs.readFileSync(STORE_FILE, 'utf8');
-      const parsed = JSON.parse(raw) as PersistentDatabaseState;
+      const parsed = readOutcome.data;
+      parsed.schemaVersion = PersistentDatabaseManager.SCHEMA_VERSION;
+      parsed.storageKind = PersistentDatabaseManager.STORAGE_KIND;
       parsed.environmentMode = 'PRODUCTION';
+      if (!Array.isArray(parsed.authorizedTargets)) {
+        parsed.authorizedTargets = [];
+      }
       if (!parsed.toolsDb) {
-        parsed.toolsDb = SonarQubeIntegrationService.createInitialToolsDatabaseState(DATA_DIR);
+        parsed.toolsDb = SonarQubeIntegrationService.createInitialToolsDatabaseState(dataDir);
       }
       if (!Array.isArray(parsed.savedSonarProjects)) {
         parsed.savedSonarProjects = [];
@@ -641,7 +686,8 @@ function loadDatabase(): PersistentDatabaseState {
           if (s.id === 'sw-vaultcore-internal') {
             const vaultCorePath = writeIsolatedArtifactsToDisk(
               'vaultcore_internal_v2_5_0',
-              VAULTCORE_INTERNAL_FILES
+              VAULTCORE_INTERNAL_FILES,
+              artifactsDir
             );
             const vaultCoreInv = buildTechnicalInventory(VAULTCORE_INTERNAL_FILES, vaultCorePath);
             return {
@@ -777,44 +823,25 @@ function loadDatabase(): PersistentDatabaseState {
         parsed.runs = parsed.demoData.runs || [];
       }
 
-      fs.writeFileSync(STORE_FILE, JSON.stringify(parsed, null, 2), 'utf8');
-      return parsed;
+      dbManager.writeAtomicChecksummed(storeFile, parsed);
+      return {
+        state: parsed,
+        integrityStatus: readOutcome.integrityStatus,
+        recoveredFromBackup: readOutcome.recoveredFromBackup,
+      };
     } catch {
-      return createInitialCleanWorkspaceState();
+      return {
+        state: createInitialCleanWorkspaceState(dataDir, dbManager),
+        integrityStatus: 'RECOVERED_CLEAN_STATE',
+        recoveredFromBackup: false,
+      };
     }
   }
-  return createInitialCleanWorkspaceState();
-}
-
-let pendingSaveTimer: NodeJS.Timeout | null = null;
-function writeDatabaseAtomically(state: PersistentDatabaseState): void {
-  ensureDirectories();
-  const tmpFile = `${STORE_FILE}.tmp`;
-  fs.writeFileSync(tmpFile, JSON.stringify(state, null, 2), 'utf8');
-  fs.renameSync(tmpFile, STORE_FILE);
-}
-
-function saveDatabase(state: PersistentDatabaseState, immediate = false): void {
-  ensureDirectories();
-  if (immediate) {
-    if (pendingSaveTimer) {
-      clearTimeout(pendingSaveTimer);
-      pendingSaveTimer = null;
-    }
-    writeDatabaseAtomically(state);
-    return;
-  }
-  if (pendingSaveTimer) {
-    clearTimeout(pendingSaveTimer);
-  }
-  pendingSaveTimer = setTimeout(() => {
-    try {
-      writeDatabaseAtomically(state);
-    } catch {
-      // Non-blocking persistence
-    }
-    pendingSaveTimer = null;
-  }, 80);
+  return {
+    state: createInitialCleanWorkspaceState(dataDir, dbManager),
+    integrityStatus: readOutcome.integrityStatus,
+    recoveredFromBackup: false,
+  };
 }
 
 function appendAuditLog(
@@ -822,15 +849,18 @@ function appendAuditLog(
   action: string,
   entityType: string,
   entityId: string,
-  details: string
+  details: string,
+  actorUser?: PublicUserView | null
 ) {
   const nowIso = new Date().toISOString();
   const prevHash = state.auditLogs[0]?.integrityHash || 'GENESIS';
+  const actorName = actorUser?.name || 'Sistema WinHood';
+  const actorRole = actorUser?.role || 'SYSTEM';
   const entry: AuditLogEntry = {
     id: `aud-${crypto.randomUUID().slice(0, 8)}`,
     timestamp: nowIso,
-    actor: `${state.currentUser.name} (${state.currentUser.role})`,
-    role: state.currentUser.role,
+    actor: `${actorName} (${actorRole})`,
+    role: actorRole,
     action,
     entityType,
     entityId,
@@ -840,14 +870,69 @@ function appendAuditLog(
   state.auditLogs.unshift(entry);
 }
 
-async function startServer() {
+export async function createWinHoodApp(options?: {
+  dataDir?: string;
+  enforceProductionAuth?: boolean;
+}) {
+  const dataDir = options?.dataDir || DEFAULT_DATA_DIR;
+  const isolatedArtifactsDir = path.join(dataDir, 'isolated_artifacts');
+  const storeFile = path.join(dataDir, 'winhood_persistent_db.json');
+  const dbManager = new PersistentDatabaseManager();
+  const authService = new AuthService(dataDir);
+
   const app = express();
   app.disable('x-powered-by');
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    next();
+  });
   app.use(express.json({ limit: '10mb' }));
 
-  let db = loadDatabase();
+  const loaded = loadDatabase(dataDir, dbManager);
+  let db = loaded.state;
+  if (loaded.recoveredFromBackup) {
+    appendAuditLog(
+      db,
+      'DATABASE_RECOVERED_FROM_BACKUP',
+      'STORAGE',
+      storeFile,
+      'Banco principal apresentou falha de integridade/checksum e foi restaurado automaticamente a partir de .bak.'
+    );
+    dbManager.writeAtomicChecksummed(storeFile, db);
+  }
+
+  let pendingSaveTimer: NodeJS.Timeout | null = null;
+  const writeDatabaseAtomically = (state: PersistentDatabaseState): void => {
+    ensureDirectories(dataDir, isolatedArtifactsDir);
+    dbManager.writeAtomicChecksummed(storeFile, state);
+  };
+  const saveDatabase = (state: PersistentDatabaseState, immediate = false): void => {
+    ensureDirectories(dataDir, isolatedArtifactsDir);
+    if (immediate) {
+      if (pendingSaveTimer) {
+        clearTimeout(pendingSaveTimer);
+        pendingSaveTimer = null;
+      }
+      writeDatabaseAtomically(state);
+      return;
+    }
+    if (pendingSaveTimer) {
+      clearTimeout(pendingSaveTimer);
+    }
+    pendingSaveTimer = setTimeout(() => {
+      try {
+        writeDatabaseAtomically(state);
+      } catch {
+        // Non-blocking persistence
+      }
+      pendingSaveTimer = null;
+    }, 80);
+  };
+
   const lifecycleManager = new ExternalToolLifecycleManager();
-  const toolCacheManager = new ToolCacheManager(DATA_DIR);
+  const toolCacheManager = new ToolCacheManager(dataDir);
   const sonarService = new SonarQubeIntegrationService(lifecycleManager, toolCacheManager);
   const gitarAdapter = new GitarAdapter();
   const sonarWorker = new SonarAnalysisWorker(sonarService);
@@ -937,8 +1022,66 @@ async function startServer() {
     return lightweight;
   };
 
-  // Telemetry middleware
+  const getRequestActor = (
+    req?: express.Request,
+    res?: express.Response
+  ): PublicUserView => {
+    const reqObj = req || ((res as any)?.req as express.Request | undefined);
+    const attached = (reqObj as any)?.authUser as PublicUserView | undefined;
+    if (attached) return attached;
+    return {
+      id: 'usr-anonymous',
+      name: 'Operador Não Autenticado',
+      email: 'anonymous@winhood.local',
+      role: 'AUDITOR',
+      mfaEnabled: false,
+      mfaVerified: false,
+    };
+  };
+
+  const setSessionCookies = (res: express.Response, sessionId: string, csrfToken: string) => {
+    const maxAgeSec = Math.floor(AuthService.SESSION_ABSOLUTE_MS / 1000);
+    res.setHeader('Set-Cookie', [
+      `winhood_session=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSec}`,
+      `winhood_csrf=${encodeURIComponent(csrfToken)}; Path=/; SameSite=Lax; Max-Age=${maxAgeSec}`,
+    ]);
+  };
+
+  const clearSessionCookies = (res: express.Response) => {
+    res.setHeader('Set-Cookie', [
+      'winhood_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0',
+      'winhood_csrf=; Path=/; SameSite=Lax; Max-Age=0',
+    ]);
+  };
+
+  const allowedOrigins = new Set(
+    [
+      'http://localhost:3000',
+      'http://127.0.0.1:3000',
+      ...(process.env.WINHOOD_ALLOWED_ORIGINS || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+    ]
+  );
+
+  // Security CORS + Telemetry + Session Authentication + CSRF double-submit middleware
   app.use('/api', (req, res, next) => {
+    const origin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
+    if (origin && allowedOrigins.has(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-csrf-token, x-winhood-role');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+      res.setHeader('Vary', 'Origin');
+    }
+    if (req.method === 'OPTIONS') {
+      if (origin && !allowedOrigins.has(origin)) {
+        return res.status(403).json({ error: 'ORIGIN_NOT_ALLOWED' });
+      }
+      return res.status(204).end();
+    }
+
     const start = performance.now();
     db.telemetry.totalApiRequests += 1;
     res.on('finish', () => {
@@ -949,22 +1092,99 @@ async function startServer() {
         db.telemetry.failedRequests += 1;
       }
     });
-    next();
+
+    const cookies = parseCookies(req.headers.cookie);
+    const sessionToken = cookies.winhood_session;
+    if (sessionToken) {
+      const validated = authService.validateSession(sessionToken);
+      if (validated) {
+        (req as any).authUser = validated.user;
+        (req as any).authSession = validated.session;
+        (req as any).authMethod = 'COOKIE';
+      }
+    }
+
+    const testHeaderAllowed = !options?.enforceProductionAuth && isTestRuntimeEnvironment();
+    const headerRoleRaw = req.headers['x-winhood-role'];
+    const headerRole = typeof headerRoleRaw === 'string' ? headerRoleRaw.trim() : '';
+    if (
+      !(req as any).authUser &&
+      testHeaderAllowed &&
+      ['ADMIN', 'SECURITY_LEAD', 'QA_ENGINEER', 'AUDITOR'].includes(headerRole)
+    ) {
+      (req as any).authUser = {
+        id: 'usr-test-header',
+        name: `Test Actor (${headerRole})`,
+        email: 'test-actor@winhood.local',
+        role: headerRole as RbacRole,
+        mfaEnabled: false,
+        mfaVerified: true,
+      } satisfies PublicUserView;
+      (req as any).authMethod = 'TEST_HEADER';
+    }
+
+    const reqPath = req.path;
+    const publicApiPaths = new Set([
+      '/health',
+      '/auth/bootstrap-status',
+      '/auth/bootstrap-admin',
+      '/auth/login',
+      '/auth/logout',
+      '/auth/session',
+      '/auth/mfa/verify',
+      '/auth/recovery/request',
+      '/auth/recovery/confirm',
+    ]);
+
+    if (!publicApiPaths.has(reqPath)) {
+      if (!(req as any).authUser) {
+        return res.status(401).json({
+          error: 'AUTH_REQUIRED',
+          bootstrapRequired: authService.isBootstrapRequired(),
+          message: authService.isBootstrapRequired()
+            ? 'Administrador inicial ainda não configurado. Execute o bootstrap inicial antes de operar a plataforma.'
+            : 'Sessão autenticada obrigatória. Faça login para acessar a API do WinHood.',
+        });
+      }
+
+      if (
+        (req as any).authMethod === 'COOKIE' &&
+        ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method.toUpperCase())
+      ) {
+        const expectedCsrf = String((req as any).authSession?.csrfToken || '');
+        const providedCsrf = String(req.headers['x-csrf-token'] || '').trim();
+        const expBuf = Buffer.from(expectedCsrf, 'utf8');
+        const provBuf = Buffer.from(providedCsrf, 'utf8');
+        if (
+          !expectedCsrf ||
+          expBuf.length !== provBuf.length ||
+          !crypto.timingSafeEqual(expBuf, provBuf)
+        ) {
+          return res.status(403).json({
+            error: 'CSRF_INVALID',
+            message: 'Token CSRF ausente ou inválido na requisição mutável.',
+          });
+        }
+      }
+    }
+
+    return next();
   });
 
-  // RBAC helper supporting per-request x-winhood-role header & session role
+  // RBAC helper enforcing granular permission matrix
   const requireWritePermission = (
     res: express.Response,
-    req?: express.Request
+    req?: express.Request,
+    permission: RbacPermission = 'projects:write'
   ): boolean => {
     const requestObj = req || ((res as any).req as express.Request | undefined);
-    const headerRole = requestObj?.headers?.['x-winhood-role'] as string | undefined;
-    const effectiveRole = headerRole || db.currentUser.role;
-    if (effectiveRole === 'AUDITOR') {
+    const actor = getRequestActor(requestObj, res);
+    if (!AuthService.hasPermission(actor.role, permission)) {
       res.status(403).json({
         error: 'ACESSO NÃO AUTORIZADO',
-        message:
-          'ACESSO NÃO AUTORIZADO: O perfil AUDITOR possui permissão estrita somente-leitura. Altere para ADMIN ou SECURITY_LEAD para executar mutações.',
+        requiredPermission: permission,
+        currentRole: actor.role,
+        message: `ACESSO NÃO AUTORIZADO: O perfil ${actor.role} não possui permissão '${permission}'.`,
       });
       return false;
     }
@@ -977,8 +1197,11 @@ async function startServer() {
       status: 'HEALTHY',
       service: 'WinHood Software Benchmark & Quality Analyzer API',
       timestamp: new Date().toISOString(),
-      storageEngine: 'Persistent Transactional Disk Store + Isolated Artifact Sandbox',
-      storeFileExists: fs.existsSync(STORE_FILE),
+      storageEngine: PersistentDatabaseManager.STORAGE_KIND,
+      schemaVersion: PersistentDatabaseManager.SCHEMA_VERSION,
+      storageIntegrity: loaded.integrityStatus,
+      authBootstrapRequired: authService.isBootstrapRequired(),
+      storeFileExists: fs.existsSync(storeFile),
       projectsCount: db.projects.length,
       softwaresCount: db.softwares.length,
       runsCount: db.runs.length,
@@ -989,42 +1212,317 @@ async function startServer() {
     res.json({
       telemetry: db.telemetry,
       adapters: db.adapters,
-      isolatedSandboxPath: ISOLATED_ARTIFACTS_DIR,
-      databaseSizeBytes: fs.existsSync(STORE_FILE) ? fs.statSync(STORE_FILE).size : 0,
+      isolatedSandboxPath: isolatedArtifactsDir,
+      storageEngine: PersistentDatabaseManager.STORAGE_KIND,
+      schemaVersion: PersistentDatabaseManager.SCHEMA_VERSION,
+      databaseSizeBytes: fs.existsSync(storeFile) ? fs.statSync(storeFile).size : 0,
       evidenceRecordsCount: db.runs.reduce((acc, r) => acc + r.evidenceChain.length, 0),
       auditLogsCount: db.auditLogs.length,
     });
   });
 
   // 2. Auth & RBAC
-  app.get('/api/auth/session', (_req, res) => {
-    res.json({ user: db.currentUser });
+  app.get('/api/auth/bootstrap-status', (_req, res) => {
+    const meta = authService.getBootstrapMetadata();
+    res.json({
+      bootstrapRequired: meta.bootstrapRequired,
+      bootstrapTokenFileHint: path.relative(process.cwd(), meta.bootstrapTokenFilePath),
+      expiresAt: meta.expiresAt,
+    });
+  });
+
+  app.post('/api/auth/bootstrap-admin', (req, res) => {
+    try {
+      const { bootstrapToken, name, email, password, enableMfa } = (req.body || {}) as {
+        bootstrapToken?: string;
+        name?: string;
+        email?: string;
+        password?: string;
+        enableMfa?: boolean;
+      };
+      const result = authService.bootstrapInitialAdmin({
+        bootstrapToken: bootstrapToken || '',
+        name: name || '',
+        email: email || '',
+        password: password || '',
+        enableMfa: Boolean(enableMfa),
+        ipAddress: req.ip || '127.0.0.1',
+        userAgent: String(req.headers['user-agent'] || 'unknown'),
+      });
+      setSessionCookies(res, result.sessionId, result.csrfToken);
+      appendAuditLog(
+        db,
+        'ADMIN_BOOTSTRAP_COMPLETED',
+        'AUTH',
+        result.user.id,
+        `Administrador inicial "${result.user.email}" provisionado com token single-use.`,
+        result.user
+      );
+      saveDatabase(db, true);
+      return res.status(201).json({
+        authenticated: !result.totpSetup,
+        mfaRequired: Boolean(result.totpSetup),
+        user: result.user,
+        csrfToken: result.csrfToken,
+        totpSetup: result.totpSetup,
+      });
+    } catch (err: any) {
+      const msg = err?.message || 'Falha no bootstrap inicial.';
+      const status = msg.startsWith('BOOTSTRAP_ALREADY_COMPLETED') ? 409 : 400;
+      return res.status(status).json({ error: msg });
+    }
+  });
+
+  app.post('/api/auth/login', (req, res) => {
+    try {
+      const { email, password, totpCode } = (req.body || {}) as {
+        email?: string;
+        password?: string;
+        totpCode?: string;
+      };
+      const outcome = authService.login({
+        email: email || '',
+        password: password || '',
+        totpCode,
+        ipAddress: req.ip || '127.0.0.1',
+        userAgent: String(req.headers['user-agent'] || 'unknown'),
+      });
+      setSessionCookies(res, outcome.sessionId, outcome.csrfToken);
+      appendAuditLog(
+        db,
+        outcome.mfaRequired ? 'AUTH_LOGIN_PENDING_MFA' : 'AUTH_LOGIN_SUCCESS',
+        'AUTH',
+        outcome.user.id,
+        `Login efetuado para ${outcome.user.email} (MFA=${outcome.user.mfaEnabled}, verified=${outcome.user.mfaVerified}).`,
+        outcome.user
+      );
+      saveDatabase(db);
+      return res.json({
+        authenticated: !outcome.mfaRequired,
+        mfaRequired: outcome.mfaRequired,
+        user: outcome.user,
+        csrfToken: outcome.csrfToken,
+      });
+    } catch (err: any) {
+      const msg = err?.message || 'Falha na autenticação.';
+      const status =
+        msg.startsWith('AUTH_RATE_LIMITED') || msg.startsWith('AUTH_ACCOUNT_LOCKED')
+          ? 429
+          : 401;
+      appendAuditLog(db, 'AUTH_LOGIN_FAILED', 'AUTH', String(req.body?.email || 'unknown'), msg);
+      saveDatabase(db);
+      return res.status(status).json({ error: msg });
+    }
+  });
+
+  app.post('/api/auth/logout', (req, res) => {
+    const cookies = parseCookies(req.headers.cookie);
+    if (cookies.winhood_session) {
+      authService.revokeSession(cookies.winhood_session);
+    }
+    clearSessionCookies(res);
+    return res.json({ ok: true });
+  });
+
+  app.get('/api/auth/session', (req, res) => {
+    const cookies = parseCookies(req.headers.cookie);
+    const pendingSession = cookies.winhood_session
+      ? authService.validateSession(cookies.winhood_session, { allowPendingMfa: true })
+      : null;
+    if (pendingSession) {
+      const mfaRequired = pendingSession.user.mfaEnabled && !pendingSession.user.mfaVerified;
+      return res.json({
+        authenticated: !mfaRequired,
+        mfaRequired,
+        bootstrapRequired: authService.isBootstrapRequired(),
+        user: pendingSession.user,
+        csrfToken: pendingSession.session.csrfToken,
+      });
+    }
+    if ((req as any).authUser) {
+      return res.json({
+        authenticated: true,
+        mfaRequired: false,
+        bootstrapRequired: authService.isBootstrapRequired(),
+        user: (req as any).authUser,
+      });
+    }
+    return res.json({
+      authenticated: false,
+      mfaRequired: false,
+      bootstrapRequired: authService.isBootstrapRequired(),
+      user: null,
+    });
+  });
+
+  app.post('/api/auth/refresh', (req, res) => {
+    const cookies = parseCookies(req.headers.cookie);
+    const renewed = cookies.winhood_session ? authService.renewSession(cookies.winhood_session) : null;
+    if (!renewed) {
+      return res.status(401).json({ error: 'AUTH_SESSION_INVALID' });
+    }
+    setSessionCookies(res, renewed.sessionId, renewed.csrfToken);
+    return res.json({ ok: true, csrfToken: renewed.csrfToken });
+  });
+
+  app.post('/api/auth/mfa/setup', (req, res) => {
+    const actor = getRequestActor(req, res);
+    if (actor.id === 'usr-anonymous') {
+      return res.status(401).json({ error: 'AUTH_REQUIRED' });
+    }
+    try {
+      const setup = authService.setupMfaForUser(actor.id);
+      appendAuditLog(db, 'AUTH_MFA_CONFIGURED', 'AUTH', actor.id, `TOTP MFA configurado para ${actor.email}.`, actor);
+      saveDatabase(db);
+      return res.json(setup);
+    } catch (err: any) {
+      return res.status(400).json({ error: err?.message || 'Falha ao configurar MFA.' });
+    }
+  });
+
+  app.post('/api/auth/mfa/verify', (req, res) => {
+    const cookies = parseCookies(req.headers.cookie);
+    const { totpCode } = (req.body || {}) as { totpCode?: string };
+    try {
+      const user = authService.verifySessionMfa(cookies.winhood_session || '', totpCode || '');
+      appendAuditLog(db, 'AUTH_MFA_VERIFIED', 'AUTH', user.id, `MFA verificado para ${user.email}.`, user);
+      saveDatabase(db);
+      return res.json({ authenticated: true, mfaRequired: false, user });
+    } catch (err: any) {
+      return res.status(401).json({ error: err?.message || 'Código TOTP inválido.' });
+    }
+  });
+
+  app.get('/api/auth/users', (req, res) => {
+    if (!requireWritePermission(res, req, 'users:manage')) return;
+    res.json({ users: authService.listUsers() });
+  });
+
+  app.post('/api/auth/users', (req, res) => {
+    if (!requireWritePermission(res, req, 'users:manage')) return;
+    const actor = getRequestActor(req, res);
+    try {
+      const { name, email, password, role, enableMfa } = (req.body || {}) as {
+        name?: string;
+        email?: string;
+        password?: string;
+        role?: RbacRole;
+        enableMfa?: boolean;
+      };
+      if (!role || !['ADMIN', 'SECURITY_LEAD', 'AUDITOR', 'QA_ENGINEER'].includes(role)) {
+        return res.status(400).json({ error: 'Perfil RBAC inválido.' });
+      }
+      const created = authService.createUser({
+        name: name || '',
+        email: email || '',
+        password: password || '',
+        role,
+        enableMfa: Boolean(enableMfa),
+      });
+      appendAuditLog(
+        db,
+        'USER_CREATED',
+        'AUTH',
+        created.id,
+        `Usuário ${created.email} criado com perfil ${created.role}.`,
+        actor
+      );
+      saveDatabase(db);
+      return res.status(201).json({ user: created });
+    } catch (err: any) {
+      return res.status(400).json({ error: err?.message || 'Erro ao criar usuário.' });
+    }
+  });
+
+  app.post('/api/auth/recovery/request', (req, res) => {
+    const { email } = (req.body || {}) as { email?: string };
+    const outcome = authService.requestPasswordRecovery(email || '');
+    appendAuditLog(
+      db,
+      'AUTH_RECOVERY_REQUESTED',
+      'AUTH',
+      String(email || 'unknown'),
+      'Solicitação de recuperação de senha registrada no canal local seguro.'
+    );
+    saveDatabase(db);
+    return res.json({
+      ok: true,
+      recoveryChannelHint: outcome.recoveryFilePath
+        ? path.relative(process.cwd(), outcome.recoveryFilePath)
+        : null,
+      message: 'Se o e-mail existir, o token temporário foi gravado no diretório local seguro (chmod 0600).',
+    });
+  });
+
+  app.post('/api/auth/recovery/confirm', (req, res) => {
+    try {
+      const { email, recoveryToken, newPassword } = (req.body || {}) as {
+        email?: string;
+        recoveryToken?: string;
+        newPassword?: string;
+      };
+      authService.confirmPasswordRecovery({
+        email: email || '',
+        recoveryToken: recoveryToken || '',
+        newPassword: newPassword || '',
+      });
+      appendAuditLog(
+        db,
+        'AUTH_PASSWORD_RECOVERED',
+        'AUTH',
+        String(email || 'unknown'),
+        'Senha redefinida via token de recuperação de uso único; sessões anteriores revogadas.'
+      );
+      saveDatabase(db);
+      return res.json({ ok: true });
+    } catch (err: any) {
+      return res.status(400).json({ error: err?.message || 'Falha na recuperação de senha.' });
+    }
   });
 
   app.post('/api/auth/switch-role', (req, res) => {
-    const { role } = req.body as {
-      role?: 'ADMIN' | 'SECURITY_LEAD' | 'AUDITOR' | 'QA_ENGINEER';
+    const { role, userId } = (req.body || {}) as {
+      role?: RbacRole;
+      userId?: string;
     };
     if (!role || !['ADMIN', 'SECURITY_LEAD', 'AUDITOR', 'QA_ENGINEER'].includes(role)) {
       return res.status(400).json({ error: 'Perfil RBAC inválido.' });
     }
-    const strictAuth = req.headers['x-winhood-strict-auth'] === 'true';
-    const adminToken = req.headers['x-winhood-admin-token'] as string | undefined;
-    if (strictAuth && !KeyManagementService.verifyStrictAdminToken(adminToken)) {
-      return res.status(403).json({
-        error: 'ROLE_ELEVATION_BLOCKED',
-        message: 'Elevação de privilégio RBAC bloqueada: configure WINHOOD_ADMIN_TOKEN ou informe token administrativo válido.',
-      });
+    const actor = getRequestActor(req, res);
+    const cookies = parseCookies(req.headers.cookie);
+
+    if (userId) {
+      if (!requireWritePermission(res, req, 'users:manage')) return;
+      try {
+        const updated = authService.updateUserRole(userId, role);
+        appendAuditLog(db, 'RBAC_USER_ROLE_UPDATED', 'AUTH', userId, `Perfil de ${updated.email} atualizado para ${role}`, actor);
+        saveDatabase(db);
+        return res.json({ user: updated });
+      } catch (err: any) {
+        return res.status(404).json({ error: err?.message || 'Usuário não encontrado.' });
+      }
     }
-    db.currentUser.role = role;
-    appendAuditLog(db, 'RBAC_ROLE_SWITCHED', 'AUTH', db.currentUser.id, `Perfil alterado para ${role}`);
-    saveDatabase(db);
-    return res.json({ user: db.currentUser });
+
+    if (cookies.winhood_session) {
+      try {
+        const updatedUser = authService.switchSessionPreviewRole(cookies.winhood_session, role);
+        appendAuditLog(db, 'RBAC_ROLE_SWITCHED', 'AUTH', actor.id, `Perfil de sessão alterado para ${role}`, actor);
+        saveDatabase(db);
+        return res.json({ user: updatedUser });
+      } catch (err: any) {
+        return res.status(403).json({ error: 'ROLE_ELEVATION_BLOCKED', message: err?.message });
+      }
+    }
+
+    return res.status(403).json({
+      error: 'ROLE_ELEVATION_BLOCKED',
+      message: 'Alternância de perfil requer sessão ADMIN autenticada.',
+    });
   });
 
   // 3. System Workspace Reset / Seed (to test both Empty State and Real Populated State)
-  app.post('/api/system/reset-empty', (_req, res) => {
-    if (!requireWritePermission(res)) return;
+  app.post('/api/system/reset-empty', (req, res) => {
+    if (!requireWritePermission(res, req, 'system:reset')) return;
     db.projects = [];
     db.softwares = [];
     db.runs = [];
@@ -1033,15 +1531,25 @@ async function startServer() {
       'WORKSPACE_CLEARED_TO_EMPTY_STATE',
       'SYSTEM',
       'global',
-      'Banco de dados limpo para verificação do estado inicial sem avaliações.'
+      'Banco de dados limpo para verificação do estado inicial sem avaliações.',
+      getRequestActor(req, res)
     );
-    saveDatabase(db);
+    saveDatabase(db, true);
     res.json({ ok: true, message: 'Estado inicial vazio ativado.' });
   });
 
-  app.post('/api/system/seed-real-workspace', (_req, res) => {
-    if (!requireWritePermission(res)) return;
-    db = createInitialRealWorkspaceState();
+  app.post('/api/system/seed-real-workspace', (req, res) => {
+    if (!requireWritePermission(res, req, 'system:reset')) return;
+    db = createInitialRealWorkspaceState(dataDir, dbManager);
+    appendAuditLog(
+      db,
+      'WORKSPACE_SEEDED_REAL',
+      'SYSTEM',
+      'global',
+      'Workspace real recarregado e analisado a partir do disco.',
+      getRequestActor(req, res)
+    );
+    saveDatabase(db, true);
     res.json({ ok: true, message: 'Workspace real recarregado e analisado a partir do disco.' });
   });
 
@@ -1051,14 +1559,15 @@ async function startServer() {
   });
 
   app.post('/api/system/hardware-profile', (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'projects:write')) return;
     const profile = updateHardwareProfile(req.body);
     appendAuditLog(
       db,
       'HARDWARE_PROFILE_UPDATED',
       'SYSTEM',
       'hardware',
-      `Perfil de hardware atualizado: Modo ${profile.performanceMode}, ${profile.activeThreadsLimit} threads ativas, limite ${profile.memoryLimitMb}MB RAM.`
+      `Perfil de hardware atualizado: Modo ${profile.performanceMode}, ${profile.activeThreadsLimit} threads ativas, limite ${profile.memoryLimitMb}MB RAM.`,
+      getRequestActor(req, res)
     );
     saveDatabase(db);
     res.json(profile);
@@ -1097,7 +1606,8 @@ async function startServer() {
     });
   });
 
-  app.post('/api/sonar/docker-auto-start', async (_req, res) => {
+  app.post('/api/sonar/docker-auto-start', async (req, res) => {
+    if (!requireWritePermission(res, req, 'sonar:config')) return;
     try {
       const isDockerInstalled = await checkDockerCliAvailable();
       if (!isDockerInstalled) {
@@ -1166,7 +1676,8 @@ async function startServer() {
     }
   });
 
-  app.post('/api/sonar/docker-stop', async (_req, res) => {
+  app.post('/api/sonar/docker-stop', async (req, res) => {
+    if (!requireWritePermission(res, req, 'sonar:config')) return;
     try {
       const isDockerInstalled = await checkDockerCliAvailable();
       if (!isDockerInstalled) {
@@ -1180,6 +1691,7 @@ async function startServer() {
   });
 
   app.post('/api/sonar/test-connection', async (req, res) => {
+    if (!requireWritePermission(res, req, 'sonar:config')) return;
     const { serverUrl = 'http://localhost:9000', token, mode = 'DOCKER' } = req.body as {
       serverUrl?: string;
       token?: string;
@@ -1195,6 +1707,7 @@ async function startServer() {
   });
 
   app.post('/api/sonar/test-cloud', async (req, res) => {
+    if (!requireWritePermission(res, req, 'sonar:config')) return;
     const { organizationKey, token } = req.body as {
       organizationKey?: string;
       token?: string;
@@ -1264,9 +1777,9 @@ async function startServer() {
   });
 
   // 4. Consolidated Bootstrap & Dashboard Summary (Seção 11.6, 11.7 e 11.8)
-  app.get('/api/bootstrap', (_req, res) => {
+  app.get('/api/bootstrap', (req, res) => {
     res.json({
-      user: db.currentUser,
+      user: getRequestActor(req, res),
       dashboard: buildDashboardPayload(),
       projects: db.projects,
       softwares: db.softwares.map(stripSoftwareHeavySource),
@@ -1286,7 +1799,7 @@ async function startServer() {
   });
 
   app.post('/api/projects', (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'projects:write')) return;
     const {
       name,
       category,
@@ -1329,26 +1842,26 @@ async function startServer() {
       enabledCategories: resolvedEnabledCategories,
       objective: objective.trim(),
       description: (description || '').trim(),
-      owner: (owner || db.currentUser.name).trim(),
+      owner: (owner || getRequestActor(req, res).name).trim(),
       createdAt: nowIso,
       updatedAt: nowIso,
       history: [
         {
           timestamp: nowIso,
           action: 'PROJECT_CREATED',
-          actor: db.currentUser.name,
+          actor: getRequestActor(req, res).name,
           details: `Projeto "${name.trim()}" registrado com UUID v4 (${resolvedEnabledCategories.length}/12 categorias habilitadas).`,
         },
       ],
     };
     db.projects.unshift(project);
-    appendAuditLog(db, 'PROJECT_CREATED', 'PROJECT', project.id, `Projeto "${project.name}" criado.`);
+    appendAuditLog(db, 'PROJECT_CREATED', 'PROJECT', project.id, `Projeto "${project.name}" criado.`, getRequestActor(req, res));
     saveDatabase(db);
     return res.status(201).json({ project });
   });
 
   app.put('/api/projects/:id', (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req)) return;
     const proj = db.projects.find((p) => p.id === req.params.id);
     if (!proj) {
       return res.status(404).json({ error: 'Projeto não encontrado.' });
@@ -1383,7 +1896,7 @@ async function startServer() {
     proj.history.unshift({
       timestamp: nowIso,
       action: 'PROJECT_UPDATED',
-      actor: db.currentUser.name,
+      actor: getRequestActor(req, res).name,
       details: `Metadados e escopo multi-categoria do projeto atualizados.`,
     });
     appendAuditLog(db, 'PROJECT_UPDATED', 'PROJECT', proj.id, `Projeto "${proj.name}" editado.`);
@@ -1392,7 +1905,7 @@ async function startServer() {
   });
 
   app.delete('/api/projects/:id', (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'projects:write')) return;
     const idx = db.projects.findIndex((p) => p.id === req.params.id);
     if (idx === -1) {
       return res.status(404).json({ error: 'Projeto não encontrado.' });
@@ -1413,7 +1926,7 @@ async function startServer() {
 
   // 5.1 Project Upload Endpoint (/api/projects/upload)
   app.post('/api/projects/upload', (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'projects:write')) return;
     const {
       name,
       category,
@@ -1477,14 +1990,14 @@ async function startServer() {
       enabledCategories: resolvedEnabledCategories,
       objective: objective.trim(),
       description: (description || 'Projeto importado via upload de artefatos com escopo transversal nas 12 categorias.').trim(),
-      owner: (owner || db.currentUser.name).trim(),
+      owner: (owner || getRequestActor(req, res).name).trim(),
       createdAt: nowIso,
       updatedAt: nowIso,
       history: [
         {
           timestamp: nowIso,
           action: 'PROJECT_UPLOADED',
-          actor: db.currentUser.name,
+          actor: getRequestActor(req, res).name,
           details: `Projeto "${name.trim()}" criado através de upload de código-fonte (${resolvedEnabledCategories.length}/12 categorias habilitadas).`,
         },
       ],
@@ -1496,7 +2009,8 @@ async function startServer() {
       'PROJECT_UPLOADED',
       'PROJECT',
       project.id,
-      `Projeto "${project.name}" criado via upload com UUID ${project.id}.`
+      `Projeto "${project.name}" criado via upload com UUID ${project.id}.`,
+      getRequestActor(req, res)
     );
 
     if (!filesMap || Object.keys(filesMap).length === 0) {
@@ -1528,7 +2042,7 @@ async function startServer() {
     if (!swVersion) swVersion = 'NOT_DECLARED';
 
     const slug = `${swName.toLowerCase().replace(/[^a-z0-9]+/g, '_')}_${Date.now()}`;
-    const isolatedPath = writeIsolatedArtifactsToDisk(slug, filesMap);
+    const isolatedPath = writeIsolatedArtifactsToDisk(slug, filesMap, isolatedArtifactsDir);
     const inv = buildTechnicalInventory(filesMap, isolatedPath);
 
     const createdSoftware: Software = {
@@ -1551,7 +2065,7 @@ async function startServer() {
       officialUrl: '',
       repositoryUrl: '',
       documentationUrl: '',
-      owner: (owner || db.currentUser.name).trim(),
+      owner: (owner || getRequestActor(req, res).name).trim(),
       notes: `Pacote ingerido com hash SHA-256: ${inv.packageSha256}`,
       sourceType: 'LOCAL_AUTHORIZED',
       commitHash: `LOCAL_PACKAGE_${inv.packageSha256.slice(0, 16)}`,
@@ -1845,7 +2359,7 @@ async function startServer() {
 
   // 5.5 Import GitHub Repository (/api/github/import)
   app.post('/api/github/import', async (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'projects:write')) return;
     const {
       projectId,
       newProjectName,
@@ -1916,14 +2430,14 @@ async function startServer() {
           description ||
           `Projeto criado a partir da importação do repositório GitHub ${sanitizedRepoFull}.`
         ).trim(),
-        owner: db.currentUser.name,
+        owner: getRequestActor(req, res).name,
         createdAt: nowIso,
         updatedAt: nowIso,
         history: [
           {
             timestamp: nowIso,
             action: 'PROJECT_CREATED_FROM_GITHUB',
-            actor: db.currentUser.name,
+            actor: getRequestActor(req, res).name,
             details: `Projeto criado via importação do repositório GitHub ${sanitizedRepoFull}.`,
           },
         ],
@@ -2087,7 +2601,7 @@ async function startServer() {
     }
 
     const slug = `${repoName.toLowerCase().replace(/[^a-z0-9]+/g, '_')}_${Date.now()}`;
-    const isolatedPath = writeIsolatedArtifactsToDisk(slug, filesMap);
+    const isolatedPath = writeIsolatedArtifactsToDisk(slug, filesMap, isolatedArtifactsDir);
     const inv = buildTechnicalInventory(filesMap, isolatedPath);
 
     const newSoftware: Software = {
@@ -2108,7 +2622,7 @@ async function startServer() {
       officialUrl: htmlUrl || `https://github.com/${repoFullName}`,
       repositoryUrl: cloneUrl || `https://github.com/${repoFullName}.git`,
       documentationUrl: htmlUrl ? `${htmlUrl}#readme` : '',
-      owner: db.currentUser.name,
+      owner: getRequestActor(req, res).name,
       notes: `Importado do GitHub (${stars || 0} estrelas). Branch: ${branch}. Commit SHA Real: ${realCommitSha || 'RESOLVED_LATEST'}. SHA-256 do Pacote: ${inv.packageSha256}`,
       sourceType: 'GIT_REPO',
       commitHash: realCommitSha || `GIT_BRANCH_${branch}`,
@@ -2174,7 +2688,7 @@ async function startServer() {
   });
 
   app.post('/api/softwares', (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'projects:write')) return;
     const body = req.body as Partial<Software> & {
       templatePreset?: 'VAULTCORE' | 'KEESAFE' | 'CUSTOM_FILES';
       customFilesMap?: Record<string, string>;
@@ -2202,14 +2716,14 @@ async function startServer() {
           enabledCategories: [...ALL_BENCHMARK_CATEGORIES],
           objective: 'Portfólio automático para avaliação e comparação independente de softwares.',
           description: 'Criado automaticamente para permitir cadastro e avaliação de softwares sem projeto prévio.',
-          owner: db.currentUser.name,
+          owner: getRequestActor(req, res).name,
           createdAt: nowIso,
           updatedAt: nowIso,
           history: [
             {
               timestamp: nowIso,
               action: 'PROJECT_AUTO_CREATED',
-              actor: db.currentUser.name,
+              actor: getRequestActor(req, res).name,
               details: 'Portfólio padrão instanciado automaticamente.',
             },
           ],
@@ -2269,7 +2783,7 @@ async function startServer() {
 
     if (hasSource) {
       const slug = `${body.name.toLowerCase().replace(/[^a-z0-9]+/g, '_')}_${Date.now()}`;
-      isolatedPath = writeIsolatedArtifactsToDisk(slug, filesMap);
+      isolatedPath = writeIsolatedArtifactsToDisk(slug, filesMap, isolatedArtifactsDir);
       inv = buildTechnicalInventory(filesMap, isolatedPath);
     }
 
@@ -2328,7 +2842,7 @@ async function startServer() {
       officialUrl: (body.officialUrl || '').trim(),
       repositoryUrl: (body.repositoryUrl || '').trim(),
       documentationUrl: (body.documentationUrl || '').trim(),
-      owner: (body.owner || db.currentUser.name).trim(),
+      owner: (body.owner || getRequestActor(req, res).name).trim(),
       notes: (body.notes || '').trim(),
       sourceType: body.sourceType || 'LOCAL_AUTHORIZED',
       commitHash: commit,
@@ -2399,7 +2913,7 @@ async function startServer() {
 
   // Ingest / update files in a software
   app.post('/api/softwares/:id/ingest', (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'projects:write')) return;
     const sw = db.softwares.find((s) => s.id === req.params.id);
     if (!sw) {
       return res.status(404).json({ error: 'Software não encontrado.' });
@@ -2421,7 +2935,7 @@ async function startServer() {
 
     const mergedFiles = { ...(sw.sourceFilesContent || {}), ...filesMap };
     const slug = `${sw.id}_rev_${Date.now()}`;
-    const isolatedPath = writeIsolatedArtifactsToDisk(slug, mergedFiles);
+    const isolatedPath = writeIsolatedArtifactsToDisk(slug, mergedFiles, isolatedArtifactsDir);
     const inv = buildTechnicalInventory(mergedFiles, isolatedPath);
 
     sw.sourceFilesContent = mergedFiles;
@@ -2471,7 +2985,7 @@ async function startServer() {
   });
 
   app.delete('/api/softwares/:id', (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'projects:write')) return;
     const idx = db.softwares.findIndex((s) => s.id === req.params.id);
     if (idx === -1) {
       return res.status(404).json({ error: 'Software não encontrado.' });
@@ -2596,7 +3110,8 @@ async function startServer() {
 
   // Quick 1-Click Zero-Configuration Analysis
   app.post('/api/benchmark-runs/quick-run', (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'runs:execute')) return;
+    const actor = getRequestActor(req, res);
     const { projectId, softwareId } = req.body as {
       projectId?: string;
       softwareId?: string;
@@ -2613,12 +3128,12 @@ async function startServer() {
         description: 'Projeto configurado automaticamente pelo WinHood para análise em 1 clique.',
         createdAt: nowIso,
         updatedAt: nowIso,
-        owner: db.currentUser.name,
+        owner: actor.name,
         history: [
           {
             timestamp: nowIso,
             action: 'PROJECT_CREATED',
-            actor: db.currentUser.name,
+            actor: actor.name,
             details: 'Projeto inicial criado para análise rápida em 1 clique.',
           },
         ],
@@ -2742,7 +3257,8 @@ async function startServer() {
   });
 
   app.post('/api/benchmark-runs', (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'runs:execute')) return;
+    const actor = getRequestActor(req, res);
     const {
       projectId,
       softwareIds,
@@ -2805,7 +3321,7 @@ async function startServer() {
         enabledCategories: [...ALL_BENCHMARK_CATEGORIES],
         objective: evaluationObjective || 'Avaliação e Benchmark Independente de Softwares',
         description: 'Projeto instanciado automaticamente para execução de software avulso.',
-        owner: db.currentUser.name,
+        owner: actor.name,
         createdAt: nowIso,
         updatedAt: nowIso,
         history: [],
@@ -3005,7 +3521,7 @@ async function startServer() {
   });
 
   app.post('/api/environment/switch', (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'system:reset')) return;
     const { mode } = req.body as { mode: AppEnvironment };
     if (!['PRODUCTION', 'DEMO', 'TEST'].includes(mode)) {
       return res.status(400).json({ error: 'Modo inválido. Escolha PRODUCTION, DEMO ou TEST.' });
@@ -3017,7 +3533,7 @@ async function startServer() {
   });
 
   app.post('/api/demo/seed', (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'system:reset')) return;
     if (db.environmentMode !== 'DEMO') {
       return res.status(403).json({
         error: 'Dados demonstrativos (fixtures) só podem ser gerados no ambiente DEMO. Alterne o ambiente para DEMO antes de carregar exemplos.',
@@ -3049,7 +3565,7 @@ async function startServer() {
 
     const vcFilesCount = Object.keys(VAULTCORE_INTERNAL_FILES).length;
     if (!db.softwares.some((s) => s.id === 'sw-vaultcore-internal')) {
-      const vcPath = writeIsolatedArtifactsToDisk('sw-vaultcore-internal', VAULTCORE_INTERNAL_FILES);
+      const vcPath = writeIsolatedArtifactsToDisk('sw-vaultcore-internal', VAULTCORE_INTERNAL_FILES, isolatedArtifactsDir);
       const vcInventory = buildTechnicalInventory(VAULTCORE_INTERNAL_FILES, vcPath);
       db.softwares.push({
         id: 'sw-vaultcore-internal',
@@ -3101,7 +3617,7 @@ async function startServer() {
 
     const ksFilesCount = Object.keys(KEESAFE_OPEN_FILES).length;
     if (!db.softwares.some((s) => s.id === 'sw-keesafe-open')) {
-      const ksPath = writeIsolatedArtifactsToDisk('sw-keesafe-open', KEESAFE_OPEN_FILES);
+      const ksPath = writeIsolatedArtifactsToDisk('sw-keesafe-open', KEESAFE_OPEN_FILES, isolatedArtifactsDir);
       const ksInventory = buildTechnicalInventory(KEESAFE_OPEN_FILES, ksPath);
       db.softwares.push({
         id: 'sw-keesafe-open',
@@ -3204,7 +3720,7 @@ async function startServer() {
   });
 
   app.post('/api/market/approve-and-compare', (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'projects:write')) return;
     const { projectId, mainSoftwareId, competitorCandidate } = req.body as {
       projectId: string;
       mainSoftwareId: string;
@@ -3386,7 +3902,7 @@ async function startServer() {
   });
 
   app.post('/api/security-assessment/compare', (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'security:ops')) return;
     const { runId, scopeAllowlist } = req.body as {
       runId?: string;
       scopeAllowlist?: string[];
@@ -3417,7 +3933,7 @@ async function startServer() {
 
   // 9.2 Validação Controlada de Vulnerabilidade e Triagem DevSecOps em Tempo Real (9 Estados + Recálculo MQR)
   app.post('/api/findings/:id/validate', (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'findings:triage')) return;
     const { validationState, validationStatus, lifecycleState, verificationNote, runId } = req.body as {
       validationState?: VulnerabilityValidationState;
       validationStatus?: NormalizedFinding['validationStatus'];
@@ -3551,7 +4067,7 @@ async function startServer() {
       criterionId: finding.originalRuleId,
       evidenceType: 'STATIC_AST_FINDING',
       origin: 'DEVSECOPS_TRIAGE',
-      responsibleActor: db.currentUser.name,
+      responsibleActor: getRequestActor(req, res).name,
       category: 'VULNERABILITY_VALIDATION',
       toolName: 'WinHood Vulnerability Validation & MQR Triage Engine',
       toolVersion: '4.0.0',
@@ -3570,7 +4086,7 @@ async function startServer() {
       ...(finding.retestHistory || []),
       {
         timestamp: nowIso,
-        actor: db.currentUser.name,
+        actor: getRequestActor(req, res).name,
         previousStatus: previousState,
         newStatus: effectiveLabel,
         notes: verificationNote || 'Triagem DevSecOps em tempo real.',
@@ -3595,7 +4111,8 @@ async function startServer() {
       'VULNERABILITY_VALIDATION_UPDATED',
       'FINDING',
       finding.id,
-      `Achado ${finding.id} (${finding.title}) classificado como ${effectiveLabel} com recálculo em tempo real e evidência SHA-256 ${newEvHash.slice(0, 12)}.`
+      `Achado ${finding.id} (${finding.title}) classificado como ${effectiveLabel} com recálculo em tempo real e evidência SHA-256 ${newEvHash.slice(0, 12)}.`,
+      getRequestActor(req, res)
     );
     saveDatabase(db, true);
     return res.json({
@@ -3609,7 +4126,8 @@ async function startServer() {
 
   // 9.3 Cancelamento Emergencial e Restauração de Snapshot
   app.post('/api/benchmark-runs/:id/emergency-stop', (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'runs:execute')) return;
+    const actor = getRequestActor(req, res);
     const run = db.runs.find((r) => r.id === req.params.id) || db.runs[0];
     if (!run) {
       return res.status(404).json({ error: 'Execução não encontrada.' });
@@ -3621,7 +4139,8 @@ async function startServer() {
       'EMERGENCY_STOP_TRIGGERED',
       'BENCHMARK_RUN',
       run.id,
-      `Cancelamento emergencial acionado por ${db.currentUser.name}. Workers isolados encerrados e snapshot baseline T0 restaurado.`
+      `Cancelamento emergencial acionado por ${actor.name}. Workers isolados encerrados e snapshot baseline T0 restaurado.`,
+      actor
     );
     saveDatabase(db);
 
@@ -4262,7 +4781,7 @@ async function startServer() {
   app.get('/api/tools-integrations', (_req, res) => {
     const cacheStats = toolCacheManager.getCacheStats();
     db.toolsDb.optimization_report = ToolResourceMonitor.buildOptimizationReport(
-      DATA_DIR,
+      dataDir,
       cacheStats.sizeKb,
       lifecycleManager.isLocalServerRunning()
     );
@@ -4297,7 +4816,7 @@ async function startServer() {
   });
 
   app.post('/api/sonar/saved-projects', async (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'sonar:config')) return;
     const {
       id,
       name,
@@ -4463,7 +4982,7 @@ async function startServer() {
   });
 
   app.delete('/api/sonar/saved-projects/:id', (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'sonar:config')) return;
     if (!Array.isArray(db.savedSonarProjects)) {
       db.savedSonarProjects = [];
     }
@@ -4490,7 +5009,7 @@ async function startServer() {
   });
 
   app.post('/api/sonar/saved-projects/:id/verify-token', async (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'sonar:config')) return;
     if (!Array.isArray(db.savedSonarProjects)) {
       db.savedSonarProjects = [];
     }
@@ -5143,6 +5662,7 @@ async function startServer() {
 
   // 4.2 Endpoint de Extração Silenciosa em 1-Clique (POST /api/sonar/export-full-report)
   app.post('/api/sonar/export-full-report', async (req, res) => {
+    if (!requireWritePermission(res, req, 'sonar:config')) return;
     const { organization, projectKey, token } = req.body as {
       organization?: string;
       projectKey?: string;
@@ -5685,6 +6205,7 @@ async function startServer() {
   });
 
   app.post('/api/sonar/export-ps1-direct', (req, res) => {
+    if (!requireWritePermission(res, req, 'sonar:config')) return;
     const { platform, serverUrl, projectKey, organization, token } = (req.body || {}) as {
       platform?: 'SONARCLOUD' | 'SONARQUBE_SERVER';
       serverUrl?: string;
@@ -5716,7 +6237,7 @@ async function startServer() {
   });
 
   app.post('/api/sonarqube/probe', async (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'sonar:config')) return;
     const { instanceId, serverUrl, port, token, mode, organizationKey, name } = req.body as {
       instanceId?: string;
       serverUrl?: string;
@@ -5806,7 +6327,7 @@ async function startServer() {
   });
 
   app.post('/api/sonarqube/disconnect', (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'sonar:config')) return;
     const { instanceId } = req.body as { instanceId?: string };
     const inst = db.toolsDb.sonar_instances.find((i) => i.id === instanceId);
     if (!inst) {
@@ -5834,7 +6355,7 @@ async function startServer() {
   });
 
   app.post('/api/sonarqube/lifecycle', (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'sonar:config')) return;
     const { action, mode, limits } = req.body as {
       action?: 'START_LOCAL' | 'STOP_LOCAL' | 'UPDATE_LIMITS';
       mode?: SonarInstallationMode;
@@ -5865,8 +6386,8 @@ async function startServer() {
     });
   });
 
-  app.post('/api/sonarqube/refresh-versions', async (_req, res) => {
-    if (!requireWritePermission(res)) return;
+  app.post('/api/sonarqube/refresh-versions', async (req, res) => {
+    if (!requireWritePermission(res, req, 'sonar:config')) return;
     const versions = await SonarQubeVersionManager.discoverLatestOfficialVersions();
     const distCheck = await SonarQubeInstallationManager.verifyOfficialDistributionOnline();
     db.toolsDb.sonar_versions = versions;
@@ -5890,7 +6411,7 @@ async function startServer() {
   });
 
   app.post('/api/sonarqube/compare-ab', async (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'sonar:config')) return;
     const { softwareAId, softwareBId } = req.body as {
       softwareAId?: string;
       softwareBId?: string;
@@ -5945,7 +6466,7 @@ async function startServer() {
   });
 
   app.post('/api/sonarqube/import-sarif', (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'sonar:config')) return;
     const { toolId, softwareId, customSarifFindings } = req.body as {
       toolId?: SarifExternalReportPayload['toolId'];
       softwareId?: string;
@@ -6026,7 +6547,7 @@ async function startServer() {
   });
 
   app.post('/api/sonarqube/vscode-config', (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'sonar:config')) return;
     const { bindingMode, serverUrl, projectKey, developerConsent } = req.body as {
       bindingMode?: 'COMMUNITY_BUILD' | 'SERVER' | 'CLOUD' | 'NOT_BOUND';
       serverUrl?: string;
@@ -6087,7 +6608,7 @@ async function startServer() {
 
   // GITAR AI ENDPOINTS (Seção 9 e Seção 15)
   app.post('/api/gitar/configure', async (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'sonar:config')) return;
     const {
       gitProvider,
       apiBaseUrl,
@@ -6156,8 +6677,9 @@ async function startServer() {
     return res.json({ gitarIntegration: g, health });
   });
 
-  app.post('/api/gitar/validate-suite', async (_req, res) => {
-    if (!requireWritePermission(res)) return;
+  app.post('/api/gitar/validate-suite', async (req, res) => {
+    if (!requireWritePermission(res, req, 'sonar:config')) return;
+    const actor = getRequestActor(req, res);
     const swA = db.softwares[0];
     const swB = db.softwares[1];
     if (!swA || !swB) {
@@ -6169,7 +6691,7 @@ async function startServer() {
     const result = await gitarWorker.executeAuthorizedValidationJob({
       softwareA: swA,
       softwareB: swB,
-      actorName: db.currentUser.name,
+      actorName: actor.name,
       toolsDb: db.toolsDb,
     });
 
@@ -6178,7 +6700,8 @@ async function startServer() {
       'GITAR_CONTRACT_VALIDATION_EXECUTED',
       'GITAR_AI',
       db.toolsDb.gitar_integration.id,
-      `Validação autorizada Gitar AI executada: ${result.reviewsImported} revisões de PR em branch isolada e ${result.ciFailuresImported} falhas de CI correlacionadas (arquivos originais intocados).`
+      `Validação autorizada Gitar AI executada: ${result.reviewsImported} revisões de PR em branch isolada e ${result.ciFailuresImported} falhas de CI correlacionadas (arquivos originais intocados).`,
+      actor
     );
     saveDatabase(db);
 
@@ -6191,7 +6714,8 @@ async function startServer() {
   });
 
   app.post('/api/gitar/reviews/:id/decision', (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'sonar:config')) return;
+    const actor = getRequestActor(req, res);
     const { decision } = req.body as { decision?: 'APPROVE' | 'REJECT' };
     if (!decision || !['APPROVE', 'REJECT'].includes(decision)) {
       return res.status(400).json({ error: 'Decisão inválida. Informe APPROVE ou REJECT.' });
@@ -6200,7 +6724,7 @@ async function startServer() {
     const outcome = gitarAdapter.reviewAndValidateProposedFix({
       reviewId: req.params.id,
       decision,
-      actorName: db.currentUser.name,
+      actorName: actor.name,
       toolsDb: db.toolsDb,
     });
 
@@ -6213,15 +6737,23 @@ async function startServer() {
       `GITAR_REMEDIATION_${decision}`,
       'GITAR_REVIEW',
       req.params.id,
-      outcome.message
+      outcome.message,
+      actor
     );
     saveDatabase(db);
     return res.json(outcome);
   });
 
-  // SUÍTE DE 15 ETAPAS + 12 CENÁRIOS DE FALHA (Seção 14)
-  app.post('/api/sonarqube/run-integration-tests', async (_req, res) => {
-    if (!requireWritePermission(res)) return;
+  // SUÍTE DE 15 ETAPAS + 12 CENÁRIOS DE FALHA (Seção 14) — bloqueada fora do modo de teste
+  app.post('/api/sonarqube/run-integration-tests', async (req, res) => {
+    if (!requireWritePermission(res, req, 'sonar:config')) return;
+    if (!isTestRuntimeEnvironment()) {
+      return res.status(403).json({
+        error: 'CONTRACT_TEST_ONLY_IN_TEST_MODE',
+        message:
+          'A suíte efêmera de testes de contrato SonarQube Web API só é permitida quando NODE_ENV=test ou WINHOOD_TEST_MODE=1.',
+      });
+    }
     const swA = db.softwares[0];
     const swB = db.softwares[1];
     if (!swA || !swB) {
@@ -6252,7 +6784,8 @@ async function startServer() {
       'SONARQUBE_INTEGRATION_TESTS_EXECUTED',
       'SONAR_TEST_SUITE',
       'suite-27-steps',
-      `Suíte real de testes de integração SonarQube concluída (${testResults.length} etapas executadas: pipeline completo + 12 cenários de falha).`
+      `Suíte de contrato SonarQube concluída (${testResults.length} etapas executadas).`,
+      getRequestActor(req, res)
     );
     saveDatabase(db);
 
@@ -6266,7 +6799,7 @@ async function startServer() {
   app.get('/api/optimization/metrics', (_req, res) => {
     const cacheStats = toolCacheManager.getCacheStats();
     const report = ToolResourceMonitor.buildOptimizationReport(
-      DATA_DIR,
+      dataDir,
       cacheStats.sizeKb,
       lifecycleManager.isLocalServerRunning()
     );
@@ -6292,7 +6825,8 @@ async function startServer() {
     });
   });
 
-  app.post('/api/hardware-benchmark/run', (_req, res) => {
+  app.post('/api/hardware-benchmark/run', (req, res) => {
+    if (!requireWritePermission(res, req, 'tests:run')) return;
     const result = ToolResourceMonitor.runHostHardwareBenchmark();
     latestHardwareBenchmark = result;
     appendAuditLog(
@@ -6300,7 +6834,8 @@ async function startServer() {
       'HARDWARE_BENCHMARK_EXECUTED',
       'HARDWARE_BENCHMARK',
       result.benchmarkId,
-      `Benchmark de Hardware & Storage executado: Score ${result.overallHostScore}/100 (Tier ${result.tier}) | SHA-256: ${result.verificationSha256.slice(0, 16)}...`
+      `Benchmark de Hardware & Storage executado: Score ${result.overallHostScore}/100 (Tier ${result.tier}) | SHA-256: ${result.verificationSha256.slice(0, 16)}...`,
+      getRequestActor(req, res)
     );
     saveDatabase(db);
     res.json({
@@ -6311,7 +6846,7 @@ async function startServer() {
   });
 
   app.post('/api/hardware-benchmark/attach-to-run', (req, res) => {
-    if (!requireWritePermission(res)) return;
+    if (!requireWritePermission(res, req, 'runs:execute')) return;
     const { runId, compositeScore, tier, displaySummary, verificationHash } = req.body as {
       runId?: string;
       compositeScore?: number;
@@ -6328,7 +6863,8 @@ async function startServer() {
       'HARDWARE_SNAPSHOT_ATTACHED',
       'BENCHMARK_RUN',
       targetRun.id,
-      `Snapshot Hardware & Display vinculado à execução ${targetRun.id}: Score ${compositeScore ?? 0}/100 (Tier ${tier || 'A'}) — ${displaySummary || 'Display Telemetry'} [SHA-256: ${(verificationHash || '').slice(0, 16)}]`
+      `Snapshot Hardware & Display vinculado à execução ${targetRun.id}: Score ${compositeScore ?? 0}/100 (Tier ${tier || 'A'}) — ${displaySummary || 'Display Telemetry'} [SHA-256: ${(verificationHash || '').slice(0, 16)}]`,
+      getRequestActor(req, res)
     );
     saveDatabase(db);
     return res.json({
@@ -6339,8 +6875,8 @@ async function startServer() {
   });
 
   // 17. Reference Intelligence, Comparability Matcher, Golden Validation, Real Execution, SBOM & Key Management
-  const refRegistry = new ReferenceRegistry(DATA_DIR);
-  const refSynchronizer = new ReferenceSynchronizer(DATA_DIR);
+  const refRegistry = new ReferenceRegistry(dataDir);
+  const refSynchronizer = new ReferenceSynchronizer(dataDir);
   let latestGoldenValidation: import('./src/types/benchmark').GoldenValidationSuiteReport | null = null;
 
   app.get('/api/intelligence/references', (_req, res) => {
@@ -6351,18 +6887,49 @@ async function startServer() {
       freshCount: snapshots.filter((s) => s.freshnessStatus === 'FRESH').length,
       cachedCount: snapshots.filter((s) => s.freshnessStatus === 'CACHED_VALID' || s.freshnessStatus === 'UNAVAILABLE_USING_CACHED').length,
       staleCount: snapshots.filter((s) => s.freshnessStatus === 'STALE').length,
+      history: refRegistry.listSnapshotHistory(30),
     });
   });
 
   app.post('/api/intelligence/sync', async (req, res) => {
-    if (!requireWritePermission(res, req)) return;
-    const { sources, sonarServerUrl } = (req.body || {}) as {
+    if (!requireWritePermission(res, req, 'security:ops')) return;
+    const { sources, sonarServerUrl, sonarToken, sbomPackages } = (req.body || {}) as {
       sources?: import('./src/types/benchmark').ReferenceSourceKey[];
       sonarServerUrl?: string;
+      sonarToken?: string;
+      sbomPackages?: Array<{
+        ecosystem: import('./src/types/benchmark').SbomComponentRecord['ecosystem'];
+        name: string;
+        version: string;
+      }>;
     };
+
+    let derivedPackages = sbomPackages;
+    if (!derivedPackages || derivedPackages.length === 0) {
+      const pkgs: Array<{
+        ecosystem: import('./src/types/benchmark').SbomComponentRecord['ecosystem'];
+        name: string;
+        version: string;
+      }> = [];
+      const seen = new Set<string>();
+      for (const sw of db.softwares) {
+        const sbom = db.runs[0]?.sbomsBySoftware?.[sw.id] || SbomGenerator.generateFromSoftware(sw);
+        for (const comp of sbom.components || []) {
+          const key = `${comp.ecosystem}:${comp.name}@${comp.version}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            pkgs.push({ ecosystem: comp.ecosystem, name: comp.name, version: comp.version });
+          }
+        }
+      }
+      derivedPackages = pkgs.slice(0, 40);
+    }
+
     const outcome = await refSynchronizer.syncSources({
       sources,
       sonarServerUrl,
+      sonarToken,
+      sbomPackages: derivedPackages,
       internalRunsCount: db.runs.length,
     });
     appendAuditLog(
@@ -6370,7 +6937,8 @@ async function startServer() {
       'REFERENCE_INTELLIGENCE_SYNCED',
       'REFERENCE_REGISTRY',
       'global',
-      `Sincronização de referências: ${outcome.liveFetchedSources.length} fonte(s) ao vivo, ${outcome.cachedFallbackSources.length} em cache válido.`
+      `Sincronização de referências: ${outcome.liveFetchedSources.length} fonte(s) ao vivo, ${outcome.cachedFallbackSources.length} em cache válido.`,
+      getRequestActor(req, res)
     );
     saveDatabase(db);
     res.json(outcome);
@@ -6409,7 +6977,7 @@ async function startServer() {
   });
 
   app.post('/api/validation/run-golden', (req, res) => {
-    if (!requireWritePermission(res, req)) return;
+    if (!requireWritePermission(res, req, 'tests:run')) return;
     const report = GoldenDatasetRunner.runValidationSuite();
     latestGoldenValidation = report;
     appendAuditLog(
@@ -6417,16 +6985,86 @@ async function startServer() {
       'GOLDEN_DATASET_VALIDATED',
       'VALIDATION_SUITE',
       report.validationId,
-      `Golden Dataset executado: Precision=${report.precision}, Recall=${report.recall}, F1=${report.f1Score} (${report.truePositives} TP / ${report.falsePositives} FP / ${report.trueNegatives} TN / ${report.falseNegatives} FN) em ${report.totalDurationMs}ms.`
+      `Golden Dataset (${report.datasetOriginLabel}) executado: Precision=${report.precision}, Recall=${report.recall}, F1=${report.f1Score} (${report.truePositives} TP / ${report.falsePositives} FP / ${report.trueNegatives} TN / ${report.falseNegatives} FN) em ${report.totalDurationMs}ms.`,
+      getRequestActor(req, res)
     );
     saveDatabase(db);
     res.json({ report });
   });
 
+  // Authorized Performance Target Registry (SSRF Guard Allowlist)
+  app.get('/api/execution/targets', (_req, res) => {
+    res.json({ targets: db.authorizedTargets || [] });
+  });
+
+  app.post('/api/execution/targets', async (req, res) => {
+    if (!requireWritePermission(res, req, 'targets:manage')) return;
+    const actor = getRequestActor(req, res);
+    const { label, origin, purpose, allowLocalhostInTest } = (req.body || {}) as {
+      label?: string;
+      origin?: string;
+      purpose?: string;
+      allowLocalhostInTest?: boolean;
+    };
+    if (!label || !origin) {
+      return res.status(400).json({ error: 'Informe label e origin HTTP/HTTPS válidos para cadastrar o destino autorizado.' });
+    }
+    let parsedOrigin: URL;
+    try {
+      parsedOrigin = new URL(origin.trim());
+    } catch {
+      return res.status(400).json({ error: 'URL de origem malformada.' });
+    }
+    const ssrfCheck = await SsrfGuard.validateUrl({
+      targetUrl: parsedOrigin.origin,
+      allowExplicitLoopback: Boolean(allowLocalhostInTest && isTestRuntimeEnvironment()),
+    });
+    if (!ssrfCheck.allowed) {
+      appendAuditLog(db, 'SSRF_TARGET_REGISTRATION_BLOCKED', 'PERF_TARGET', parsedOrigin.origin, ssrfCheck.reason, actor);
+      saveDatabase(db);
+      return res.status(403).json({
+        error: 'SSRF_BLOCKED',
+        message: ssrfCheck.reason,
+      });
+    }
+    const target: AuthorizedPerfTarget = {
+      id: `tgt-${crypto.randomUUID().slice(0, 8)}`,
+      label: label.trim(),
+      origin: parsedOrigin.origin,
+      purpose: (purpose || 'Medição controlada de latência HTTP').trim(),
+      allowLocalhostInTest: Boolean(allowLocalhostInTest && isTestRuntimeEnvironment()),
+      authorizedBy: actor.email,
+      createdAt: new Date().toISOString(),
+    };
+    db.authorizedTargets = db.authorizedTargets || [];
+    db.authorizedTargets.unshift(target);
+    appendAuditLog(db, 'PERF_TARGET_AUTHORIZED', 'PERF_TARGET', target.id, `Destino autorizado cadastrado: ${target.origin} (${target.label}).`, actor);
+    saveDatabase(db);
+    return res.status(201).json({ target, targets: db.authorizedTargets });
+  });
+
+  app.delete('/api/execution/targets/:id', (req, res) => {
+    if (!requireWritePermission(res, req, 'targets:manage')) return;
+    const list = db.authorizedTargets || [];
+    const idx = list.findIndex((t) => t.id === req.params.id);
+    if (idx === -1) {
+      return res.status(404).json({ error: 'Destino autorizado não encontrado.' });
+    }
+    const removed = list.splice(idx, 1)[0]!;
+    db.authorizedTargets = list;
+    appendAuditLog(db, 'PERF_TARGET_REMOVED', 'PERF_TARGET', removed.id, `Destino autorizado removido: ${removed.origin}.`, getRequestActor(req, res));
+    saveDatabase(db);
+    return res.json({ ok: true, targets: db.authorizedTargets });
+  });
+
   app.post('/api/execution/run-tests', (req, res) => {
-    if (!requireWritePermission(res, req)) return;
-    const { softwareId } = (req.body || {}) as { softwareId?: string };
-    const sw = db.softwares.find((s) => s.id === softwareId) || db.softwares[0];
+    if (!requireWritePermission(res, req, 'tests:run')) return;
+    const actor = getRequestActor(req, res);
+    const { softwareId, runId } = (req.body || {}) as { softwareId?: string; runId?: string };
+    if (!softwareId) {
+      return res.status(400).json({ error: 'Informe softwareId obrigatório para execução isolada de testes.' });
+    }
+    const sw = db.softwares.find((s) => s.id === softwareId);
     if (!sw) {
       return res.status(404).json({ error: 'Software não encontrado.' });
     }
@@ -6434,57 +7072,228 @@ async function startServer() {
       softwareName: sw.name,
       filesMap: sw.sourceFilesContent || {},
     });
+
+    const targetRun = runId
+      ? db.runs.find((r) => r.id === runId)
+      : db.runs.find((r) => r.softwareIds.includes(sw.id));
+    let attachedToRunId: string | null = null;
+
+    if (targetRun) {
+      const execRecord: UnifiedExecutionRecord = {
+        id: `uexec-test-${crypto.randomUUID().slice(0, 8)}`,
+        runId: targetRun.id,
+        softwareId: sw.id,
+        kind: 'TEST_EXECUTION',
+        state: result.provenance.state,
+        isolationMode: result.isolationMode,
+        isolationState: result.isolationState,
+        recoveryVerified: result.recoveryVerified,
+        executedAt: new Date().toISOString(),
+        durationMs: result.durationMs ?? 0,
+        summary: `Execução isolada (${result.runnerUsed}): ${result.testsPassed}/${result.testsTotal} aprovados.`,
+        evidenceHash: result.provenance.evidenceHash || computeSha256(`${sw.id}|${result.testsTotal}|${result.testsPassed}`),
+        metricsPayload: {
+          testsTotal: result.testsTotal,
+          testsPassed: result.testsPassed,
+          testsFailed: result.testsFailed,
+          exitCode: result.exitCode,
+        },
+      };
+      targetRun.executionRecords = [execRecord, ...(targetRun.executionRecords || [])];
+      const sc = targetRun.scoreCards.find((card) => card.softwareId === sw.id);
+      if (sc && result.executed) {
+        sc.metricsSummary.functionalTestsTotal = result.testsTotal;
+        sc.metricsSummary.functionalTestsPassed = result.testsPassed;
+        sc.metricsSummary.functionalTestsFailed = result.testsFailed;
+        if (result.coverageReport.found && result.coverageReport.lineCoveragePercent !== null) {
+          sc.metricsSummary.testCoveragePercent = result.coverageReport.lineCoveragePercent;
+        }
+        recalculateBenchmarkRunScoreCards(targetRun, db.softwares);
+      }
+      attachedToRunId = targetRun.id;
+    }
+
     appendAuditLog(
       db,
       'CONTROLLED_TEST_EXECUTION',
       'SOFTWARE',
       sw.id,
-      `Execução isolada de testes (${result.runnerUsed}): ${result.testsPassed}/${result.testsTotal} aprovados (estado: ${result.provenance.state}).`
+      `Execução isolada de testes (${result.runnerUsed}, isolation=${result.isolationMode}, cleanup=${result.recoveryVerified}): ${result.testsPassed}/${result.testsTotal} aprovados (estado: ${result.provenance.state}).`,
+      actor
     );
-    saveDatabase(db);
-    return res.json({ softwareId: sw.id, softwareName: sw.name, result });
+    saveDatabase(db, true);
+    return res.json({ softwareId: sw.id, softwareName: sw.name, attachedToRunId, result });
   });
 
   app.post('/api/execution/import-coverage', (req, res) => {
-    if (!requireWritePermission(res, req)) return;
-    const { filePath = 'coverage/lcov.info', content } = (req.body || {}) as {
+    if (!requireWritePermission(res, req, 'tests:run')) return;
+    const { filePath = 'coverage/lcov.info', content, softwareId, runId } = (req.body || {}) as {
       filePath?: string;
       content?: string;
+      softwareId?: string;
+      runId?: string;
     };
     if (!content || typeof content !== 'string') {
       return res.status(400).json({ error: 'Conteúdo do relatório de cobertura (LCOV/JaCoCo/Cobertura/Istanbul) obrigatório.' });
     }
     const parsed = CoverageReportParser.parseFromFilesMap({ [filePath]: content });
-    return res.json({ coverage: parsed });
+
+    let attachedToRunId: string | null = null;
+    if (softwareId) {
+      const targetRun = runId
+        ? db.runs.find((r) => r.id === runId)
+        : db.runs.find((r) => r.softwareIds.includes(softwareId));
+      if (targetRun && parsed.found && parsed.lineCoveragePercent !== null) {
+        const sc = targetRun.scoreCards.find((card) => card.softwareId === softwareId);
+        if (sc) {
+          sc.metricsSummary.testCoveragePercent = parsed.lineCoveragePercent;
+          targetRun.executionRecords = [
+            {
+              id: `uexec-cov-${crypto.randomUUID().slice(0, 8)}`,
+              runId: targetRun.id,
+              softwareId,
+              kind: 'COVERAGE_IMPORT',
+              state: parsed.state,
+              isolationMode: 'NOT_REQUIRED',
+              isolationState: 'CLEANUP_VERIFIED',
+              recoveryVerified: true,
+              executedAt: new Date().toISOString(),
+              durationMs: 1,
+              summary: `Relatório ${parsed.format} importado: ${parsed.lineCoveragePercent}% (${parsed.linesHit}/${parsed.linesFound}).`,
+              evidenceHash: parsed.evidenceHash || computeSha256(content),
+              metricsPayload: {
+                format: parsed.format,
+                lineCoveragePercent: parsed.lineCoveragePercent,
+                linesHit: parsed.linesHit,
+                linesFound: parsed.linesFound,
+              },
+            },
+            ...(targetRun.executionRecords || []),
+          ];
+          recalculateBenchmarkRunScoreCards(targetRun, db.softwares);
+          attachedToRunId = targetRun.id;
+          saveDatabase(db, true);
+        }
+      }
+    }
+
+    return res.json({ coverage: parsed, attachedToRunId });
   });
 
   app.post('/api/execution/run-perf', async (req, res) => {
-    if (!requireWritePermission(res, req)) return;
-    const { targetUrl, requestsCount = 20, concurrency = 4 } = (req.body || {}) as {
+    if (!requireWritePermission(res, req, 'perf:run')) return;
+    const actor = getRequestActor(req, res);
+    const {
+      targetUrl,
+      requestsCount = 20,
+      concurrency = 4,
+      allowExplicitLoopback,
+      softwareId,
+      runId,
+    } = (req.body || {}) as {
       targetUrl?: string;
       requestsCount?: number;
       concurrency?: number;
+      allowExplicitLoopback?: boolean;
+      softwareId?: string;
+      runId?: string;
     };
     if (!targetUrl) {
       return res.status(400).json({
         error: 'TARGET_URL_REQUIRED',
-        message: 'Informe targetUrl HTTP/HTTPS real para medição controlada de P50/P95/P99, RPS, CPU e RSS.',
+        message: 'Informe targetUrl HTTP/HTTPS cadastrada em destinos autorizados para medição controlada.',
       });
     }
     const result = await ControlledTestAndPerfRunner.measureHttpWorkload({
       targetUrl,
       requestsCount,
       concurrency,
+      authorizedTargets: db.authorizedTargets || [],
+      requireRegisteredTarget: true,
+      allowExplicitLoopback: Boolean(allowExplicitLoopback && isTestRuntimeEnvironment()),
     });
+
+    if (result.status === 'BLOCKED_SSRF') {
+      appendAuditLog(
+        db,
+        'SSRF_ATTEMPT_BLOCKED',
+        'RUNTIME_PERF',
+        targetUrl,
+        `Tentativa de medição bloqueada por SsrfGuard em ${targetUrl}: ${result.reason}`,
+        actor
+      );
+      saveDatabase(db);
+      return res.status(403).json({
+        error: 'SSRF_BLOCKED',
+        message: result.reason,
+        result,
+      });
+    }
+
+    let attachedToRunId: string | null = null;
+    if (result.status === 'MEASURED') {
+      const targetRun = runId
+        ? db.runs.find((r) => r.id === runId)
+        : softwareId
+          ? db.runs.find((r) => r.softwareIds.includes(softwareId))
+          : undefined;
+      if (targetRun && softwareId) {
+        const sc = targetRun.scoreCards.find((card) => card.softwareId === softwareId);
+        if (sc) {
+          sc.runtimeMetrics = {
+            status: 'MEASURED',
+            p50LatencyMs: result.p50LatencyMs ?? undefined,
+            p95LatencyMs: result.p95LatencyMs ?? undefined,
+            p99LatencyMs: result.p99LatencyMs ?? undefined,
+            throughputRps: result.throughputRps ?? undefined,
+            cpuPercent: result.targetMetrics.cpuPercent ?? undefined,
+            memoryMb: result.targetMetrics.memoryRssMb ?? undefined,
+            reason: `Medição HTTP SSRF-safe concluída em ${targetUrl} (telemetria de CPU/RAM do alvo remoto = NOT_MEASURED).`,
+          };
+          sc.metricsSummary.p50LatencyMs = result.p50LatencyMs ?? 0;
+          sc.metricsSummary.p95LatencyMs = result.p95LatencyMs ?? 0;
+          sc.metricsSummary.p99LatencyMs = result.p99LatencyMs ?? 0;
+          sc.metricsSummary.throughputRps = result.throughputRps ?? 0;
+          targetRun.executionRecords = [
+            {
+              id: `uexec-perf-${crypto.randomUUID().slice(0, 8)}`,
+              runId: targetRun.id,
+              softwareId,
+              kind: 'HTTP_PERF_PROBE',
+              state: 'MEASURED',
+              isolationMode: 'SSRF_GUARD_PINNED',
+              isolationState: 'CLEANUP_VERIFIED',
+              recoveryVerified: true,
+              executedAt: result.measuredAt,
+              durationMs: result.agentMetrics.probeTimeMs,
+              summary: `P50=${result.p50LatencyMs}ms, P95=${result.p95LatencyMs}ms, RPS=${result.throughputRps} em ${targetUrl}.`,
+              evidenceHash: result.provenance.evidenceHash || computeSha256(`${targetUrl}|${result.measuredAt}`),
+              metricsPayload: {
+                p50LatencyMs: result.p50LatencyMs,
+                p95LatencyMs: result.p95LatencyMs,
+                p99LatencyMs: result.p99LatencyMs,
+                throughputRps: result.throughputRps,
+                agentMetrics: result.agentMetrics,
+              },
+            },
+            ...(targetRun.executionRecords || []),
+          ];
+          recalculateBenchmarkRunScoreCards(targetRun, db.softwares);
+          attachedToRunId = targetRun.id;
+        }
+      }
+    }
+
     appendAuditLog(
       db,
       'CONTROLLED_PERF_MEASUREMENT',
       'RUNTIME_PERF',
       targetUrl,
-      `Medição HTTP em ${targetUrl}: status=${result.status}, P95=${result.p95LatencyMs}ms, RPS=${result.throughputRps}.`
+      `Medição HTTP em ${targetUrl}: status=${result.status}, P95=${result.p95LatencyMs}ms, RPS=${result.throughputRps}.`,
+      actor
     );
-    saveDatabase(db);
-    return res.json({ result });
+    saveDatabase(db, true);
+    return res.json({ result, attachedToRunId });
   });
 
   app.get('/api/runs/:runId/sbom', (req, res) => {
@@ -6532,39 +7341,99 @@ async function startServer() {
   });
 
   app.post('/api/security/keys/rotate', (req, res) => {
-    if (!requireWritePermission(res, req)) return;
+    if (!requireWritePermission(res, req, 'keys:rotate')) return;
+    const actor = getRequestActor(req, res);
     const { purpose } = (req.body || {}) as {
-      purpose?: 'evidence-hmac' | 'sonar-vault-aes' | 'EVIDENCE_HMAC' | 'TOKEN_VAULT_AES256';
+      purpose?:
+        | 'evidence-hmac'
+        | 'evidence-ed25519'
+        | 'sonar-vault-aes'
+        | 'EVIDENCE_HMAC'
+        | 'EVIDENCE_ED25519'
+        | 'TOKEN_VAULT_AES256';
     };
-    const purposeMap: Record<string, 'EVIDENCE_HMAC' | 'TOKEN_VAULT_AES256'> = {
+    const purposeMap: Record<
+      string,
+      'EVIDENCE_HMAC' | 'EVIDENCE_ED25519' | 'TOKEN_VAULT_AES256'
+    > = {
       'evidence-hmac': 'EVIDENCE_HMAC',
       EVIDENCE_HMAC: 'EVIDENCE_HMAC',
+      'evidence-ed25519': 'EVIDENCE_ED25519',
+      EVIDENCE_ED25519: 'EVIDENCE_ED25519',
       'sonar-vault-aes': 'TOKEN_VAULT_AES256',
       TOKEN_VAULT_AES256: 'TOKEN_VAULT_AES256',
     };
     const mappedPurpose = purpose ? purposeMap[purpose] : undefined;
     if (!mappedPurpose) {
       return res.status(400).json({
-        error: 'Informe purpose: "EVIDENCE_HMAC" ("evidence-hmac") ou "TOKEN_VAULT_AES256" ("sonar-vault-aes").',
+        error:
+          'Informe purpose: "EVIDENCE_HMAC" ("evidence-hmac"), "EVIDENCE_ED25519" ("evidence-ed25519") ou "TOKEN_VAULT_AES256" ("sonar-vault-aes").',
       });
     }
-    const newRecord = KeyManagementService.rotateKey(mappedPurpose);
+
+    let reencryptedCount = 0;
+    const newRecord = KeyManagementService.rotateKey(mappedPurpose, undefined, (ctx) => {
+      if (Array.isArray(db.savedSonarProjects)) {
+        for (const proj of db.savedSonarProjects) {
+          if (proj.encryptedToken) {
+            const reenc = SonarQubeConnection.reencryptToken(proj.encryptedToken, ctx);
+            if (reenc) {
+              proj.encryptedToken = reenc;
+              reencryptedCount += 1;
+            }
+          }
+        }
+      }
+      reencryptedCount += sonarService.reencryptAllTokens(ctx);
+      if (gitarAdapter.getConnection().reencryptStoredToken(ctx)) {
+        reencryptedCount += 1;
+      }
+    });
+
     appendAuditLog(
       db,
       'CRYPTO_KEY_ROTATED',
       'KEY_MANAGEMENT',
       newRecord.keyId,
-      `Chave criptográfica para ${mappedPurpose} rotacionada com sucesso (novo keyId: ${newRecord.keyId}; chaves anteriores mantidas para verificação histórica).`
+      `Chave criptográfica para ${mappedPurpose} rotacionada com sucesso (novo keyId: ${newRecord.keyId}; re-criptografados=${reencryptedCount}; chaves anteriores mantidas para verificação histórica).`,
+      actor
     );
-    saveDatabase(db);
+    saveDatabase(db, true);
     return res.json({
       rotated: true,
       newKeyId: newRecord.keyId,
       purpose: newRecord.purpose,
+      algorithm: newRecord.algorithm,
+      reencryptedTokensCount: reencryptedCount,
       createdAt: newRecord.createdAt,
       keys: KeyManagementService.getStatus(),
     });
   });
+
+  // Safe API JSON fallback & error handler
+  app.use('/api', (_req, res) => {
+    res.status(404).json({ error: 'ENDPOINT_NOT_FOUND' });
+  });
+  app.use(
+    '/api',
+    (err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+      res.status(err?.status || 500).json({
+        error: 'INTERNAL_API_ERROR',
+        message: err?.message || 'Erro interno no servidor WinHood.',
+      });
+    }
+  );
+
+  return {
+    app,
+    dbManager,
+    authService,
+    getDb: () => db,
+  };
+}
+
+export async function startServer() {
+  const { app } = await createWinHoodApp();
 
   // Mount Vite or Static Dist
   if (process.env.NODE_ENV !== 'production') {
@@ -6581,11 +7450,24 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`WinHood Benchmark Server listening on http://localhost:${PORT}`);
+  const bindHost =
+    process.env.WINHOOD_ALLOW_NETWORK_BIND === 'true'
+      ? process.env.WINHOOD_BIND_HOST || '0.0.0.0'
+      : '127.0.0.1';
+
+  app.listen(PORT, bindHost, () => {
+    console.log(`WinHood Benchmark Server listening on http://${bindHost}:${PORT}`);
   });
 }
 
-void startServer().catch((err) => {
-  console.error('Failed to start WinHood server:', err);
-});
+const isEntrypoint =
+  typeof process !== 'undefined' &&
+  Array.isArray(process.argv) &&
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (isEntrypoint) {
+  void startServer().catch((err) => {
+    console.error('Failed to start WinHood server:', err);
+  });
+}

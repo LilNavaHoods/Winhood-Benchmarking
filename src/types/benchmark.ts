@@ -358,6 +358,14 @@ export interface ComparabilityReport {
   dimensionMatrix: DimensionComparabilityEntry[];
 }
 
+export type ManifestVerificationState =
+  | 'GENERATED'
+  | 'SIGNED'
+  | 'VERIFIED'
+  | 'INVALID'
+  | 'TAMPERED'
+  | 'UNVERIFIABLE';
+
 export interface SignedEvidenceManifest {
   manifestId: string;
   runId: string;
@@ -370,11 +378,24 @@ export interface SignedEvidenceManifest {
   manifestPayloadSha256: string;
   digitalSignatureHmacSha256: string;
   hmacSignature?: string;
-  signatureAlgorithm?: 'HMAC-SHA256';
+  signatureAlgorithm?: 'HMAC-SHA256' | 'HMAC-SHA256+ED25519';
   signingKeyId: string;
   keyId?: string;
-  authenticityProofType: 'HMAC_SHA256_PROTECTED_SERVER_KEY';
+  ed25519Signature?: string | null;
+  ed25519PublicKeyPem?: string | null;
+  ed25519KeyId?: string | null;
+  sourceHashes?: string[];
+  toolsHash?: string;
+  resultsHash?: string;
+  configHash?: string;
+  scopeSummary?: string;
+  datasetVersion?: string;
+  authenticityProofType:
+    | 'HMAC_SHA256_PROTECTED_SERVER_KEY'
+    | 'HMAC_SHA256_AND_ED25519'
+    | 'HMAC_SHA256_AND_ED25519_ASYMMETRIC';
   integrityNote: string;
+  verificationState: ManifestVerificationState;
   verified: boolean;
 }
 
@@ -522,7 +543,11 @@ export interface ToolAdapterInfo {
     | 'DISABLED';
   binaryDetected: boolean;
   configured: boolean;
-  signatureHash: string;
+  signatureHash: string | null;
+  availabilityState?: ToolLifecycleState;
+  configurationState?: ToolLifecycleState;
+  readinessState?: ToolLifecycleState;
+  executionState?: ToolLifecycleState;
   description: string;
   supportedLanguages: string[];
   lastExecutionAt: string | null;
@@ -675,6 +700,7 @@ export interface VeracityCheckResult {
   checks: Veracity19Checks;
   auditMatrix?: VeracityAuditMatrixRow[];
   overallCoveragePercent: number;
+  coverageBreakdown?: MultiLayerCoverageBreakdown;
   warnings: string[];
   blockingReasons: string[];
   auditedAt: string;
@@ -857,6 +883,7 @@ export interface SoftwareScoreCard {
     throughputRps?: number;
     cpuPercent?: number;
     memoryRssMb?: number;
+    memoryMb?: number;
     memoryPeakMb?: number;
     startupTimeMs?: number;
     shutdownTimeMs?: number;
@@ -893,6 +920,7 @@ export interface SoftwareScoreCard {
     security: 'A' | 'B' | 'C' | 'D' | 'E';
     maintainability: 'A' | 'B' | 'C' | 'D' | 'E';
   };
+  veracity?: VeracityCheckResult;
   isPartialEvaluation?: boolean;
   unmeasuredCategories?: BenchmarkCategoryKey[];
   metricProvenance?: Record<string, MetricProvenanceRecord>;
@@ -1027,9 +1055,9 @@ export interface WindowsSandboxSnapshotDiff {
   softwareName: string;
   sandboxEnvironment: string;
   executionStatus?: 'EXECUTED_REAL_SANDBOX' | 'NOT_EXECUTED_HOST_UNAVAILABLE' | 'STATIC_MANIFEST_INSPECTION';
-  t0BaselineHash: string;
-  t1PostInstallHash: string;
-  t2PostUninstallHash: string;
+  t0BaselineHash: string | null;
+  t1PostInstallHash: string | null;
+  t2PostUninstallHash: string | null;
   filesCreatedT1: string[];
   registryKeysModifiedT1: string[];
   servicesRegisteredT1: string[];
@@ -1126,6 +1154,8 @@ export interface BenchmarkRun {
   sbomsBySoftware?: Record<string, SbomDocumentBundle>;
   scaCorrelationsBySoftware?: Record<string, ScaVulnerabilityCorrelation[]>;
   referenceSnapshotsUsed?: ReferenceSnapshotRecord[];
+  unifiedExecutions?: UnifiedExecutionRecord[];
+  executionRecords?: UnifiedExecutionRecord[];
   executiveSummary: string;
 }
 
@@ -1133,7 +1163,7 @@ export interface AuditLogEntry {
   id: string;
   timestamp: string;
   actor: string;
-  role: 'ADMIN' | 'SECURITY_LEAD' | 'AUDITOR' | 'QA_ENGINEER';
+  role: 'ADMIN' | 'SECURITY_LEAD' | 'AUDITOR' | 'QA_ENGINEER' | 'SYSTEM';
   action: string;
   entityType: string;
   entityId: string;
@@ -1241,15 +1271,52 @@ export interface AttackPathChain {
   evidenceSha256: string;
 }
 
+export type IsolationLifecycleState =
+  | 'NOT_INITIALIZED'
+  | 'ISOLATION_CONFIGURED'
+  | 'ISOLATION_INITIALIZED'
+  | 'ISOLATION_VERIFIED'
+  | 'EXECUTION_RUNNING'
+  | 'EXECUTION_TERMINATED'
+  | 'RECOVERY_VERIFIED'
+  | 'CLEANUP_VERIFIED'
+  | 'ISOLATION_FAILED';
+
+export type ToolLifecycleState =
+  | 'AVAILABLE'
+  | 'UNAVAILABLE'
+  | 'DETECTED'
+  | 'CONFIGURED'
+  | 'UNCONFIGURED'
+  | 'READY'
+  | 'NOT_READY'
+  | 'RUNNING'
+  | 'EXECUTED'
+  | 'EXECUTED_STATIC'
+  | 'EXECUTED_DYNAMIC'
+  | 'SUCCESS'
+  | 'PARTIAL'
+  | 'NOT_EXECUTED'
+  | 'NOT_INSTALLED'
+  | 'NOT_CONFIGURED'
+  | 'NOT_MEASURED'
+  | 'FAILED'
+  | 'BLOCKED'
+  | 'NOT_APPLICABLE';
+
 export interface ExecutionSandboxControl {
-  isolationMode: 'DISPOSABLE_MICROVM' | 'RESTRICTED_CONTAINER' | 'WINDOWS_SANDBOX';
+  isolationMode: 'DISPOSABLE_MICROVM' | 'RESTRICTED_CONTAINER' | 'WINDOWS_SANDBOX' | 'NODE_PERMISSION_SUBPROCESS' | 'UNAVAILABLE_HOST';
+  isolationState: IsolationLifecycleState;
+  isolationProvider: string;
+  sandboxAvailable: boolean;
   scopeAllowlist: string[];
   networkPolicy: 'AIRGAPPED_NONE' | 'ALLOWLIST_ONLY';
   cpuLimitCores: number;
   memoryLimitMb: number;
   timeoutSeconds: number;
-  snapshotBaselineId: string;
+  snapshotBaselineId: string | null;
   recoveryVerified: boolean;
+  blockedReason?: string | null;
   emergencyStopTriggered: boolean;
   emergencyStopAt?: string | null;
   emergencyStopActor?: string | null;
@@ -1267,25 +1334,46 @@ export interface SoftwareSecurityComparisonMetrics {
   notTestedCount: number;
   reproducibilityScore: number;
   potentialImpactIndex: number;
-  testCoveragePercent: number;
+  testCoveragePercent: number | null;
+  testCoverageState?: MetricMeasurementState | 'PARTIAL';
   comparisonConfidencePercent: number;
   totalExecutionTimeMs: number;
   securityFailuresCount: number;
-  recoveryCapabilityScore: number; // 0.00 a 5.00
-  performanceUnderStressScore: number; // 0.00 a 5.00
+  recoveryCapabilityScore: number | null; // null quando não medido dinamicamente
+  performanceUnderStressScore: number | null; // null quando não medido dinamicamente
   overallSecurityMaturityScore: number; // 0.00 a 5.00
+}
+
+export interface SecurityModuleDescriptor {
+  key?: SecurityAssessmentModuleKey;
+  title?: string;
+  moduleId?: string;
+  label?: string;
+  implementationState?: 'IMPLEMENTED' | 'PLANNED';
+  reason?: string;
+  status:
+    | 'OPERATIONAL'
+    | 'PARTIAL_COVERAGE'
+    | 'EXTERNAL_TOOL_REQUIRED'
+    | 'NOT_EXECUTED'
+    | 'BLOCKED'
+    | 'FAILED'
+    | 'ACTIVE'
+    | 'NOT_CONFIGURED';
+  availabilityState?: ToolLifecycleState;
+  configurationState?: ToolLifecycleState;
+  readinessState?: ToolLifecycleState;
+  executionState?: ToolLifecycleState;
+  coveragePercent?: number | null;
+  limitations?: string[];
 }
 
 export interface SecurityAssessmentSuiteBundle {
   runId: string;
   evaluatedAt: string;
   sandboxControl: ExecutionSandboxControl;
-  modulesCatalog: Array<{
-    key: SecurityAssessmentModuleKey;
-    title: string;
-    status: 'OPERATIONAL' | 'PARTIAL_COVERAGE' | 'EXTERNAL_TOOL_REQUIRED';
-    coveragePercent: number;
-  }>;
+  modulesCatalog: SecurityModuleDescriptor[];
+  modules?: SecurityModuleDescriptor[];
   attackSurfaces: AttackSurfaceProfile[];
   attackPaths: AttackPathChain[];
   executionRecords: StandardizedExecutionRecord[];
@@ -1442,14 +1530,29 @@ export interface SonarProjectRecord {
   lastAnalysisAt: string | null;
 }
 
+export type SonarSyncExecutionState =
+  | 'NOT_CONNECTED'
+  | 'NOT_CONFIGURED'
+  | 'SCANNER_NOT_FOUND'
+  | 'SOURCE_DIRECTORY_INVALID'
+  | 'SCANNER_NOT_EXECUTED'
+  | 'SCANNER_FAILED'
+  | 'REPORT_TASK_MISSING'
+  | 'COMPUTE_ENGINE_PENDING'
+  | 'COMPUTE_ENGINE_FAILED'
+  | 'ANALYSIS_SUCCESS'
+  | 'RESULTS_IMPORTED'
+  | 'ANALYSIS_PARTIAL'
+  | 'CACHED_REUSED';
+
 export interface SonarTaskRecord {
   id: string;
   executionId: string;
-  ceTaskId: string;
+  ceTaskId: string | null;
   instanceId: string;
   projectKey: string;
   softwareId: string;
-  status: 'PENDING' | 'IN_PROGRESS' | 'SUCCESS' | 'FAILED' | 'CANCELED';
+  status: 'PENDING' | 'IN_PROGRESS' | 'SUCCESS' | 'FAILED' | 'CANCELED' | 'NOT_EXECUTED';
   submittedAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -1574,6 +1677,8 @@ export interface SonarAnalysisRecord {
   startedAt: string;
   completedAt: string;
   status: 'COMPLETED' | 'FAILED' | 'CACHED_REUSED';
+  sonarExecutionState?: SonarSyncExecutionState;
+  isContractTestInstance?: boolean;
   cacheHit: boolean;
   cacheKeySha256: string;
   measuresId: string;
@@ -1872,7 +1977,7 @@ export type MetricMeasurementState =
 export interface MetricProvenanceRecord {
   metricKey: string;
   value: number | string | boolean | null;
-  state: MetricMeasurementState;
+  state: MetricMeasurementState | 'PARTIAL';
   origin: string;
   method: string;
   toolName: string;
@@ -1954,7 +2059,8 @@ export type ReferenceFreshnessState =
   | 'CACHED_VALID'
   | 'STALE'
   | 'UNAVAILABLE_USING_CACHED'
-  | 'UNAVAILABLE_NO_CACHE';
+  | 'UNAVAILABLE_NO_CACHE'
+  | 'FAILED';
 
 export interface ReferenceSnapshotRecord {
   id: string;
@@ -1965,6 +2071,7 @@ export interface ReferenceSnapshotRecord {
   originUrl: string;
   license: string;
   sha256: string;
+  etag?: string | null;
   recordsCount: number;
   rulesIncluded: string[];
   toolsReferenced: string[];
@@ -2015,8 +2122,8 @@ export interface GoldenValidationCaseResult {
   category: string;
   cwe: string;
   expectedVulnerable: boolean;
-  detectedVulnerable: boolean;
-  classification: 'TP' | 'FP' | 'TN' | 'FN';
+  detectedVulnerable: boolean | null;
+  classification: 'TP' | 'FP' | 'TN' | 'FN' | 'INCONCLUSIVE';
   durationMs: number;
   detectedRules: string[];
 }
@@ -2026,18 +2133,23 @@ export interface GoldenValidationSuiteReport {
   executedAt: string;
   engineVersion: string;
   datasetVersion: string;
+  datasetOriginLabel: 'WINHOOD_INTERNAL_CALIBRATION_CORPUS' | 'OWASP_BENCHMARK_OFFICIAL';
+  datasetSha256: string;
+  sampleWarning: string | null;
   totalCases: number;
+  inconclusiveCases: number;
   truePositives: number;
   falsePositives: number;
   trueNegatives: number;
   falseNegatives: number;
-  precision: number;
-  recall: number;
-  f1Score: number;
-  falsePositiveRate: number;
-  falseNegativeRate: number;
+  precision: number | null;
+  recall: number | null;
+  f1Score: number | null;
+  falsePositiveRate: number | null;
+  falseNegativeRate: number | null;
   totalDurationMs: number;
   memoryDeltaMb: number;
+  limitations: string[];
   byLanguage: Record<
     string,
     {
@@ -2046,9 +2158,9 @@ export interface GoldenValidationSuiteReport {
       fp: number;
       tn: number;
       fn: number;
-      precision: number;
-      recall: number;
-      f1Score: number;
+      precision: number | null;
+      recall: number | null;
+      f1Score: number | null;
     }
   >;
   byCategory: Record<
@@ -2059,28 +2171,108 @@ export interface GoldenValidationSuiteReport {
       fp: number;
       tn: number;
       fn: number;
-      precision: number;
-      recall: number;
-      f1Score: number;
+      precision: number | null;
+      recall: number | null;
+      f1Score: number | null;
     }
   >;
   cases: GoldenValidationCaseResult[];
   reportSha256: string;
 }
 
+export interface CoverageDimensionMetric {
+  numerator: number | null;
+  denominator: number | null;
+  percent: number | null;
+  state: MetricMeasurementState | 'PARTIAL';
+  formula?: string;
+  limitations?: string[];
+  label?: string;
+  detail?: string;
+  sourceFormat?: string;
+}
+
+export interface MultiLayerCoverageBreakdown {
+  ingestionCoverage?: CoverageDimensionMetric;
+  analysisCoverage?: CoverageDimensionMetric;
+  parsingCoverage?: CoverageDimensionMetric;
+  languageCoverage?: CoverageDimensionMetric & {
+    byLanguage?: Record<
+      string,
+      {
+        filesCount: number;
+        linesCount: number;
+        parserKind: 'BABEL_AST' | 'STRUCTURAL_PARSER' | 'UNSUPPORTED';
+      }
+    >;
+  };
+  testCoverage?: CoverageDimensionMetric;
+  ingestion?: CoverageDimensionMetric;
+  analysis?: CoverageDimensionMetric;
+  parsing?: CoverageDimensionMetric;
+  language?: CoverageDimensionMetric & {
+    byLanguage?: Record<string, any>;
+  };
+  test?: CoverageDimensionMetric;
+}
+
 export interface ParsedCoverageReportSummary {
   found: boolean;
   format: 'LCOV' | 'JACOCO_XML' | 'COBERTURA_XML' | 'ISTANBUL_JSON' | 'NONE';
   sourceFiles: string[];
-  linesFound: number;
-  linesHit: number;
-  branchesFound: number;
-  branchesHit: number;
+  linesFound: number | null;
+  linesHit: number | null;
+  branchesFound: number | null;
+  branchesHit: number | null;
   lineCoveragePercent: number | null;
   branchCoveragePercent: number | null;
-  state: MetricMeasurementState;
+  state: MetricMeasurementState | 'PARTIAL';
   evidenceHash: string | null;
+  limitations?: string[];
+  softwareId?: string;
+  softwareVersion?: string;
 }
+
+export interface UnifiedExecutionRecord {
+  id?: string;
+  executionId?: string;
+  runId: string;
+  softwareId: string;
+  sourceHash?: string;
+  commitHash?: string;
+  kind?: string;
+  state?: string;
+  isolationMode?: string;
+  isolationState?: string;
+  recoveryVerified?: boolean;
+  executedAt?: string;
+  durationMs?: number;
+  summary?: string;
+  evidenceHash?: string | null;
+  metricsPayload?: Record<string, unknown>;
+  toolId?: string;
+  toolVersion?: string;
+  executionStatus?: ToolLifecycleState;
+  startedAt?: string;
+  completedAt?: string;
+  exitCode?: number | null;
+  stdoutHash?: string;
+  stderrHash?: string;
+  artifactHashes?: Record<string, string>;
+  metricProvenance?: MetricProvenanceRecord[];
+  limitations?: string[];
+}
+
+export interface AuthorizedPerfTarget {
+  id: string;
+  label: string;
+  origin: string;
+  purpose: string;
+  allowLocalhostInTest?: boolean;
+  authorizedBy: string;
+  createdAt: string;
+}
+
 
 
 

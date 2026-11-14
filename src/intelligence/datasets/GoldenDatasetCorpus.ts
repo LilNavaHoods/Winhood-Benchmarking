@@ -8,10 +8,12 @@ export interface GoldenDatasetCase {
   filesMap: Record<string, string>;
 }
 
-export const GOLDEN_DATASET_VERSION = 'WINHOOD-OWASP-CALIBRATION-v2.0.0';
+export const GOLDEN_DATASET_VERSION = 'WINHOOD-INTERNAL-CALIBRATION-v2.0.0';
+export const GOLDEN_DATASET_ORIGIN_LABEL = 'WINHOOD_INTERNAL_CALIBRATION_CORPUS' as const;
 
 /**
- * Corpus oficial de referência (True Positives + True Negatives pareados) inspirado no OWASP Benchmark.
+ * Corpus interno de calibração determinística (True Positives + True Negatives pareados),
+ * inspirado nas categorias do OWASP Benchmark (NÃO é o dataset oficial completo do OWASP Benchmark v1.2).
  * Permite aferir objetivamente Precision, Recall, F1, FPR e FNR sobre o motor real ParserRegistry + TaintAnalyzer.
  */
 export const GOLDEN_DATASET_CORPUS: GoldenDatasetCase[] = [

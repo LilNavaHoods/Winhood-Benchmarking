@@ -13,7 +13,9 @@ import {
   FileText,
   FolderGit2,
   Github,
+  KeyRound,
   LayoutDashboard,
+  LogOut,
   Monitor,
   Moon,
   PanelLeftClose,
@@ -44,6 +46,7 @@ import { StepByStepJourneyBar, type AppNavSection } from './components/StepBySte
 import { ContextualScreenHelpBanner } from './components/ContextualScreenHelpBanner';
 import { AnalysisProgressHeaderBanner } from './components/AnalysisProgressHeaderBanner';
 import { WinHoodLogo } from './components/WinHoodLogo';
+import { AuthGateModal, type AuthUserView } from './components/AuthGateModal';
 
 // Lazy-loaded modules (Seção 11.7 — Otimização do frontend: Code Splitting & Lazy Loading sob demanda)
 const ProjectsAndSoftwaresModule = lazy(() =>
@@ -126,17 +129,21 @@ export default function App() {
   const [darkMode, setDarkMode] = useState<boolean>(true);
   const [loading, setLoading] = useState<boolean>(true);
 
-  const [currentUser, setCurrentUser] = useState<{
-    id: string;
-    name: string;
-    email: string;
-    role: 'ADMIN' | 'SECURITY_LEAD' | 'AUDITOR' | 'QA_ENGINEER';
-  }>({
-    id: 'usr-admin-01',
-    name: 'Lohan Silva',
-    email: 'admin@winhood.sec',
-    role: 'ADMIN',
-  });
+  const [currentUser, setCurrentUser] = useState<AuthUserView | null>(null);
+  const [authLoading, setAuthLoading] = useState<boolean>(true);
+  const [authenticated, setAuthenticated] = useState<boolean>(false);
+  const [mfaRequired, setMfaRequired] = useState<boolean>(false);
+  const [bootstrapRequired, setBootstrapRequired] = useState<boolean>(false);
+  const [bootstrapTokenFileHint, setBootstrapTokenFileHint] = useState<string>(
+    '.winhood_data/bootstrap_admin_token.txt'
+  );
+  const [isAdminOrigin, setIsAdminOrigin] = useState<boolean>(false);
+  const [isMfaSetupOpen, setIsMfaSetupOpen] = useState<boolean>(false);
+  const [mfaSetupPayload, setMfaSetupPayload] = useState<{
+    secret: string;
+    otpauthUrl: string;
+  } | null>(null);
+  const [mfaVerifyCode, setMfaVerifyCode] = useState<string>('');
 
   const [dashboardData, setDashboardData] = useState<{
     hasEvaluations: boolean;
@@ -204,14 +211,53 @@ export default function App() {
 
   const [activeRunningRun, setActiveRunningRun] = useState<BenchmarkRun | null>(null);
 
+  const checkAuthSession = useCallback(async () => {
+    setAuthLoading(true);
+    try {
+      const [sessRes, bsRes] = await Promise.all([
+        fetch('/api/auth/session'),
+        fetch('/api/auth/bootstrap-status'),
+      ]);
+      if (bsRes.ok) {
+        const bsData = await bsRes.json();
+        setBootstrapRequired(Boolean(bsData.bootstrapRequired));
+        if (bsData.bootstrapTokenFileHint) {
+          setBootstrapTokenFileHint(bsData.bootstrapTokenFileHint);
+        }
+      }
+      if (sessRes.ok) {
+        const sessData = await sessRes.json();
+        setAuthenticated(Boolean(sessData.authenticated));
+        setMfaRequired(Boolean(sessData.mfaRequired));
+        setBootstrapRequired(Boolean(sessData.bootstrapRequired));
+        setCurrentUser(sessData.user || null);
+        if (sessData.user?.role === 'ADMIN') {
+          setIsAdminOrigin(true);
+        }
+      } else {
+        setAuthenticated(false);
+        setMfaRequired(false);
+        setCurrentUser(null);
+      }
+    } catch {
+      setAuthenticated(false);
+    } finally {
+      setAuthLoading(false);
+    }
+  }, []);
+
   // Requisição consolidada única (/api/bootstrap) substituindo chamadas paralelas redundantes
   const fetchAllBackendState = useCallback(async () => {
+    if (!authenticated || mfaRequired) return;
     setLoading(true);
     try {
       const res = await fetch('/api/bootstrap');
       if (res.ok) {
         const data = await res.json();
-        if (data.user) setCurrentUser(data.user);
+        if (data.user) {
+          setCurrentUser(data.user);
+          if (data.user.role === 'ADMIN') setIsAdminOrigin(true);
+        }
         if (data.dashboard) {
           setDashboardData(data.dashboard);
           if (data.dashboard.latestRun?.status === 'RUNNING') {
@@ -231,12 +277,31 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [notify, activeRunningRun]);
+  }, [authenticated, mfaRequired, notify, activeRunningRun]);
 
   useEffect(() => {
-    fetchAllBackendState();
+    void checkAuthSession();
+  }, [checkAuthSession]);
+
+  useEffect(() => {
+    if (authenticated && !mfaRequired) {
+      void fetchAllBackendState();
+    } else if (!authLoading) {
+      setLoading(false);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [authenticated, mfaRequired]);
+
+  useEffect(() => {
+    const onAuthRequired = () => {
+      setAuthenticated(false);
+      setMfaRequired(false);
+      setIsAdminOrigin(false);
+      void checkAuthSession();
+    };
+    window.addEventListener('winhood:auth-required', onAuthRequired);
+    return () => window.removeEventListener('winhood:auth-required', onAuthRequired);
+  }, [checkAuthSession]);
 
   const handleRunUpdated = useCallback((updatedRun: BenchmarkRun) => {
     setDashboardData((prev) => {
@@ -288,6 +353,7 @@ export default function App() {
 
   // Polling leve para verificar se há alguma corrida com status RUNNING ativa
   useEffect(() => {
+    if (!authenticated || mfaRequired) return;
     const checkActiveProgress = async () => {
       try {
         const res = await fetch('/api/benchmark-runs/active-progress');
@@ -310,7 +376,7 @@ export default function App() {
       void checkActiveProgress();
     }, activeRunningRun ? 1200 : 3500);
     return () => clearInterval(interval);
-  }, [activeRunningRun, fetchAllBackendState]);
+  }, [authenticated, mfaRequired, activeRunningRun, fetchAllBackendState]);
 
   const handleEmergencyCancelRun = async (runId: string) => {
     try {
@@ -344,9 +410,65 @@ export default function App() {
         setCurrentUser(data.user);
         notify(`Perfil RBAC alterado para ${role}.`, 'success');
         await fetchAllBackendState();
+      } else {
+        notify(data.message || data.error || 'Alteração de perfil bloqueada.', 'error');
       }
     } catch {
       notify('Erro ao alterar perfil RBAC.', 'error');
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } finally {
+      setAuthenticated(false);
+      setMfaRequired(false);
+      setIsAdminOrigin(false);
+      setCurrentUser(null);
+      setDashboardData(null);
+      setProjects([]);
+      setSoftwares([]);
+      notify('Sessão encerrada com segurança.', 'success');
+      await checkAuthSession();
+    }
+  };
+
+  const handleOpenMfaSetup = async () => {
+    try {
+      const res = await fetch('/api/auth/mfa/setup', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        notify(data.error || 'Falha ao iniciar configuração TOTP MFA.', 'error');
+        return;
+      }
+      setMfaSetupPayload({ secret: data.secret, otpauthUrl: data.otpauthUrl });
+      setMfaVerifyCode('');
+      setIsMfaSetupOpen(true);
+    } catch {
+      notify('Erro ao configurar MFA.', 'error');
+    }
+  };
+
+  const handleConfirmMfaSetup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const res = await fetch('/api/auth/mfa/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ totpCode: mfaVerifyCode.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        notify(data.error || 'Código TOTP inválido.', 'error');
+        return;
+      }
+      if (data.user) setCurrentUser(data.user);
+      setIsMfaSetupOpen(false);
+      setMfaSetupPayload(null);
+      notify('Autenticação MFA (TOTP) ativada e verificada!', 'success');
+    } catch {
+      notify('Erro ao confirmar código MFA.', 'error');
     }
   };
 
@@ -581,17 +703,71 @@ export default function App() {
           </nav>
         </div>
 
-        {/* User Status in Sidebar Footer (Acesso Completo ADMIN por Padrão) */}
+        {/* User Status & RBAC / MFA / Logout in Sidebar Footer */}
         {!sidebarCollapsed && (
-          <div className="p-4 border-t border-slate-200 dark:border-slate-800/80 space-y-1.5 text-xs">
-            <div className="flex items-center gap-2 text-slate-700 dark:text-slate-300 font-semibold">
-              <UserCheck className="w-4 h-4 text-[#31d6c4] shrink-0" />
-              <span className="truncate">{currentUser.name}</span>
+          <div className="p-4 border-t border-slate-200 dark:border-slate-800/80 space-y-2.5 text-xs">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-slate-700 dark:text-slate-300 font-semibold min-w-0">
+                <UserCheck className="w-4 h-4 text-[#31d6c4] shrink-0" />
+                <span className="truncate">{currentUser?.name || 'Sessão não iniciada'}</span>
+              </div>
+              {currentUser && (
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  title="Encerrar Sessão"
+                  className="p-1 rounded border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-rose-500 hover:border-rose-400 cursor-pointer shrink-0"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                </button>
+              )}
             </div>
-            <div className="flex items-center gap-1.5 text-[11px] font-mono text-emerald-600 dark:text-[#31d6c4]">
-              <span className="w-1.5 h-1.5 rounded-full bg-[#31d6c4]" />
-              <span>Acesso Total Irrestrito (ADMIN)</span>
-            </div>
+
+            {currentUser && (
+              <>
+                <div className="text-[11px] font-mono text-slate-500 truncate">
+                  {currentUser.email}
+                </div>
+                <div className="flex items-center justify-between gap-2 text-[11px] font-mono">
+                  <span className="text-emerald-600 dark:text-[#31d6c4] font-bold">
+                    Perfil: {currentUser.role}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleOpenMfaSetup}
+                    className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border border-slate-300 dark:border-slate-700 hover:border-[#31d6c4] text-slate-600 dark:text-slate-300 cursor-pointer"
+                  >
+                    <KeyRound className="w-3 h-3 text-[#31d6c4]" />
+                    <span>{currentUser.mfaEnabled ? 'MFA Ativo' : 'Ativar MFA'}</span>
+                  </button>
+                </div>
+                {isAdminOrigin && (
+                  <div>
+                    <label
+                      htmlFor="sidebar-role-switcher"
+                      className="block text-[10px] text-slate-400 mb-1"
+                    >
+                      Pré-visualização RBAC (Sessão ADMIN):
+                    </label>
+                    <select
+                      id="sidebar-role-switcher"
+                      value={currentUser.role}
+                      onChange={(e) =>
+                        handleSwitchRole(
+                          e.target.value as 'ADMIN' | 'SECURITY_LEAD' | 'AUDITOR' | 'QA_ENGINEER'
+                        )
+                      }
+                      className="w-full rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-2 py-1 text-[11px] font-mono text-slate-900 dark:text-slate-100"
+                    >
+                      <option value="ADMIN">ADMIN (Total)</option>
+                      <option value="SECURITY_LEAD">SECURITY_LEAD</option>
+                      <option value="QA_ENGINEER">QA_ENGINEER</option>
+                      <option value="AUDITOR">AUDITOR (Somente Leitura)</option>
+                    </select>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )}
       </aside>
@@ -884,6 +1060,82 @@ export default function App() {
             onNotify={notify}
           />
         </Suspense>
+      )}
+
+      {/* TOTP MFA Configuration Modal */}
+      {isMfaSetupOpen && mfaSetupPayload && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4"
+        >
+          <form
+            onSubmit={handleConfirmMfaSetup}
+            className="w-full max-w-md rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0c1017] p-5 space-y-4 text-xs shadow-2xl"
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+                <KeyRound className="w-4 h-4 text-[#31d6c4]" />
+                <span>Configurar Autenticação MFA (TOTP RFC-6238)</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setIsMfaSetupOpen(false)}
+                className="text-slate-400 hover:text-slate-200 cursor-pointer"
+              >
+                Fechar
+              </button>
+            </div>
+            <div className="p-3 rounded border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10] space-y-1.5">
+              <div className="text-slate-500">Chave Secreta Base32:</div>
+              <div className="font-mono font-bold text-[#0e9f8e] dark:text-[#31d6c4] break-all select-all">
+                {mfaSetupPayload.secret}
+              </div>
+              <div className="font-mono text-[10px] text-slate-400 break-all">
+                {mfaSetupPayload.otpauthUrl}
+              </div>
+            </div>
+            <div>
+              <label className="block font-semibold mb-1">
+                Informe o código de 6 dígitos para ativar:
+              </label>
+              <input
+                type="text"
+                required
+                inputMode="numeric"
+                maxLength={6}
+                value={mfaVerifyCode}
+                onChange={(e) => setMfaVerifyCode(e.target.value)}
+                placeholder="123456"
+                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 font-mono text-center text-base tracking-widest"
+              />
+            </div>
+            <button
+              type="submit"
+              className="w-full py-2 rounded-lg font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] cursor-pointer"
+            >
+              Validar e Ativar TOTP MFA
+            </button>
+          </form>
+        </div>
+      )}
+
+      {/* Global Auth Gate (Bootstrap Admin / Login / MFA / Recovery) */}
+      {!authLoading && (!authenticated || mfaRequired) && (
+        <AuthGateModal
+          bootstrapRequired={bootstrapRequired}
+          bootstrapTokenFileHint={bootstrapTokenFileHint}
+          mfaRequired={mfaRequired}
+          pendingUser={currentUser}
+          onAuthenticated={(user) => {
+            setCurrentUser(user);
+            setAuthenticated(true);
+            setMfaRequired(false);
+            setBootstrapRequired(false);
+            if (user.role === 'ADMIN') setIsAdminOrigin(true);
+          }}
+          onRefreshSession={checkAuthSession}
+        />
       )}
     </div>
   );

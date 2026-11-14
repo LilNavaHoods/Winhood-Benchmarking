@@ -5,7 +5,43 @@ import type {
   ReferenceFreshnessState,
   ReferenceSnapshotRecord,
   ReferenceSourceKey,
+  SbomComponentRecord,
 } from '../../types/benchmark';
+
+export interface SyncedAdvisoryCacheEntry {
+  source: 'OSV.dev' | 'NVD' | 'FIRST_EPSS' | 'CISA_KEV';
+  ecosystem?: SbomComponentRecord['ecosystem'];
+  packageName?: string;
+  affectedVersionRange?: string;
+  fixedVersion?: string | null;
+  cveId: string | null;
+  ghsaId: string | null;
+  cweIds: string[];
+  cvssScore: number | null;
+  epssScore: number | null;
+  epssPercentile: number | null;
+  cisaKev: boolean;
+  summary: string;
+  syncedAt: string;
+}
+
+export interface SyncedAdvisoryCacheBundle {
+  updatedAt: string;
+  advisories: SyncedAdvisoryCacheEntry[];
+  kevCveIds: string[];
+  epssByCve: Record<string, { epss: number; percentile: number }>;
+  nvdByCve: Record<string, { cvssScore: number | null; summary: string; cweIds: string[] }>;
+}
+
+export interface ReferenceHistoryEntry {
+  sourceKey: ReferenceSourceKey;
+  version: string;
+  fetchedAt: string;
+  sha256: string;
+  etag?: string | null;
+  freshnessStatus: ReferenceFreshnessState;
+  recordsCount: number;
+}
 
 const REFERENCE_CATALOG_DEFAULTS: Array<{
   sourceKey: ReferenceSourceKey;
@@ -70,7 +106,7 @@ const REFERENCE_CATALOG_DEFAULTS: Array<{
     sourceKey: 'OSV_DEV',
     sourceName: 'OSV.dev Open Source Vulnerability Database',
     version: 'api.osv.dev/v1',
-    originUrl: 'https://api.osv.dev/v1/query',
+    originUrl: 'https://api.osv.dev/v1/querybatch',
     license: 'CC-BY-4.0',
     ttlHours: 12,
     rulesIncluded: ['GHSA-correlator', 'CVE-correlator', 'PYSEC', 'RUSTSEC', 'GO-advisory'],
@@ -182,6 +218,12 @@ function computeHash(payload: unknown): string {
   return crypto.createHash('sha256').update(JSON.stringify(payload), 'utf8').digest('hex');
 }
 
+function writeAtomicJson(targetPath: string, data: unknown): void {
+  const tmpPath = `${targetPath}.${process.pid}.tmp`;
+  fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf8');
+  fs.renameSync(tmpPath, targetPath);
+}
+
 export class ReferenceRegistry {
   private readonly storeDir: string;
 
@@ -198,6 +240,14 @@ export class ReferenceRegistry {
     return path.join(this.storeDir, `${sourceKey.toLowerCase()}.json`);
   }
 
+  private getHistoryFilePath(): string {
+    return path.join(this.storeDir, 'reference_history.json');
+  }
+
+  private getSyncedAdvisoryCachePath(): string {
+    return path.join(this.storeDir, 'synced_advisories.json');
+  }
+
   public ensureBaselineSnapshots(): void {
     const nowIso = new Date().toISOString();
     for (const def of REFERENCE_CATALOG_DEFAULTS) {
@@ -212,6 +262,7 @@ export class ReferenceRegistry {
         fetchedAt: nowIso,
         originUrl: def.originUrl,
         license: def.license,
+        etag: null,
         recordsCount: def.rulesIncluded.length,
         rulesIncluded: def.rulesIncluded,
         toolsReferenced: def.toolsReferenced,
@@ -227,11 +278,12 @@ export class ReferenceRegistry {
         ...snapshotWithoutHash,
         sha256: computeHash(snapshotWithoutHash),
       };
-      fs.writeFileSync(filePath, JSON.stringify(record, null, 2), 'utf8');
+      writeAtomicJson(filePath, record);
     }
   }
 
   public computeFreshness(record: ReferenceSnapshotRecord): ReferenceFreshnessState {
+    if (record.freshnessStatus === 'FAILED') return 'FAILED';
     if (record.freshnessStatus === 'UNAVAILABLE_NO_CACHE') return 'UNAVAILABLE_NO_CACHE';
     if (record.freshnessStatus === 'UNAVAILABLE_USING_CACHED') return 'UNAVAILABLE_USING_CACHED';
     const fetchedMs = Date.parse(record.fetchedAt);
@@ -243,7 +295,6 @@ export class ReferenceRegistry {
 
   public verifyIntegrity(record: ReferenceSnapshotRecord): boolean {
     const { sha256, freshnessStatus: _f, ...rest } = record;
-    // Check basic format and recompute deterministic hash if stored with matching fields
     if (!sha256 || sha256.length !== 64) return false;
     return typeof rest.sourceKey === 'string' && rest.rulesIncluded.length > 0;
   }
@@ -282,8 +333,78 @@ export class ReferenceRegistry {
 
   public saveSnapshot(record: ReferenceSnapshotRecord): ReferenceSnapshotRecord {
     const filePath = this.getSnapshotFilePath(record.sourceKey);
-    fs.writeFileSync(filePath, JSON.stringify(record, null, 2), 'utf8');
+    writeAtomicJson(filePath, record);
+    this.appendHistoryEntry({
+      sourceKey: record.sourceKey,
+      version: record.version,
+      fetchedAt: record.fetchedAt,
+      sha256: record.sha256,
+      etag: record.etag ?? null,
+      freshnessStatus: record.freshnessStatus,
+      recordsCount: record.recordsCount,
+    });
     return record;
+  }
+
+  private appendHistoryEntry(entry: ReferenceHistoryEntry): void {
+    const histPath = this.getHistoryFilePath();
+    let history: ReferenceHistoryEntry[] = [];
+    if (fs.existsSync(histPath)) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(histPath, 'utf8'));
+        if (Array.isArray(parsed)) history = parsed;
+      } catch {
+        history = [];
+      }
+    }
+    history.push(entry);
+    if (history.length > 500) {
+      history = history.slice(-500);
+    }
+    writeAtomicJson(histPath, history);
+  }
+
+  public listSnapshotHistory(
+    sourceKeyOrLimit?: ReferenceSourceKey | number,
+    limit = 50
+  ): ReferenceHistoryEntry[] {
+    const histPath = this.getHistoryFilePath();
+    if (!fs.existsSync(histPath)) return [];
+    try {
+      const parsed = JSON.parse(fs.readFileSync(histPath, 'utf8')) as ReferenceHistoryEntry[];
+      if (!Array.isArray(parsed)) return [];
+      const sourceKey = typeof sourceKeyOrLimit === 'string' ? sourceKeyOrLimit : undefined;
+      const maxItems = typeof sourceKeyOrLimit === 'number' ? sourceKeyOrLimit : limit;
+      const filtered = sourceKey ? parsed.filter((h) => h.sourceKey === sourceKey) : parsed;
+      return filtered.slice(-maxItems);
+    } catch {
+      return [];
+    }
+  }
+
+  public loadSyncedAdvisoryCache(): SyncedAdvisoryCacheBundle {
+    const cachePath = this.getSyncedAdvisoryCachePath();
+    if (fs.existsSync(cachePath)) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(cachePath, 'utf8')) as SyncedAdvisoryCacheBundle;
+        if (parsed && Array.isArray(parsed.advisories)) {
+          return parsed;
+        }
+      } catch {
+        // Fall through to empty bundle
+      }
+    }
+    return {
+      updatedAt: '',
+      advisories: [],
+      kevCveIds: [],
+      epssByCve: {},
+      nvdByCve: {},
+    };
+  }
+
+  public saveSyncedAdvisoryCache(bundle: SyncedAdvisoryCacheBundle): void {
+    writeAtomicJson(this.getSyncedAdvisoryCachePath(), bundle);
   }
 
   public markSyncFailureFallback(sourceKey: ReferenceSourceKey, errorMessage: string): ReferenceSnapshotRecord | null {

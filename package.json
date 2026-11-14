@@ -12,7 +12,11 @@
     "dist:win": "electron-builder --win nsis",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "tsx --test src/engine/analyzer.test.ts src/analyzers/analyzers.test.ts src/intelligence/intelligence.test.ts src/security/security.test.ts",
+    "test:unit": "tsx --test src/engine/analyzer.test.ts src/analyzers/analyzers.test.ts src/intelligence/intelligence.test.ts",
+    "test:security": "tsx --test src/security/security.test.ts",
+    "test:golden": "tsx --test src/intelligence/intelligence.test.ts"
   },
   "dependencies": {
     "@babel/parser": "^8.1.2",

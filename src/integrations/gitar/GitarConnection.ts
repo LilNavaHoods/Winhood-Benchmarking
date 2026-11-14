@@ -26,6 +26,19 @@ export class GitarConnection {
     return SonarQubeConnection.decryptToken(this.encryptedToken);
   }
 
+  public reencryptStoredToken(ctx: {
+    oldKeyId: string;
+    oldKeyBuffer: Buffer;
+    newKeyId: string;
+    newKeyBuffer: Buffer;
+  }): boolean {
+    if (!this.encryptedToken) return false;
+    const next = SonarQubeConnection.reencryptToken(this.encryptedToken, ctx);
+    if (!next) return false;
+    this.encryptedToken = next;
+    return true;
+  }
+
   public static validateSafetyPolicies(
     record: GitarIntegrationRecord
   ): { valid: boolean; violations: string[] } {

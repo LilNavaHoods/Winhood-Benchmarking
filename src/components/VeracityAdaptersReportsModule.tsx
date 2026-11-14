@@ -278,6 +278,8 @@ export const VeracityAdaptersReportsModule: React.FC<
     valid: boolean;
     tamperedIndices: number[];
     signatureValid: boolean;
+    ed25519SignatureValid?: boolean;
+    verificationState?: 'SIGNED' | 'VERIFIED' | 'TAMPERED' | 'UNVERIFIED';
     message: string;
   } | null>(null);
 
@@ -289,16 +291,25 @@ export const VeracityAdaptersReportsModule: React.FC<
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       });
+      const data = await res.json();
       if (res.ok) {
-        const data = await res.json();
         setChainVerificationResult(data);
+      } else {
+        setChainVerificationResult({
+          valid: false,
+          tamperedIndices: [],
+          signatureValid: false,
+          verificationState: 'UNVERIFIED',
+          message: data.error || `Falha HTTP ${res.status} ao verificar assinatura criptográfica.`,
+        });
       }
     } catch {
       setChainVerificationResult({
-        valid: true,
+        valid: false,
         tamperedIndices: [],
-        signatureValid: true,
-        message: 'Cadeia de custódia SHA-256 e assinatura HMAC-SHA256 verificadas localmente.',
+        signatureValid: false,
+        verificationState: 'UNVERIFIED',
+        message: 'Não foi possível contatar o servidor para verificação criptográfica da cadeia e assinaturas.',
       });
     } finally {
       setVerifyingChain(false);
@@ -743,11 +754,32 @@ export const VeracityAdaptersReportsModule: React.FC<
                 </div>
 
                 {latestRun.signedManifest && (
-                  <div className="p-3.5 rounded-lg border border-[#31d6c4]/30 bg-[#31d6c4]/5 grid grid-cols-1 md:grid-cols-3 gap-3 text-xs font-mono">
+                  <div className="p-3.5 rounded-lg border border-[#31d6c4]/30 bg-[#31d6c4]/5 grid grid-cols-1 md:grid-cols-4 gap-3 text-xs font-mono">
                     <div>
                       <div className="text-[10px] text-slate-400 font-sans">Algoritmo &amp; Key ID</div>
                       <div className="font-bold text-slate-900 dark:text-slate-100">
                         {latestRun.signedManifest.signatureAlgorithm} ({latestRun.signedManifest.keyId})
+                      </div>
+                      {latestRun.signedManifest.ed25519KeyId && (
+                        <div className="text-[10px] text-[#31d6c4]">
+                          Ed25519: {latestRun.signedManifest.ed25519KeyId}
+                        </div>
+                      )}
+                    </div>
+                    <div>
+                      <div className="text-[10px] text-slate-400 font-sans">Estado de Verificação</div>
+                      <div
+                        className={`font-bold ${
+                          (chainVerificationResult?.verificationState || latestRun.signedManifest.verificationState) === 'VERIFIED'
+                            ? 'text-emerald-500'
+                            : (chainVerificationResult?.verificationState || latestRun.signedManifest.verificationState) === 'TAMPERED'
+                              ? 'text-rose-500'
+                              : 'text-amber-500'
+                        }`}
+                      >
+                        {chainVerificationResult?.verificationState ||
+                          latestRun.signedManifest.verificationState ||
+                          'SIGNED (Aguardando Verificação)'}
                       </div>
                     </div>
                     <div>
@@ -757,23 +789,35 @@ export const VeracityAdaptersReportsModule: React.FC<
                       </div>
                     </div>
                     <div>
-                      <div className="text-[10px] text-slate-400 font-sans">Assinatura Digital HMAC-SHA256</div>
-                      <div className="font-bold text-emerald-500 truncate" title={latestRun.signedManifest.hmacSignature}>
-                        {latestRun.signedManifest.hmacSignature}
+                      <div className="text-[10px] text-slate-400 font-sans">Assinaturas (HMAC + Ed25519)</div>
+                      <div className="font-bold text-emerald-500 truncate" title={latestRun.signedManifest.hmacSignature || latestRun.signedManifest.digitalSignatureHmacSha256}>
+                        HMAC: {(latestRun.signedManifest.hmacSignature || latestRun.signedManifest.digitalSignatureHmacSha256 || '').slice(0, 18)}...
                       </div>
+                      {latestRun.signedManifest.ed25519Signature && (
+                        <div className="text-[10px] text-slate-400 truncate" title={latestRun.signedManifest.ed25519Signature}>
+                          Ed25519: {latestRun.signedManifest.ed25519Signature.slice(0, 18)}...
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}
 
                 {chainVerificationResult && (
                   <div
-                    className={`p-3 rounded-lg border text-xs font-mono ${
+                    className={`p-3 rounded-lg border text-xs font-mono space-y-1 ${
                       chainVerificationResult.valid
                         ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400'
                         : 'border-rose-500/40 bg-rose-500/10 text-rose-400'
                     }`}
                   >
-                    <strong>Resultado da Verificação Criptográfica:</strong> {chainVerificationResult.message}
+                    <div>
+                      <strong>Resultado ({chainVerificationResult.verificationState || (chainVerificationResult.valid ? 'VERIFIED' : 'TAMPERED')}):</strong>{' '}
+                      {chainVerificationResult.message}
+                    </div>
+                    <div className="text-[11px]">
+                      HMAC-SHA256: {chainVerificationResult.signatureValid ? 'VÁLIDO' : 'INVÁLIDO'} ·{' '}
+                      Ed25519: {chainVerificationResult.ed25519SignatureValid === undefined ? 'N/A' : chainVerificationResult.ed25519SignatureValid ? 'VÁLIDO' : 'INVÁLIDO'}
+                    </div>
                   </div>
                 )}
 
@@ -869,7 +913,9 @@ export const VeracityAdaptersReportsModule: React.FC<
 
                   <div className="pt-2 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between text-[11px] font-mono text-slate-500">
                     <span>Método: {ad.executionMethod}</span>
-                    <span>Assinatura: {ad.signatureHash.slice(0, 14)}...</span>
+                    <span>
+                      Assinatura: {ad.signatureHash ? `${ad.signatureHash.slice(0, 14)}...` : 'N/A (Não instalado)'}
+                    </span>
                   </div>
                 </div>
               ))}

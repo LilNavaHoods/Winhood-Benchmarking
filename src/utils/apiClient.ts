@@ -1,3 +1,5 @@
+import { getCsrfTokenFromCookie } from './csrfFetch';
+
 export interface ApiFetchOptions extends RequestInit {
   timeoutMs?: number;
 }
@@ -38,7 +40,7 @@ export function enforceStrictHttpsUrl(rawUrl: string): string {
 }
 
 /**
- * Helper centralizado de requisição HTTP com AbortController e tratamento determinístico de erros.
+ * Helper centralizado de requisição HTTP com AbortController, credenciais HttpOnly e CSRF.
  */
 export async function apiFetchJson<T>(
   url: string,
@@ -50,16 +52,29 @@ export async function apiFetchJson<T>(
   const controller = new AbortController();
   const timerId = globalThis.setTimeout(() => controller.abort(), effectiveTimeout);
 
+  const method = (options?.method || 'GET').toUpperCase();
+  const csrf = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)
+    ? getCsrfTokenFromCookie()
+    : '';
+
   try {
     const response = await fetch(secureUrl, {
       ...options,
+      credentials: options?.credentials ?? 'same-origin',
       signal: options?.signal ?? controller.signal,
       headers: {
         Accept: 'application/json',
         ...(options?.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(csrf ? { 'x-csrf-token': csrf } : {}),
         ...(options?.headers ?? {}),
       },
     });
+
+    if (response.status === 401 && typeof window !== 'undefined' && !secureUrl.includes('/api/auth/')) {
+      window.dispatchEvent(
+        new CustomEvent('winhood:auth-required', { detail: { pathname: secureUrl, status: 401 } })
+      );
+    }
 
     if (!response.ok) {
       let errorDetails: unknown = undefined;

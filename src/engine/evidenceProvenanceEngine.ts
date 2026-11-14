@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { KeyManagementService } from '../security/KeyManagementService';
 import {
   EvidenceRecord,
+  ManifestVerificationState,
   NormalizedFinding,
   SignedEvidenceManifest,
   Software,
@@ -93,7 +94,7 @@ export function buildVerifiableEvidenceChain(params: {
       responsibleActor,
       category: 'VERACITY_AUDIT',
       toolName: 'WinHood Veracity & Provenance Auditor',
-      toolVersion: '4.0.0',
+      toolVersion: '4.2.0',
       timestamp: vr.auditedAt,
       resultSummary: `Classificação=${vr.overallClassification} | Cobertura=${vr.overallCoveragePercent}% | Elegível=${vr.checks.eligibleForScoring}`,
       severity: vr.checks.eligibleForScoring ? 'INFO' : 'HIGH',
@@ -192,28 +193,34 @@ export function buildVerifiableEvidenceChain(params: {
   return evidenceChain;
 }
 
-export function signEvidenceManifestHmacSha256(params: {
+function buildManifestPayloadSha256(params: {
   runId: string;
   algorithmVersion: string;
   evidenceChain: EvidenceRecord[];
-  signingKeyId?: string;
-  generatedAt?: string;
-  secret?: string;
-}): SignedEvidenceManifest {
-  const activeKey = KeyManagementService.getActiveEvidenceHmacKey();
-  const {
-    runId,
-    algorithmVersion,
-    evidenceChain,
-    signingKeyId = activeKey.keyId,
-    generatedAt = new Date().toISOString(),
-    secret = activeKey.secret,
-  } = params;
-
+}): { merkleOrChainRootSha256: string; manifestPayloadSha256: string; sourceHashes: string[]; toolsHash: string; resultsHash: string } {
+  const { runId, algorithmVersion, evidenceChain } = params;
   const merkleOrChainRootSha256 =
     evidenceChain.length > 0
-      ? evidenceChain[evidenceChain.length - 1].sha256
+      ? evidenceChain[evidenceChain.length - 1]!.sha256
       : GENESIS_EVIDENCE_HASH;
+
+  const sourceHashes = Array.from(
+    new Set(evidenceChain.map((e) => e.sourceHash).filter((h): h is string => Boolean(h && h !== 'UNVERIFIED')))
+  );
+  const toolsHash = sha256Hex(
+    JSON.stringify(
+      evidenceChain
+        .filter((e) => e.evidenceType === 'TOOL_RAW_OUTPUT')
+        .map((e) => ({ toolName: e.toolName, toolVersion: e.toolVersion, sha256: e.sha256 }))
+    )
+  );
+  const resultsHash = sha256Hex(
+    JSON.stringify(
+      evidenceChain
+        .filter((e) => e.evidenceType !== 'TOOL_RAW_OUTPUT')
+        .map((e) => ({ id: e.id, sha256: e.sha256 }))
+    )
+  );
 
   const manifestCanonicalBody = JSON.stringify({
     runId,
@@ -229,8 +236,65 @@ export function signEvidenceManifestHmacSha256(params: {
     })),
   });
 
-  const manifestPayloadSha256 = sha256Hex(manifestCanonicalBody);
+  return {
+    merkleOrChainRootSha256,
+    manifestPayloadSha256: sha256Hex(manifestCanonicalBody),
+    sourceHashes,
+    toolsHash,
+    resultsHash,
+  };
+}
+
+/**
+ * Gera e assina o manifesto com HMAC-SHA256 + Ed25519 assimétrico.
+ * IMPORTANTE (AC-13): Um manifesto recém-assinado recebe verificationState = 'SIGNED' e verified = false
+ * até que verifyEvidenceChainAndManifest() execute e valide a cadeia + assinaturas criptográficas.
+ */
+export function signEvidenceManifestHmacSha256(params: {
+  runId: string;
+  algorithmVersion: string;
+  evidenceChain: EvidenceRecord[];
+  signingKeyId?: string;
+  generatedAt?: string;
+  secret?: string;
+  includeEd25519?: boolean;
+}): SignedEvidenceManifest {
+  const activeKey = KeyManagementService.getActiveEvidenceHmacKey();
+  const {
+    runId,
+    algorithmVersion,
+    evidenceChain,
+    signingKeyId = activeKey.keyId,
+    generatedAt = new Date().toISOString(),
+    secret = activeKey.secret,
+    includeEd25519 = true,
+  } = params;
+
+  const {
+    merkleOrChainRootSha256,
+    manifestPayloadSha256,
+    sourceHashes,
+    toolsHash,
+    resultsHash,
+  } = buildManifestPayloadSha256({ runId, algorithmVersion, evidenceChain });
+
   const digitalSignatureHmacSha256 = hmacSha256Hex(manifestPayloadSha256, secret);
+
+  let ed25519Signature: string | undefined;
+  let ed25519PublicKeyPem: string | undefined;
+  let ed25519KeyId: string | undefined;
+
+  if (includeEd25519) {
+    try {
+      const edKey = KeyManagementService.getActiveEvidenceEd25519Key();
+      const sigBuf = crypto.sign(null, Buffer.from(manifestPayloadSha256, 'utf8'), edKey.privateKeyPem);
+      ed25519Signature = sigBuf.toString('base64');
+      ed25519PublicKeyPem = edKey.publicKeyPem;
+      ed25519KeyId = edKey.keyId;
+    } catch {
+      // If Ed25519 keystore read failed, omit rather than fabricating
+    }
+  }
 
   return {
     manifestId: `manifest-${runId}`,
@@ -242,23 +306,34 @@ export function signEvidenceManifestHmacSha256(params: {
     merkleOrChainRootSha256,
     rootChainSha256: merkleOrChainRootSha256,
     manifestPayloadSha256,
+    sourceHashes,
+    toolsHash,
+    resultsHash,
     digitalSignatureHmacSha256,
     hmacSignature: digitalSignatureHmacSha256,
-    signatureAlgorithm: 'HMAC-SHA256',
+    ed25519Signature,
+    ed25519PublicKeyPem,
+    ed25519KeyId,
+    signatureAlgorithm: ed25519Signature ? 'HMAC-SHA256+ED25519' : 'HMAC-SHA256',
     signingKeyId,
     keyId: signingKeyId,
-    authenticityProofType: 'HMAC_SHA256_PROTECTED_SERVER_KEY',
+    authenticityProofType: ed25519Signature
+      ? 'HMAC_SHA256_AND_ED25519_ASYMMETRIC'
+      : 'HMAC_SHA256_PROTECTED_SERVER_KEY',
     integrityNote:
-      'Hash SHA-256 encadeado garante integridade imutável da cadeia de evidências; assinatura HMAC-SHA256 com chave protegida do servidor garante autenticidade do manifesto de execução.',
-    verified: true,
+      'Hash SHA-256 encadeado protege a cadeia de evidências; manifesto assinado com HMAC-SHA256 + Ed25519 aguarda verificação formal.',
+    verificationState: 'SIGNED',
+    verified: false,
   };
 }
 
 export interface EvidenceChainVerificationResult {
   valid: boolean;
+  verificationState: ManifestVerificationState;
   chainIntegrityValid: boolean;
   manifestSignatureValid: boolean;
   signatureValid: boolean;
+  ed25519SignatureValid: boolean | null;
   recordsChecked: number;
   tamperedRecordIds: string[];
   tamperedIndices: number[];
@@ -283,7 +358,7 @@ export function verifyEvidenceChainAndManifest(
   let expectedPrevHash = GENESIS_EVIDENCE_HASH;
 
   for (let i = 0; i < evidenceChain.length; i++) {
-    const rec = evidenceChain[i];
+    const rec = evidenceChain[i]!;
     if (rec.immutableIndex !== i) {
       brokenLinkIndices.push(i);
       tamperedIndicesSet.add(i);
@@ -317,17 +392,20 @@ export function verifyEvidenceChainAndManifest(
 
   const actualRootHash =
     evidenceChain.length > 0
-      ? evidenceChain[evidenceChain.length - 1].sha256
+      ? evidenceChain[evidenceChain.length - 1]!.sha256
       : GENESIS_EVIDENCE_HASH;
 
   const chainIntegrityValid =
     tamperedRecordIds.length === 0 && brokenLinkIndices.length === 0;
 
   let manifestSignatureValid = false;
+  let ed25519SignatureValid: boolean | null = null;
+  let verificationState: ManifestVerificationState = 'UNVERIFIABLE';
   let expectedRootHash = actualRootHash;
 
   if (!signedManifest) {
     details.push('Manifesto assinado ausente na execução.');
+    verificationState = chainIntegrityValid ? 'UNVERIFIABLE' : 'TAMPERED';
   } else {
     expectedRootHash = signedManifest.merkleOrChainRootSha256;
     if (signedManifest.recordsCount !== evidenceChain.length) {
@@ -341,35 +419,71 @@ export function verifyEvidenceChainAndManifest(
       );
     }
 
-    const resolvedSecret =
-      secret ||
-      KeyManagementService.getEvidenceSecretByKeyId(signedManifest.signingKeyId) ||
-      KeyManagementService.getActiveEvidenceHmacKey().secret;
-
-    const recomputedManifest = signEvidenceManifestHmacSha256({
+    const { manifestPayloadSha256 } = buildManifestPayloadSha256({
       runId: signedManifest.runId,
       algorithmVersion: signedManifest.algorithmVersion,
       evidenceChain,
-      signingKeyId: signedManifest.signingKeyId,
-      generatedAt: signedManifest.generatedAt,
-      secret: resolvedSecret,
     });
 
-    if (
-      recomputedManifest.manifestPayloadSha256 === signedManifest.manifestPayloadSha256 &&
-      recomputedManifest.digitalSignatureHmacSha256 === signedManifest.digitalSignatureHmacSha256 &&
-      signedManifest.merkleOrChainRootSha256 === actualRootHash &&
-      signedManifest.recordsCount === evidenceChain.length &&
-      chainIntegrityValid
-    ) {
-      manifestSignatureValid = true;
-      details.push(
-        'Assinatura HMAC-SHA256 e cadeia de custódia SHA-256 verificadas com sucesso (0 adulterações).'
-      );
+    const resolvedSecret =
+      secret ||
+      KeyManagementService.getEvidenceSecretByKeyId(signedManifest.signingKeyId) ||
+      null;
+
+    let hmacValid = false;
+    if (!resolvedSecret) {
+      details.push(`Chave HMAC ${signedManifest.signingKeyId} indisponível para verificação.`);
     } else {
+      const expectedHmac = hmacSha256Hex(manifestPayloadSha256, resolvedSecret);
+      const a = Buffer.from(expectedHmac, 'hex');
+      const b = Buffer.from(signedManifest.digitalSignatureHmacSha256 || '', 'hex');
+      hmacValid = a.length === b.length && crypto.timingSafeEqual(a, b);
+    }
+
+    if (signedManifest.ed25519Signature) {
+      const pubPem =
+        (signedManifest.ed25519KeyId
+          ? KeyManagementService.getEd25519PublicKeyByKeyId(signedManifest.ed25519KeyId)
+          : null) || signedManifest.ed25519PublicKeyPem;
+
+      if (!pubPem) {
+        ed25519SignatureValid = false;
+        details.push('Chave pública Ed25519 indisponível para validar assinatura assimétrica.');
+      } else {
+        try {
+          ed25519SignatureValid = crypto.verify(
+            null,
+            Buffer.from(manifestPayloadSha256, 'utf8'),
+            pubPem,
+            Buffer.from(signedManifest.ed25519Signature, 'base64')
+          );
+        } catch {
+          ed25519SignatureValid = false;
+        }
+      }
+    }
+
+    const payloadMatched = manifestPayloadSha256 === signedManifest.manifestPayloadSha256;
+    const rootMatched = signedManifest.merkleOrChainRootSha256 === actualRootHash;
+    const countMatched = signedManifest.recordsCount === evidenceChain.length;
+    const asymOk = ed25519SignatureValid === null ? true : ed25519SignatureValid;
+
+    if (hmacValid && asymOk && payloadMatched && rootMatched && countMatched && chainIntegrityValid) {
+      manifestSignatureValid = true;
+      verificationState = 'VERIFIED';
       details.push(
-        'Assinatura HMAC-SHA256 ou payload do manifesto inválido — falha de autenticidade/integridade.'
+        ed25519SignatureValid
+          ? 'Cadeia SHA-256, HMAC-SHA256 e assinatura assimétrica Ed25519 verificadas com sucesso (0 adulterações).'
+          : 'Assinatura HMAC-SHA256 e cadeia de custódia SHA-256 verificadas com sucesso (0 adulterações).'
       );
+    } else if (!chainIntegrityValid || !payloadMatched || !rootMatched || !countMatched) {
+      verificationState = 'TAMPERED';
+      details.push('Adulteração detectada na cadeia de evidências ou no payload do manifesto.');
+    } else if (!resolvedSecret && ed25519SignatureValid === null) {
+      verificationState = 'UNVERIFIABLE';
+    } else {
+      verificationState = 'INVALID';
+      details.push('Assinatura criptográfica (HMAC-SHA256 / Ed25519) inválida.');
     }
   }
 
@@ -378,9 +492,11 @@ export function verifyEvidenceChainAndManifest(
 
   return {
     valid,
+    verificationState,
     chainIntegrityValid,
     manifestSignatureValid,
     signatureValid: manifestSignatureValid,
+    ed25519SignatureValid,
     recordsChecked: evidenceChain.length,
     tamperedRecordIds,
     tamperedIndices,
