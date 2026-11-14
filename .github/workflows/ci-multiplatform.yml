@@ -20,8 +20,11 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
-      - name: Install dependencies deterministically
-        run: npm ci
+      - name: Verify package-lock.json integrity
+        run: node -e "const fs=require('fs'); if(!fs.existsSync('package-lock.json')) { console.error('Missing package-lock.json'); process.exit(1); } const lock=JSON.parse(fs.readFileSync('package-lock.json','utf8')); if(!lock.lockfileVersion || !lock.packages) { console.error('Invalid package-lock.json'); process.exit(1); }"
+
+      - name: Install dependencies deterministically without lifecycle scripts
+        run: npm ci --ignore-scripts
 
       - name: Typecheck (tsc --noEmit)
         run: npm run lint
@@ -45,8 +48,11 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
-      - name: Install dependencies deterministically
-        run: npm ci
+      - name: Verify package-lock.json integrity
+        run: node -e "const fs=require('fs'); if(!fs.existsSync('package-lock.json')) { console.error('Missing package-lock.json'); process.exit(1); } const lock=JSON.parse(fs.readFileSync('package-lock.json','utf8')); if(!lock.lockfileVersion || !lock.packages) { console.error('Invalid package-lock.json'); process.exit(1); }"
+
+      - name: Install dependencies deterministically without lifecycle scripts
+        run: npm ci --ignore-scripts
 
       - name: Typecheck on Windows
         run: npm run lint

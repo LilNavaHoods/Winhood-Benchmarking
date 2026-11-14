@@ -54,6 +54,8 @@ export interface KeyManagementStatus {
   integrityVerified: boolean;
   dpapiSupported: boolean;
   keyOrigin: 'ENV_EXTERNAL' | 'HOST_CSPRNG_KEYSTORE';
+  productionEnvSecretConfigured: boolean;
+  securityWarnings: string[];
   activeEvidenceKeyId: string;
   activeEd25519KeyId: string;
   activeVaultKeyId: string;
@@ -77,6 +79,18 @@ function generateEd25519Pair(): { privateKeyPem: string; publicKeyPem: string } 
   return { privateKeyPem: privateKey, publicKeyPem: publicKey };
 }
 
+function resolvePowerShellExecutable(): { exePath: string; safeEnv: NodeJS.ProcessEnv } {
+  const sysRoot = process.env.SystemRoot || 'C:\\Windows';
+  // Segurança (typescript:S4036): usar caminho absoluto canônico no System32 em vez de resolver via PATH.
+  // Risco residual: em instalações Windows fora de %SystemRoot% padrão, a variável SystemRoot controla o prefixo.
+  const exePath = path.win32.join(sysRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const safeEnv: NodeJS.ProcessEnv = {
+    SystemRoot: sysRoot,
+    PATH: path.win32.join(sysRoot, 'System32'),
+  };
+  return { exePath, safeEnv };
+}
+
 function tryDpapiProtectUtf8(plainText: string): { protectedText: string; usedDpapi: boolean } {
   if (os.platform() !== 'win32') {
     return { protectedText: plainText, usedDpapi: false };
@@ -89,10 +103,12 @@ function tryDpapiProtectUtf8(plainText: string): { protectedText: string; usedDp
       '$prot = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser);',
       '[Convert]::ToBase64String($prot)',
     ].join(' ');
-    const res = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], {
+    const { exePath, safeEnv } = resolvePowerShellExecutable();
+    const res = spawnSync(exePath, ['-NoProfile', '-NonInteractive', '-Command', ps], {
       shell: false,
       encoding: 'utf8',
       timeout: 5000,
+      env: safeEnv,
     });
     if (res.status === 0 && res.stdout && res.stdout.trim().length > 0) {
       return { protectedText: res.stdout.trim(), usedDpapi: true };
@@ -113,10 +129,12 @@ function tryDpapiUnprotectUtf8(cipherB64OrPlain: string, wasProtected?: boolean)
     '$unprot = [System.Security.Cryptography.ProtectedData]::Unprotect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser);',
     '[System.Text.Encoding]::UTF8.GetString($unprot)',
   ].join(' ');
-  const res = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], {
+  const { exePath, safeEnv } = resolvePowerShellExecutable();
+  const res = spawnSync(exePath, ['-NoProfile', '-NonInteractive', '-Command', ps], {
     shell: false,
     encoding: 'utf8',
     timeout: 5000,
+    env: safeEnv,
   });
   if (res.status !== 0 || !res.stdout) {
     throw new Error('KEYSTORE_DPAPI_UNPROTECT_FAILED: Falha ao descriptografar chave via Windows DPAPI.');
@@ -323,6 +341,12 @@ export class KeyManagementService {
       };
     }
 
+    if (process.env.WINHOOD_REQUIRE_ENV_SECRETS === 'true') {
+      throw new Error(
+        'KEY_MANAGEMENT_ENV_SECRET_REQUIRED: Defina WINHOOD_EVIDENCE_HMAC_SECRET (>= 16 caracteres) quando WINHOOD_REQUIRE_ENV_SECRETS=true.'
+      );
+    }
+
     const { store } = KeyManagementService.loadOrInitializeStore(customPath);
     const active = store.keysHex[store.activeEvidenceKeyId];
     return {
@@ -375,6 +399,12 @@ export class KeyManagementService {
         keyBuffer: crypto.createHash('sha256').update(envVaultSecret.trim(), 'utf8').digest(),
         origin: 'ENV_EXTERNAL',
       };
+    }
+
+    if (process.env.WINHOOD_REQUIRE_ENV_SECRETS === 'true') {
+      throw new Error(
+        'KEY_MANAGEMENT_ENV_SECRET_REQUIRED: Defina WINHOOD_VAULT_SECRET ou SONAR_SECRET_SALT (>= 16 caracteres) quando WINHOOD_REQUIRE_ENV_SECRETS=true.'
+      );
     }
 
     const { store } = KeyManagementService.loadOrInitializeStore(customPath);
@@ -551,11 +581,27 @@ export class KeyManagementService {
 
     const keys = [...symKeys, ...asymKeys];
 
+    const securityWarnings: string[] = [];
+    if (process.env.NODE_ENV === 'production') {
+      if (!hasEnvEvidence) {
+        securityWarnings.push(
+          'Produção utilizando keystore local para HMAC de evidências; configure WINHOOD_EVIDENCE_HMAC_SECRET.'
+        );
+      }
+      if (!hasEnvVault) {
+        securityWarnings.push(
+          'Produção utilizando keystore local para cofre AES-256; configure WINHOOD_VAULT_SECRET ou SONAR_SECRET_SALT.'
+        );
+      }
+    }
+
     return {
       keystorePath: KeyManagementService.getStorePath(customPath),
       integrityVerified,
       dpapiSupported: os.platform() === 'win32',
       keyOrigin: hasEnvEvidence || hasEnvVault ? 'ENV_EXTERNAL' : 'HOST_CSPRNG_KEYSTORE',
+      productionEnvSecretConfigured: hasEnvEvidence && hasEnvVault,
+      securityWarnings,
       activeEvidenceKeyId: store.activeEvidenceKeyId,
       activeEd25519KeyId: store.activeEd25519KeyId,
       activeVaultKeyId: store.activeVaultKeyId,

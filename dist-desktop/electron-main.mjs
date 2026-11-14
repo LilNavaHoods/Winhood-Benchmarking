@@ -1,14 +1,14 @@
 // electron-main.ts
-import fs15 from "node:fs";
+import fs16 from "node:fs";
 import { createRequire } from "node:module";
-import path16 from "node:path";
+import path17 from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // server.ts
-import crypto21 from "node:crypto";
-import fs14 from "node:fs";
-import path15 from "node:path";
-import { exec } from "node:child_process";
+import crypto23 from "node:crypto";
+import fs15 from "node:fs";
+import path16 from "node:path";
+import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import express from "express";
@@ -1676,17 +1676,33 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
       status: "NOT_MEASURED",
       reason: "M\xE9tricas de runtime n\xE3o medidas em worker isolado."
     },
-    staticMetrics: input.staticMetrics || {
-      loc,
-      cyclomaticComplexity: m.avgCyclomaticComplexity,
-      cognitiveComplexity: m.avgCognitiveComplexity,
-      duplicatedLinesPercent: m.duplicatedLinesPercent,
-      couplingIndex: m.couplingIndex,
-      cohesionIndex: m.cohesionIndex,
-      circularDependenciesCount: m.circularDependencies,
-      layerViolationsCount: 0,
-      riskIndicators: []
-    },
+    staticMetrics: (() => {
+      const kloc = Math.max(0.1, Number((loc / 1e3).toFixed(3)));
+      const bugsPerKloc = Number((m.bugs / kloc).toFixed(2));
+      const codeSmellsPerKloc = Number((m.codeSmells / kloc).toFixed(2));
+      const devMinutes = Math.max(1, loc * 30);
+      const technicalDebtRatioPercent = Number(
+        Math.min(100, m.technicalDebtMinutes / devMinutes * 100).toFixed(2)
+      );
+      const base = input.staticMetrics || {
+        loc,
+        cyclomaticComplexity: m.avgCyclomaticComplexity,
+        cognitiveComplexity: m.avgCognitiveComplexity,
+        duplicatedLinesPercent: m.duplicatedLinesPercent,
+        couplingIndex: m.couplingIndex,
+        cohesionIndex: m.cohesionIndex,
+        circularDependenciesCount: m.circularDependencies,
+        layerViolationsCount: 0,
+        riskIndicators: []
+      };
+      return {
+        ...base,
+        kloc: base.kloc ?? kloc,
+        bugsPerKloc: base.bugsPerKloc ?? bugsPerKloc,
+        codeSmellsPerKloc: base.codeSmellsPerKloc ?? codeSmellsPerKloc,
+        technicalDebtRatioPercent: base.technicalDebtRatioPercent ?? technicalDebtRatioPercent
+      };
+    })(),
     qualityGate: {
       gateName: input.qualityGateId === "qg-zero-trust" ? "WinHood Zero-Trust Gate" : "Sonar way (MQR Official)",
       status: qualityGateStatus,
@@ -1704,7 +1720,51 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
     },
     isPartialEvaluation,
     unmeasuredCategories,
-    metricProvenance: input.metricProvenance,
+    metricProvenance: (() => {
+      const kloc = Math.max(0.1, Number((loc / 1e3).toFixed(3)));
+      const smellsPerKloc = Number((m.codeSmells / kloc).toFixed(2));
+      const bugsPerKloc = Number((m.bugs / kloc).toFixed(2));
+      const sqaleRatio = Number(
+        Math.min(100, m.technicalDebtMinutes / Math.max(1, loc * 30) * 100).toFixed(2)
+      );
+      const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+      return {
+        ...input.metricProvenance || {},
+        smellsPerKloc: {
+          metricKey: "staticMetrics.codeSmellsPerKloc",
+          value: smellsPerKloc,
+          state: isEligibleForScoring ? "STATIC_DERIVED" : "NOT_MEASURED",
+          origin: "WinHood KLOC Normalizer (SQALE)",
+          method: "codeSmells / max(0.1, LOC / 1000)",
+          toolName: "WinHood Deterministic Scoring Engine",
+          toolVersion: ALGORITHM_VERSION,
+          measuredAt: nowIso,
+          scope: `${input.softwareName} (${loc} LOC / ${kloc} KLOC)`
+        },
+        bugsPerKloc: {
+          metricKey: "staticMetrics.bugsPerKloc",
+          value: bugsPerKloc,
+          state: isEligibleForScoring ? "STATIC_DERIVED" : "NOT_MEASURED",
+          origin: "WinHood KLOC Normalizer",
+          method: "bugs / max(0.1, LOC / 1000)",
+          toolName: "WinHood Deterministic Scoring Engine",
+          toolVersion: ALGORITHM_VERSION,
+          measuredAt: nowIso,
+          scope: `${input.softwareName} (${loc} LOC / ${kloc} KLOC)`
+        },
+        technicalDebtRatioPercent: {
+          metricKey: "staticMetrics.technicalDebtRatioPercent",
+          value: sqaleRatio,
+          state: isEligibleForScoring ? "STATIC_DERIVED" : "NOT_MEASURED",
+          origin: "SonarQube SQALE Debt Ratio Formula",
+          method: "(technicalDebtMinutes / (LOC * 30)) * 100",
+          toolName: "WinHood Deterministic Scoring Engine",
+          toolVersion: ALGORITHM_VERSION,
+          measuredAt: nowIso,
+          scope: `${input.softwareName} (${m.technicalDebtMinutes}m / ${loc * 30}m)`
+        }
+      };
+    })(),
     sonarNativeResults: input.sonarNativeResults || {
       available: false,
       sourceInstanceUrl: null,
@@ -3888,28 +3948,67 @@ function resolveNodeRuntimeForSubprocess() {
 }
 
 // src/execution/SandboxExecutor.ts
-var MINIMAL_SAFE_ENV_KEYS = ["PATH", "LANG", "LC_ALL"];
+var MINIMAL_SAFE_ENV_KEYS = ["LANG", "LC_ALL"];
+function getRestrictedSafePath() {
+  if (os2.platform() === "win32") {
+    const sysRoot = process.env.SystemRoot || "C:\\Windows";
+    return `${sysRoot}\\System32;${sysRoot};${sysRoot}\\System32\\Wbem`;
+  }
+  return "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+}
+function resolveSystemBinaryPath(candidates) {
+  for (const candidate of candidates) {
+    try {
+      if (fs2.existsSync(candidate)) {
+        return candidate;
+      }
+    } catch {
+    }
+  }
+  return null;
+}
+function getDockerBinaryPath() {
+  if (os2.platform() === "win32") {
+    const progFiles = process.env.ProgramFiles || "C:\\Program Files";
+    const winDocker = path2.win32.join(progFiles, "Docker", "Docker", "resources", "bin", "docker.exe");
+    return resolveSystemBinaryPath([winDocker]) || winDocker;
+  }
+  return resolveSystemBinaryPath(["/usr/bin/docker", "/usr/local/bin/docker", "/bin/docker"]) || "/usr/bin/docker";
+}
+function getBwrapBinaryPath() {
+  return resolveSystemBinaryPath(["/usr/bin/bwrap", "/bin/bwrap"]) || "/usr/bin/bwrap";
+}
+function getUnshareBinaryPath() {
+  return resolveSystemBinaryPath(["/usr/bin/unshare", "/bin/unshare"]) || "/usr/bin/unshare";
+}
 function checkBinaryCommand(bin, args, envOverrides) {
   try {
+    const restrictedEnv = {
+      PATH: getRestrictedSafePath(),
+      ...process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {},
+      ...envOverrides || {}
+    };
     const res = spawnSync(bin, args, {
       shell: false,
       encoding: "utf8",
       timeout: 2500,
-      env: envOverrides ? { ...process.env, ...envOverrides } : process.env
+      env: restrictedEnv
     });
     return res.status === 0 && !res.error;
   } catch {
     return false;
   }
 }
-function buildMinimalEnv(tmpRoot, extra) {
+function buildMinimalSandboxEnv(tmpRoot, extra) {
   const nodeRuntime = resolveNodeRuntimeForSubprocess();
   const cleanEnv = {
+    PATH: getRestrictedSafePath(),
     TMPDIR: tmpRoot,
     TMP: tmpRoot,
     TEMP: tmpRoot,
     HOME: tmpRoot,
     NODE_ENV: "test",
+    ...process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {},
     ...nodeRuntime.envOverrides
   };
   for (const key of MINIMAL_SAFE_ENV_KEYS) {
@@ -3919,6 +4018,7 @@ function buildMinimalEnv(tmpRoot, extra) {
   }
   if (extra) {
     for (const [k, v] of Object.entries(extra)) {
+      if (k.toUpperCase() === "PATH") continue;
       cleanEnv[k] = v;
     }
   }
@@ -3928,16 +4028,23 @@ var SandboxExecutor = class _SandboxExecutor {
   static {
     this.cachedProbe = null;
   }
+  static getControlledSafePath() {
+    return getRestrictedSafePath();
+  }
   static probeHostIsolation(forceRefresh = false) {
     if (_SandboxExecutor.cachedProbe && !forceRefresh) {
       return _SandboxExecutor.cachedProbe;
     }
     const platform = os2.platform();
     const limitations = [];
-    const dockerAvailable = checkBinaryCommand("docker", ["info"]);
-    const bwrapAvailable = platform === "linux" && checkBinaryCommand("bwrap", ["--version"]);
-    const unshareAvailable = platform === "linux" && checkBinaryCommand("unshare", ["--user", "--map-root-user", "true"]);
-    const windowsSandboxAvailable = platform === "win32" && fs2.existsSync("C:\\Windows\\System32\\WindowsSandbox.exe");
+    const dockerBin = getDockerBinaryPath();
+    const bwrapBin = getBwrapBinaryPath();
+    const unshareBin = getUnshareBinaryPath();
+    const dockerAvailable = checkBinaryCommand(dockerBin, ["info"]);
+    const bwrapAvailable = platform === "linux" && checkBinaryCommand(bwrapBin, ["--version"]);
+    const unshareAvailable = platform === "linux" && checkBinaryCommand(unshareBin, ["--user", "--map-root-user", "true"]);
+    const winSysRoot = process.env.SystemRoot || "C:\\Windows";
+    const windowsSandboxAvailable = platform === "win32" && fs2.existsSync(path2.win32.join(winSysRoot, "System32", "WindowsSandbox.exe"));
     const nodeMajor = Number.parseInt(process.versions.node.split(".")[0] || "0", 10);
     const nodeRuntime = resolveNodeRuntimeForSubprocess();
     const nodePermissionSupported = nodeMajor >= 20 && checkBinaryCommand(
@@ -4076,11 +4183,11 @@ var SandboxExecutor = class _SandboxExecutor {
         }
       }
       isolationState = "ISOLATION_VERIFIED";
-      const childEnv = buildMinimalEnv(realTmpRoot);
+      const childEnv = buildMinimalSandboxEnv(realTmpRoot);
       let res;
       if (probe.dockerAvailable) {
         res = spawnSync(
-          "docker",
+          getDockerBinaryPath(),
           [
             "run",
             "--rm",
@@ -4232,9 +4339,9 @@ var SandboxExecutor = class _SandboxExecutor {
           throw new Error(`Test path outside sandbox: ${tf}`);
         }
       }
-      const childEnv = buildMinimalEnv(realTmpRoot);
+      const childEnv = buildMinimalSandboxEnv(realTmpRoot);
       const res = probe.dockerAvailable ? spawnSync(
-        "docker",
+        getDockerBinaryPath(),
         [
           "run",
           "--rm",
@@ -4369,9 +4476,9 @@ ${stderr}` : stderr,
         fs2.writeFileSync(resolved, content, "utf8");
       }
       const rawArgs = params.argsBuilder(realTmpRoot);
-      const childEnv = buildMinimalEnv(realTmpRoot);
+      const childEnv = buildMinimalSandboxEnv(realTmpRoot);
       const res = probe.bwrapAvailable ? spawnSync(
-        "bwrap",
+        getBwrapBinaryPath(),
         [
           "--ro-bind",
           "/usr",
@@ -5687,7 +5794,7 @@ var ELIGIBLE_EXTENSIONS = /* @__PURE__ */ new Set([
   ".go",
   ".rs"
 ]);
-function validateSourceUploadSecurity(filesMap, maxFileSizeBytes = 2 * 1024 * 1024) {
+function validateSourceUploadSecurity(filesMap, maxFileSizeBytes = 2 * 1024 * 1024, maxTotalFiles = 500, maxTotalBytes = 12 * 1024 * 1024) {
   const blockedFiles = [];
   const rejectedFiles = [];
   const violations = [];
@@ -5695,13 +5802,27 @@ function validateSourceUploadSecurity(filesMap, maxFileSizeBytes = 2 * 1024 * 10
   const traversalAttempts = [];
   const symlinkAttempts = [];
   const corruptedFiles = [];
-  for (const [rawPath, content] of Object.entries(filesMap)) {
+  const entries = Object.entries(filesMap);
+  if (entries.length > maxTotalFiles) {
+    violations.push(
+      `Quantidade de arquivos (${entries.length}) excede o limite m\xE1ximo permitido (${maxTotalFiles}).`
+    );
+    blockedFiles.push({ path: "<bundle>", reason: `TOO_MANY_FILES (${entries.length} > ${maxTotalFiles})` });
+  }
+  let totalBytes = 0;
+  for (const [rawPath, content] of entries) {
     const normalized = rawPath.replace(/\\/g, "/");
-    if (normalized.startsWith("/") || /^[a-zA-Z]:\//.test(normalized) || normalized.split("/").includes("..") || normalized.includes("../") || normalized.includes("..\\")) {
+    const segments = normalized.split("/").filter(Boolean);
+    if (normalized.startsWith("/") || /^[a-zA-Z]:\//.test(normalized) || normalized.split("/").includes("..") || normalized.includes("../") || normalized.includes("..\\") || segments.length > 20) {
       traversalAttempts.push(rawPath);
       rejectedFiles.push(rawPath);
-      blockedFiles.push({ path: rawPath, reason: "PATH_TRAVERSAL_ATTEMPT" });
-      violations.push(`Tentativa de Path Traversal bloqueada no caminho: ${rawPath}`);
+      blockedFiles.push({
+        path: rawPath,
+        reason: segments.length > 20 ? "EXCESSIVE_PATH_DEPTH" : "PATH_TRAVERSAL_ATTEMPT"
+      });
+      violations.push(
+        segments.length > 20 ? `Profundidade de diret\xF3rio excessiva bloqueada no caminho: ${rawPath}` : `Tentativa de Path Traversal bloqueada no caminho: ${rawPath}`
+      );
       continue;
     }
     if (typeof content !== "string" || content.startsWith("SYMLINK:") || content.includes("\0")) {
@@ -5719,12 +5840,22 @@ function validateSourceUploadSecurity(filesMap, maxFileSizeBytes = 2 * 1024 * 10
       continue;
     }
     const sizeBytes = Buffer.byteLength(content, "utf8");
+    totalBytes += sizeBytes;
     if (sizeBytes > maxFileSizeBytes) {
       oversizedFiles.push(rawPath);
       rejectedFiles.push(rawPath);
       blockedFiles.push({ path: rawPath, reason: `FILE_TOO_LARGE (${sizeBytes} > ${maxFileSizeBytes} bytes)` });
       violations.push(`Arquivo ${rawPath} (${sizeBytes} bytes) excede o limite m\xE1ximo de ${maxFileSizeBytes} bytes.`);
     }
+  }
+  if (totalBytes > maxTotalBytes) {
+    violations.push(
+      `Tamanho acumulado do pacote (${totalBytes} bytes) excede o limite m\xE1ximo permitido (${maxTotalBytes} bytes).`
+    );
+    blockedFiles.push({
+      path: "<bundle>",
+      reason: `TOTAL_PAYLOAD_TOO_LARGE (${totalBytes} > ${maxTotalBytes} bytes)`
+    });
   }
   return {
     valid: blockedFiles.length === 0,
@@ -8966,6 +9097,15 @@ function generateEd25519Pair() {
   });
   return { privateKeyPem: privateKey, publicKeyPem: publicKey };
 }
+function resolvePowerShellExecutable() {
+  const sysRoot = process.env.SystemRoot || "C:\\Windows";
+  const exePath = path6.win32.join(sysRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const safeEnv = {
+    SystemRoot: sysRoot,
+    PATH: path6.win32.join(sysRoot, "System32")
+  };
+  return { exePath, safeEnv };
+}
 function tryDpapiProtectUtf8(plainText) {
   if (os4.platform() !== "win32") {
     return { protectedText: plainText, usedDpapi: false };
@@ -8978,10 +9118,12 @@ function tryDpapiProtectUtf8(plainText) {
       "$prot = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser);",
       "[Convert]::ToBase64String($prot)"
     ].join(" ");
-    const res = spawnSync2("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], {
+    const { exePath, safeEnv } = resolvePowerShellExecutable();
+    const res = spawnSync2(exePath, ["-NoProfile", "-NonInteractive", "-Command", ps], {
       shell: false,
       encoding: "utf8",
-      timeout: 5e3
+      timeout: 5e3,
+      env: safeEnv
     });
     if (res.status === 0 && res.stdout && res.stdout.trim().length > 0) {
       return { protectedText: res.stdout.trim(), usedDpapi: true };
@@ -9000,10 +9142,12 @@ function tryDpapiUnprotectUtf8(cipherB64OrPlain, wasProtected) {
     "$unprot = [System.Security.Cryptography.ProtectedData]::Unprotect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser);",
     "[System.Text.Encoding]::UTF8.GetString($unprot)"
   ].join(" ");
-  const res = spawnSync2("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], {
+  const { exePath, safeEnv } = resolvePowerShellExecutable();
+  const res = spawnSync2(exePath, ["-NoProfile", "-NonInteractive", "-Command", ps], {
     shell: false,
     encoding: "utf8",
-    timeout: 5e3
+    timeout: 5e3,
+    env: safeEnv
   });
   if (res.status !== 0 || !res.stdout) {
     throw new Error("KEYSTORE_DPAPI_UNPROTECT_FAILED: Falha ao descriptografar chave via Windows DPAPI.");
@@ -9182,6 +9326,11 @@ var KeyManagementService = class _KeyManagementService {
         origin: "ENV_EXTERNAL"
       };
     }
+    if (process.env.WINHOOD_REQUIRE_ENV_SECRETS === "true") {
+      throw new Error(
+        "KEY_MANAGEMENT_ENV_SECRET_REQUIRED: Defina WINHOOD_EVIDENCE_HMAC_SECRET (>= 16 caracteres) quando WINHOOD_REQUIRE_ENV_SECRETS=true."
+      );
+    }
     const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
     const active = store.keysHex[store.activeEvidenceKeyId];
     return {
@@ -9221,6 +9370,11 @@ var KeyManagementService = class _KeyManagementService {
         keyBuffer: crypto7.createHash("sha256").update(envVaultSecret.trim(), "utf8").digest(),
         origin: "ENV_EXTERNAL"
       };
+    }
+    if (process.env.WINHOOD_REQUIRE_ENV_SECRETS === "true") {
+      throw new Error(
+        "KEY_MANAGEMENT_ENV_SECRET_REQUIRED: Defina WINHOOD_VAULT_SECRET ou SONAR_SECRET_SALT (>= 16 caracteres) quando WINHOOD_REQUIRE_ENV_SECRETS=true."
+      );
     }
     const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
     const active = store.keysHex[store.activeVaultKeyId];
@@ -9366,11 +9520,26 @@ var KeyManagementService = class _KeyManagementService {
       algorithm: "ED25519"
     }));
     const keys = [...symKeys, ...asymKeys];
+    const securityWarnings = [];
+    if (process.env.NODE_ENV === "production") {
+      if (!hasEnvEvidence) {
+        securityWarnings.push(
+          "Produ\xE7\xE3o utilizando keystore local para HMAC de evid\xEAncias; configure WINHOOD_EVIDENCE_HMAC_SECRET."
+        );
+      }
+      if (!hasEnvVault) {
+        securityWarnings.push(
+          "Produ\xE7\xE3o utilizando keystore local para cofre AES-256; configure WINHOOD_VAULT_SECRET ou SONAR_SECRET_SALT."
+        );
+      }
+    }
     return {
       keystorePath: _KeyManagementService.getStorePath(customPath),
       integrityVerified,
       dpapiSupported: os4.platform() === "win32",
       keyOrigin: hasEnvEvidence || hasEnvVault ? "ENV_EXTERNAL" : "HOST_CSPRNG_KEYSTORE",
+      productionEnvSecretConfigured: hasEnvEvidence && hasEnvVault,
+      securityWarnings,
       activeEvidenceKeyId: store.activeEvidenceKeyId,
       activeEd25519KeyId: store.activeEd25519KeyId,
       activeVaultKeyId: store.activeVaultKeyId,
@@ -9471,29 +9640,29 @@ function buildVerifiableEvidenceChain(params) {
     previousHash = recordHash;
     immutableIndex += 1;
   }
-  for (const exec2 of toolExecutions) {
-    const sw = softwareById.get(exec2.softwareId);
+  for (const exec of toolExecutions) {
+    const sw = softwareById.get(exec.softwareId);
     const baseRecord = {
-      id: `ev-exec-${runId}-${exec2.id}-${immutableIndex}`,
+      id: `ev-exec-${runId}-${exec.id}-${immutableIndex}`,
       runId,
-      softwareId: exec2.softwareId,
-      softwareName: sw?.name || exec2.softwareId,
+      softwareId: exec.softwareId,
+      softwareName: sw?.name || exec.softwareId,
       version: sw?.version || "unknown",
-      commitHash: exec2.commitHash || sw?.commitHash || "NOT_DECLARED",
-      sourceHash: exec2.sourceHash || sw?.packageSha256 || "UNVERIFIED",
-      criterionId: `TOOL-${exec2.toolId}`,
+      commitHash: exec.commitHash || sw?.commitHash || "NOT_DECLARED",
+      sourceHash: exec.sourceHash || sw?.packageSha256 || "UNVERIFIED",
+      criterionId: `TOOL-${exec.toolId}`,
       evidenceType: "TOOL_RAW_OUTPUT",
-      origin: exec2.executionMethod || "NATIVE_AST_ENGINE",
+      origin: exec.executionMethod || "NATIVE_AST_ENGINE",
       responsibleActor,
-      category: exec2.canonicalFormat,
-      toolName: exec2.toolName,
-      toolVersion: exec2.toolVersion,
-      timestamp: exec2.completedAt,
-      resultSummary: `Status=${exec2.veracityStatus} | M\xE9todo=${exec2.executionMethod || "NATIVE_AST_ENGINE"} | Arquivos=${exec2.analyzedFilesCount}/${exec2.eligibleFilesCount} | Exit=${exec2.exitCode} | Dura\xE7\xE3o=${exec2.durationMs}ms`,
-      severity: exec2.veracityStatus === "SUCCESS_VALIDATED" ? "INFO" : "LOW",
-      fileOrComponent: exec2.workingDirectory || sw?.inventory?.isolatedStoragePath || "workspace",
-      validationStatus: exec2.veracityStatus,
-      rawPayloadPreview: (exec2.stdout || exec2.logs.join(" | ")).slice(0, 400),
+      category: exec.canonicalFormat,
+      toolName: exec.toolName,
+      toolVersion: exec.toolVersion,
+      timestamp: exec.completedAt,
+      resultSummary: `Status=${exec.veracityStatus} | M\xE9todo=${exec.executionMethod || "NATIVE_AST_ENGINE"} | Arquivos=${exec.analyzedFilesCount}/${exec.eligibleFilesCount} | Exit=${exec.exitCode} | Dura\xE7\xE3o=${exec.durationMs}ms`,
+      severity: exec.veracityStatus === "SUCCESS_VALIDATED" ? "INFO" : "LOW",
+      fileOrComponent: exec.workingDirectory || sw?.inventory?.isolatedStoragePath || "workspace",
+      validationStatus: exec.veracityStatus,
+      rawPayloadPreview: (exec.stdout || exec.logs.join(" | ")).slice(0, 400),
       immutableIndex,
       previousRecordSha256: previousHash
     };
@@ -10363,6 +10532,15 @@ var defaultDnsResolver = async (hostname) => {
   return await dns.promises.lookup(hostname, { all: true, verbatim: true });
 };
 var SsrfGuard = class _SsrfGuard {
+  static isExplicitLoopbackUrl(rawUrl) {
+    try {
+      const parsed = new URL(rawUrl);
+      const hostname = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+      return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+    } catch {
+      return false;
+    }
+  }
   static async validateUrl(params) {
     let parsed;
     try {
@@ -11710,8 +11888,50 @@ function executeBenchmarkRunOrchestration(params) {
     ratings: (winner || topCandidate || scoreCards[0])?.ratings,
     executiveSummary
   };
+  enforceVerifiedQualityGateOnRun(finalResult);
   params.onProgress?.(finalResult.progress);
   return finalResult;
+}
+function enforceVerifiedQualityGateOnRun(run) {
+  const verification = verifyEvidenceChainAndManifest(run.evidenceChain || [], run.signedManifest);
+  run.evidenceVerification = {
+    valid: verification.valid,
+    verificationState: verification.verificationState,
+    verifiedAt: verification.verificationTimestamp,
+    message: verification.message,
+    tamperedIndices: verification.tamperedIndices
+  };
+  if (!verification.valid) {
+    run.winnerSoftwareId = null;
+    for (const sc of run.scoreCards || []) {
+      if (sc.qualityGate) {
+        sc.qualityGate.status = "INCONCLUSIVE";
+        sc.qualityGate.executiveDecision = "INCONCLUSIVE";
+        sc.qualityGate.conditionsFailed = Math.max(1, sc.qualityGate.conditionsFailed || 0);
+        if (!sc.qualityGate.failedMetrics.includes("EVIDENCE_CHAIN_VERIFICATION_FAILED")) {
+          sc.qualityGate.failedMetrics = [
+            ...sc.qualityGate.failedMetrics,
+            "EVIDENCE_CHAIN_VERIFICATION_FAILED"
+          ];
+        }
+      }
+      if (sc.separatedIndicators) {
+        sc.separatedIndicators.qualityGateDecision = "INCONCLUSIVE";
+      }
+    }
+    if (run.qualityGate) {
+      run.qualityGate.status = "INCONCLUSIVE";
+      run.qualityGate.executiveDecision = "INCONCLUSIVE";
+      run.qualityGate.conditionsFailed = Math.max(1, run.qualityGate.conditionsFailed || 0);
+      if (!run.qualityGate.failedMetrics.includes("EVIDENCE_CHAIN_VERIFICATION_FAILED")) {
+        run.qualityGate.failedMetrics = [
+          ...run.qualityGate.failedMetrics,
+          "EVIDENCE_CHAIN_VERIFICATION_FAILED"
+        ];
+      }
+    }
+  }
+  return run;
 }
 function recalculateBenchmarkRunScoreCards(run, softwares) {
   const enabledCategories = run.enabledCategories && run.enabledCategories.length > 0 ? run.enabledCategories : ALL_BENCHMARK_CATEGORIES;
@@ -11797,6 +12017,9 @@ function recalculateBenchmarkRunScoreCards(run, softwares) {
   run.qualityGate = (winner || topCandidate || updatedScoreCards[0])?.qualityGate;
   run.ratings = (winner || topCandidate || updatedScoreCards[0])?.ratings;
   run.executiveSummary = executiveSummary;
+  if (run.signedManifest) {
+    enforceVerifiedQualityGateOnRun(run);
+  }
   return run;
 }
 
@@ -13149,6 +13372,56 @@ var ToolResourceMonitor = class _ToolResourceMonitor {
   static runHostHardwareBenchmark() {
     const host = _ToolResourceMonitor.inspectHostResources();
     const stepLatenciesMs = [];
+    const warmupRounds = 2;
+    const measuredRounds = 7;
+    const executeCalibrationRound = (seedOffset) => {
+      const rStart = performance.now();
+      let acc = 0;
+      for (let k = 0; k < 250; k++) {
+        const digest = crypto12.createHash("sha256").update(`wh-round-${seedOffset}-${k}`).digest();
+        acc += digest[0];
+      }
+      const vec = new Float64Array(4096);
+      for (let i = 0; i < vec.length; i++) {
+        vec[i] = (i + acc) % 31 * 0.125;
+      }
+      return Math.round((performance.now() - rStart) * 1e3) / 1e3;
+    };
+    for (let w = 0; w < warmupRounds; w++) {
+      executeCalibrationRound(w);
+    }
+    const rawRoundSamplesMs = [];
+    for (let r = 0; r < measuredRounds; r++) {
+      rawRoundSamplesMs.push(executeCalibrationRound(warmupRounds + r));
+    }
+    const sortedRounds = [...rawRoundSamplesMs].sort((a, b) => a - b);
+    const quantile = (arr, q) => {
+      if (arr.length === 0) return 0;
+      const pos = (arr.length - 1) * q;
+      const base = Math.floor(pos);
+      const rest = pos - base;
+      const next = arr[base + 1] !== void 0 ? arr[base + 1] : arr[base];
+      return arr[base] + rest * (next - arr[base]);
+    };
+    const q1 = quantile(sortedRounds, 0.25);
+    const q3 = quantile(sortedRounds, 0.75);
+    const iqrMs = Math.max(0, Math.round((q3 - q1) * 1e3) / 1e3);
+    const lowerFence = q1 - 1.5 * iqrMs;
+    const upperFence = q3 + 1.5 * iqrMs;
+    const inlierRounds = sortedRounds.filter((v) => v >= lowerFence && v <= upperFence);
+    const effectiveRounds = inlierRounds.length >= 3 ? inlierRounds : sortedRounds;
+    const outliersFilteredCount = sortedRounds.length - effectiveRounds.length;
+    const medianRoundMs = Math.round(quantile(effectiveRounds, 0.5) * 1e3) / 1e3;
+    const p95RoundMs = Math.round(quantile(effectiveRounds, 0.95) * 1e3) / 1e3;
+    const p99RoundMs = Math.round(quantile(effectiveRounds, 0.99) * 1e3) / 1e3;
+    const meanRoundMs = effectiveRounds.length > 0 ? Math.round(
+      effectiveRounds.reduce((a, b) => a + b, 0) / effectiveRounds.length * 1e3
+    ) / 1e3 : 0;
+    const variance = effectiveRounds.length > 1 ? effectiveRounds.reduce((acc, v) => acc + (v - meanRoundMs) ** 2, 0) / (effectiveRounds.length - 1) : 0;
+    const stdDevMs = Math.round(Math.sqrt(variance) * 1e3) / 1e3;
+    const cvBase = medianRoundMs > 0 ? medianRoundMs : meanRoundMs;
+    const coefficientOfVariationPercent = cvBase > 0 ? Math.round(stdDevMs / cvBase * 1e3) / 10 : 0;
+    const confidenceLevel = coefficientOfVariationPercent <= 5 ? "HIGH" : coefficientOfVariationPercent <= 12 ? "MODERATE" : "LOW_NOISY_NEIGHBOR";
     const shaIterations = 6e3;
     const shaStart = performance.now();
     for (let i = 0; i < shaIterations; i++) {
@@ -13236,7 +13509,7 @@ var ToolResourceMonitor = class _ToolResourceMonitor {
       checksumAcc += memArray[i];
     }
     const readSec = Math.max(2e-4, (performance.now() - readStart) / 1e3);
-    const readGuardFactor = Number.isFinite(checksumAcc) ? 1 : 0;
+    const readGuardFactor = Number.isFinite(checksumAcc) && checksumAcc >= 0 ? 1 : 0;
     const sequentialReadMbPerSec = Math.round(bufferSizeMb / readSec * readGuardFactor);
     const memoryScore = Math.min(
       100,
@@ -13345,6 +13618,20 @@ var ToolResourceMonitor = class _ToolResourceMonitor {
       },
       overallHostScore,
       tier,
+      statisticalTelemetry: {
+        warmupRoundsDiscarded: warmupRounds,
+        measuredRoundsCount: measuredRounds,
+        outliersFilteredCount,
+        medianRoundMs,
+        p95RoundMs,
+        p99RoundMs,
+        meanRoundMs,
+        stdDevMs,
+        iqrMs,
+        coefficientOfVariationPercent,
+        confidenceLevel,
+        roundSamplesMs: rawRoundSamplesMs
+      },
       verificationSha256
     };
   }
@@ -14683,8 +14970,23 @@ var SonarQubeApiClient = class {
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     const url = `${this.baseUrl}${endpointPath.startsWith("/") ? endpointPath : `/${endpointPath}`}`;
     try {
+      const ssrf = await SsrfGuard.validateUrl({
+        targetUrl: url,
+        allowExplicitLoopback: SsrfGuard.isExplicitLoopbackUrl(this.baseUrl)
+      });
+      if (!ssrf.allowed) {
+        clearTimeout(timer);
+        return {
+          ok: false,
+          status: 403,
+          data: null,
+          rawHash: computeSha256(`SSRF_BLOCKED|${url}`),
+          error: `SSRF_BLOCKED: ${ssrf.reason}`
+        };
+      }
       const res = await fetch(url, {
         ...options,
+        redirect: "manual",
         headers: {
           ...this.buildHeaders(),
           ...options.headers
@@ -14692,6 +14994,15 @@ var SonarQubeApiClient = class {
         signal: controller.signal
       });
       clearTimeout(timer);
+      if (res.status >= 300 && res.status < 400) {
+        return {
+          ok: false,
+          status: res.status,
+          data: null,
+          rawHash: computeSha256(`SSRF_REDIRECT_BLOCKED|${url}|${res.status}`),
+          error: `SSRF_REDIRECT_BLOCKED: Redirecionamento HTTP ${res.status} bloqueado.`
+        };
+      }
       const rawText = await res.text();
       const rawHash = computeSha256(rawText || `STATUS_${res.status}`);
       if (!res.ok) {
@@ -15076,6 +15387,30 @@ var SonarQubeConnection = class _SonarQubeConnection {
         errorMessage: "URL do servidor SonarQube n\xE3o foi configurada."
       };
     }
+    const ssrf = await SsrfGuard.validateUrl({
+      targetUrl: rawUrl,
+      allowExplicitLoopback: SsrfGuard.isExplicitLoopbackUrl(rawUrl)
+    });
+    if (!ssrf.allowed) {
+      return {
+        connectionState: "SERVER_UNAVAILABLE",
+        httpReachable: false,
+        authenticated: false,
+        version: null,
+        edition: null,
+        systemStatus: "SSRF_BLOCKED",
+        apiCompatibility: "UNKNOWN",
+        permissions: {
+          browse: false,
+          executeAnalysis: false,
+          administerQualityGates: false,
+          provisioning: false
+        },
+        tokenExpiresAt: null,
+        latencyMs: Math.round((performance.now() - start) * 10) / 10,
+        errorMessage: `SSRF_BLOCKED: ${ssrf.reason}`
+      };
+    }
     const headers = {
       Accept: "application/json",
       "User-Agent": "WinHood-SonarQubeIntegrationService/2.0"
@@ -15089,9 +15424,30 @@ var SonarQubeConnection = class _SonarQubeConnection {
       const statusRes = await fetch(`${rawUrl}/api/system/status`, {
         method: "GET",
         headers,
+        redirect: "manual",
         signal: controller.signal
       });
       clearTimeout(timer);
+      if (statusRes.status >= 300 && statusRes.status < 400) {
+        return {
+          connectionState: "SERVER_UNAVAILABLE",
+          httpReachable: false,
+          authenticated: false,
+          version: null,
+          edition: null,
+          systemStatus: "REDIRECT_BLOCKED",
+          apiCompatibility: "UNKNOWN",
+          permissions: {
+            browse: false,
+            executeAnalysis: false,
+            administerQualityGates: false,
+            provisioning: false
+          },
+          tokenExpiresAt: null,
+          latencyMs: Math.round((performance.now() - start) * 10) / 10,
+          errorMessage: `SSRF_REDIRECT_BLOCKED: Servidor respondeu com redirecionamento HTTP ${statusRes.status}.`
+        };
+      }
       const latencyMs = Math.round((performance.now() - start) * 10) / 10;
       if (statusRes.status === 401 || statusRes.status === 403) {
         return {
@@ -15183,10 +15539,14 @@ var SonarQubeConnection = class _SonarQubeConnection {
       let authenticated = false;
       let tokenExpiresAt = null;
       if (options.token && options.token.trim().length > 0) {
+        const authController = new AbortController();
+        const authTimer = setTimeout(() => authController.abort(), timeoutMs);
         const authRes = await fetch(`${rawUrl}/api/authentication/validate`, {
           method: "GET",
-          headers
-        });
+          headers,
+          redirect: "manual",
+          signal: authController.signal
+        }).finally(() => clearTimeout(authTimer));
         if (authRes.status === 401 || authRes.status === 403) {
           return {
             connectionState: "AUTH_FAILED",
@@ -15243,10 +15603,14 @@ var SonarQubeConnection = class _SonarQubeConnection {
       };
       if (authenticated) {
         try {
+          const userController = new AbortController();
+          const userTimer = setTimeout(() => userController.abort(), timeoutMs);
           const userRes = await fetch(`${rawUrl}/api/users/current`, {
             method: "GET",
-            headers
-          });
+            headers,
+            redirect: "manual",
+            signal: userController.signal
+          }).finally(() => clearTimeout(userTimer));
           if (userRes.ok) {
             const userJson = await userRes.json();
             const globalPerms = userJson.permissions?.global;
@@ -15808,6 +16172,7 @@ var SonarResultParser = class _SonarResultParser {
 
 // src/integrations/sonarqube/SonarScannerExecutor.ts
 import { spawn } from "node:child_process";
+import crypto15 from "node:crypto";
 import fs9 from "node:fs";
 import path10 from "node:path";
 var FORBIDDEN_METACHAR_REGEX = /[&|;`$><\r\n\0]/;
@@ -15842,7 +16207,7 @@ var SonarScannerExecutor = class _SonarScannerExecutor {
     const lowerExec = executablePath.toLowerCase();
     const isWinBatchScript = isWin && (lowerExec.endsWith(".bat") || lowerExec.endsWith(".cmd") || lowerExec === "npx" || lowerExec === "mvn" || lowerExec === "gradle");
     if (isWinBatchScript) {
-      const comSpec = process.env.ComSpec || "C:\\Windows\\System32\\cmd.exe";
+      const comSpec = process.env.ComSpec || path10.win32.join(process.env.SystemRoot || "C:\\Windows", "System32", "cmd.exe");
       const quotedCmd = quoteWindowsCmdArgument(executablePath);
       const quotedArgs = args.map((a) => quoteWindowsCmdArgument(a)).join(" ");
       const innerCommandLine = `"${quotedCmd}${quotedArgs ? ` ${quotedArgs}` : ""}"`;
@@ -15920,7 +16285,7 @@ var SonarScannerExecutor = class _SonarScannerExecutor {
         errorMessage: `Execut\xE1vel do scanner (${params.scannerType}) n\xE3o localizado.`
       };
     }
-    const tempPropsFileName = `.winhood-sonar-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.properties`;
+    const tempPropsFileName = `.winhood-sonar-${crypto15.randomUUID()}.properties`;
     const propsFilePath = path10.join(params.projectBaseDir, tempPropsFileName);
     try {
       fs9.writeFileSync(propsFilePath, params.propertiesContent, { encoding: "utf8", mode: 384 });
@@ -18598,7 +18963,7 @@ function updateHardwareProfile(updates) {
 }
 
 // src/security/AuthService.ts
-import crypto15 from "node:crypto";
+import crypto16 from "node:crypto";
 import fs12 from "node:fs";
 import path13 from "node:path";
 var PERMISSIONS_MATRIX = {
@@ -18683,26 +19048,43 @@ function computeHotp(secretBase32, counter) {
   const key = base32Decode(secretBase32);
   const msg = Buffer.alloc(8);
   msg.writeBigUInt64BE(BigInt(counter), 0);
-  const hmac = crypto15.createHmac("sha1", key).update(msg).digest();
+  const hmac = crypto16.createHmac("sha1", key).update(msg).digest();
   const offset = hmac[hmac.length - 1] & 15;
   const code = ((hmac[offset] & 127) << 24 | (hmac[offset + 1] & 255) << 16 | (hmac[offset + 2] & 255) << 8 | hmac[offset + 3] & 255) % 1e6;
   return String(code).padStart(6, "0");
 }
-function verifyTotpCode(secretBase32, candidateCode, atMs = Date.now()) {
-  const clean = (candidateCode || "").trim();
-  if (!/^\d{6}$/.test(clean)) return false;
-  const step = Math.floor(atMs / 1e3 / 30);
+function verifyTotpCodeWithStep(secretBase32, candidateCode, lastAcceptedStep, atMs = Date.now()) {
+  const clean = (candidateCode || "").replace(/[\s-]/g, "").trim();
+  if (!/^\d{6}$/.test(clean)) {
+    return { valid: false, matchedStep: null, replayRejected: false };
+  }
+  const currentStep = Math.floor(atMs / 1e3 / 30);
   for (const delta of [-1, 0, 1]) {
-    const expected = computeHotp(secretBase32, step + delta);
-    if (crypto15.timingSafeEqual(Buffer.from(clean), Buffer.from(expected))) {
-      return true;
+    const candidateStep = currentStep + delta;
+    const expected = computeHotp(secretBase32, candidateStep);
+    if (crypto16.timingSafeEqual(Buffer.from(clean), Buffer.from(expected))) {
+      if (typeof lastAcceptedStep === "number" && candidateStep <= lastAcceptedStep) {
+        return { valid: false, matchedStep: candidateStep, replayRejected: true };
+      }
+      return { valid: true, matchedStep: candidateStep, replayRejected: false };
     }
   }
-  return false;
+  return { valid: false, matchedStep: null, replayRejected: false };
+}
+function generateRecoveryCodesSet(count = 8) {
+  const plaintextCodes = [];
+  const codeHashes = [];
+  for (let i = 0; i < count; i++) {
+    const rawHex = crypto16.randomBytes(4).toString("hex").toUpperCase();
+    const formatted = `${rawHex.slice(0, 4)}-${rawHex.slice(4, 8)}`;
+    plaintextCodes.push(formatted);
+    codeHashes.push(sha256(`winhood-rc:${rawHex}`));
+  }
+  return { plaintextCodes, codeHashes };
 }
 function hashPassword(password) {
-  const salt = crypto15.randomBytes(16).toString("hex");
-  const derived = crypto15.scryptSync(password, salt, 64, { N: 16384, r: 8, p: 1 }).toString("hex");
+  const salt = crypto16.randomBytes(16).toString("hex");
+  const derived = crypto16.scryptSync(password, salt, 64, { N: 16384, r: 8, p: 1 }).toString("hex");
   return `scrypt:N=16384,r=8,p=1:${salt}:${derived}`;
 }
 function verifyPassword(password, storedHash) {
@@ -18710,20 +19092,20 @@ function verifyPassword(password, storedHash) {
   if (parts.length !== 4 || parts[0] !== "scrypt") return false;
   const salt = parts[2];
   const expectedHex = parts[3];
-  const derived = crypto15.scryptSync(password, salt, 64, { N: 16384, r: 8, p: 1 });
+  const derived = crypto16.scryptSync(password, salt, 64, { N: 16384, r: 8, p: 1 });
   const expectedBuf = Buffer.from(expectedHex, "hex");
   if (derived.length !== expectedBuf.length) return false;
-  return crypto15.timingSafeEqual(derived, expectedBuf);
+  return crypto16.timingSafeEqual(derived, expectedBuf);
 }
 function sha256(val) {
-  return crypto15.createHash("sha256").update(val, "utf8").digest("hex");
+  return crypto16.createHash("sha256").update(val, "utf8").digest("hex");
 }
 function atomicWriteSecretFile(filePath, content) {
   const dir = path13.dirname(filePath);
   if (!fs12.existsSync(dir)) {
     fs12.mkdirSync(dir, { recursive: true });
   }
-  const tmpPath = `${filePath}.tmp.${crypto15.randomBytes(4).toString("hex")}`;
+  const tmpPath = `${filePath}.tmp.${crypto16.randomBytes(4).toString("hex")}`;
   fs12.writeFileSync(tmpPath, content, { encoding: "utf8", mode: 384 });
   fs12.renameSync(tmpPath, filePath);
   try {
@@ -18738,6 +19120,7 @@ var AuthService = class _AuthService {
     this.authStorePath = path13.join(base, "security", "auth_users.json");
     this.bootstrapTokenFilePath = path13.join(base, "bootstrap_admin_token.txt");
     this.recoveryDir = path13.join(base, "security");
+    this.keystorePath = path13.join(base, "keys", "keystore.json");
     this.db = this.loadOrInit(base);
   }
   static {
@@ -18747,10 +19130,148 @@ var AuthService = class _AuthService {
     this.SESSION_ABSOLUTE_MS = 8 * 60 * 60 * 1e3;
   }
   static {
+    this.SESSION_TRUSTED_DEVICE_MS = 30 * 24 * 60 * 60 * 1e3;
+  }
+  static {
+    this.PREAUTH_TTL_MS = 5 * 60 * 1e3;
+  }
+  static {
     this.MAX_LOGIN_ATTEMPTS = 5;
   }
   static {
     this.LOCKOUT_DURATION_MS = 5 * 60 * 1e3;
+  }
+  encryptSecretAtRest(plainSecret) {
+    const { keyId, keyBuffer } = KeyManagementService.getActiveVaultAesKey(this.keystorePath);
+    const iv = crypto16.randomBytes(12);
+    const cipher = crypto16.createCipheriv("aes-256-gcm", keyBuffer, iv);
+    const encrypted = Buffer.concat([cipher.update(plainSecret, "utf8"), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    return `whvault:v1:${keyId}:${iv.toString("hex")}:${tag.toString("hex")}:${encrypted.toString("hex")}`;
+  }
+  decryptSecretAtRest(stored) {
+    if (!stored) return null;
+    if (!stored.startsWith("whvault:v1:")) {
+      return stored;
+    }
+    const parts = stored.split(":");
+    if (parts.length !== 6) {
+      throw new Error("TOTP_VAULT_CORRUPTED: Formato criptogr\xE1fico do segredo TOTP inv\xE1lido.");
+    }
+    const [, , keyId, ivHex, tagHex, cipherHex] = parts;
+    const keyBuf = KeyManagementService.getVaultKeyBufferByKeyId(keyId, this.keystorePath) || KeyManagementService.getActiveVaultAesKey(this.keystorePath).keyBuffer;
+    const decipher = crypto16.createDecipheriv("aes-256-gcm", keyBuf, Buffer.from(ivHex, "hex"));
+    decipher.setAuthTag(Buffer.from(tagHex, "hex"));
+    const plain = Buffer.concat([
+      decipher.update(Buffer.from(cipherHex, "hex")),
+      decipher.final()
+    ]);
+    return plain.toString("utf8");
+  }
+  reencryptTotpSecrets(ctx) {
+    let updated = 0;
+    const reencryptWithCtx = (stored) => {
+      if (!stored) return stored;
+      let plain = null;
+      if (stored.startsWith(`whvault:v1:${ctx.oldKeyId}:`)) {
+        const parts = stored.split(":");
+        if (parts.length === 6) {
+          const decipher = crypto16.createDecipheriv(
+            "aes-256-gcm",
+            ctx.oldKeyBuffer,
+            Buffer.from(parts[3], "hex")
+          );
+          decipher.setAuthTag(Buffer.from(parts[4], "hex"));
+          plain = Buffer.concat([
+            decipher.update(Buffer.from(parts[5], "hex")),
+            decipher.final()
+          ]).toString("utf8");
+        }
+      } else if (!stored.startsWith("whvault:v1:")) {
+        plain = stored;
+      }
+      if (!plain) return stored;
+      const iv = crypto16.randomBytes(12);
+      const cipher = crypto16.createCipheriv("aes-256-gcm", ctx.newKeyBuffer, iv);
+      const encrypted = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
+      const tag = cipher.getAuthTag();
+      updated += 1;
+      return `whvault:v1:${ctx.newKeyId}:${iv.toString("hex")}:${tag.toString("hex")}:${encrypted.toString("hex")}`;
+    };
+    for (const user of this.db.users) {
+      if (user.totpSecretBase32) {
+        user.totpSecretBase32 = reencryptWithCtx(user.totpSecretBase32) || null;
+      }
+      if (user.pendingTotpSecretBase32) {
+        user.pendingTotpSecretBase32 = reencryptWithCtx(user.pendingTotpSecretBase32) || null;
+      }
+    }
+    if (updated > 0) {
+      this.save();
+    }
+    return updated;
+  }
+  createPreAuthToken(userId, email, trustDevice) {
+    const { keyId, secret } = KeyManagementService.getActiveEvidenceHmacKey(this.keystorePath);
+    const payload = {
+      keyId,
+      uid: userId,
+      email,
+      scope: "TOTP_CHALLENGE",
+      trustDevice: Boolean(trustDevice),
+      exp: Date.now() + _AuthService.PREAUTH_TTL_MS,
+      jti: crypto16.randomBytes(8).toString("hex")
+    };
+    const encodedPayload = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+    const sig = crypto16.createHmac("sha256", secret).update(encodedPayload, "utf8").digest("base64url");
+    return `whpa1.${encodedPayload}.${sig}`;
+  }
+  verifyPreAuthToken(token) {
+    const parts = (token || "").trim().split(".");
+    if (parts.length !== 3 || parts[0] !== "whpa1") {
+      throw new Error("AUTH_PREAUTH_INVALID: Token tempor\xE1rio de desafio MFA malformado.");
+    }
+    let decoded;
+    try {
+      decoded = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+    } catch {
+      throw new Error("AUTH_PREAUTH_INVALID: Payload do desafio MFA inv\xE1lido.");
+    }
+    if (decoded.scope !== "TOTP_CHALLENGE" || !decoded.uid || !decoded.keyId || !decoded.exp) {
+      throw new Error("AUTH_PREAUTH_INVALID: Escopo do token de desafio MFA inv\xE1lido.");
+    }
+    if (Date.now() > decoded.exp) {
+      throw new Error("AUTH_PREAUTH_EXPIRED: Desafio TOTP expirado (5 minutos). Fa\xE7a login novamente.");
+    }
+    const hmacSecret = KeyManagementService.getEvidenceSecretByKeyId(decoded.keyId, this.keystorePath);
+    if (!hmacSecret) {
+      throw new Error("AUTH_PREAUTH_INVALID: Chave de assinatura do desafio n\xE3o reconhecida.");
+    }
+    const expectedSig = crypto16.createHmac("sha256", hmacSecret).update(parts[1], "utf8").digest("base64url");
+    const a = Buffer.from(parts[2], "utf8");
+    const b = Buffer.from(expectedSig, "utf8");
+    if (a.length !== b.length || !crypto16.timingSafeEqual(a, b)) {
+      throw new Error("AUTH_PREAUTH_INVALID: Assinatura HMAC do token de desafio MFA inv\xE1lida.");
+    }
+    return {
+      uid: decoded.uid,
+      email: decoded.email || "",
+      trustDevice: Boolean(decoded.trustDevice)
+    };
+  }
+  tryConsumeRecoveryCode(user, rawCode) {
+    const clean = (rawCode || "").replace(/[\s-]/g, "").trim().toUpperCase();
+    if (!/^[A-F0-9]{8}$/.test(clean) || !Array.isArray(user.recoveryCodeHashes) || user.recoveryCodeHashes.length === 0) {
+      return false;
+    }
+    const candidateHashBuf = Buffer.from(sha256(`winhood-rc:${clean}`), "hex");
+    const matchIndex = user.recoveryCodeHashes.findIndex((storedHex) => {
+      const storedBuf = Buffer.from(storedHex, "hex");
+      return storedBuf.length === candidateHashBuf.length && crypto16.timingSafeEqual(storedBuf, candidateHashBuf);
+    });
+    if (matchIndex === -1) return false;
+    user.recoveryCodeHashes.splice(matchIndex, 1);
+    return true;
   }
   loadOrInit(baseDir) {
     fs12.mkdirSync(path13.join(baseDir, "security"), { recursive: true });
@@ -18784,7 +19305,7 @@ var AuthService = class _AuthService {
   }
   issueFreshBootstrapToken(state) {
     const envToken = process.env.WINHOOD_BOOTSTRAP_TOKEN?.trim();
-    const rawToken = envToken && envToken.length >= 16 ? envToken : `wh-boot-${crypto15.randomBytes(24).toString("base64url")}`;
+    const rawToken = envToken && envToken.length >= 16 ? envToken : `wh-boot-${crypto16.randomBytes(24).toString("base64url")}`;
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1e3).toISOString();
     state.bootstrapTokenSha256 = sha256(rawToken);
     state.bootstrapTokenExpiresAt = expiresAt;
@@ -18837,7 +19358,7 @@ ${rawToken}
     }
     const providedSha = Buffer.from(sha256(provided), "hex");
     const storedSha = Buffer.from(this.db.bootstrapTokenSha256, "hex");
-    if (providedSha.length !== storedSha.length || !crypto15.timingSafeEqual(providedSha, storedSha)) {
+    if (providedSha.length !== storedSha.length || !crypto16.timingSafeEqual(providedSha, storedSha)) {
       throw new Error("BOOTSTRAP_TOKEN_INVALID: Token de bootstrap incorreto.");
     }
     const cleanName = (params.name || "").trim();
@@ -18853,15 +19374,18 @@ ${rawToken}
       throw new Error("A senha deve possuir pelo menos 10 caracteres.");
     }
     const now = (/* @__PURE__ */ new Date()).toISOString();
-    const totpSecret = params.enableMfa ? base32Encode(crypto15.randomBytes(20)) : null;
+    const totpSecret = params.enableMfa ? base32Encode(crypto16.randomBytes(20)) : null;
+    const recoveryGen = totpSecret ? generateRecoveryCodesSet(8) : null;
     const adminUser = {
-      id: `usr-${crypto15.randomUUID().slice(0, 8)}`,
+      id: `usr-${crypto16.randomUUID().slice(0, 8)}`,
       name: cleanName,
       email: cleanEmail,
       role: "ADMIN",
       passwordHash: hashPassword(cleanPassword),
       mfaEnabled: Boolean(params.enableMfa),
-      totpSecretBase32: totpSecret,
+      totpSecretBase32: totpSecret ? this.encryptSecretAtRest(totpSecret) : null,
+      recoveryCodeHashes: recoveryGen ? recoveryGen.codeHashes : [],
+      lastAcceptedTotpStep: null,
       disabled: false,
       failedLoginAttempts: 0,
       lockedUntil: null,
@@ -18901,7 +19425,10 @@ ${rawToken}
       ...totpSecret ? {
         totpSetup: {
           secretBase32: totpSecret,
-          otpauthUri: `otpauth://totp/WinHood:${encodeURIComponent(cleanEmail)}?secret=${totpSecret}&issuer=WinHood`
+          secret: totpSecret,
+          otpauthUri: `otpauth://totp/WinHood:${encodeURIComponent(cleanEmail)}?secret=${totpSecret}&issuer=WinHood`,
+          otpauthUrl: `otpauth://totp/WinHood:${encodeURIComponent(cleanEmail)}?secret=${totpSecret}&issuer=WinHood`,
+          recoveryCodes: recoveryGen?.plaintextCodes || []
         }
       } : {}
     };
@@ -18950,25 +19477,45 @@ ${rawToken}
       this.save();
       throw new Error("AUTH_INVALID_CREDENTIALS: Credenciais inv\xE1lidas.");
     }
+    const plainTotpSecret = this.decryptSecretAtRest(user.totpSecretBase32);
     let mfaVerified = !user.mfaEnabled;
-    if (user.mfaEnabled && user.totpSecretBase32 && params.totpCode) {
-      if (!verifyTotpCode(user.totpSecretBase32, params.totpCode)) {
+    if (user.mfaEnabled && plainTotpSecret && params.totpCode) {
+      const check = verifyTotpCodeWithStep(
+        plainTotpSecret,
+        params.totpCode,
+        user.lastAcceptedTotpStep
+      );
+      if (check.replayRejected) {
+        user.failedLoginAttempts += 1;
+        this.save();
+        throw new Error(
+          "AUTH_TOTP_REPLAY: C\xF3digo TOTP j\xE1 utilizado nesta janela de 30s. Aguarde o pr\xF3ximo token."
+        );
+      }
+      if (!check.valid) {
         user.failedLoginAttempts += 1;
         this.save();
         throw new Error("AUTH_INVALID_MFA: C\xF3digo TOTP MFA inv\xE1lido.");
       }
+      user.lastAcceptedTotpStep = check.matchedStep;
       mfaVerified = true;
     }
     user.failedLoginAttempts = 0;
     user.lockedUntil = null;
     user.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    if (user.totpSecretBase32 && !user.totpSecretBase32.startsWith("whvault:v1:")) {
+      user.totpSecretBase32 = this.encryptSecretAtRest(user.totpSecretBase32);
+    }
+    const trustDevice = Boolean(params.trustDevice);
     const { sessionId, session } = this.createSessionRecord(
       user,
       mfaVerified,
       ipAddress,
-      params.userAgent || "unknown"
+      params.userAgent || "unknown",
+      { trustDevice }
     );
     this.save();
+    const mfaRequired = user.mfaEnabled && !mfaVerified;
     return {
       user: {
         id: user.id,
@@ -18980,54 +19527,196 @@ ${rawToken}
       },
       sessionId,
       csrfToken: session.csrfToken,
-      mfaRequired: user.mfaEnabled && !mfaVerified
+      mfaRequired,
+      requiresTotp: mfaRequired,
+      ...mfaRequired ? { preAuthToken: this.createPreAuthToken(user.id, user.email, trustDevice) } : {},
+      trustDevice,
+      serverTimeIso: (/* @__PURE__ */ new Date()).toISOString(),
+      totpPeriodSeconds: 30
     };
   }
-  verifySessionMfa(sessionId, totpCode) {
+  authenticateWithTotpPreAuth(params) {
+    const ipAddress = params.ipAddress || "127.0.0.1";
+    this.checkIpRateLimit(ipAddress);
+    const verifiedChallenge = this.verifyPreAuthToken(params.preAuthToken);
+    const user = this.db.users.find((u) => u.id === verifiedChallenge.uid);
+    if (!user || user.disabled || !user.mfaEnabled) {
+      throw new Error("AUTH_INVALID_MFA: Conta indispon\xEDvel ou MFA n\xE3o configurado.");
+    }
+    let usedRecoveryCode = false;
+    const candidateRecovery = (params.recoveryCode || "").trim();
+    const candidateTotp = (params.totpCode || "").trim();
+    if (candidateRecovery) {
+      if (!this.tryConsumeRecoveryCode(user, candidateRecovery)) {
+        user.failedLoginAttempts += 1;
+        this.recordIpFailure(ipAddress);
+        this.save();
+        throw new Error("AUTH_INVALID_RECOVERY_CODE: C\xF3digo de recupera\xE7\xE3o inv\xE1lido ou j\xE1 utilizado.");
+      }
+      usedRecoveryCode = true;
+    } else {
+      const plainTotpSecret = this.decryptSecretAtRest(user.totpSecretBase32);
+      if (!plainTotpSecret) {
+        throw new Error("AUTH_INVALID_MFA: Segredo TOTP n\xE3o localizado no cofre.");
+      }
+      const check = verifyTotpCodeWithStep(
+        plainTotpSecret,
+        candidateTotp,
+        user.lastAcceptedTotpStep
+      );
+      if (check.replayRejected) {
+        throw new Error(
+          "AUTH_TOTP_REPLAY: C\xF3digo TOTP j\xE1 utilizado nesta janela de 30s. Aguarde o pr\xF3ximo token."
+        );
+      }
+      if (!check.valid) {
+        user.failedLoginAttempts += 1;
+        this.recordIpFailure(ipAddress);
+        this.save();
+        throw new Error("AUTH_INVALID_MFA: C\xF3digo TOTP inv\xE1lido.");
+      }
+      user.lastAcceptedTotpStep = check.matchedStep;
+    }
+    user.failedLoginAttempts = 0;
+    user.lockedUntil = null;
+    user.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    const effectiveTrustDevice = typeof params.trustDevice === "boolean" ? params.trustDevice : verifiedChallenge.trustDevice;
+    const { sessionId, session } = this.createSessionRecord(
+      user,
+      true,
+      ipAddress,
+      params.userAgent || "unknown",
+      { trustDevice: effectiveTrustDevice }
+    );
+    this.save();
+    return {
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        mfaEnabled: user.mfaEnabled,
+        mfaVerified: true
+      },
+      sessionId,
+      csrfToken: session.csrfToken,
+      trustDevice: effectiveTrustDevice,
+      usedRecoveryCode,
+      remainingRecoveryCodesCount: user.recoveryCodeHashes?.length ?? 0
+    };
+  }
+  verifySessionMfa(sessionId, totpCode, opts) {
     const verified = this.validateSession(sessionId, { allowPendingMfa: true });
     if (!verified) {
       throw new Error("AUTH_SESSION_INVALID: Sess\xE3o inv\xE1lida ou expirada.");
     }
     const user = this.db.users.find((u) => u.id === verified.user.id);
-    if (!user || !user.mfaEnabled || !user.totpSecretBase32) {
+    const plainSecret = this.decryptSecretAtRest(user?.totpSecretBase32);
+    if (!user || !user.mfaEnabled || !plainSecret) {
       throw new Error("MFA n\xE3o habilitado para este usu\xE1rio.");
     }
-    if (!verifyTotpCode(user.totpSecretBase32, totpCode)) {
-      throw new Error("AUTH_INVALID_MFA: C\xF3digo TOTP inv\xE1lido.");
+    let usedRecoveryCode = false;
+    if (opts?.recoveryCode && opts.recoveryCode.trim().length > 0) {
+      if (!this.tryConsumeRecoveryCode(user, opts.recoveryCode)) {
+        throw new Error("AUTH_INVALID_RECOVERY_CODE: C\xF3digo de recupera\xE7\xE3o inv\xE1lido ou j\xE1 utilizado.");
+      }
+      usedRecoveryCode = true;
+    } else {
+      const check = verifyTotpCodeWithStep(
+        plainSecret,
+        totpCode,
+        user.lastAcceptedTotpStep
+      );
+      if (check.replayRejected) {
+        throw new Error(
+          "AUTH_TOTP_REPLAY: C\xF3digo TOTP j\xE1 utilizado nesta janela de 30s. Aguarde o pr\xF3ximo token."
+        );
+      }
+      if (!check.valid) {
+        throw new Error("AUTH_INVALID_MFA: C\xF3digo TOTP inv\xE1lido.");
+      }
+      user.lastAcceptedTotpStep = check.matchedStep;
+    }
+    if (user.totpSecretBase32 && !user.totpSecretBase32.startsWith("whvault:v1:")) {
+      user.totpSecretBase32 = this.encryptSecretAtRest(user.totpSecretBase32);
+    }
+    if (opts?.trustDevice) {
+      const nowMs = Date.now();
+      verified.session.trustDevice = true;
+      verified.session.idleTimeoutMs = _AuthService.SESSION_TRUSTED_DEVICE_MS;
+      verified.session.expiresAt = new Date(nowMs + _AuthService.SESSION_TRUSTED_DEVICE_MS).toISOString();
     }
     verified.session.mfaVerified = true;
     verified.session.lastActivityAt = (/* @__PURE__ */ new Date()).toISOString();
     this.save();
     return {
       ...verified.user,
-      mfaVerified: true
+      mfaVerified: true,
+      usedRecoveryCode,
+      remainingRecoveryCodesCount: user.recoveryCodeHashes?.length ?? 0
     };
   }
   setupMfaForUser(userId) {
     const user = this.db.users.find((u) => u.id === userId);
     if (!user) throw new Error("Usu\xE1rio n\xE3o encontrado.");
-    const secretBase32 = base32Encode(crypto15.randomBytes(20));
-    user.totpSecretBase32 = secretBase32;
+    const secretBase32 = base32Encode(crypto16.randomBytes(20));
+    user.pendingTotpSecretBase32 = this.encryptSecretAtRest(secretBase32);
+    user.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    this.save();
+    const otpauthUri = `otpauth://totp/WinHood:${encodeURIComponent(user.email)}?secret=${secretBase32}&issuer=WinHood&algorithm=SHA1&digits=6&period=30`;
+    return {
+      secretBase32,
+      secret: secretBase32,
+      otpauthUri,
+      otpauthUrl: otpauthUri
+    };
+  }
+  confirmMfaEnrollment(userId, totpCode) {
+    const user = this.db.users.find((u) => u.id === userId);
+    if (!user) throw new Error("Usu\xE1rio n\xE3o encontrado.");
+    const pendingPlain = this.decryptSecretAtRest(user.pendingTotpSecretBase32);
+    if (!pendingPlain) {
+      throw new Error("Nenhum setup de MFA pendente encontrado. Solicite a configura\xE7\xE3o primeiro.");
+    }
+    const check = verifyTotpCodeWithStep(pendingPlain, totpCode, null);
+    if (!check.valid) {
+      throw new Error("AUTH_INVALID_MFA: C\xF3digo TOTP inv\xE1lido. O MFA n\xE3o foi ativado.");
+    }
+    const { plaintextCodes, codeHashes } = generateRecoveryCodesSet(8);
+    user.totpSecretBase32 = this.encryptSecretAtRest(pendingPlain);
     user.mfaEnabled = true;
+    user.pendingTotpSecretBase32 = null;
+    user.lastAcceptedTotpStep = check.matchedStep;
+    user.recoveryCodeHashes = codeHashes;
     user.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     this.save();
     return {
-      secretBase32,
-      otpauthUri: `otpauth://totp/WinHood:${encodeURIComponent(user.email)}?secret=${secretBase32}&issuer=WinHood`
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      mfaEnabled: true,
+      mfaVerified: true,
+      recoveryCodes: plaintextCodes
     };
   }
-  createSessionRecord(user, mfaVerified, ipAddress, userAgent) {
-    const sessionId = crypto15.randomBytes(32).toString("hex");
+  createSessionRecord(user, mfaVerified, ipAddress, userAgent, opts) {
+    const sessionId = crypto16.randomBytes(32).toString("hex");
     const nowMs = Date.now();
+    const trustDevice = Boolean(opts?.trustDevice);
+    const absoluteMs = trustDevice ? _AuthService.SESSION_TRUSTED_DEVICE_MS : _AuthService.SESSION_ABSOLUTE_MS;
+    const idleTimeoutMs = trustDevice ? _AuthService.SESSION_TRUSTED_DEVICE_MS : _AuthService.SESSION_IDLE_MS;
     const session = {
       sessionIdHash: sha256(sessionId),
       userId: user.id,
       role: user.role,
-      csrfToken: crypto15.randomBytes(24).toString("hex"),
+      csrfToken: crypto16.randomBytes(24).toString("hex"),
       mfaVerified,
+      trustDevice,
+      idleTimeoutMs,
       createdAt: new Date(nowMs).toISOString(),
       lastActivityAt: new Date(nowMs).toISOString(),
-      expiresAt: new Date(nowMs + _AuthService.SESSION_ABSOLUTE_MS).toISOString(),
+      expiresAt: new Date(nowMs + absoluteMs).toISOString(),
       revoked: false,
       ipAddress,
       userAgent
@@ -19047,7 +19736,8 @@ ${rawToken}
       this.save();
       return null;
     }
-    if (nowMs - Date.parse(session.lastActivityAt) > _AuthService.SESSION_IDLE_MS) {
+    const effectiveIdleMs = session.idleTimeoutMs || (session.trustDevice ? _AuthService.SESSION_TRUSTED_DEVICE_MS : _AuthService.SESSION_IDLE_MS);
+    if (nowMs - Date.parse(session.lastActivityAt) > effectiveIdleMs) {
       session.revoked = true;
       this.save();
       return null;
@@ -19129,14 +19819,17 @@ ${rawToken}
       throw new Error("E-mail j\xE1 cadastrado.");
     }
     const now = (/* @__PURE__ */ new Date()).toISOString();
+    const rawAdminCreatedTotp = params.enableMfa ? base32Encode(crypto16.randomBytes(20)) : null;
     const user = {
-      id: `usr-${crypto15.randomUUID().slice(0, 8)}`,
+      id: `usr-${crypto16.randomUUID().slice(0, 8)}`,
       name: params.name.trim(),
       email: cleanEmail,
       role: params.role,
       passwordHash: hashPassword(params.password),
       mfaEnabled: Boolean(params.enableMfa),
-      totpSecretBase32: params.enableMfa ? base32Encode(crypto15.randomBytes(20)) : null,
+      totpSecretBase32: rawAdminCreatedTotp ? this.encryptSecretAtRest(rawAdminCreatedTotp) : null,
+      recoveryCodeHashes: [],
+      lastAcceptedTotpStep: null,
       disabled: false,
       failedLoginAttempts: 0,
       lockedUntil: null,
@@ -19154,6 +19847,98 @@ ${rawToken}
       role: user.role,
       mfaEnabled: user.mfaEnabled,
       mfaVerified: false
+    };
+  }
+  registerAccount(params) {
+    const ipAddress = params.ipAddress || "127.0.0.1";
+    this.checkIpRateLimit(ipAddress);
+    const cleanName = (params.name || "").trim();
+    const cleanEmail = (params.email || "").trim().toLowerCase();
+    const cleanPassword = params.password || "";
+    if (cleanName.length < 2) {
+      throw new Error("INVALID_NAME: O nome completo deve possuir pelo menos 2 caracteres.");
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      throw new Error("INVALID_EMAIL: Informe um endere\xE7o de e-mail v\xE1lido.");
+    }
+    if (cleanPassword.length < 10) {
+      throw new Error("WEAK_PASSWORD: A senha deve possuir pelo menos 10 caracteres.");
+    }
+    if (this.db.users.some((u) => u.email === cleanEmail)) {
+      this.recordIpFailure(ipAddress);
+      throw new Error("EMAIL_ALREADY_EXISTS: Este e-mail j\xE1 est\xE1 cadastrado na plataforma.");
+    }
+    const requestedRole = params.role || "SECURITY_LEAD";
+    if (requestedRole === "ADMIN") {
+      throw new Error(
+        "ROLE_ELEVATION_BLOCKED: O perfil ADMIN exige provisionamento via Bootstrap ou atribui\xE7\xE3o por um Administrador existente."
+      );
+    }
+    const allowedSelfRoles = ["SECURITY_LEAD", "QA_ENGINEER", "AUDITOR"];
+    if (!allowedSelfRoles.includes(requestedRole)) {
+      throw new Error("INVALID_ROLE: Perfil de acesso selecionado \xE9 inv\xE1lido.");
+    }
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const isFirstUser = this.db.users.length === 0;
+    const totpSecret = params.enableMfa ? base32Encode(crypto16.randomBytes(20)) : null;
+    const recoveryGen = totpSecret ? generateRecoveryCodesSet(8) : null;
+    const newUser = {
+      id: `usr-${crypto16.randomUUID().slice(0, 8)}`,
+      name: cleanName,
+      email: cleanEmail,
+      role: requestedRole,
+      passwordHash: hashPassword(cleanPassword),
+      mfaEnabled: Boolean(params.enableMfa),
+      totpSecretBase32: totpSecret ? this.encryptSecretAtRest(totpSecret) : null,
+      recoveryCodeHashes: recoveryGen ? recoveryGen.codeHashes : [],
+      lastAcceptedTotpStep: null,
+      disabled: false,
+      failedLoginAttempts: 0,
+      lockedUntil: null,
+      recoveryTokenSha256: null,
+      recoveryExpiresAt: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    this.db.users.push(newUser);
+    if (isFirstUser) {
+      this.db.bootstrapTokenSha256 = null;
+      this.db.bootstrapTokenExpiresAt = null;
+      this.db.bootstrapCompletedAt = now;
+      try {
+        if (fs12.existsSync(this.bootstrapTokenFilePath)) {
+          fs12.unlinkSync(this.bootstrapTokenFilePath);
+        }
+      } catch {
+      }
+    }
+    const { sessionId, session } = this.createSessionRecord(
+      newUser,
+      !newUser.mfaEnabled,
+      ipAddress,
+      params.userAgent || "unknown"
+    );
+    this.save();
+    return {
+      user: {
+        id: newUser.id,
+        name: newUser.name,
+        email: newUser.email,
+        role: newUser.role,
+        mfaEnabled: newUser.mfaEnabled,
+        mfaVerified: session.mfaVerified
+      },
+      sessionId,
+      csrfToken: session.csrfToken,
+      ...totpSecret ? {
+        totpSetup: {
+          secretBase32: totpSecret,
+          secret: totpSecret,
+          otpauthUri: `otpauth://totp/WinHood:${encodeURIComponent(cleanEmail)}?secret=${totpSecret}&issuer=WinHood`,
+          otpauthUrl: `otpauth://totp/WinHood:${encodeURIComponent(cleanEmail)}?secret=${totpSecret}&issuer=WinHood`,
+          recoveryCodes: recoveryGen?.plaintextCodes || []
+        }
+      } : {}
     };
   }
   listUsers() {
@@ -19190,7 +19975,7 @@ ${rawToken}
     if (!user) {
       return { recoveryFilePath: null };
     }
-    const token = `wh-rec-${crypto15.randomBytes(20).toString("base64url")}`;
+    const token = `wh-rec-${crypto16.randomBytes(20).toString("base64url")}`;
     const expiresAt = new Date(Date.now() + 15 * 60 * 1e3).toISOString();
     user.recoveryTokenSha256 = sha256(token);
     user.recoveryExpiresAt = expiresAt;
@@ -19212,7 +19997,7 @@ ${token}
     }
     const provided = Buffer.from(sha256((params.recoveryToken || "").trim()), "hex");
     const stored = Buffer.from(user.recoveryTokenSha256, "hex");
-    if (provided.length !== stored.length || !crypto15.timingSafeEqual(provided, stored)) {
+    if (provided.length !== stored.length || !crypto16.timingSafeEqual(provided, stored)) {
       throw new Error("Token de recupera\xE7\xE3o inv\xE1lido.");
     }
     if ((params.newPassword || "").length < 10) {
@@ -19235,11 +20020,11 @@ ${token}
 };
 
 // src/storage/PersistentDatabaseManager.ts
-import crypto16 from "node:crypto";
+import crypto17 from "node:crypto";
 import fs13 from "node:fs";
 import path14 from "node:path";
 function sha256Hex2(raw) {
-  return crypto16.createHash("sha256").update(raw, "utf8").digest("hex");
+  return crypto17.createHash("sha256").update(raw, "utf8").digest("hex");
 }
 function fsyncAndRename(tmpPath, targetPath) {
   const fd = fs13.openSync(tmpPath, "r+");
@@ -19282,10 +20067,10 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
       } catch {
       }
     }
-    const tmpFile = `${targetPath}.${process.pid}.${crypto16.randomBytes(4).toString("hex")}.tmp`;
+    const tmpFile = `${targetPath}.${process.pid}.${crypto17.randomBytes(4).toString("hex")}.tmp`;
     fs13.writeFileSync(tmpFile, serialized, { encoding: "utf8", mode: 384 });
     fsyncAndRename(tmpFile, targetPath);
-    const tmpSha = `${checksumPath}.${process.pid}.${crypto16.randomBytes(4).toString("hex")}.tmp`;
+    const tmpSha = `${checksumPath}.${process.pid}.${crypto17.randomBytes(4).toString("hex")}.tmp`;
     fs13.writeFileSync(tmpSha, `${checksum}
 `, { encoding: "utf8", mode: 384 });
     fsyncAndRename(tmpSha, checksumPath);
@@ -19373,13 +20158,298 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
   }
 };
 
+// src/services/backup/ProjectBackupService.ts
+import fs14 from "node:fs";
+import path15 from "node:path";
+import crypto18 from "node:crypto";
+var BACKUP_ID_ALLOWLIST = /^bkp-\d+-[a-f0-9]{8}$/i;
+var MAX_BACKUP_ID_LENGTH = 128;
+var ProjectBackupService = class {
+  constructor(dataDir) {
+    const root = dataDir || resolveWinHoodDataRoot();
+    this.backupsRootDir = path15.resolve(root, "backups", "projects");
+    if (!fs14.existsSync(this.backupsRootDir)) {
+      fs14.mkdirSync(this.backupsRootDir, { recursive: true, mode: 448 });
+    }
+  }
+  computeSha256(buf) {
+    return crypto18.createHash("sha256").update(buf).digest("hex");
+  }
+  assertSafeBackupId(backupId) {
+    if (typeof backupId !== "string") {
+      throw new Error("INVALID_BACKUP_ID: O identificador do backup deve ser uma string v\xE1lida.");
+    }
+    const trimmed = backupId.trim();
+    if (!trimmed || trimmed.length > MAX_BACKUP_ID_LENGTH || trimmed.includes("\0")) {
+      throw new Error("INVALID_BACKUP_ID: Identificador de backup vazio ou com tamanho inv\xE1lido.");
+    }
+    if (!BACKUP_ID_ALLOWLIST.test(trimmed)) {
+      throw new Error(
+        `INVALID_BACKUP_ID: Formato de backupId n\xE3o autorizado (${trimmed.slice(0, 32)}).`
+      );
+    }
+    const rootResolved = path15.resolve(this.backupsRootDir);
+    const resolvedTarget = path15.resolve(rootResolved, trimmed);
+    const expectedPrefix = rootResolved.endsWith(path15.sep) ? rootResolved : `${rootResolved}${path15.sep}`;
+    if (!resolvedTarget.startsWith(expectedPrefix) || path15.dirname(resolvedTarget) !== rootResolved) {
+      throw new Error(
+        "PATH_TRAVERSAL_BLOCKED: Caminho do backup fora do diret\xF3rio isolado autorizado."
+      );
+    }
+    return trimmed;
+  }
+  resolveBackupDirectory(backupId) {
+    const safeId = this.assertSafeBackupId(backupId);
+    const rootResolved = path15.resolve(this.backupsRootDir);
+    const targetDir = path15.resolve(rootResolved, safeId);
+    const expectedPrefix = rootResolved.endsWith(path15.sep) ? rootResolved : `${rootResolved}${path15.sep}`;
+    if (!targetDir.startsWith(expectedPrefix) || path15.dirname(targetDir) !== rootResolved) {
+      throw new Error(
+        "PATH_TRAVERSAL_BLOCKED: Resolu\xE7\xE3o de diret\xF3rio fora do boundary de backups."
+      );
+    }
+    return targetDir;
+  }
+  resolveSafeChildPath(baseDir, rawRelativePath) {
+    if (typeof rawRelativePath !== "string" || rawRelativePath.length === 0 || rawRelativePath.includes("\0")) {
+      throw new Error("PATH_TRAVERSAL_BLOCKED: Caminho de arquivo inv\xE1lido no pacote de backup.");
+    }
+    const cleaned = rawRelativePath.replace(/^[/\\]+/, "").replace(/\\/g, "/");
+    const segments = cleaned.split("/").filter(Boolean);
+    if (segments.length === 0 || segments.some((seg) => seg === "." || seg === ".." || seg.includes(":"))) {
+      throw new Error(
+        `PATH_TRAVERSAL_BLOCKED: Segmento de caminho proibido no pacote (${rawRelativePath}).`
+      );
+    }
+    const rootResolved = path15.resolve(baseDir);
+    const absPath = path15.resolve(rootResolved, ...segments);
+    const expectedPrefix = rootResolved.endsWith(path15.sep) ? rootResolved : `${rootResolved}${path15.sep}`;
+    if (!absPath.startsWith(expectedPrefix)) {
+      throw new Error(
+        `PATH_TRAVERSAL_BLOCKED: Tentativa de acesso fora do diret\xF3rio isolado (${rawRelativePath}).`
+      );
+    }
+    return {
+      absPath,
+      relPathNormalized: segments.join("/")
+    };
+  }
+  createBackup(project, softwares, sourceFilesMap) {
+    const backupId = `bkp-${Date.now()}-${crypto18.randomBytes(4).toString("hex")}`;
+    const backupDir = this.resolveBackupDirectory(backupId);
+    fs14.mkdirSync(backupDir, { recursive: true, mode: 448 });
+    const filesSha256 = {};
+    let totalSizeBytes = 0;
+    let filesCount = 0;
+    const metaPayload = JSON.stringify({ project, softwares }, null, 2);
+    const metaBuf = Buffer.from(metaPayload, "utf8");
+    const metaRelPath = "metadata.json";
+    const metaAbsPath = this.resolveSafeChildPath(backupDir, metaRelPath).absPath;
+    fs14.writeFileSync(metaAbsPath, metaBuf);
+    filesSha256[metaRelPath] = this.computeSha256(metaBuf);
+    totalSizeBytes += metaBuf.length;
+    filesCount += 1;
+    if (sourceFilesMap && typeof sourceFilesMap === "object") {
+      const srcDir = this.resolveSafeChildPath(backupDir, "source_files").absPath;
+      fs14.mkdirSync(srcDir, { recursive: true, mode: 448 });
+      for (const [filePath, content] of Object.entries(sourceFilesMap)) {
+        const { absPath, relPathNormalized } = this.resolveSafeChildPath(srcDir, filePath);
+        fs14.mkdirSync(path15.dirname(absPath), { recursive: true, mode: 448 });
+        const fileBuf = Buffer.from(String(content || ""), "utf8");
+        fs14.writeFileSync(absPath, fileBuf);
+        const relKey = `source_files/${relPathNormalized}`;
+        filesSha256[relKey] = this.computeSha256(fileBuf);
+        totalSizeBytes += fileBuf.length;
+        filesCount += 1;
+      }
+    }
+    const manifest = {
+      backupId,
+      projectId: project.id,
+      projectName: project.name,
+      createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+      schemaVersion: 1,
+      formatVersion: "WINHOOD-BACKEND-v3.0",
+      softwaresCount: softwares.length,
+      filesCount,
+      totalSizeBytes,
+      filesSha256,
+      integrityVerified: true
+    };
+    const manifestBuf = Buffer.from(JSON.stringify(manifest, null, 2), "utf8");
+    manifest.manifestSha256 = this.computeSha256(manifestBuf);
+    const manifestAbsPath = this.resolveSafeChildPath(backupDir, "manifest.json").absPath;
+    fs14.writeFileSync(manifestAbsPath, JSON.stringify(manifest, null, 2), "utf8");
+    return manifest;
+  }
+  listBackups() {
+    if (!fs14.existsSync(this.backupsRootDir)) return [];
+    const entries = fs14.readdirSync(this.backupsRootDir, { withFileTypes: true });
+    const summaries = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      let backupDir;
+      try {
+        backupDir = this.resolveBackupDirectory(entry.name);
+      } catch {
+        continue;
+      }
+      const manifestPath = path15.join(backupDir, "manifest.json");
+      if (!fs14.existsSync(manifestPath)) continue;
+      try {
+        const raw = fs14.readFileSync(manifestPath, "utf8");
+        const m = JSON.parse(raw);
+        summaries.push({
+          backupId: m.backupId || entry.name,
+          projectId: m.projectId,
+          projectName: m.projectName,
+          createdAt: m.createdAt,
+          filesCount: m.filesCount,
+          totalSizeBytes: m.totalSizeBytes,
+          integrityVerified: m.integrityVerified
+        });
+      } catch {
+      }
+    }
+    summaries.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+    return summaries;
+  }
+  verifyBackup(backupId) {
+    this.assertSafeBackupId(backupId);
+    const backupDir = this.resolveBackupDirectory(backupId);
+    const manifestPath = path15.join(backupDir, "manifest.json");
+    const errors = [];
+    if (!fs14.existsSync(manifestPath)) {
+      return {
+        valid: false,
+        manifest: null,
+        errors: ["MANIFEST_NOT_FOUND: Arquivo manifest.json ausente."]
+      };
+    }
+    let manifest;
+    try {
+      manifest = JSON.parse(fs14.readFileSync(manifestPath, "utf8"));
+    } catch {
+      return {
+        valid: false,
+        manifest: null,
+        errors: ["MANIFEST_CORRUPTED: N\xE3o foi poss\xEDvel decodificar o JSON do manifesto."]
+      };
+    }
+    if (!manifest.filesSha256 || typeof manifest.filesSha256 !== "object") {
+      errors.push("INVALID_MANIFEST: Dicion\xE1rio filesSha256 ausente no manifesto.");
+      return { valid: false, manifest, errors };
+    }
+    for (const [relPath, expectedHash] of Object.entries(manifest.filesSha256)) {
+      let targetPath;
+      try {
+        targetPath = this.resolveSafeChildPath(backupDir, relPath).absPath;
+      } catch (err) {
+        errors.push(err?.message || `PATH_TRAVERSAL_BLOCKED: ${relPath}`);
+        continue;
+      }
+      if (!fs14.existsSync(targetPath)) {
+        errors.push(
+          `FILE_MISSING: Arquivo documentado no manifesto n\xE3o foi encontrado: ${relPath}`
+        );
+        continue;
+      }
+      try {
+        const fileBuf = fs14.readFileSync(targetPath);
+        const actualHash = this.computeSha256(fileBuf);
+        if (actualHash !== expectedHash) {
+          errors.push(
+            `HASH_MISMATCH: O arquivo ${relPath} foi modificado ou corrompido (esperado ${expectedHash.slice(0, 10)}..., obtido ${actualHash.slice(0, 10)}...).`
+          );
+        }
+      } catch (err) {
+        errors.push(`READ_ERROR: Falha ao ler arquivo ${relPath}: ${err?.message}`);
+      }
+    }
+    const valid = errors.length === 0;
+    return { valid, manifest, errors };
+  }
+  restoreBackup(backupId) {
+    this.assertSafeBackupId(backupId);
+    const verification = this.verifyBackup(backupId);
+    if (!verification.valid || !verification.manifest) {
+      throw new Error(
+        `BACKUP_INTEGRITY_FAILED: Imposs\xEDvel restaurar backup corrompido ou inv\xE1lido. Erros: ${verification.errors.join(" | ")}`
+      );
+    }
+    const backupDir = this.resolveBackupDirectory(backupId);
+    const metaPath = this.resolveSafeChildPath(backupDir, "metadata.json").absPath;
+    if (!fs14.existsSync(metaPath)) {
+      throw new Error("METADATA_NOT_FOUND: metadata.json ausente no backup.");
+    }
+    const metaRaw = JSON.parse(fs14.readFileSync(metaPath, "utf8"));
+    const oldProj = metaRaw.project;
+    const oldSoftwares = metaRaw.softwares || [];
+    const newProjId = `proj-restored-${crypto18.randomUUID().slice(0, 8)}`;
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const restoredProject = {
+      ...oldProj,
+      id: newProjId,
+      name: `${oldProj.name} (Restaurado)`,
+      createdAt: now,
+      updatedAt: now
+    };
+    const restoredSoftwares = oldSoftwares.map((sw) => ({
+      ...sw,
+      id: `sw-restored-${crypto18.randomUUID().slice(0, 8)}`,
+      projectId: newProjId,
+      createdAt: now,
+      updatedAt: now
+    }));
+    const sourceFilesMap = {};
+    const srcDir = this.resolveSafeChildPath(backupDir, "source_files").absPath;
+    if (fs14.existsSync(srcDir)) {
+      const walk = (dir, baseRel = "") => {
+        const items = fs14.readdirSync(dir, { withFileTypes: true });
+        for (const item of items) {
+          if (item.isSymbolicLink()) continue;
+          const rel = baseRel ? `${baseRel}/${item.name}` : item.name;
+          const full = this.resolveSafeChildPath(srcDir, rel).absPath;
+          if (item.isDirectory()) {
+            walk(full, rel);
+          } else if (item.isFile()) {
+            try {
+              sourceFilesMap[rel] = fs14.readFileSync(full, "utf8");
+            } catch {
+            }
+          }
+        }
+      };
+      walk(srcDir);
+    }
+    return { restoredProject, restoredSoftwares, sourceFilesMap };
+  }
+  deleteBackup(backupId) {
+    this.assertSafeBackupId(backupId);
+    const backupDir = this.resolveBackupDirectory(backupId);
+    if (!fs14.existsSync(backupDir)) return false;
+    fs14.rmSync(backupDir, { recursive: true, force: true });
+    return true;
+  }
+};
+
 // src/intelligence/synchronization/ReferenceSynchronizer.ts
-import crypto17 from "node:crypto";
-async function fetchJsonWithHeaders(url, init, timeoutMs = 4500) {
+import crypto19 from "node:crypto";
+async function fetchJsonWithHeaders(url, init, timeoutMs = 4500, allowExplicitLoopback = false) {
+  const ssrf = await SsrfGuard.validateUrl({
+    targetUrl: url,
+    allowExplicitLoopback: allowExplicitLoopback && SsrfGuard.isExplicitLoopbackUrl(url)
+  });
+  if (!ssrf.allowed) {
+    throw new Error(`SSRF_BLOCKED: ${ssrf.reason}`);
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { ...init, signal: controller.signal });
+    const res = await fetch(url, { ...init, redirect: "manual", signal: controller.signal });
+    if (res.status >= 300 && res.status < 400) {
+      throw new Error(`SSRF_REDIRECT_BLOCKED: HTTP ${res.status}`);
+    }
     if (!res.ok) {
       throw new Error(`HTTP ${res.status} ${res.statusText}`);
     }
@@ -19465,7 +20535,7 @@ var ReferenceSynchronizer = class {
               indexedKevCveIdsCount: advisoryCache.kevCveIds.length
             }
           };
-          const sha2562 = crypto17.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto19.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "OSV_DEV") {
@@ -19543,7 +20613,7 @@ var ReferenceSynchronizer = class {
               usedProjectSbom: queryTargets.length > 0
             }
           };
-          const sha2562 = crypto17.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto19.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "NVD_NIST") {
@@ -19592,7 +20662,7 @@ var ReferenceSynchronizer = class {
               cachedCvesCount: Object.keys(advisoryCache.nvdByCve).length
             }
           };
-          const sha2562 = crypto17.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto19.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "FIRST_EPSS") {
@@ -19628,7 +20698,7 @@ var ReferenceSynchronizer = class {
               sampleScores: rows.slice(0, 5)
             }
           };
-          const sha2562 = crypto17.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto19.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "SONARQUBE_CLOUD") {
@@ -19652,7 +20722,7 @@ var ReferenceSynchronizer = class {
               totalTypeScriptRules: scData?.total ?? null
             }
           };
-          const sha2562 = crypto17.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto19.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "SONARQUBE_SERVER") {
@@ -19664,7 +20734,8 @@ var ReferenceSynchronizer = class {
           const { json: statusData, etag } = await fetchJsonWithHeaders(
             `${baseServer}/api/system/status`,
             { headers },
-            2500
+            2500,
+            true
           );
           const updatedBase = {
             ...existing,
@@ -19680,7 +20751,7 @@ var ReferenceSynchronizer = class {
               serverStatus: statusData?.status || "UP"
             }
           };
-          const sha2562 = crypto17.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto19.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "INTERNAL_HISTORY") {
@@ -19692,7 +20763,7 @@ var ReferenceSynchronizer = class {
             isOfflineFallback: false,
             lastError: null
           };
-          const sha2562 = crypto17.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto19.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else {
@@ -19703,7 +20774,7 @@ var ReferenceSynchronizer = class {
             isOfflineFallback: true,
             lastError: null
           };
-          const sha2562 = crypto17.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto19.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           cachedFallbackSources.push(sourceKey);
         }
@@ -19725,16 +20796,16 @@ var ReferenceSynchronizer = class {
 };
 
 // src/validation/GoldenDatasetRunner.ts
-import crypto20 from "node:crypto";
+import crypto22 from "node:crypto";
 
 // src/analyzers/AnalyzerRegistry.ts
-import crypto19 from "node:crypto";
+import crypto21 from "node:crypto";
 
 // src/analyzers/FindingNormalizer.ts
-import crypto18 from "node:crypto";
+import crypto20 from "node:crypto";
 var EvidenceCollector = class {
   static computeCanonicalHash(payload) {
-    return crypto18.createHash("sha256").update(JSON.stringify(payload), "utf8").digest("hex");
+    return crypto20.createHash("sha256").update(JSON.stringify(payload), "utf8").digest("hex");
   }
   static extractContextLines(fileContent, lineNumber, radius = 2) {
     const lines = fileContent.split(/\r?\n/);
@@ -19920,7 +20991,7 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
       filesProcessed: astFilesCount,
       filesFailed: parseResults.filter((p) => (p.errorCount || 0) > 0).length,
       measurementState: astFilesCount > 0 ? "STATIC_DERIVED" : "NOT_MEASURED",
-      rawOutputSha256: crypto19.createHash("sha256").update(JSON.stringify({ findingsCount: findings.length, astFilesCount })).digest("hex")
+      rawOutputSha256: crypto21.createHash("sha256").update(JSON.stringify({ findingsCount: findings.length, astFilesCount })).digest("hex")
     };
     return {
       execution,
@@ -19975,7 +21046,7 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
           filesProcessed: 0,
           filesFailed: 0,
           measurementState: "NOT_MEASURED",
-          rawOutputSha256: crypto19.createHash("sha256").update(`${item.id}:EMPTY_SCOPE`).digest("hex")
+          rawOutputSha256: crypto21.createHash("sha256").update(`${item.id}:EMPTY_SCOPE`).digest("hex")
         },
         findings: [],
         limitations: ["Escopo vazio para an\xE1lise externa."]
@@ -19998,7 +21069,7 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
             filesProcessed: 0,
             filesFailed: 0,
             measurementState: "NOT_MEASURED",
-            rawOutputSha256: crypto19.createHash("sha256").update(`${item.id}:NOT_INSTALLED`).digest("hex")
+            rawOutputSha256: crypto21.createHash("sha256").update(`${item.id}:NOT_INSTALLED`).digest("hex")
           },
           findings: [],
           limitations: [`Bin\xE1rio ${item.name} n\xE3o instalado no host.`]
@@ -20508,7 +21579,7 @@ var GoldenDatasetRunner = class {
     let inconclusiveCases = 0;
     const byLanguageAcc = {};
     const byCategoryAcc = {};
-    const datasetSha256 = crypto20.createHash("sha256").update(JSON.stringify(GOLDEN_DATASET_CORPUS), "utf8").digest("hex");
+    const datasetSha256 = crypto22.createHash("sha256").update(JSON.stringify(GOLDEN_DATASET_CORPUS), "utf8").digest("hex");
     for (const item of GOLDEN_DATASET_CORPUS) {
       const caseStart = performance.now();
       const result = AnalyzerRegistry.runNativeAstAndTaintPipeline({
@@ -20642,7 +21713,7 @@ var GoldenDatasetRunner = class {
       byCategory,
       cases
     };
-    const reportSha256 = crypto20.createHash("sha256").update(JSON.stringify(reportBody), "utf8").digest("hex");
+    const reportSha256 = crypto22.createHash("sha256").update(JSON.stringify(reportBody), "utf8").digest("hex");
     return {
       ...reportBody,
       reportSha256
@@ -20654,8 +21725,8 @@ var GoldenDatasetRunner = class {
 var PORT = Number(process.env.PORT || 3e3);
 var DEFAULT_DATA_DIR = resolveWinHoodDataRoot();
 var DATA_DIR = DEFAULT_DATA_DIR;
-var ISOLATED_ARTIFACTS_DIR = path15.join(DEFAULT_DATA_DIR, "isolated_artifacts");
-var STORE_FILE = path15.join(DEFAULT_DATA_DIR, "winhood_persistent_db.json");
+var ISOLATED_ARTIFACTS_DIR = path16.join(DEFAULT_DATA_DIR, "isolated_artifacts");
+var STORE_FILE = path16.join(DEFAULT_DATA_DIR, "winhood_persistent_db.json");
 function isTestRuntimeEnvironment() {
   return process.env.NODE_ENV === "test" || process.env.WINHOOD_TEST_MODE === "1";
 }
@@ -20851,42 +21922,107 @@ function validateSonarServerOrigin(rawServerUrl, platform) {
   }
   return parsed.origin;
 }
-function ensureDirectories(dataDir = DATA_DIR, artifactsDir = ISOLATED_ARTIFACTS_DIR) {
-  if (!fs14.existsSync(dataDir)) {
-    fs14.mkdirSync(dataDir, { recursive: true });
+async function validateSonarServerOriginSafe(rawServerUrl, platform) {
+  const safeOrigin = validateSonarServerOrigin(rawServerUrl, platform);
+  const ssrf = await SsrfGuard.validateUrl({
+    targetUrl: safeOrigin,
+    allowExplicitLoopback: SsrfGuard.isExplicitLoopbackUrl(safeOrigin)
+  });
+  if (!ssrf.allowed) {
+    throw new Error(ssrf.reason || "URL do servidor Sonar bloqueada pelo SsrfGuard.");
   }
-  if (!fs14.existsSync(artifactsDir)) {
-    fs14.mkdirSync(artifactsDir, { recursive: true });
+  return safeOrigin;
+}
+async function fetchWithTimeoutAndNoRedirect(url, init, timeoutMs = 8e3) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      ...init,
+      redirect: "manual",
+      signal: controller.signal
+    });
+    if (response.status >= 300 && response.status < 400) {
+      throw new Error(`SSRF_REDIRECT_BLOCKED: Redirecionamento HTTP ${response.status} bloqueado.`);
+    }
+    return response;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function createInMemoryRateLimiter(opts) {
+  const buckets = /* @__PURE__ */ new Map();
+  const cleanupTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of buckets.entries()) {
+      if (entry.resetAt <= now) {
+        buckets.delete(key);
+      }
+    }
+  }, Math.max(opts.windowMs, 15e3));
+  cleanupTimer.unref();
+  return (req, res, next) => {
+    const now = Date.now();
+    const actorKey = String(req.authUser?.id || "") || String(req.ip || req.socket?.remoteAddress || "unknown");
+    const compositeKey = `${opts.bucketName}:${actorKey}`;
+    let entry = buckets.get(compositeKey);
+    if (!entry || entry.resetAt <= now) {
+      entry = { count: 0, resetAt: now + opts.windowMs };
+      buckets.set(compositeKey, entry);
+    }
+    entry.count += 1;
+    const remaining = Math.max(0, opts.maxRequests - entry.count);
+    const retryAfterSeconds = Math.max(1, Math.ceil((entry.resetAt - now) / 1e3));
+    res.setHeader("X-RateLimit-Limit", String(opts.maxRequests));
+    res.setHeader("X-RateLimit-Remaining", String(remaining));
+    if (entry.count > opts.maxRequests) {
+      res.setHeader("Retry-After", String(retryAfterSeconds));
+      return res.status(429).json({
+        error: "RATE_LIMITED",
+        bucket: opts.bucketName,
+        retryAfterSeconds,
+        message: `Limite de requisi\xE7\xF5es excedido para ${opts.bucketName}. Tente novamente em ${retryAfterSeconds}s.`
+      });
+    }
+    return next();
+  };
+}
+function ensureDirectories(dataDir = DATA_DIR, artifactsDir = ISOLATED_ARTIFACTS_DIR) {
+  if (!fs15.existsSync(dataDir)) {
+    fs15.mkdirSync(dataDir, { recursive: true });
+  }
+  if (!fs15.existsSync(artifactsDir)) {
+    fs15.mkdirSync(artifactsDir, { recursive: true });
   }
 }
 function writeIsolatedArtifactsToDisk(softwareSlug, filesMap, artifactsDir = ISOLATED_ARTIFACTS_DIR) {
-  ensureDirectories(path15.dirname(artifactsDir), artifactsDir);
+  ensureDirectories(path16.dirname(artifactsDir), artifactsDir);
   const safeSlug = softwareSlug.replace(/[^a-zA-Z0-9_-]/g, "_");
-  const targetDir = path15.resolve(artifactsDir, safeSlug);
-  const rootCanonical = path15.resolve(artifactsDir);
-  if (!targetDir.startsWith(rootCanonical + path15.sep) && targetDir !== rootCanonical) {
+  const targetDir = path16.resolve(artifactsDir, safeSlug);
+  const rootCanonical = path16.resolve(artifactsDir);
+  if (!targetDir.startsWith(rootCanonical + path16.sep) && targetDir !== rootCanonical) {
     throw new Error("Tentativa de Directory Traversal no softwareSlug bloqueada.");
   }
-  if (!fs14.existsSync(targetDir)) {
-    fs14.mkdirSync(targetDir, { recursive: true });
+  if (!fs15.existsSync(targetDir)) {
+    fs15.mkdirSync(targetDir, { recursive: true });
   }
   for (const [relPath, content] of Object.entries(filesMap)) {
     const normalizedRel = relPath.replace(/\\/g, "/");
-    const canonicalTarget = path15.resolve(targetDir, normalizedRel);
-    if (!canonicalTarget.startsWith(targetDir + path15.sep) && canonicalTarget !== targetDir) {
+    const canonicalTarget = path16.resolve(targetDir, normalizedRel);
+    if (!canonicalTarget.startsWith(targetDir + path16.sep) && canonicalTarget !== targetDir) {
       throw new Error(`Tentativa de Path Traversal bloqueada no arquivo: ${relPath}`);
     }
-    const parent = path15.dirname(canonicalTarget);
-    if (!fs14.existsSync(parent)) {
-      fs14.mkdirSync(parent, { recursive: true });
+    const parent = path16.dirname(canonicalTarget);
+    if (!fs15.existsSync(parent)) {
+      fs15.mkdirSync(parent, { recursive: true });
     }
-    fs14.writeFileSync(canonicalTarget, content, "utf8");
+    fs15.writeFileSync(canonicalTarget, content, "utf8");
   }
   return targetDir;
 }
 function createInitialRealWorkspaceState(dataDir = DATA_DIR, dbManager = new PersistentDatabaseManager()) {
-  const artifactsDir = path15.join(dataDir, "isolated_artifacts");
-  const storeFile = path15.join(dataDir, "winhood_persistent_db.json");
+  const artifactsDir = path16.join(dataDir, "isolated_artifacts");
+  const storeFile = path16.join(dataDir, "winhood_persistent_db.json");
   ensureDirectories(dataDir, artifactsDir);
   const nowIso = (/* @__PURE__ */ new Date()).toISOString();
   const projectId = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -21004,7 +22140,7 @@ function createInitialRealWorkspaceState(dataDir = DATA_DIR, dbManager = new Per
   });
   const auditLogs = [
     {
-      id: `aud-${crypto21.randomUUID().slice(0, 8)}`,
+      id: `aud-${crypto23.randomUUID().slice(0, 8)}`,
       timestamp: nowIso,
       actor: "Arquiteto Chefe (admin@winhood.sec)",
       role: "ADMIN",
@@ -21015,7 +22151,7 @@ function createInitialRealWorkspaceState(dataDir = DATA_DIR, dbManager = new Per
       integrityHash: computeSha256(`AUDIT|1|${projectId}|${nowIso}`)
     },
     {
-      id: `aud-${crypto21.randomUUID().slice(0, 8)}`,
+      id: `aud-${crypto23.randomUUID().slice(0, 8)}`,
       timestamp: nowIso,
       actor: "Orquestrador de An\xE1lises WinHood",
       role: "SECURITY_LEAD",
@@ -21051,8 +22187,8 @@ function createInitialRealWorkspaceState(dataDir = DATA_DIR, dbManager = new Per
   return state;
 }
 function createInitialCleanWorkspaceState(dataDir = DATA_DIR, dbManager = new PersistentDatabaseManager()) {
-  const artifactsDir = path15.join(dataDir, "isolated_artifacts");
-  const storeFile = path15.join(dataDir, "winhood_persistent_db.json");
+  const artifactsDir = path16.join(dataDir, "isolated_artifacts");
+  const storeFile = path16.join(dataDir, "winhood_persistent_db.json");
   ensureDirectories(dataDir, artifactsDir);
   const nowIso = (/* @__PURE__ */ new Date()).toISOString();
   const state = {
@@ -21066,7 +22202,7 @@ function createInitialCleanWorkspaceState(dataDir = DATA_DIR, dbManager = new Pe
     adapters: buildFull21SecurityAdaptersCatalog(),
     auditLogs: [
       {
-        id: `aud-${crypto21.randomUUID().slice(0, 8)}`,
+        id: `aud-${crypto23.randomUUID().slice(0, 8)}`,
         timestamp: nowIso,
         actor: "Sistema WinHood Analyzer",
         role: "SYSTEM",
@@ -21092,8 +22228,8 @@ function createInitialCleanWorkspaceState(dataDir = DATA_DIR, dbManager = new Pe
   return state;
 }
 function loadDatabase(dataDir = DATA_DIR, dbManager = new PersistentDatabaseManager()) {
-  const artifactsDir = path15.join(dataDir, "isolated_artifacts");
-  const storeFile = path15.join(dataDir, "winhood_persistent_db.json");
+  const artifactsDir = path16.join(dataDir, "isolated_artifacts");
+  const storeFile = path16.join(dataDir, "winhood_persistent_db.json");
   ensureDirectories(dataDir, artifactsDir);
   const readOutcome = dbManager.readWithChecksumRecovery(storeFile);
   if (readOutcome.data) {
@@ -21245,7 +22381,7 @@ function appendAuditLog(state, action, entityType, entityId, details, actorUser)
   const actorName = actorUser?.name || "Sistema WinHood";
   const actorRole = actorUser?.role || "SYSTEM";
   const entry = {
-    id: `aud-${crypto21.randomUUID().slice(0, 8)}`,
+    id: `aud-${crypto23.randomUUID().slice(0, 8)}`,
     timestamp: nowIso,
     actor: `${actorName} (${actorRole})`,
     role: actorRole,
@@ -21260,11 +22396,29 @@ function appendAuditLog(state, action, entityType, entityId, details, actorUser)
 async function createWinHoodApp(options) {
   const dataDir = resolveWinHoodDataRoot(options?.dataDir);
   ensureWinHoodDirectories(dataDir);
-  const isolatedArtifactsDir = path15.join(dataDir, "isolated_artifacts");
-  const storeFile = path15.join(dataDir, "winhood_persistent_db.json");
+  const isolatedArtifactsDir = path16.join(dataDir, "isolated_artifacts");
+  const storeFile = path16.join(dataDir, "winhood_persistent_db.json");
   const dbManager = new PersistentDatabaseManager();
   const authService = new AuthService(dataDir);
   const app = express();
+  app.set("trust proxy", 1);
+  const backupService = new ProjectBackupService(dataDir);
+  const rateLimitWindowMs = options?.rateLimits?.windowMs ?? 6e4;
+  const ingestionRateLimiter = createInMemoryRateLimiter({
+    bucketName: "ingestion",
+    windowMs: rateLimitWindowMs,
+    maxRequests: options?.rateLimits?.ingestionMax ?? 30
+  });
+  const analysisRateLimiter = createInMemoryRateLimiter({
+    bucketName: "analysis",
+    windowMs: rateLimitWindowMs,
+    maxRequests: options?.rateLimits?.analysisMax ?? 40
+  });
+  const backupRateLimiter = createInMemoryRateLimiter({
+    bucketName: "backup",
+    windowMs: rateLimitWindowMs,
+    maxRequests: options?.rateLimits?.backupMax ?? 30
+  });
   app.disable("x-powered-by");
   app.use((_req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -21329,6 +22483,9 @@ async function createWinHoodApp(options) {
       (r) => r.status === "FAILED" || r.status === "INCOMPLETE"
     ).length;
     const latestRun = db.runs[0] || null;
+    if (latestRun && latestRun.signedManifest) {
+      enforceVerifiedQualityGateOnRun(latestRun);
+    }
     const allFindings = latestRun ? latestRun.findings : [];
     const vulnerabilitiesCount = allFindings.filter(
       (f) => ["SAST", "SCA", "SECRETS", "DAST", "DATABASE"].includes(f.category)
@@ -21393,45 +22550,89 @@ async function createWinHoodApp(options) {
       mfaVerified: false
     };
   };
-  const setSessionCookies = (res, sessionId, csrfToken) => {
-    const maxAgeSec = Math.floor(AuthService.SESSION_ABSOLUTE_MS / 1e3);
+  const resolveCookieSecurityContext = (res) => {
+    const reqObj = res.req;
+    const hostHeader = String(reqObj?.headers?.host || "");
+    const isLoopbackHttp = /^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(hostHeader) && !reqObj?.secure && reqObj?.headers["x-forwarded-proto"] !== "https";
+    const isHttps = !isLoopbackHttp && (Boolean(reqObj?.secure) || reqObj?.headers["x-forwarded-proto"] === "https" || Boolean(reqObj?.headers?.referer?.startsWith("https://")));
+    const isCrossSiteIframe = isHttps && (reqObj?.headers["sec-fetch-site"] === "cross-site" || reqObj?.headers["sec-fetch-dest"] === "iframe");
+    const sameSiteAttr = isCrossSiteIframe ? "SameSite=None; Secure; Partitioned" : `SameSite=Strict${isHttps ? "; Secure" : ""}`;
+    return { sameSiteAttr };
+  };
+  const setSessionCookies = (res, sessionId, csrfToken, opts) => {
+    const { sameSiteAttr } = resolveCookieSecurityContext(res);
+    const maxAgeSec = opts?.trustDevice ? Math.floor(AuthService.SESSION_TRUSTED_DEVICE_MS / 1e3) : Math.floor(AuthService.SESSION_ABSOLUTE_MS / 1e3);
     res.setHeader("Set-Cookie", [
-      `winhood_session=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSec}`,
-      `winhood_csrf=${encodeURIComponent(csrfToken)}; Path=/; SameSite=Lax; Max-Age=${maxAgeSec}`
+      `winhood_session=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; ${sameSiteAttr}; Max-Age=${maxAgeSec}`,
+      `winhood_csrf=${encodeURIComponent(csrfToken)}; Path=/; ${sameSiteAttr}; Max-Age=${maxAgeSec}`
     ]);
+    res.setHeader("X-WinHood-Session-Token", sessionId);
+    res.setHeader("X-WinHood-CSRF-Token", csrfToken);
   };
   const clearSessionCookies = (res) => {
+    const { sameSiteAttr } = resolveCookieSecurityContext(res);
     res.setHeader("Set-Cookie", [
-      "winhood_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
-      "winhood_csrf=; Path=/; SameSite=Lax; Max-Age=0"
+      `winhood_session=; Path=/; HttpOnly; ${sameSiteAttr}; Max-Age=0`,
+      `winhood_csrf=; Path=/; ${sameSiteAttr}; Max-Age=0`
     ]);
   };
-  const allowedOrigins = /* @__PURE__ */ new Set(
-    [
-      "http://localhost:3000",
-      "http://127.0.0.1:3000",
-      ...(process.env.WINHOOD_ALLOWED_ORIGINS || "").split(",").map((s) => s.trim()).filter(Boolean)
-    ]
-  );
-  const isAllowedOrigin = (origin) => {
-    if (!origin) return false;
-    if (allowedOrigins.has(origin)) return true;
-    if (process.env.WINHOOD_RUNTIME_ENV === "ELECTRON_DESKTOP" && /^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(origin)) {
-      return true;
+  const extractSessionTokenFromRequest = (req) => {
+    const cookies = parseCookies(req.headers.cookie);
+    if (cookies.winhood_session && cookies.winhood_session.length >= 32) {
+      return { token: cookies.winhood_session, source: "COOKIE" };
     }
-    return false;
+    const headerSession = typeof req.headers["x-winhood-session"] === "string" ? req.headers["x-winhood-session"].trim() : "";
+    if (headerSession.length >= 32) {
+      return { token: headerSession, source: "BEARER" };
+    }
+    const authHeader = typeof req.headers.authorization === "string" ? req.headers.authorization.trim() : "";
+    if (authHeader.toLowerCase().startsWith("bearer ")) {
+      const bearerTok = authHeader.slice(7).trim();
+      if (bearerTok.length >= 32) {
+        return { token: bearerTok, source: "BEARER" };
+      }
+    }
+    return { token: void 0, source: null };
+  };
+  const allowedOriginMap = /* @__PURE__ */ new Map();
+  for (const candidate of [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    ...(process.env.WINHOOD_ALLOWED_ORIGINS || "").split(",").map((s) => s.trim()).filter(Boolean)
+  ]) {
+    allowedOriginMap.set(candidate, candidate);
+  }
+  const resolveAllowedCorsOrigin = (origin) => {
+    if (!origin) return null;
+    if (process.env.WINHOOD_RUNTIME_ENV === "ELECTRON_DESKTOP") {
+      const m = /^http:\/\/(127\.0\.0\.1|localhost):(\d{1,5})$/.exec(origin);
+      if (!m) return null;
+      const portNum = Number.parseInt(m[2], 10);
+      if (portNum < 1 || portNum > 65535) return null;
+      const safeHostLiteral = m[1] === "127.0.0.1" ? "127.0.0.1" : "localhost";
+      return `http://${safeHostLiteral}:${portNum}`;
+    }
+    return allowedOriginMap.get(origin) ?? null;
   };
   app.use("/api", (req, res, next) => {
-    const origin = typeof req.headers.origin === "string" ? req.headers.origin : "";
-    if (origin && isAllowedOrigin(origin)) {
-      res.setHeader("Access-Control-Allow-Origin", origin);
+    const rawOrigin = typeof req.headers.origin === "string" ? req.headers.origin : "";
+    const canonicalCorsOrigin = resolveAllowedCorsOrigin(rawOrigin);
+    if (canonicalCorsOrigin) {
+      res.setHeader("Access-Control-Allow-Origin", canonicalCorsOrigin);
       res.setHeader("Access-Control-Allow-Credentials", "true");
-      res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-csrf-token, x-winhood-role");
+      res.setHeader(
+        "Access-Control-Allow-Headers",
+        "Content-Type, Authorization, x-csrf-token, x-winhood-session, x-winhood-role"
+      );
+      res.setHeader(
+        "Access-Control-Expose-Headers",
+        "X-WinHood-Session-Token, X-WinHood-CSRF-Token"
+      );
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
       res.setHeader("Vary", "Origin");
     }
     if (req.method === "OPTIONS") {
-      if (origin && !isAllowedOrigin(origin)) {
+      if (rawOrigin && !canonicalCorsOrigin) {
         return res.status(403).json({ error: "ORIGIN_NOT_ALLOWED" });
       }
       return res.status(204).end();
@@ -21445,14 +22646,13 @@ async function createWinHoodApp(options) {
         db.telemetry.failedRequests += 1;
       }
     });
-    const cookies = parseCookies(req.headers.cookie);
-    const sessionToken = cookies.winhood_session;
-    if (sessionToken) {
-      const validated = authService.validateSession(sessionToken);
+    const extracted = extractSessionTokenFromRequest(req);
+    if (extracted.token) {
+      const validated = authService.validateSession(extracted.token);
       if (validated) {
         req.authUser = validated.user;
         req.authSession = validated.session;
-        req.authMethod = "COOKIE";
+        req.authMethod = extracted.source;
       }
     }
     const testHeaderAllowed = !options?.enforceProductionAuth && isTestRuntimeEnvironment();
@@ -21474,10 +22674,12 @@ async function createWinHoodApp(options) {
       "/health",
       "/auth/bootstrap-status",
       "/auth/bootstrap-admin",
+      "/auth/register",
       "/auth/login",
       "/auth/logout",
       "/auth/session",
       "/auth/mfa/verify",
+      "/auth/totp/authenticate",
       "/auth/recovery/request",
       "/auth/recovery/confirm"
     ]);
@@ -21494,7 +22696,7 @@ async function createWinHoodApp(options) {
         const providedCsrf = String(req.headers["x-csrf-token"] || "").trim();
         const expBuf = Buffer.from(expectedCsrf, "utf8");
         const provBuf = Buffer.from(providedCsrf, "utf8");
-        if (!expectedCsrf || expBuf.length !== provBuf.length || !crypto21.timingSafeEqual(expBuf, provBuf)) {
+        if (!expectedCsrf || expBuf.length !== provBuf.length || !crypto23.timingSafeEqual(expBuf, provBuf)) {
           return res.status(403).json({
             error: "CSRF_INVALID",
             message: "Token CSRF ausente ou inv\xE1lido na requisi\xE7\xE3o mut\xE1vel."
@@ -21531,7 +22733,7 @@ async function createWinHoodApp(options) {
       schemaVersion: PersistentDatabaseManager.SCHEMA_VERSION,
       storageIntegrity: loaded.integrityStatus,
       authBootstrapRequired: authService.isBootstrapRequired(),
-      storeFileExists: fs14.existsSync(storeFile),
+      storeFileExists: fs15.existsSync(storeFile),
       projectsCount: db.projects.length,
       softwaresCount: db.softwares.length,
       runsCount: db.runs.length
@@ -21544,7 +22746,7 @@ async function createWinHoodApp(options) {
       isolatedSandboxPath: isolatedArtifactsDir,
       storageEngine: PersistentDatabaseManager.STORAGE_KIND,
       schemaVersion: PersistentDatabaseManager.SCHEMA_VERSION,
-      databaseSizeBytes: fs14.existsSync(storeFile) ? fs14.statSync(storeFile).size : 0,
+      databaseSizeBytes: fs15.existsSync(storeFile) ? fs15.statSync(storeFile).size : 0,
       evidenceRecordsCount: db.runs.reduce((acc, r) => acc + r.evidenceChain.length, 0),
       auditLogsCount: db.auditLogs.length
     });
@@ -21553,7 +22755,7 @@ async function createWinHoodApp(options) {
     const meta = authService.getBootstrapMetadata();
     res.json({
       bootstrapRequired: meta.bootstrapRequired,
-      bootstrapTokenFileHint: path15.relative(process.cwd(), meta.bootstrapTokenFilePath),
+      bootstrapTokenFileHint: path16.relative(process.cwd(), meta.bootstrapTokenFilePath),
       expiresAt: meta.expiresAt
     });
   });
@@ -21583,6 +22785,7 @@ async function createWinHoodApp(options) {
         authenticated: !result.totpSetup,
         mfaRequired: Boolean(result.totpSetup),
         user: result.user,
+        sessionId: result.sessionId,
         csrfToken: result.csrfToken,
         totpSetup: result.totpSetup
       });
@@ -21592,30 +22795,77 @@ async function createWinHoodApp(options) {
       return res.status(status).json({ error: msg });
     }
   });
+  app.post("/api/auth/register", (req, res) => {
+    try {
+      const { name, email, password, role, enableMfa } = req.body || {};
+      const result = authService.registerAccount({
+        name: name || "",
+        email: email || "",
+        password: password || "",
+        role,
+        enableMfa: Boolean(enableMfa),
+        ipAddress: req.ip || "127.0.0.1",
+        userAgent: String(req.headers["user-agent"] || "unknown")
+      });
+      setSessionCookies(res, result.sessionId, result.csrfToken);
+      appendAuditLog(
+        db,
+        "USER_SELF_REGISTERED",
+        "AUTH",
+        result.user.id,
+        `Novo usu\xE1rio "${result.user.email}" cadastrado com perfil ${result.user.role} (MFA=${result.user.mfaEnabled}).`,
+        result.user
+      );
+      saveDatabase(db);
+      return res.status(201).json({
+        authenticated: !result.totpSetup,
+        mfaRequired: Boolean(result.totpSetup),
+        user: result.user,
+        sessionId: result.sessionId,
+        csrfToken: result.csrfToken,
+        totpSetup: result.totpSetup
+      });
+    } catch (err) {
+      const msg = err?.message || "Falha ao realizar cadastro.";
+      const status = msg.startsWith("EMAIL_ALREADY_EXISTS") ? 409 : msg.startsWith("ROLE_ELEVATION_BLOCKED") ? 403 : msg.startsWith("AUTH_RATE_LIMITED") ? 429 : 400;
+      appendAuditLog(db, "AUTH_REGISTER_FAILED", "AUTH", String(req.body?.email || "unknown"), msg);
+      saveDatabase(db);
+      return res.status(status).json({ error: msg });
+    }
+  });
   app.post("/api/auth/login", (req, res) => {
     try {
-      const { email, password, totpCode } = req.body || {};
+      const { email, password, totpCode, trustDevice } = req.body || {};
       const outcome = authService.login({
         email: email || "",
         password: password || "",
         totpCode,
+        trustDevice: Boolean(trustDevice),
         ipAddress: req.ip || "127.0.0.1",
         userAgent: String(req.headers["user-agent"] || "unknown")
       });
-      setSessionCookies(res, outcome.sessionId, outcome.csrfToken);
+      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
+        trustDevice: outcome.trustDevice
+      });
       appendAuditLog(
         db,
         outcome.mfaRequired ? "AUTH_LOGIN_PENDING_MFA" : "AUTH_LOGIN_SUCCESS",
         "AUTH",
         outcome.user.id,
-        `Login efetuado para ${outcome.user.email} (MFA=${outcome.user.mfaEnabled}, verified=${outcome.user.mfaVerified}).`,
+        `Login efetuado para ${outcome.user.email} (MFA=${outcome.user.mfaEnabled}, verified=${outcome.user.mfaVerified}, trustDevice=${outcome.trustDevice}).`,
         outcome.user
       );
       saveDatabase(db);
       return res.json({
         authenticated: !outcome.mfaRequired,
         mfaRequired: outcome.mfaRequired,
+        requiresTotp: outcome.requiresTotp,
+        preAuthToken: outcome.preAuthToken,
+        trustDevice: outcome.trustDevice,
+        serverTimeIso: outcome.serverTimeIso,
+        totpPeriodSeconds: outcome.totpPeriodSeconds,
         user: outcome.user,
+        sessionId: outcome.sessionId,
         csrfToken: outcome.csrfToken
       });
     } catch (err) {
@@ -21627,21 +22877,24 @@ async function createWinHoodApp(options) {
     }
   });
   app.post("/api/auth/logout", (req, res) => {
-    const cookies = parseCookies(req.headers.cookie);
-    if (cookies.winhood_session) {
-      authService.revokeSession(cookies.winhood_session);
+    const sessionToken = extractSessionTokenFromRequest(req).token;
+    if (sessionToken) {
+      authService.revokeSession(sessionToken);
     }
     clearSessionCookies(res);
     return res.json({ ok: true });
   });
   app.get("/api/auth/session", (req, res) => {
-    const cookies = parseCookies(req.headers.cookie);
-    const pendingSession = cookies.winhood_session ? authService.validateSession(cookies.winhood_session, { allowPendingMfa: true }) : null;
+    const sessionToken = extractSessionTokenFromRequest(req).token;
+    const pendingSession = sessionToken ? authService.validateSession(sessionToken, { allowPendingMfa: true }) : null;
     if (pendingSession) {
       const mfaRequired = pendingSession.user.mfaEnabled && !pendingSession.user.mfaVerified;
       return res.json({
         authenticated: !mfaRequired,
         mfaRequired,
+        requiresTotp: mfaRequired,
+        serverTimeIso: (/* @__PURE__ */ new Date()).toISOString(),
+        totpPeriodSeconds: 30,
         bootstrapRequired: authService.isBootstrapRequired(),
         user: pendingSession.user,
         csrfToken: pendingSession.session.csrfToken
@@ -21651,27 +22904,34 @@ async function createWinHoodApp(options) {
       return res.json({
         authenticated: true,
         mfaRequired: false,
+        requiresTotp: false,
+        serverTimeIso: (/* @__PURE__ */ new Date()).toISOString(),
+        totpPeriodSeconds: 30,
         bootstrapRequired: authService.isBootstrapRequired(),
-        user: req.authUser
+        user: req.authUser,
+        csrfToken: req.authSession?.csrfToken
       });
     }
     return res.json({
       authenticated: false,
       mfaRequired: false,
+      requiresTotp: false,
+      serverTimeIso: (/* @__PURE__ */ new Date()).toISOString(),
+      totpPeriodSeconds: 30,
       bootstrapRequired: authService.isBootstrapRequired(),
       user: null
     });
   });
   app.post("/api/auth/refresh", (req, res) => {
-    const cookies = parseCookies(req.headers.cookie);
-    const renewed = cookies.winhood_session ? authService.renewSession(cookies.winhood_session) : null;
+    const sessionToken = extractSessionTokenFromRequest(req).token;
+    const renewed = sessionToken ? authService.renewSession(sessionToken) : null;
     if (!renewed) {
       return res.status(401).json({ error: "AUTH_SESSION_INVALID" });
     }
     setSessionCookies(res, renewed.sessionId, renewed.csrfToken);
-    return res.json({ ok: true, csrfToken: renewed.csrfToken });
+    return res.json({ ok: true, sessionId: renewed.sessionId, csrfToken: renewed.csrfToken });
   });
-  app.post("/api/auth/mfa/setup", (req, res) => {
+  app.post(["/api/auth/mfa/setup", "/api/auth/totp/setup"], (req, res) => {
     const actor = getRequestActor(req, res);
     if (actor.id === "usr-anonymous") {
       return res.status(401).json({ error: "AUTH_REQUIRED" });
@@ -21680,19 +22940,106 @@ async function createWinHoodApp(options) {
       const setup = authService.setupMfaForUser(actor.id);
       appendAuditLog(db, "AUTH_MFA_CONFIGURED", "AUTH", actor.id, `TOTP MFA configurado para ${actor.email}.`, actor);
       saveDatabase(db);
-      return res.json(setup);
+      return res.json({
+        ...setup,
+        serverTimeIso: (/* @__PURE__ */ new Date()).toISOString()
+      });
     } catch (err) {
       return res.status(400).json({ error: err?.message || "Falha ao configurar MFA." });
     }
   });
-  app.post("/api/auth/mfa/verify", (req, res) => {
-    const cookies = parseCookies(req.headers.cookie);
+  app.post(["/api/auth/mfa/confirm", "/api/auth/totp/verify-setup"], (req, res) => {
+    const actor = getRequestActor(req, res);
+    if (actor.id === "usr-anonymous") {
+      return res.status(401).json({ error: "AUTH_REQUIRED" });
+    }
     const { totpCode } = req.body || {};
     try {
-      const user = authService.verifySessionMfa(cookies.winhood_session || "", totpCode || "");
-      appendAuditLog(db, "AUTH_MFA_VERIFIED", "AUTH", user.id, `MFA verificado para ${user.email}.`, user);
+      const confirmed = authService.confirmMfaEnrollment(actor.id, totpCode || "");
+      const { recoveryCodes, ...user } = confirmed;
+      appendAuditLog(db, "AUTH_MFA_CONFIRMED", "AUTH", user.id, `MFA ativado e confirmado para ${user.email}. C\xF3digos de recupera\xE7\xE3o emitidos.`, user);
       saveDatabase(db);
-      return res.json({ authenticated: true, mfaRequired: false, user });
+      return res.json({ ok: true, user, recoveryCodes });
+    } catch (err) {
+      return res.status(400).json({ error: err?.message || "Falha ao confirmar MFA." });
+    }
+  });
+  app.post("/api/auth/totp/authenticate", (req, res) => {
+    const { preAuthToken, totpCode, recoveryCode, trustDevice } = req.body || {};
+    if (!preAuthToken) {
+      return res.status(400).json({ error: "AUTH_PREAUTH_REQUIRED: Token de desafio MFA obrigat\xF3rio." });
+    }
+    try {
+      const outcome = authService.authenticateWithTotpPreAuth({
+        preAuthToken,
+        totpCode,
+        recoveryCode,
+        trustDevice: typeof trustDevice === "boolean" ? trustDevice : void 0,
+        ipAddress: req.ip || "127.0.0.1",
+        userAgent: String(req.headers["user-agent"] || "unknown")
+      });
+      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
+        trustDevice: outcome.trustDevice
+      });
+      appendAuditLog(
+        db,
+        outcome.usedRecoveryCode ? "AUTH_RECOVERY_CODE_USED" : "AUTH_MFA_VERIFIED",
+        "AUTH",
+        outcome.user.id,
+        outcome.usedRecoveryCode ? `Acesso 2FA conclu\xEDdo com c\xF3digo de recupera\xE7\xE3o para ${outcome.user.email} (restantes: ${outcome.remainingRecoveryCodesCount}).` : `TOTP 2FA validado para ${outcome.user.email} (trustDevice=${outcome.trustDevice}).`,
+        outcome.user
+      );
+      saveDatabase(db);
+      return res.json({
+        authenticated: true,
+        mfaRequired: false,
+        requiresTotp: false,
+        user: outcome.user,
+        sessionId: outcome.sessionId,
+        csrfToken: outcome.csrfToken,
+        trustDevice: outcome.trustDevice,
+        usedRecoveryCode: outcome.usedRecoveryCode,
+        remainingRecoveryCodesCount: outcome.remainingRecoveryCodesCount
+      });
+    } catch (err) {
+      const msg = err?.message || "C\xF3digo TOTP inv\xE1lido.";
+      const status = msg.startsWith("AUTH_RATE_LIMITED") ? 429 : 401;
+      return res.status(status).json({ error: msg });
+    }
+  });
+  app.post("/api/auth/mfa/verify", (req, res) => {
+    const sessionToken = extractSessionTokenFromRequest(req).token || "";
+    const { totpCode, recoveryCode, trustDevice } = req.body || {};
+    try {
+      const result = authService.verifySessionMfa(sessionToken, totpCode || "", {
+        recoveryCode,
+        trustDevice: Boolean(trustDevice)
+      });
+      const validated = sessionToken ? authService.validateSession(sessionToken) : null;
+      if (trustDevice && validated) {
+        setSessionCookies(res, sessionToken, validated.session.csrfToken, {
+          trustDevice: true
+        });
+      }
+      const { usedRecoveryCode, remainingRecoveryCodesCount, ...user } = result;
+      appendAuditLog(
+        db,
+        usedRecoveryCode ? "AUTH_RECOVERY_CODE_USED" : "AUTH_MFA_VERIFIED",
+        "AUTH",
+        user.id,
+        usedRecoveryCode ? `MFA conclu\xEDdo com c\xF3digo de recupera\xE7\xE3o para ${user.email}.` : `MFA verificado para ${user.email}.`,
+        user
+      );
+      saveDatabase(db);
+      return res.json({
+        authenticated: true,
+        mfaRequired: false,
+        user,
+        sessionId: sessionToken || void 0,
+        csrfToken: validated?.session.csrfToken,
+        usedRecoveryCode: Boolean(usedRecoveryCode),
+        remainingRecoveryCodesCount
+      });
     } catch (err) {
       return res.status(401).json({ error: err?.message || "C\xF3digo TOTP inv\xE1lido." });
     }
@@ -21743,7 +23090,7 @@ async function createWinHoodApp(options) {
     saveDatabase(db);
     return res.json({
       ok: true,
-      recoveryChannelHint: outcome.recoveryFilePath ? path15.relative(process.cwd(), outcome.recoveryFilePath) : null,
+      recoveryChannelHint: outcome.recoveryFilePath ? path16.relative(process.cwd(), outcome.recoveryFilePath) : null,
       message: "Se o e-mail existir, o token tempor\xE1rio foi gravado no diret\xF3rio local seguro (chmod 0600)."
     });
   });
@@ -21774,7 +23121,7 @@ async function createWinHoodApp(options) {
       return res.status(400).json({ error: "Perfil RBAC inv\xE1lido." });
     }
     const actor = getRequestActor(req, res);
-    const cookies = parseCookies(req.headers.cookie);
+    const sessionToken = extractSessionTokenFromRequest(req).token;
     if (userId) {
       if (!requireWritePermission(res, req, "users:manage")) return;
       try {
@@ -21786,9 +23133,9 @@ async function createWinHoodApp(options) {
         return res.status(404).json({ error: err?.message || "Usu\xE1rio n\xE3o encontrado." });
       }
     }
-    if (cookies.winhood_session) {
+    if (sessionToken) {
       try {
-        const updatedUser = authService.switchSessionPreviewRole(cookies.winhood_session, role);
+        const updatedUser = authService.switchSessionPreviewRole(sessionToken, role);
         appendAuditLog(db, "RBAC_ROLE_SWITCHED", "AUTH", actor.id, `Perfil de sess\xE3o alterado para ${role}`, actor);
         saveDatabase(db);
         return res.json({ user: updatedUser });
@@ -21848,10 +23195,34 @@ async function createWinHoodApp(options) {
     saveDatabase(db);
     res.json(profile);
   });
-  const execAsync = promisify(exec);
+  const execFileAsync = promisify(execFile);
+  function resolveDockerBinaryPath() {
+    if (process.platform === "win32") {
+      const programFiles = process.env.ProgramFiles || "C:\\Program Files";
+      const candidate = path16.win32.join(programFiles, "Docker", "Docker", "resources", "bin", "docker.exe");
+      return fs15.existsSync(candidate) ? candidate : "docker";
+    }
+    for (const candidate of ["/usr/bin/docker", "/usr/local/bin/docker", "/bin/docker"]) {
+      if (fs15.existsSync(candidate)) return candidate;
+    }
+    return "docker";
+  }
+  function runDockerCli(args, timeoutMs) {
+    const controlledEnv = {
+      PATH: SandboxExecutor.getControlledSafePath()
+    };
+    if (process.platform === "win32" && process.env.SystemRoot) {
+      controlledEnv.SystemRoot = process.env.SystemRoot;
+    }
+    return execFileAsync(resolveDockerBinaryPath(), args, {
+      timeout: timeoutMs,
+      shell: false,
+      env: controlledEnv
+    });
+  }
   async function checkDockerCliAvailable() {
     try {
-      const { stdout } = await execAsync("docker --version", { timeout: 2500 });
+      const { stdout } = await runDockerCli(["--version"], 2500);
       return stdout.toLowerCase().includes("docker");
     } catch {
       return false;
@@ -21889,9 +23260,9 @@ async function createWinHoodApp(options) {
         });
       }
       try {
-        const { stdout: psOut } = await execAsync(
-          'docker ps -a --filter name=sonarqube --format "{{.Status}}"',
-          { timeout: 4e3 }
+        const { stdout: psOut } = await runDockerCli(
+          ["ps", "-a", "--filter", "name=sonarqube", "--format", "{{.Status}}"],
+          4e3
         );
         const statusText = psOut.trim();
         if (statusText.toLowerCase().includes("up")) {
@@ -21904,7 +23275,7 @@ async function createWinHoodApp(options) {
           });
         }
         if (statusText) {
-          await execAsync("docker start sonarqube", { timeout: 6e3 });
+          await runDockerCli(["start", "sonarqube"], 6e3);
           return res.json({
             ok: true,
             available: true,
@@ -21914,9 +23285,19 @@ async function createWinHoodApp(options) {
         }
       } catch {
       }
-      await execAsync(
-        "docker run -d --name sonarqube -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true -p 9000:9000 sonarqube:latest",
-        { timeout: 8e3 }
+      await runDockerCli(
+        [
+          "run",
+          "-d",
+          "--name",
+          "sonarqube",
+          "-e",
+          "SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true",
+          "-p",
+          "9000:9000",
+          "sonarqube:latest"
+        ],
+        8e3
       );
       return res.json({
         ok: true,
@@ -21940,7 +23321,7 @@ async function createWinHoodApp(options) {
       if (!isDockerInstalled) {
         return res.json({ ok: false, message: "Docker n\xE3o dispon\xEDvel no sistema operacional." });
       }
-      await execAsync("docker stop sonarqube", { timeout: 6e3 });
+      await runDockerCli(["stop", "sonarqube"], 6e3);
       return res.json({ ok: true, message: "Container SonarQube pausado com sucesso." });
     } catch (err) {
       return res.status(500).json({ ok: false, error: err?.message || "Falha ao pausar container." });
@@ -22053,7 +23434,7 @@ async function createWinHoodApp(options) {
     const resolvedCategory = (category || resolvedTags[0] || "Avalia\xE7\xE3o Multi-Categoria Transversal").trim();
     const resolvedEnabledCategories = Array.isArray(enabledCategories) && enabledCategories.length > 0 ? enabledCategories : [...ALL_BENCHMARK_CATEGORIES];
     const project = {
-      id: crypto21.randomUUID(),
+      id: crypto23.randomUUID(),
       name: name.trim(),
       category: resolvedCategory,
       domainTags: resolvedTags,
@@ -22141,7 +23522,93 @@ async function createWinHoodApp(options) {
     saveDatabase(db);
     return res.json({ ok: true, deletedId: removed.id });
   });
-  app.post("/api/projects/upload", (req, res) => {
+  app.get("/api/projects/backups", (req, res) => {
+    if (!requireWritePermission(res, req, "read:all")) return;
+    try {
+      const backups = backupService.listBackups();
+      return res.json({ backups });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Falha ao listar backups." });
+    }
+  });
+  app.post("/api/projects/:id/backup", backupRateLimiter, (req, res) => {
+    if (!requireWritePermission(res, req, "projects:write")) return;
+    const project = db.projects.find((p) => p.id === req.params.id);
+    if (!project) {
+      return res.status(404).json({ error: "Projeto n\xE3o encontrado." });
+    }
+    const softwares = db.softwares.filter((s) => s.projectId === project.id);
+    try {
+      const manifest = backupService.createBackup(project, softwares);
+      appendAuditLog(
+        db,
+        "PROJECT_BACKED_UP",
+        "PROJECT",
+        project.id,
+        `Backup f\xEDsico criado para o projeto "${project.name}" (ID: ${manifest.backupId}).`,
+        getRequestActor(req, res)
+      );
+      saveDatabase(db);
+      return res.status(201).json({ manifest });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Falha ao criar backup do projeto." });
+    }
+  });
+  app.post("/api/projects/backups/:backupId/verify", (req, res) => {
+    if (!requireWritePermission(res, req, "audit:read")) return;
+    try {
+      const verification = backupService.verifyBackup(req.params.backupId);
+      return res.json(verification);
+    } catch (err) {
+      const msg = err?.message || "Falha ao verificar integridade do backup.";
+      const status = msg.startsWith("INVALID_BACKUP_ID") || msg.startsWith("PATH_TRAVERSAL_BLOCKED") ? 400 : 500;
+      return res.status(status).json({ error: msg });
+    }
+  });
+  app.post("/api/projects/backups/:backupId/restore", backupRateLimiter, (req, res) => {
+    if (!requireWritePermission(res, req, "projects:write")) return;
+    try {
+      const { restoredProject, restoredSoftwares } = backupService.restoreBackup(req.params.backupId);
+      db.projects.push(restoredProject);
+      db.softwares.push(...restoredSoftwares);
+      appendAuditLog(
+        db,
+        "PROJECT_RESTORED_FROM_BACKUP",
+        "PROJECT",
+        restoredProject.id,
+        `Projeto restaurado a partir do backup ID ${req.params.backupId} como "${restoredProject.name}".`,
+        getRequestActor(req, res)
+      );
+      saveDatabase(db);
+      return res.status(201).json({ project: restoredProject, softwares: restoredSoftwares });
+    } catch (err) {
+      return res.status(400).json({ error: err?.message || "Falha ao restaurar backup." });
+    }
+  });
+  app.delete("/api/projects/backups/:backupId", (req, res) => {
+    if (!requireWritePermission(res, req, "projects:write")) return;
+    try {
+      const deleted = backupService.deleteBackup(req.params.backupId);
+      if (!deleted) {
+        return res.status(404).json({ error: "Backup n\xE3o encontrado." });
+      }
+      appendAuditLog(
+        db,
+        "PROJECT_BACKUP_DELETED",
+        "PROJECT",
+        req.params.backupId,
+        `Backup ID ${req.params.backupId} foi exclu\xEDdo.`,
+        getRequestActor(req, res)
+      );
+      saveDatabase(db);
+      return res.json({ ok: true, backupId: req.params.backupId });
+    } catch (err) {
+      const msg = err?.message || "Falha ao excluir backup.";
+      const status = msg.startsWith("INVALID_BACKUP_ID") || msg.startsWith("PATH_TRAVERSAL_BLOCKED") ? 400 : 500;
+      return res.status(status).json({ error: msg });
+    }
+  });
+  app.post("/api/projects/upload", ingestionRateLimiter, (req, res) => {
     if (!requireWritePermission(res, req, "projects:write")) return;
     const {
       name,
@@ -22163,8 +23630,23 @@ async function createWinHoodApp(options) {
         error: "Nome do Projeto e Objetivo s\xE3o obrigat\xF3rios para upload."
       });
     }
+    if (!filesMap || typeof filesMap !== "object" || Object.keys(filesMap).length === 0) {
+      return res.status(400).json({
+        error: "SOURCE_REQUIRED",
+        message: "Nenhum arquivo enviado. \xC9 obrigat\xF3rio fornecer os arquivos reais do projeto para upload."
+      });
+    }
+    const uploadSecurity = validateSourceUploadSecurity(filesMap);
+    if (!uploadSecurity.valid) {
+      return res.status(400).json({
+        error: "UPLOAD_SECURITY_VIOLATION",
+        message: `Upload bloqueado pela valida\xE7\xE3o de seguran\xE7a: ${uploadSecurity.violations.join(" ")}`,
+        violations: uploadSecurity.violations,
+        rejectedFiles: uploadSecurity.rejectedFiles
+      });
+    }
     const nowIso = (/* @__PURE__ */ new Date()).toISOString();
-    const projectId = crypto21.randomUUID();
+    const projectId = crypto23.randomUUID();
     const resolvedTags = Array.isArray(domainTags) && domainTags.length > 0 ? domainTags.map((t) => String(t).trim()).filter(Boolean) : category ? [category.trim(), "multi-category", "sonarqube-mqr"] : ["multi-category", "devsecops", "sonarqube-mqr"];
     const resolvedCategory = (category || resolvedTags[0] || "Avalia\xE7\xE3o Multi-Categoria Transversal").trim();
     const resolvedEnabledCategories = Array.isArray(enabledCategories) && enabledCategories.length > 0 ? enabledCategories : [...ALL_BENCHMARK_CATEGORIES];
@@ -22199,21 +23681,6 @@ async function createWinHoodApp(options) {
       `Projeto "${project.name}" criado via upload com UUID ${project.id}.`,
       getRequestActor(req, res)
     );
-    if (!filesMap || Object.keys(filesMap).length === 0) {
-      return res.status(400).json({
-        error: "SOURCE_REQUIRED",
-        message: "Nenhum arquivo enviado. \xC9 obrigat\xF3rio fornecer os arquivos reais do projeto para upload."
-      });
-    }
-    const uploadSecurity = validateSourceUploadSecurity(filesMap);
-    if (!uploadSecurity.valid) {
-      return res.status(400).json({
-        error: "UPLOAD_SECURITY_VIOLATION",
-        message: `Upload bloqueado pela valida\xE7\xE3o de seguran\xE7a: ${uploadSecurity.violations.join(" ")}`,
-        violations: uploadSecurity.violations,
-        rejectedFiles: uploadSecurity.rejectedFiles
-      });
-    }
     const swName = (softwareName || name).trim();
     const swVendor = (softwareVendor || owner || "Upload Local").trim();
     let swVersion = (softwareVersion || "").trim();
@@ -22229,7 +23696,7 @@ async function createWinHoodApp(options) {
     const isolatedPath = writeIsolatedArtifactsToDisk(slug, filesMap, isolatedArtifactsDir);
     const inv = buildTechnicalInventory(filesMap, isolatedPath);
     const createdSoftware = {
-      id: `sw-${crypto21.randomUUID().slice(0, 8)}`,
+      id: `sw-${crypto23.randomUUID().slice(0, 8)}`,
       projectId: project.id,
       name: swName,
       vendor: swVendor,
@@ -22446,23 +23913,30 @@ async function createWinHoodApp(options) {
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     }
   ];
-  app.get("/api/github/search", async (req, res) => {
+  app.get("/api/github/search", ingestionRateLimiter, async (req, res) => {
     const q = (req.query.q || "").trim();
     if (!q) {
       return res.json({ items: CURATED_GITHUB_REPOSITORIES, source: "CURATED_SECURITY_BENCHMARKS" });
     }
     try {
       const ghUrl = `https://api.github.com/search/repositories?q=${encodeURIComponent(q)}&sort=stars&order=desc&per_page=12`;
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3500);
-      const ghRes = await fetch(ghUrl, {
-        headers: {
-          "User-Agent": "WinHood-Benchmark-Platform",
-          Accept: "application/vnd.github.v3+json"
-        },
-        signal: controller.signal
+      const ssrfCheck = await SsrfGuard.validateUrl({
+        targetUrl: ghUrl,
+        allowExplicitLoopback: false
       });
-      clearTimeout(timeoutId);
+      if (!ssrfCheck.allowed) {
+        throw new Error(ssrfCheck.reason || "SSRF_BLOCKED");
+      }
+      const ghRes = await fetchWithTimeoutAndNoRedirect(
+        ghUrl,
+        {
+          headers: {
+            "User-Agent": "WinHood-Benchmark-Platform",
+            Accept: "application/vnd.github.v3+json"
+          }
+        },
+        3500
+      );
       if (ghRes.ok) {
         const data = await ghRes.json();
         const items = (data.items || []).map((item) => ({
@@ -22497,7 +23971,7 @@ async function createWinHoodApp(options) {
       note: "Resultados servidos com base no cat\xE1logo selecionado de reposit\xF3rios open-source e de seguran\xE7a."
     });
   });
-  app.post("/api/github/import", async (req, res) => {
+  app.post("/api/github/import", ingestionRateLimiter, async (req, res) => {
     if (!requireWritePermission(res, req, "projects:write")) return;
     const {
       projectId,
@@ -22528,9 +24002,163 @@ async function createWinHoodApp(options) {
       return res.status(400).json({ error: "Branch do GitHub inv\xE1lida." });
     }
     const nowIso = (/* @__PURE__ */ new Date()).toISOString();
-    let targetProject = db.projects.find((p) => p.id === projectId);
+    const existingProject = projectId ? db.projects.find((p) => p.id === projectId) : void 0;
+    if (projectId && !existingProject) {
+      return res.status(404).json({ error: "Projeto informado para importa\xE7\xE3o n\xE3o encontrado." });
+    }
+    let filesMap = {};
+    const branch = sanitizedBranch;
+    let realCommitSha = "";
+    let treeSha = "";
+    let totalDiscovered = 0;
+    let failedCount = 0;
+    let rateLimited = false;
+    const encodedOwner = encodeURIComponent(repoOwnerSegment);
+    const encodedRepo = encodeURIComponent(repoSlugSegment);
+    const encodedBranchPath = branch.split("/").filter(Boolean).map((seg) => encodeURIComponent(seg)).join("/");
+    try {
+      const commitUrl = new URL(
+        `/repos/${encodedOwner}/${encodedRepo}/commits/${encodedBranchPath}`,
+        "https://api.github.com"
+      );
+      if (commitUrl.origin !== "https://api.github.com") {
+        throw new Error("Origem de API inv\xE1lida");
+      }
+      const commitSsrf = await SsrfGuard.validateUrl({
+        targetUrl: commitUrl.toString(),
+        allowExplicitLoopback: false
+      });
+      if (!commitSsrf.allowed) {
+        throw new Error(commitSsrf.reason || "SSRF_BLOCKED");
+      }
+      const commitRes = await fetchWithTimeoutAndNoRedirect(
+        commitUrl.toString(),
+        {
+          headers: {
+            "User-Agent": "WinHood-Security-Analyzer",
+            Accept: "application/vnd.github.v3+json"
+          }
+        },
+        5e3
+      );
+      if (commitRes.status === 403) {
+        rateLimited = true;
+      } else if (commitRes.ok) {
+        const commitData = await commitRes.json();
+        const candidateSha = (commitData.sha || "").trim();
+        if (/^[a-fA-F0-9]{7,40}$/.test(candidateSha)) {
+          realCommitSha = candidateSha;
+        }
+      }
+      const encodedTreeRef = realCommitSha ? encodeURIComponent(realCommitSha) : encodedBranchPath;
+      const treeUrl = new URL(
+        `/repos/${encodedOwner}/${encodedRepo}/git/trees/${encodedTreeRef}?recursive=1`,
+        "https://api.github.com"
+      );
+      if (treeUrl.origin !== "https://api.github.com") {
+        throw new Error("Origem de API inv\xE1lida");
+      }
+      const treeSsrf = await SsrfGuard.validateUrl({
+        targetUrl: treeUrl.toString(),
+        allowExplicitLoopback: false
+      });
+      if (!treeSsrf.allowed) {
+        throw new Error(treeSsrf.reason || "SSRF_BLOCKED");
+      }
+      const treeRes = await fetchWithTimeoutAndNoRedirect(
+        treeUrl.toString(),
+        {
+          headers: {
+            "User-Agent": "WinHood-Security-Analyzer",
+            Accept: "application/vnd.github.v3+json"
+          }
+        },
+        5e3
+      );
+      if (treeRes.status === 403) {
+        rateLimited = true;
+      } else if (treeRes.ok) {
+        const treeData = await treeRes.json();
+        treeSha = treeData.sha || realCommitSha;
+        const allBlobs = (treeData.tree || []).filter((item) => item.type === "blob" && item.path);
+        totalDiscovered = allBlobs.length;
+        const eligibleTreeItems = allBlobs.filter((item) => {
+          const ext = path16.extname(item.path).toLowerCase();
+          const segments = item.path.split("/").filter(Boolean);
+          return [".ts", ".tsx", ".js", ".jsx", ".py", ".sql", ".json", ".cs", ".java", ".go", ".rs", ".md", ".yml", ".yaml", ".toml"].includes(ext) && segments.length > 0 && segments.length <= 20 && !item.path.includes("..") && !item.path.startsWith("/") && !item.path.includes("node_modules/") && !item.path.includes("dist/") && !item.path.includes("vendor/") && !item.path.includes(".git/") && (item.size === void 0 || item.size < 5e5);
+        }).slice(0, 100);
+        if (eligibleTreeItems.length > 0) {
+          const rawSsrf = await SsrfGuard.validateUrl({
+            targetUrl: "https://raw.githubusercontent.com",
+            allowExplicitLoopback: false
+          });
+          if (!rawSsrf.allowed) {
+            throw new Error(rawSsrf.reason || "SSRF_BLOCKED");
+          }
+          const fetchPromises = eligibleTreeItems.map(async (item) => {
+            try {
+              const safePathSegments = item.path.split("/").filter((seg) => seg.length > 0 && seg !== "." && seg !== "..").map((seg) => encodeURIComponent(seg)).join("/");
+              const rawUrl = new URL(
+                `/${encodedOwner}/${encodedRepo}/${encodedTreeRef}/${safePathSegments}`,
+                "https://raw.githubusercontent.com"
+              );
+              if (rawUrl.origin !== "https://raw.githubusercontent.com") {
+                return null;
+              }
+              const rawRes = await fetchWithTimeoutAndNoRedirect(
+                rawUrl.toString(),
+                {
+                  headers: { "User-Agent": "WinHood-Security-Analyzer" }
+                },
+                5e3
+              );
+              if (rawRes.ok) {
+                const text = await rawRes.text();
+                if (Buffer.byteLength(text, "utf8") > 5e5) {
+                  return null;
+                }
+                return { path: item.path, content: text };
+              }
+            } catch {
+              failedCount += 1;
+            }
+            return null;
+          });
+          const fetchedFiles = await Promise.all(fetchPromises);
+          let cumulativeBytes = 0;
+          const MAX_CUMULATIVE_BYTES = 8 * 1024 * 1024;
+          for (const f of fetchedFiles) {
+            if (f && f.content && f.content.trim().length > 0) {
+              const byteLen = Buffer.byteLength(f.content, "utf8");
+              if (cumulativeBytes + byteLen > MAX_CUMULATIVE_BYTES) {
+                break;
+              }
+              filesMap[f.path] = f.content;
+              cumulativeBytes += byteLen;
+            }
+          }
+        }
+      }
+    } catch {
+    }
+    if (Object.keys(filesMap).length === 0) {
+      return res.status(rateLimited ? 429 : 502).json({
+        error: rateLimited ? "RATE_LIMITED" : "FETCH_FAILED",
+        message: rateLimited ? "Rate limit da API do GitHub atingido ou acesso restrito. Aguarde alguns minutos ou utilize autentica\xE7\xE3o com token." : `N\xE3o foi poss\xEDvel obter arquivos reais do reposit\xF3rio ${repoFullName}. Regra WinHood: N\xE3o s\xE3o permitidos fallbacks sint\xE9ticos.`
+      });
+    }
+    const uploadSecurity = validateSourceUploadSecurity(filesMap, 2 * 1024 * 1024, 100, 8 * 1024 * 1024);
+    if (!uploadSecurity.valid) {
+      return res.status(400).json({
+        error: "UPLOAD_SECURITY_VIOLATION",
+        message: `Importa\xE7\xE3o GitHub bloqueada pela valida\xE7\xE3o de seguran\xE7a: ${uploadSecurity.violations.join(" ")}`,
+        violations: uploadSecurity.violations,
+        rejectedFiles: uploadSecurity.rejectedFiles
+      });
+    }
+    let targetProject = existingProject;
     if (!targetProject) {
-      const projId = crypto21.randomUUID();
+      const projId = crypto23.randomUUID();
       targetProject = {
         id: projId,
         name: (newProjectName || `Benchmark ${repoName}`).trim(),
@@ -22558,103 +24186,6 @@ async function createWinHoodApp(options) {
         `Projeto "${targetProject.name}" criado a partir do GitHub.`
       );
     }
-    let filesMap = {};
-    const branch = sanitizedBranch;
-    let realCommitSha = "";
-    let treeSha = "";
-    let totalDiscovered = 0;
-    let failedCount = 0;
-    let rateLimited = false;
-    const encodedOwner = encodeURIComponent(repoOwnerSegment);
-    const encodedRepo = encodeURIComponent(repoSlugSegment);
-    const encodedBranchPath = branch.split("/").filter(Boolean).map((seg) => encodeURIComponent(seg)).join("/");
-    try {
-      const commitUrl = new URL(
-        `/repos/${encodedOwner}/${encodedRepo}/commits/${encodedBranchPath}`,
-        "https://api.github.com"
-      );
-      if (commitUrl.origin !== "https://api.github.com") {
-        throw new Error("Origem de API inv\xE1lida");
-      }
-      const commitRes = await fetch(commitUrl.toString(), {
-        headers: {
-          "User-Agent": "WinHood-Security-Analyzer",
-          Accept: "application/vnd.github.v3+json"
-        }
-      });
-      if (commitRes.status === 403) {
-        rateLimited = true;
-      } else if (commitRes.ok) {
-        const commitData = await commitRes.json();
-        const candidateSha = (commitData.sha || "").trim();
-        if (/^[a-fA-F0-9]{7,40}$/.test(candidateSha)) {
-          realCommitSha = candidateSha;
-        }
-      }
-      const encodedTreeRef = realCommitSha ? encodeURIComponent(realCommitSha) : encodedBranchPath;
-      const treeUrl = new URL(
-        `/repos/${encodedOwner}/${encodedRepo}/git/trees/${encodedTreeRef}?recursive=1`,
-        "https://api.github.com"
-      );
-      if (treeUrl.origin !== "https://api.github.com") {
-        throw new Error("Origem de API inv\xE1lida");
-      }
-      const treeRes = await fetch(treeUrl.toString(), {
-        headers: {
-          "User-Agent": "WinHood-Security-Analyzer",
-          Accept: "application/vnd.github.v3+json"
-        }
-      });
-      if (treeRes.status === 403) {
-        rateLimited = true;
-      } else if (treeRes.ok) {
-        const treeData = await treeRes.json();
-        treeSha = treeData.sha || realCommitSha;
-        const allBlobs = (treeData.tree || []).filter((item) => item.type === "blob" && item.path);
-        totalDiscovered = allBlobs.length;
-        const eligibleTreeItems = allBlobs.filter((item) => {
-          const ext = path15.extname(item.path).toLowerCase();
-          return [".ts", ".tsx", ".js", ".jsx", ".py", ".sql", ".json", ".cs", ".java", ".go", ".rs", ".md", ".yml", ".yaml", ".toml"].includes(ext) && !item.path.includes("..") && !item.path.startsWith("/") && !item.path.includes("node_modules/") && !item.path.includes("dist/") && !item.path.includes("vendor/") && !item.path.includes(".git/") && (item.size === void 0 || item.size < 5e5);
-        }).slice(0, 100);
-        if (eligibleTreeItems.length > 0) {
-          const fetchPromises = eligibleTreeItems.map(async (item) => {
-            try {
-              const safePathSegments = item.path.split("/").filter((seg) => seg.length > 0 && seg !== "." && seg !== "..").map((seg) => encodeURIComponent(seg)).join("/");
-              const rawUrl = new URL(
-                `/${encodedOwner}/${encodedRepo}/${encodedTreeRef}/${safePathSegments}`,
-                "https://raw.githubusercontent.com"
-              );
-              if (rawUrl.origin !== "https://raw.githubusercontent.com") {
-                return null;
-              }
-              const rawRes = await fetch(rawUrl.toString(), {
-                headers: { "User-Agent": "WinHood-Security-Analyzer" }
-              });
-              if (rawRes.ok) {
-                const text = await rawRes.text();
-                return { path: item.path, content: text };
-              }
-            } catch {
-              failedCount += 1;
-            }
-            return null;
-          });
-          const fetchedFiles = await Promise.all(fetchPromises);
-          for (const f of fetchedFiles) {
-            if (f && f.content && f.content.trim().length > 0) {
-              filesMap[f.path] = f.content;
-            }
-          }
-        }
-      }
-    } catch {
-    }
-    if (Object.keys(filesMap).length === 0) {
-      return res.status(rateLimited ? 429 : 502).json({
-        error: rateLimited ? "RATE_LIMITED" : "FETCH_FAILED",
-        message: rateLimited ? "Rate limit da API do GitHub atingido ou acesso restrito. Aguarde alguns minutos ou utilize autentica\xE7\xE3o com token." : `N\xE3o foi poss\xEDvel obter arquivos reais do reposit\xF3rio ${repoFullName}. Regra WinHood: N\xE3o s\xE3o permitidos fallbacks sint\xE9ticos.`
-      });
-    }
     let detectedVersion = "NOT_DECLARED";
     if (filesMap["package.json"]) {
       try {
@@ -22667,7 +24198,7 @@ async function createWinHoodApp(options) {
     const isolatedPath = writeIsolatedArtifactsToDisk(slug, filesMap, isolatedArtifactsDir);
     const inv = buildTechnicalInventory(filesMap, isolatedPath);
     const newSoftware = {
-      id: `sw-${crypto21.randomUUID().slice(0, 8)}`,
+      id: `sw-${crypto23.randomUUID().slice(0, 8)}`,
       projectId: targetProject.id,
       name: repoName,
       vendor: owner || "Comunidade GitHub",
@@ -22743,7 +24274,7 @@ async function createWinHoodApp(options) {
       softwares: includeSource ? list : list.map(stripSoftwareHeavySource)
     });
   });
-  app.post("/api/softwares", (req, res) => {
+  app.post("/api/softwares", ingestionRateLimiter, (req, res) => {
     if (!requireWritePermission(res, req, "projects:write")) return;
     const body = req.body;
     if (!body.name || !body.version || !body.vendor) {
@@ -22832,7 +24363,7 @@ async function createWinHoodApp(options) {
       isolatedPath = writeIsolatedArtifactsToDisk(slug, filesMap, isolatedArtifactsDir);
       inv = buildTechnicalInventory(filesMap, isolatedPath);
     }
-    const swId = `sw-${crypto21.randomUUID().slice(0, 8)}`;
+    const swId = `sw-${crypto23.randomUUID().slice(0, 8)}`;
     const commit = hasSource ? body.commitHash && body.commitHash.trim().length > 0 ? body.commitHash.trim() : `PKG_${inv.packageSha256.slice(0, 16)}` : body.commitHash && body.commitHash.trim().length > 0 ? body.commitHash.trim() : "NOT_DECLARED";
     const resolvedDomainTags = Array.isArray(body.domainTags) && body.domainTags.length > 0 ? body.domainTags.map((t) => String(t).trim()).filter(Boolean) : body.category ? [body.category.trim(), ...Object.keys(inv.languageBreakdown).map((l) => l.toLowerCase())] : ["multi-category", ...Object.keys(inv.languageBreakdown).map((l) => l.toLowerCase())];
     const newSw = {
@@ -22921,7 +24452,7 @@ async function createWinHoodApp(options) {
     saveDatabase(db);
     return res.status(201).json({ software: newSw });
   });
-  app.post("/api/softwares/:id/ingest", (req, res) => {
+  app.post("/api/softwares/:id/ingest", ingestionRateLimiter, (req, res) => {
     if (!requireWritePermission(res, req, "projects:write")) return;
     const sw = db.softwares.find((s) => s.id === req.params.id);
     if (!sw) {
@@ -22941,6 +24472,15 @@ async function createWinHoodApp(options) {
       });
     }
     const mergedFiles = { ...sw.sourceFilesContent || {}, ...filesMap };
+    const mergedSecurity = validateSourceUploadSecurity(mergedFiles);
+    if (!mergedSecurity.valid) {
+      return res.status(400).json({
+        error: "UPLOAD_SECURITY_VIOLATION",
+        message: `Invent\xE1rio combinado excede limites de seguran\xE7a: ${mergedSecurity.violations.join(" ")}`,
+        violations: mergedSecurity.violations,
+        rejectedFiles: mergedSecurity.rejectedFiles
+      });
+    }
     const slug = `${sw.id}_rev_${Date.now()}`;
     const isolatedPath = writeIsolatedArtifactsToDisk(slug, mergedFiles, isolatedArtifactsDir);
     const inv = buildTechnicalInventory(mergedFiles, isolatedPath);
@@ -23081,9 +24621,12 @@ async function createWinHoodApp(options) {
     if (!run) {
       return res.status(404).json({ error: "Execu\xE7\xE3o de benchmark n\xE3o encontrada." });
     }
+    if (run.signedManifest) {
+      enforceVerifiedQualityGateOnRun(run);
+    }
     return res.json({ run });
   });
-  app.post("/api/benchmark-runs/quick-run", (req, res) => {
+  app.post("/api/benchmark-runs/quick-run", analysisRateLimiter, (req, res) => {
     if (!requireWritePermission(res, req, "runs:execute")) return;
     const actor = getRequestActor(req, res);
     const { projectId, softwareId } = req.body;
@@ -23091,7 +24634,7 @@ async function createWinHoodApp(options) {
     if (!targetProject) {
       const nowIso = (/* @__PURE__ */ new Date()).toISOString();
       targetProject = {
-        id: `proj-${crypto21.randomUUID().slice(0, 8)}`,
+        id: `proj-${crypto23.randomUUID().slice(0, 8)}`,
         name: "Projeto Principal (Zero-Configura\xE7\xE3o)",
         category: "Aplica\xE7\xF5es Web & Microsservi\xE7os",
         objective: "Auditoria Autom\xE1tica de Qualidade e Seguran\xE7a",
@@ -23131,7 +24674,7 @@ async function createWinHoodApp(options) {
         message: `O software "${missingSources[0].name}" n\xE3o possui c\xF3digo-fonte importado. Ingest\xE3o de fontes reais obrigat\xF3ria antes da an\xE1lise.`
       });
     }
-    const runId = `run-${crypto21.randomUUID().slice(0, 8)}`;
+    const runId = `run-${crypto23.randomUUID().slice(0, 8)}`;
     const activeEnabledCategories = targetProject.enabledCategories && targetProject.enabledCategories.length > 0 ? targetProject.enabledCategories : [...ALL_BENCHMARK_CATEGORIES];
     const activeWeights = normalizeEnabledCategoryWeights(DEFAULT_CATEGORY_WEIGHTS, activeEnabledCategories);
     const activeEnv = DEFAULT_BENCHMARK_PROFILES[0].equivalenceEnvironment;
@@ -23211,7 +24754,7 @@ async function createWinHoodApp(options) {
       message: "An\xE1lise 1-Clique iniciada com sucesso."
     });
   });
-  app.post("/api/benchmark-runs", (req, res) => {
+  app.post("/api/benchmark-runs", analysisRateLimiter, (req, res) => {
     if (!requireWritePermission(res, req, "runs:execute")) return;
     const actor = getRequestActor(req, res);
     const {
@@ -23245,7 +24788,7 @@ async function createWinHoodApp(options) {
     if (!project) {
       const nowIso = (/* @__PURE__ */ new Date()).toISOString();
       project = {
-        id: `proj-${crypto21.randomUUID().slice(0, 8)}`,
+        id: `proj-${crypto23.randomUUID().slice(0, 8)}`,
         name: `Avalia\xE7\xE3o Independente (${selectedSoftwares.map((s) => s.name).join(" vs ")})`,
         category: "Avalia\xE7\xE3o Multi-Categoria Transversal",
         domainTags: ["multi-category", "standalone"],
@@ -23307,7 +24850,7 @@ async function createWinHoodApp(options) {
     }
     const activeQualityGateId = qualityGateId || project.defaultQualityGateId || "qg-sonar-way-mqr";
     const resolvedProfileName = profileName || matchedSpecializedProfile?.name || (resolvedAssessmentMode === "INDIVIDUAL" ? `Auditoria Individual - ${selectedSoftwares[0]?.name}` : "Benchmark WinHood");
-    const runId = `run-${crypto21.randomUUID().slice(0, 8)}`;
+    const runId = `run-${crypto23.randomUUID().slice(0, 8)}`;
     const runningRun = createInitialRunningBenchmark({
       runId,
       projectId: project.id,
@@ -23730,7 +25273,7 @@ async function createWinHoodApp(options) {
     });
     return res.json({ suite });
   });
-  app.post("/api/security-assessment/compare", (req, res) => {
+  app.post("/api/security-assessment/compare", analysisRateLimiter, (req, res) => {
     if (!requireWritePermission(res, req, "security:ops")) return;
     const { runId, scopeAllowlist } = req.body;
     const targetRun = runId ? db.runs.find((r) => r.id === runId) : db.runs[0];
@@ -23940,9 +25483,13 @@ async function createWinHoodApp(options) {
     res.json({ auditLogs: db.auditLogs });
   });
   app.get(["/api/reports/:runId/export", "/api/benchmark-runs/:runId/export"], (req, res) => {
+    if (!requireWritePermission(res, req, "reports:export")) return;
     const run = db.runs.find((r) => r.id === req.params.runId) || db.runs[0];
     if (!run) {
       return res.status(404).json({ error: "Execu\xE7\xE3o n\xE3o encontrada para exporta\xE7\xE3o de relat\xF3rio." });
+    }
+    if (run.signedManifest) {
+      enforceVerifiedQualityGateOnRun(run);
     }
     const format = resolveSafeExportFormat(req.query.format);
     const reportType = resolveSafeReportType(req.query.type);
@@ -24308,11 +25855,11 @@ async function createWinHoodApp(options) {
   </div>
 </body>
 </html>`;
-      res.setHeader("Content-Type", "application/octet-stream");
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("X-Content-Type-Options", "nosniff");
       res.setHeader(
         "Content-Security-Policy",
-        "default-src 'none'; style-src 'unsafe-inline'"
+        "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'self' data:; base-uri 'none'; form-action 'none'"
       );
       res.setHeader(
         "Content-Disposition",
@@ -24517,7 +26064,7 @@ async function createWinHoodApp(options) {
     }
     let safeOrigin;
     try {
-      safeOrigin = validateSonarServerOrigin(
+      safeOrigin = await validateSonarServerOriginSafe(
         serverUrl || (resolvedPlatform === "SONARCLOUD" ? "https://sonarcloud.io" : "http://localhost:9000"),
         resolvedPlatform
       );
@@ -24543,7 +26090,7 @@ async function createWinHoodApp(options) {
     );
     if (!existing) {
       existing = {
-        id: id || `sonar-proj-${crypto21.randomUUID().slice(0, 8)}`,
+        id: id || `sonar-proj-${crypto23.randomUUID().slice(0, 8)}`,
         name: (name || cleanProjectKey).trim(),
         platform: resolvedPlatform,
         serverUrl: safeOrigin,
@@ -24582,14 +26129,18 @@ async function createWinHoodApp(options) {
       }
       try {
         const authUrl = new URL("/api/authentication/validate", safeOrigin);
-        const authRes = await fetch(authUrl.toString(), {
-          method: "GET",
-          headers: {
-            Accept: "application/json",
-            Authorization: `Bearer ${cleanToken}`,
-            "User-Agent": "WinHood-SonarExporter/2.0"
-          }
-        });
+        const authRes = await fetchWithTimeoutAndNoRedirect(
+          authUrl.toString(),
+          {
+            method: "GET",
+            headers: {
+              Accept: "application/json",
+              Authorization: `Bearer ${cleanToken}`,
+              "User-Agent": "WinHood-SonarExporter/2.0"
+            }
+          },
+          5e3
+        );
         if (authRes.ok) {
           const authJson = await authRes.json();
           existing.lastVerifiedAt = nowIso;
@@ -24678,21 +26229,25 @@ async function createWinHoodApp(options) {
     }
     let safeOrigin;
     try {
-      safeOrigin = validateSonarServerOrigin(proj.serverUrl, proj.platform);
+      safeOrigin = await validateSonarServerOriginSafe(proj.serverUrl, proj.platform);
     } catch (err) {
       return res.status(400).json({ error: err?.message || "URL do servidor Sonar inv\xE1lida." });
     }
     const nowIso = (/* @__PURE__ */ new Date()).toISOString();
     try {
       const validateUrl = new URL("/api/authentication/validate", safeOrigin);
-      const authRes = await fetch(validateUrl.toString(), {
-        method: "GET",
-        headers: {
-          Accept: "application/json",
-          Authorization: `Bearer ${plainToken}`,
-          "User-Agent": "WinHood-SonarExporter/2.0"
-        }
-      });
+      const authRes = await fetchWithTimeoutAndNoRedirect(
+        validateUrl.toString(),
+        {
+          method: "GET",
+          headers: {
+            Accept: "application/json",
+            Authorization: `Bearer ${plainToken}`,
+            "User-Agent": "WinHood-SonarExporter/2.0"
+          }
+        },
+        6e3
+      );
       if (authRes.status === 401 || authRes.status === 403) {
         proj.lastVerifiedAt = nowIso;
         proj.lastVerificationStatus = "INVALID";
@@ -24715,14 +26270,18 @@ async function createWinHoodApp(options) {
       if (isValid) {
         try {
           const tokensUrl = new URL("/api/user_tokens/search", safeOrigin);
-          const tokensRes = await fetch(tokensUrl.toString(), {
-            method: "GET",
-            headers: {
-              Accept: "application/json",
-              Authorization: `Bearer ${plainToken}`,
-              "User-Agent": "WinHood-SonarExporter/2.0"
-            }
-          });
+          const tokensRes = await fetchWithTimeoutAndNoRedirect(
+            tokensUrl.toString(),
+            {
+              method: "GET",
+              headers: {
+                Accept: "application/json",
+                Authorization: `Bearer ${plainToken}`,
+                "User-Agent": "WinHood-SonarExporter/2.0"
+              }
+            },
+            6e3
+          );
           if (tokensRes.ok) {
             const tokensJson = await tokensRes.json();
             const tokenWithExp = (tokensJson.userTokens || []).find((t) => Boolean(t.expirationDate));
@@ -24764,6 +26323,7 @@ async function createWinHoodApp(options) {
     }
   });
   app.get("/api/sonar/saved-projects/:id/export-json", async (req, res) => {
+    if (!requireWritePermission(res, req, "reports:export")) return;
     if (!Array.isArray(db.savedSonarProjects)) {
       db.savedSonarProjects = [];
     }
@@ -24779,7 +26339,7 @@ async function createWinHoodApp(options) {
     }
     let safeOrigin;
     try {
-      safeOrigin = validateSonarServerOrigin(proj.serverUrl, proj.platform);
+      safeOrigin = await validateSonarServerOriginSafe(proj.serverUrl, proj.platform);
     } catch (err) {
       return res.status(400).json({ error: err?.message || "URL do servidor Sonar inv\xE1lida." });
     }
@@ -24799,7 +26359,7 @@ async function createWinHoodApp(options) {
         const compUrl = new URL("/api/components/show", safeOrigin);
         compUrl.searchParams.set("component", proj.projectKey);
         if (compUrl.origin === safeOrigin) {
-          const compRes = await fetch(compUrl.toString(), { method: "GET", headers: reqHeaders });
+          const compRes = await fetchWithTimeoutAndNoRedirect(compUrl.toString(), { method: "GET", headers: reqHeaders }, 8e3);
           if (compRes.ok) {
             const compData = await compRes.json();
             componentMetadata = compData.component || null;
@@ -24813,7 +26373,7 @@ async function createWinHoodApp(options) {
         const qgUrl = new URL("/api/qualitygates/project_status", safeOrigin);
         qgUrl.searchParams.set("projectKey", proj.projectKey);
         if (qgUrl.origin === safeOrigin) {
-          const qgRes = await fetch(qgUrl.toString(), { method: "GET", headers: reqHeaders });
+          const qgRes = await fetchWithTimeoutAndNoRedirect(qgUrl.toString(), { method: "GET", headers: reqHeaders }, 8e3);
           if (qgRes.ok) {
             const qgData = await qgRes.json();
             qualityGateStatusObj = qgData.projectStatus || qgData;
@@ -24828,7 +26388,7 @@ async function createWinHoodApp(options) {
         measuresUrl.searchParams.set("component", proj.projectKey);
         measuresUrl.searchParams.set("metricKeys", SONAR_FULL_METRIC_KEYS);
         if (measuresUrl.origin === safeOrigin) {
-          const mRes = await fetch(measuresUrl.toString(), { method: "GET", headers: reqHeaders });
+          const mRes = await fetchWithTimeoutAndNoRedirect(measuresUrl.toString(), { method: "GET", headers: reqHeaders }, 8e3);
           if (mRes.ok) {
             const mData = await mRes.json();
             if (Array.isArray(mData.component?.measures)) {
@@ -24869,10 +26429,14 @@ async function createWinHoodApp(options) {
         if (searchUrl.origin !== safeOrigin) {
           return res.status(400).json({ error: "Origem da URL de busca inv\xE1lida." });
         }
-        const response = await fetch(searchUrl.toString(), {
-          method: "GET",
-          headers: reqHeaders
-        });
+        const response = await fetchWithTimeoutAndNoRedirect(
+          searchUrl.toString(),
+          {
+            method: "GET",
+            headers: reqHeaders
+          },
+          1e4
+        );
         if (response.status === 401 || response.status === 403) {
           proj.lastVerificationStatus = "INVALID";
           proj.lastVerifiedAt = (/* @__PURE__ */ new Date()).toISOString();
@@ -24934,7 +26498,7 @@ async function createWinHoodApp(options) {
           hsUrl.searchParams.set("ps", String(pageSize));
           hsUrl.searchParams.set("p", String(hsPage));
           if (hsUrl.origin !== safeOrigin) break;
-          const hsRes = await fetch(hsUrl.toString(), { method: "GET", headers: reqHeaders });
+          const hsRes = await fetchWithTimeoutAndNoRedirect(hsUrl.toString(), { method: "GET", headers: reqHeaders }, 8e3);
           if (!hsRes.ok) break;
           const hsData = await hsRes.json();
           const hsBatch = Array.isArray(hsData.hotspots) ? hsData.hotspots : [];
@@ -24958,7 +26522,7 @@ async function createWinHoodApp(options) {
         const brUrl = new URL("/api/project_branches/list", safeOrigin);
         brUrl.searchParams.set("project", proj.projectKey);
         if (brUrl.origin === safeOrigin) {
-          const brRes = await fetch(brUrl.toString(), { method: "GET", headers: reqHeaders });
+          const brRes = await fetchWithTimeoutAndNoRedirect(brUrl.toString(), { method: "GET", headers: reqHeaders }, 8e3);
           if (brRes.ok) {
             const brData = await brRes.json();
             projectBranches = Array.isArray(brData.branches) ? brData.branches : [];
@@ -24972,7 +26536,7 @@ async function createWinHoodApp(options) {
         anUrl.searchParams.set("ps", "50");
         anUrl.searchParams.set("p", "1");
         if (anUrl.origin === safeOrigin) {
-          const anRes = await fetch(anUrl.toString(), { method: "GET", headers: reqHeaders });
+          const anRes = await fetchWithTimeoutAndNoRedirect(anUrl.toString(), { method: "GET", headers: reqHeaders }, 8e3);
           if (anRes.ok) {
             const anData = await anRes.json();
             projectAnalyses = Array.isArray(anData.analyses) ? anData.analyses : [];
@@ -25187,7 +26751,7 @@ async function createWinHoodApp(options) {
         error: "Token do SonarCloud n\xE3o configurado. Forne\xE7a o token ou salve-o com seguran\xE7a no cofre."
       });
     }
-    const safeOrigin = "https://sonarcloud.io";
+    const safeOrigin = await validateSonarServerOriginSafe("https://sonarcloud.io", "SONARCLOUD");
     const reqHeaders = {
       Accept: "application/json",
       Authorization: `Bearer ${effectiveToken}`,
@@ -25196,9 +26760,10 @@ async function createWinHoodApp(options) {
     try {
       let qualityGate = null;
       try {
-        const qgRes = await fetch(
+        const qgRes = await fetchWithTimeoutAndNoRedirect(
           `${safeOrigin}/api/qualitygates/project_status?projectKey=${encodeURIComponent(effectiveKey)}`,
-          { headers: reqHeaders }
+          { headers: reqHeaders },
+          8e3
         );
         if (qgRes.ok) {
           const qgJson = await qgRes.json();
@@ -25210,9 +26775,10 @@ async function createWinHoodApp(options) {
       const measuresMap = {};
       try {
         const mKeys = DEFAULT_SONAR_METRIC_KEYS.join(",");
-        const mRes = await fetch(
+        const mRes = await fetchWithTimeoutAndNoRedirect(
           `${safeOrigin}/api/measures/component?component=${encodeURIComponent(effectiveKey)}&metricKeys=${mKeys}`,
-          { headers: reqHeaders }
+          { headers: reqHeaders },
+          8e3
         );
         if (mRes.ok) {
           const mJson = await mRes.json();
@@ -25225,9 +26791,10 @@ async function createWinHoodApp(options) {
       }
       let hotspots = [];
       try {
-        const hsRes = await fetch(
+        const hsRes = await fetchWithTimeoutAndNoRedirect(
           `${safeOrigin}/api/hotspots/search?projectKey=${encodeURIComponent(effectiveKey)}&ps=500`,
-          { headers: reqHeaders }
+          { headers: reqHeaders },
+          8e3
         );
         if (hsRes.ok) {
           const hsJson = await hsRes.json();
@@ -25241,9 +26808,10 @@ async function createWinHoodApp(options) {
       let issuesFailed = false;
       do {
         const orgParam = effectiveOrg ? `&organization=${encodeURIComponent(effectiveOrg)}` : "";
-        const issRes = await fetch(
+        const issRes = await fetchWithTimeoutAndNoRedirect(
           `${safeOrigin}/api/issues/search?componentKeys=${encodeURIComponent(effectiveKey)}${orgParam}&ps=500&p=${page}&additionalFields=_all&facets=severities,types,rules,statuses`,
-          { headers: reqHeaders }
+          { headers: reqHeaders },
+          1e4
         );
         if (!issRes.ok) {
           issuesFailed = true;
@@ -25259,9 +26827,10 @@ async function createWinHoodApp(options) {
       let realProfiles = [];
       try {
         const orgParam = effectiveOrg ? `&organization=${encodeURIComponent(effectiveOrg)}` : "";
-        const qpRes = await fetch(
+        const qpRes = await fetchWithTimeoutAndNoRedirect(
           `${safeOrigin}/api/qualityprofiles/search?project=${encodeURIComponent(effectiveKey)}${orgParam}`,
-          { headers: reqHeaders }
+          { headers: reqHeaders },
+          8e3
         );
         if (qpRes.ok) {
           const qpJson = await qpRes.json();
@@ -25272,9 +26841,10 @@ async function createWinHoodApp(options) {
       let verifiedGateName;
       try {
         const orgParam = effectiveOrg ? `&organization=${encodeURIComponent(effectiveOrg)}` : "";
-        const qgNameRes = await fetch(
+        const qgNameRes = await fetchWithTimeoutAndNoRedirect(
           `${safeOrigin}/api/qualitygates/get_by_project?project=${encodeURIComponent(effectiveKey)}${orgParam}`,
-          { headers: reqHeaders }
+          { headers: reqHeaders },
+          8e3
         );
         if (qgNameRes.ok) {
           const qgNameJson = await qgNameRes.json();
@@ -25333,7 +26903,7 @@ async function createWinHoodApp(options) {
       const existingProfile = db.savedSonarProjects.find((p) => p.projectKey === effectiveKey);
       if (!existingProfile) {
         const newProfile = {
-          id: `sonar-proj-${crypto21.randomUUID().slice(0, 8)}`,
+          id: `sonar-proj-${crypto23.randomUUID().slice(0, 8)}`,
           name: effectiveKey,
           platform: "SONARCLOUD",
           serverUrl: safeOrigin,
@@ -26524,7 +28094,7 @@ async function createWinHoodApp(options) {
       });
     }
     const target = {
-      id: `tgt-${crypto21.randomUUID().slice(0, 8)}`,
+      id: `tgt-${crypto23.randomUUID().slice(0, 8)}`,
       label: label.trim(),
       origin: parsedOrigin.origin,
       purpose: (purpose || "Medi\xE7\xE3o controlada de lat\xEAncia HTTP").trim(),
@@ -26551,7 +28121,7 @@ async function createWinHoodApp(options) {
     saveDatabase(db);
     return res.json({ ok: true, targets: db.authorizedTargets });
   });
-  app.post("/api/execution/run-tests", (req, res) => {
+  app.post("/api/execution/run-tests", analysisRateLimiter, (req, res) => {
     if (!requireWritePermission(res, req, "tests:run")) return;
     const actor = getRequestActor(req, res);
     const { softwareId, runId } = req.body || {};
@@ -26570,7 +28140,7 @@ async function createWinHoodApp(options) {
     let attachedToRunId = null;
     if (targetRun) {
       const execRecord = {
-        id: `uexec-test-${crypto21.randomUUID().slice(0, 8)}`,
+        id: `uexec-test-${crypto23.randomUUID().slice(0, 8)}`,
         runId: targetRun.id,
         softwareId: sw.id,
         kind: "TEST_EXECUTION",
@@ -26629,7 +28199,7 @@ async function createWinHoodApp(options) {
           sc.metricsSummary.testCoveragePercent = parsed.lineCoveragePercent;
           targetRun.executionRecords = [
             {
-              id: `uexec-cov-${crypto21.randomUUID().slice(0, 8)}`,
+              id: `uexec-cov-${crypto23.randomUUID().slice(0, 8)}`,
               runId: targetRun.id,
               softwareId,
               kind: "COVERAGE_IMPORT",
@@ -26658,7 +28228,7 @@ async function createWinHoodApp(options) {
     }
     return res.json({ coverage: parsed, attachedToRunId });
   });
-  app.post("/api/execution/run-perf", async (req, res) => {
+  app.post("/api/execution/run-perf", analysisRateLimiter, async (req, res) => {
     if (!requireWritePermission(res, req, "perf:run")) return;
     const actor = getRequestActor(req, res);
     const {
@@ -26721,7 +28291,7 @@ async function createWinHoodApp(options) {
           sc.metricsSummary.throughputRps = result.throughputRps ?? 0;
           targetRun.executionRecords = [
             {
-              id: `uexec-perf-${crypto21.randomUUID().slice(0, 8)}`,
+              id: `uexec-perf-${crypto23.randomUUID().slice(0, 8)}`,
               runId: targetRun.id,
               softwareId,
               kind: "HTTP_PERF_PROBE",
@@ -26830,6 +28400,7 @@ async function createWinHoodApp(options) {
       if (gitarAdapter.getConnection().reencryptStoredToken(ctx)) {
         reencryptedCount += 1;
       }
+      reencryptedCount += authService.reencryptTotpSecrets(ctx);
     });
     appendAuditLog(
       db,
@@ -26884,11 +28455,11 @@ async function startServer(options) {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = options?.distPath || path15.resolve(process.cwd(), "dist");
-    if (fs14.existsSync(distPath)) {
+    const distPath = options?.distPath || path16.resolve(process.cwd(), "dist");
+    if (fs15.existsSync(distPath)) {
       app.use(express.static(distPath));
       app.get("*", (_req, res) => {
-        res.sendFile(path15.join(distPath, "index.html"));
+        res.sendFile(path16.join(distPath, "index.html"));
       });
     }
   }
@@ -26931,7 +28502,7 @@ async function startServer(options) {
     })
   };
 }
-var isEntrypoint = typeof process !== "undefined" && Array.isArray(process.argv) && Boolean(process.argv[1]) && path15.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+var isEntrypoint = typeof process !== "undefined" && Array.isArray(process.argv) && Boolean(process.argv[1]) && path16.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isEntrypoint) {
   void startServer().catch((err) => {
     console.error("Failed to start WinHood server:", err);
@@ -26940,7 +28511,7 @@ if (isEntrypoint) {
 
 // electron-main.ts
 var __filename = fileURLToPath2(import.meta.url);
-var __dirname = path16.dirname(__filename);
+var __dirname = path17.dirname(__filename);
 var ELECTRON_SECURITY_WEB_PREFERENCES = Object.freeze({
   nodeIntegration: false,
   contextIsolation: true,
@@ -27024,11 +28595,11 @@ async function bootstrapWindowsDesktop(options) {
   const layout = ensureWinHoodDirectories(rawUserData);
   process.env.WINHOOD_DATA_DIR = layout.rootDataDir;
   const candidateDistPaths = [
-    path16.resolve(__dirname, "dist"),
-    path16.resolve(__dirname, "..", "dist"),
-    path16.resolve(process.cwd(), "dist")
+    path17.resolve(__dirname, "dist"),
+    path17.resolve(__dirname, "..", "dist"),
+    path17.resolve(process.cwd(), "dist")
   ];
-  const resolvedDistPath = candidateDistPaths.find((p) => fs15.existsSync(path16.join(p, "index.html"))) || candidateDistPaths[0];
+  const resolvedDistPath = candidateDistPaths.find((p) => fs16.existsSync(path17.join(p, "index.html"))) || candidateDistPaths[0];
   const startedBackend = await startServer({
     dataDir: layout.rootDataDir,
     host: "127.0.0.1",
@@ -27067,11 +28638,11 @@ async function bootstrapWindowsDesktop(options) {
   }
   await app.whenReady();
   const preloadCandidates = [
-    path16.resolve(__dirname, "electron-preload.cjs"),
-    path16.resolve(__dirname, "electron-preload.js"),
-    path16.resolve(__dirname, "dist-desktop", "electron-preload.cjs")
+    path17.resolve(__dirname, "electron-preload.cjs"),
+    path17.resolve(__dirname, "electron-preload.js"),
+    path17.resolve(__dirname, "dist-desktop", "electron-preload.cjs")
   ];
-  const resolvedPreloadPath = preloadCandidates.find((p) => fs15.existsSync(p)) || preloadCandidates[0];
+  const resolvedPreloadPath = preloadCandidates.find((p) => fs16.existsSync(p)) || preloadCandidates[0];
   if (ipcMain?.handle) {
     ipcMain.handle("winhood:get-runtime-info", (event) => {
       const senderUrl = event?.senderFrame?.url;
@@ -27157,7 +28728,7 @@ async function bootstrapWindowsDesktop(options) {
     securityWebPreferences: ELECTRON_SECURITY_WEB_PREFERENCES
   };
 }
-var isDirectEntry = typeof process !== "undefined" && Array.isArray(process.argv) && Boolean(process.argv[1]) && path16.resolve(process.argv[1]) === __filename;
+var isDirectEntry = typeof process !== "undefined" && Array.isArray(process.argv) && Boolean(process.argv[1]) && path17.resolve(process.argv[1]) === __filename;
 if (isDirectEntry || process.env.WINHOOD_DESKTOP_RUN === "true") {
   bootstrapWindowsDesktop().catch((err) => {
     console.error("[WinHood Desktop Fatal Error]:", err);

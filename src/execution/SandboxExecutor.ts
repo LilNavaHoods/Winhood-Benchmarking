@@ -46,7 +46,50 @@ export interface SandboxedCommandResult {
   limitations: string[];
 }
 
-const MINIMAL_SAFE_ENV_KEYS = ['PATH', 'LANG', 'LC_ALL'];
+const MINIMAL_SAFE_ENV_KEYS = ['LANG', 'LC_ALL'];
+
+function getRestrictedSafePath(): string {
+  // Segurança (typescript:S4036): nunca herdar PATH completo do host em subprocessos de sandbox;
+  // restringir exclusivamente a diretórios fixos de sistema operacional não graváveis por usuário comum.
+  if (os.platform() === 'win32') {
+    const sysRoot = process.env.SystemRoot || 'C:\\Windows';
+    return `${sysRoot}\\System32;${sysRoot};${sysRoot}\\System32\\Wbem`;
+  }
+  return '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+}
+
+function resolveSystemBinaryPath(candidates: string[]): string | null {
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    } catch {
+      // Ignore inaccessible candidate
+    }
+  }
+  return null;
+}
+
+function getDockerBinaryPath(): string {
+  if (os.platform() === 'win32') {
+    const progFiles = process.env.ProgramFiles || 'C:\\Program Files';
+    const winDocker = path.win32.join(progFiles, 'Docker', 'Docker', 'resources', 'bin', 'docker.exe');
+    return resolveSystemBinaryPath([winDocker]) || winDocker;
+  }
+  return (
+    resolveSystemBinaryPath(['/usr/bin/docker', '/usr/local/bin/docker', '/bin/docker']) ||
+    '/usr/bin/docker'
+  );
+}
+
+function getBwrapBinaryPath(): string {
+  return resolveSystemBinaryPath(['/usr/bin/bwrap', '/bin/bwrap']) || '/usr/bin/bwrap';
+}
+
+function getUnshareBinaryPath(): string {
+  return resolveSystemBinaryPath(['/usr/bin/unshare', '/bin/unshare']) || '/usr/bin/unshare';
+}
 
 function checkBinaryCommand(
   bin: string,
@@ -54,11 +97,16 @@ function checkBinaryCommand(
   envOverrides?: Record<string, string>
 ): boolean {
   try {
+    const restrictedEnv: NodeJS.ProcessEnv = {
+      PATH: getRestrictedSafePath(),
+      ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+      ...(envOverrides || {}),
+    };
     const res = spawnSync(bin, args, {
       shell: false,
       encoding: 'utf8',
       timeout: 2500,
-      env: envOverrides ? { ...process.env, ...envOverrides } : process.env,
+      env: restrictedEnv,
     });
     return res.status === 0 && !res.error;
   } catch {
@@ -66,14 +114,16 @@ function checkBinaryCommand(
   }
 }
 
-function buildMinimalEnv(tmpRoot: string, extra?: Record<string, string>): NodeJS.ProcessEnv {
+export function buildMinimalSandboxEnv(tmpRoot: string, extra?: Record<string, string>): NodeJS.ProcessEnv {
   const nodeRuntime = resolveNodeRuntimeForSubprocess();
   const cleanEnv: NodeJS.ProcessEnv = {
+    PATH: getRestrictedSafePath(),
     TMPDIR: tmpRoot,
     TMP: tmpRoot,
     TEMP: tmpRoot,
     HOME: tmpRoot,
     NODE_ENV: 'test',
+    ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
     ...nodeRuntime.envOverrides,
   };
   for (const key of MINIMAL_SAFE_ENV_KEYS) {
@@ -83,6 +133,7 @@ function buildMinimalEnv(tmpRoot: string, extra?: Record<string, string>): NodeJ
   }
   if (extra) {
     for (const [k, v] of Object.entries(extra)) {
+      if (k.toUpperCase() === 'PATH') continue; // Preserve controlled non-writable PATH
       cleanEnv[k] = v;
     }
   }
@@ -92,6 +143,10 @@ function buildMinimalEnv(tmpRoot: string, extra?: Record<string, string>): NodeJ
 export class SandboxExecutor {
   private static cachedProbe: HostIsolationProbe | null = null;
 
+  public static getControlledSafePath(): string {
+    return getRestrictedSafePath();
+  }
+
   public static probeHostIsolation(forceRefresh = false): HostIsolationProbe {
     if (SandboxExecutor.cachedProbe && !forceRefresh) {
       return SandboxExecutor.cachedProbe;
@@ -100,12 +155,18 @@ export class SandboxExecutor {
     const platform = os.platform();
     const limitations: string[] = [];
 
-    const dockerAvailable = checkBinaryCommand('docker', ['info']);
-    const bwrapAvailable = platform === 'linux' && checkBinaryCommand('bwrap', ['--version']);
+    const dockerBin = getDockerBinaryPath();
+    const bwrapBin = getBwrapBinaryPath();
+    const unshareBin = getUnshareBinaryPath();
+
+    const dockerAvailable = checkBinaryCommand(dockerBin, ['info']);
+    const bwrapAvailable = platform === 'linux' && checkBinaryCommand(bwrapBin, ['--version']);
     const unshareAvailable =
-      platform === 'linux' && checkBinaryCommand('unshare', ['--user', '--map-root-user', 'true']);
+      platform === 'linux' && checkBinaryCommand(unshareBin, ['--user', '--map-root-user', 'true']);
+    const winSysRoot = process.env.SystemRoot || 'C:\\Windows';
     const windowsSandboxAvailable =
-      platform === 'win32' && fs.existsSync('C:\\Windows\\System32\\WindowsSandbox.exe');
+      platform === 'win32' &&
+      fs.existsSync(path.win32.join(winSysRoot, 'System32', 'WindowsSandbox.exe'));
 
     const nodeMajor = Number.parseInt(process.versions.node.split('.')[0] || '0', 10);
     const nodeRuntime = resolveNodeRuntimeForSubprocess();
@@ -266,13 +327,13 @@ export class SandboxExecutor {
       }
 
       isolationState = 'ISOLATION_VERIFIED';
-      const childEnv = buildMinimalEnv(realTmpRoot);
+      const childEnv = buildMinimalSandboxEnv(realTmpRoot);
 
       let res;
       if (probe.dockerAvailable) {
-        // Ephemeral rootless/restricted container, NEVER mounting docker.sock
+        // Ephemeral rootless/restricted container using absolute system binary path, NEVER mounting docker.sock
         res = spawnSync(
-          'docker',
+          getDockerBinaryPath(),
           [
             'run',
             '--rm',
@@ -441,10 +502,10 @@ export class SandboxExecutor {
         }
       }
 
-      const childEnv = buildMinimalEnv(realTmpRoot);
+      const childEnv = buildMinimalSandboxEnv(realTmpRoot);
       const res = probe.dockerAvailable
         ? spawnSync(
-            'docker',
+            getDockerBinaryPath(),
             [
               'run',
               '--rm',
@@ -595,11 +656,11 @@ export class SandboxExecutor {
       }
 
       const rawArgs = params.argsBuilder(realTmpRoot);
-      const childEnv = buildMinimalEnv(realTmpRoot);
+      const childEnv = buildMinimalSandboxEnv(realTmpRoot);
 
       const res = probe.bwrapAvailable
         ? spawnSync(
-            'bwrap',
+            getBwrapBinaryPath(),
             [
               '--ro-bind',
               '/usr',

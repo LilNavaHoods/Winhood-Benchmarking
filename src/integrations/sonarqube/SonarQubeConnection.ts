@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { KeyManagementService } from '../../security/KeyManagementService';
+import { SsrfGuard } from '../../execution/SsrfGuard';
 import type { SonarConnectionState, SonarInstallationMode, SonarInstanceRecord } from '../../types/benchmark';
 
 export interface ProbeSonarQubeOptions {
@@ -175,6 +176,31 @@ export class SonarQubeConnection {
       };
     }
 
+    const ssrf = await SsrfGuard.validateUrl({
+      targetUrl: rawUrl,
+      allowExplicitLoopback: SsrfGuard.isExplicitLoopbackUrl(rawUrl),
+    });
+    if (!ssrf.allowed) {
+      return {
+        connectionState: 'SERVER_UNAVAILABLE',
+        httpReachable: false,
+        authenticated: false,
+        version: null,
+        edition: null,
+        systemStatus: 'SSRF_BLOCKED',
+        apiCompatibility: 'UNKNOWN',
+        permissions: {
+          browse: false,
+          executeAnalysis: false,
+          administerQualityGates: false,
+          provisioning: false,
+        },
+        tokenExpiresAt: null,
+        latencyMs: Math.round((performance.now() - start) * 10) / 10,
+        errorMessage: `SSRF_BLOCKED: ${ssrf.reason}`,
+      };
+    }
+
     const headers: Record<string, string> = {
       Accept: 'application/json',
       'User-Agent': 'WinHood-SonarQubeIntegrationService/2.0',
@@ -190,9 +216,31 @@ export class SonarQubeConnection {
       const statusRes = await fetch(`${rawUrl}/api/system/status`, {
         method: 'GET',
         headers,
+        redirect: 'manual',
         signal: controller.signal,
       });
       clearTimeout(timer);
+
+      if (statusRes.status >= 300 && statusRes.status < 400) {
+        return {
+          connectionState: 'SERVER_UNAVAILABLE',
+          httpReachable: false,
+          authenticated: false,
+          version: null,
+          edition: null,
+          systemStatus: 'REDIRECT_BLOCKED',
+          apiCompatibility: 'UNKNOWN',
+          permissions: {
+            browse: false,
+            executeAnalysis: false,
+            administerQualityGates: false,
+            provisioning: false,
+          },
+          tokenExpiresAt: null,
+          latencyMs: Math.round((performance.now() - start) * 10) / 10,
+          errorMessage: `SSRF_REDIRECT_BLOCKED: Servidor respondeu com redirecionamento HTTP ${statusRes.status}.`,
+        };
+      }
 
       const latencyMs = Math.round((performance.now() - start) * 10) / 10;
 
@@ -303,10 +351,14 @@ export class SonarQubeConnection {
       let authenticated = false;
       let tokenExpiresAt: string | null = null;
       if (options.token && options.token.trim().length > 0) {
+        const authController = new AbortController();
+        const authTimer = setTimeout(() => authController.abort(), timeoutMs);
         const authRes = await fetch(`${rawUrl}/api/authentication/validate`, {
           method: 'GET',
           headers,
-        });
+          redirect: 'manual',
+          signal: authController.signal,
+        }).finally(() => clearTimeout(authTimer));
         if (authRes.status === 401 || authRes.status === 403) {
           return {
             connectionState: 'AUTH_FAILED',
@@ -365,10 +417,14 @@ export class SonarQubeConnection {
       };
       if (authenticated) {
         try {
+          const userController = new AbortController();
+          const userTimer = setTimeout(() => userController.abort(), timeoutMs);
           const userRes = await fetch(`${rawUrl}/api/users/current`, {
             method: 'GET',
             headers,
-          });
+            redirect: 'manual',
+            signal: userController.signal,
+          }).finally(() => clearTimeout(userTimer));
           if (userRes.ok) {
             const userJson = (await userRes.json()) as { permissions?: { global?: string[] } };
             const globalPerms = userJson.permissions?.global;

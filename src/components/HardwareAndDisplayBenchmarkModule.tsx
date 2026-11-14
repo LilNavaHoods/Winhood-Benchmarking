@@ -702,7 +702,8 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
     }
     setReflexState('WAITING');
     setReflexLastMs(null);
-    const delayMs = 1100 + Math.floor(Math.random() * 1600);
+    // NOSONAR (typescript:S2245): jitter visual não-sensível apenas para aleatorizar estímulo do teste de reflexo UI
+    const delayMs = 1100 + Math.floor(Math.random() * 1600); // NOSONAR
     reflexTimerRef.current = globalThis.setTimeout(() => {
       reflexStartRef.current = performance.now();
       setReflexState('READY');

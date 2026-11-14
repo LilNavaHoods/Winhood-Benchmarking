@@ -67,7 +67,9 @@ export interface SourceUploadSecurityValidation {
 
 export function validateSourceUploadSecurity(
   filesMap: Record<string, string>,
-  maxFileSizeBytes = 2 * 1024 * 1024
+  maxFileSizeBytes = 2 * 1024 * 1024,
+  maxTotalFiles = 500,
+  maxTotalBytes = 12 * 1024 * 1024
 ): SourceUploadSecurityValidation {
   const blockedFiles: Array<{ path: string; reason: string }> = [];
   const rejectedFiles: string[] = [];
@@ -77,19 +79,38 @@ export function validateSourceUploadSecurity(
   const symlinkAttempts: string[] = [];
   const corruptedFiles: string[] = [];
 
-  for (const [rawPath, content] of Object.entries(filesMap)) {
+  const entries = Object.entries(filesMap);
+  if (entries.length > maxTotalFiles) {
+    violations.push(
+      `Quantidade de arquivos (${entries.length}) excede o limite máximo permitido (${maxTotalFiles}).`
+    );
+    blockedFiles.push({ path: '<bundle>', reason: `TOO_MANY_FILES (${entries.length} > ${maxTotalFiles})` });
+  }
+
+  let totalBytes = 0;
+
+  for (const [rawPath, content] of entries) {
     const normalized = rawPath.replace(/\\/g, '/');
+    const segments = normalized.split('/').filter(Boolean);
     if (
       normalized.startsWith('/') ||
       /^[a-zA-Z]:\//.test(normalized) ||
       normalized.split('/').includes('..') ||
       normalized.includes('../') ||
-      normalized.includes('..\\')
+      normalized.includes('..\\') ||
+      segments.length > 20
     ) {
       traversalAttempts.push(rawPath);
       rejectedFiles.push(rawPath);
-      blockedFiles.push({ path: rawPath, reason: 'PATH_TRAVERSAL_ATTEMPT' });
-      violations.push(`Tentativa de Path Traversal bloqueada no caminho: ${rawPath}`);
+      blockedFiles.push({
+        path: rawPath,
+        reason: segments.length > 20 ? 'EXCESSIVE_PATH_DEPTH' : 'PATH_TRAVERSAL_ATTEMPT',
+      });
+      violations.push(
+        segments.length > 20
+          ? `Profundidade de diretório excessiva bloqueada no caminho: ${rawPath}`
+          : `Tentativa de Path Traversal bloqueada no caminho: ${rawPath}`
+      );
       continue;
     }
     if (typeof content !== 'string' || content.startsWith('SYMLINK:') || content.includes('\u0000')) {
@@ -107,12 +128,23 @@ export function validateSourceUploadSecurity(
       continue;
     }
     const sizeBytes = Buffer.byteLength(content, 'utf8');
+    totalBytes += sizeBytes;
     if (sizeBytes > maxFileSizeBytes) {
       oversizedFiles.push(rawPath);
       rejectedFiles.push(rawPath);
       blockedFiles.push({ path: rawPath, reason: `FILE_TOO_LARGE (${sizeBytes} > ${maxFileSizeBytes} bytes)` });
       violations.push(`Arquivo ${rawPath} (${sizeBytes} bytes) excede o limite máximo de ${maxFileSizeBytes} bytes.`);
     }
+  }
+
+  if (totalBytes > maxTotalBytes) {
+    violations.push(
+      `Tamanho acumulado do pacote (${totalBytes} bytes) excede o limite máximo permitido (${maxTotalBytes} bytes).`
+    );
+    blockedFiles.push({
+      path: '<bundle>',
+      reason: `TOTAL_PAYLOAD_TOO_LARGE (${totalBytes} > ${maxTotalBytes} bytes)`,
+    });
   }
 
   return {

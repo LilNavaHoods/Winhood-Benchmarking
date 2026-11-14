@@ -1,3 +1,5 @@
+import { SsrfGuard } from '../../execution/SsrfGuard';
+
 /**
  * GitarApiClient (Seção 9.2)
  * Implementa exclusivamente operações documentadas na referência oficial da API Gitar:
@@ -27,9 +29,20 @@ export class GitarApiClient {
   private async getJson<T>(path: string): Promise<{ ok: boolean; status: number; data: T | null; error?: string }> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 4000);
+    const targetUrl = `${this.apiBaseUrl}${path.startsWith('/') ? path : `/${path}`}`;
     try {
-      const res = await fetch(`${this.apiBaseUrl}${path.startsWith('/') ? path : `/${path}`}`, {
+      const ssrf = await SsrfGuard.validateUrl({
+        targetUrl,
+        allowExplicitLoopback: SsrfGuard.isExplicitLoopbackUrl(this.apiBaseUrl),
+      });
+      if (!ssrf.allowed) {
+        clearTimeout(timer);
+        return { ok: false, status: 403, data: null, error: `SSRF_BLOCKED: ${ssrf.reason}` };
+      }
+
+      const res = await fetch(targetUrl, {
         method: 'GET',
+        redirect: 'manual',
         headers: {
           Accept: 'application/json',
           Authorization: `Bearer ${this.token}`,
@@ -38,6 +51,9 @@ export class GitarApiClient {
         signal: controller.signal,
       });
       clearTimeout(timer);
+      if (res.status >= 300 && res.status < 400) {
+        return { ok: false, status: res.status, data: null, error: `SSRF_REDIRECT_BLOCKED: HTTP ${res.status}` };
+      }
       if (!res.ok) {
         return { ok: false, status: res.status, data: null, error: `HTTP ${res.status}` };
       }

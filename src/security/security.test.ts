@@ -9,7 +9,7 @@ import type { AddressInfo } from 'node:net';
 import { AuthService, generateTotpCode } from './AuthService';
 import { KeyManagementService } from './KeyManagementService';
 import { SsrfGuard } from '../execution/SsrfGuard';
-import { SandboxExecutor } from '../execution/SandboxExecutor';
+import { buildMinimalSandboxEnv, SandboxExecutor } from '../execution/SandboxExecutor';
 import { PersistentDatabaseManager } from '../storage/PersistentDatabaseManager';
 import {
   GENESIS_EVIDENCE_HASH,
@@ -17,6 +17,18 @@ import {
   verifyEvidenceChainAndManifest,
 } from '../engine/evidenceProvenanceEngine';
 import { SonarQubeConnection } from '../integrations/sonarqube/SonarQubeConnection';
+import { SonarQubeApiClient } from '../integrations/sonarqube/SonarQubeApiClient';
+import { SonarScannerExecutor } from '../integrations/sonarqube/SonarScannerExecutor';
+import { GitarApiClient } from '../integrations/gitar/GitarApiClient';
+import {
+  enforceVerifiedQualityGateOnRun,
+  executeBenchmarkRunOrchestration,
+} from '../engine/benchmarkOrchestrator';
+import {
+  ALL_BENCHMARK_CATEGORIES,
+  DEFAULT_CATEGORY_WEIGHTS,
+} from '../engine/scoringEngine';
+import { buildTechnicalInventory } from '../engine/staticAnalyzer';
 import { ProjectBackupService } from '../services/backup/ProjectBackupService';
 import { createWinHoodApp } from '../../server';
 
@@ -1211,6 +1223,298 @@ test('ProjectBackupService blocks Path Traversal & Filesystem Oracle attacks on 
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('CORS canonical allowlist (tssecurity:S8348) and ELECTRON_DESKTOP localhost restriction reject unauthorized origins', async () => {
+  await withIsolatedKeystoreEnv(async (tmpDir) => {
+    const prevRuntimeEnv = process.env.WINHOOD_RUNTIME_ENV;
+    const prevAllowedOrigins = process.env.WINHOOD_ALLOWED_ORIGINS;
+    process.env.WINHOOD_ALLOWED_ORIGINS = 'https://app.winhood.example';
+    delete process.env.WINHOOD_RUNTIME_ENV;
+
+    const { app } = await createWinHoodApp({ dataDir: tmpDir });
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      const allowedRes = await fetch(`${baseUrl}/api/health`, {
+        headers: { Origin: 'http://localhost:3000' },
+      });
+      assert.equal(allowedRes.status, 200);
+      assert.equal(allowedRes.headers.get('access-control-allow-origin'), 'http://localhost:3000');
+
+      const blockedOptRes = await fetch(`${baseUrl}/api/health`, {
+        method: 'OPTIONS',
+        headers: { Origin: 'https://evil-attacker.example' },
+      });
+      assert.equal(blockedOptRes.status, 403);
+      assert.equal(blockedOptRes.headers.get('access-control-allow-origin'), null);
+
+      process.env.WINHOOD_RUNTIME_ENV = 'ELECTRON_DESKTOP';
+      const electronAllowed = await fetch(`${baseUrl}/api/health`, {
+        headers: { Origin: 'http://127.0.0.1:41234' },
+      });
+      assert.equal(electronAllowed.status, 200);
+      assert.equal(electronAllowed.headers.get('access-control-allow-origin'), 'http://127.0.0.1:41234');
+
+      const electronEvilOpt = await fetch(`${baseUrl}/api/health`, {
+        method: 'OPTIONS',
+        headers: { Origin: 'https://app.winhood.example' },
+      });
+      assert.equal(electronEvilOpt.status, 403);
+      assert.equal(electronEvilOpt.headers.get('access-control-allow-origin'), null);
+    } finally {
+      if (prevRuntimeEnv === undefined) delete process.env.WINHOOD_RUNTIME_ENV;
+      else process.env.WINHOOD_RUNTIME_ENV = prevRuntimeEnv;
+      if (prevAllowedOrigins === undefined) delete process.env.WINHOOD_ALLOWED_ORIGINS;
+      else process.env.WINHOOD_ALLOWED_ORIGINS = prevAllowedOrigins;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+test('SandboxExecutor (typescript:S4036) enforces controlled PATH without host writable directory inheritance', () => {
+  const prevPath = process.env.PATH;
+  const injectedDir = path.join(os.tmpdir(), 'attacker-writable-bin');
+  process.env.PATH = `${injectedDir}${path.delimiter}${prevPath || ''}`;
+
+  try {
+    const controlledPath = SandboxExecutor.getControlledSafePath();
+    assert.equal(controlledPath.includes(injectedDir), false);
+
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'winhood-env-test-'));
+    try {
+      const env = buildMinimalSandboxEnv(tmpRoot, {
+        PATH: injectedDir,
+        CUSTOM_SAFE_FLAG: '1',
+      });
+      assert.equal(env.PATH, controlledPath);
+      assert.equal(env.PATH?.includes(injectedDir), false);
+      assert.equal(env.CUSTOM_SAFE_FLAG, '1');
+      assert.equal(env.HOME, tmpRoot);
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  } finally {
+    if (prevPath === undefined) delete process.env.PATH;
+    else process.env.PATH = prevPath;
+  }
+});
+
+test('SonarScannerExecutor (typescript:S2245) generates CSPRNG UUID temp properties file', async () => {
+  if (process.platform === 'win32') return;
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'winhood-scanner-uuid-'));
+  try {
+    const fakeScanner = path.join(tmpDir, 'fake-scanner.sh');
+    fs.writeFileSync(fakeScanner, '#!/bin/sh\necho "ARG=$1"\n', { mode: 0o755 });
+
+    const res = await SonarScannerExecutor.executeIsolatedScanner({
+      scannerType: 'SONAR_SCANNER_CLI',
+      executablePath: fakeScanner,
+      projectBaseDir: tmpDir,
+      propertiesContent: 'sonar.projectKey=test-uuid\n',
+      timeoutMs: 5000,
+    });
+
+    assert.equal(res.executed, true);
+    assert.match(
+      res.stdout,
+      /\.winhood-sonar-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.properties/i
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('Outbound HTTP clients (SonarQubeConnection, SonarQubeApiClient, GitarApiClient) block SSRF metadata & private IPs', async () => {
+  const probeMetadata = await SonarQubeConnection.probeSonarQube({
+    serverUrl: 'http://169.254.169.254/latest/meta-data',
+    mode: 'DOCKER',
+    timeoutMs: 1500,
+  });
+  assert.equal(probeMetadata.httpReachable, false);
+  assert.match(probeMetadata.errorMessage || '', /SSRF/i);
+
+  const sonarClient = new SonarQubeApiClient({
+    serverUrl: 'http://10.0.0.5:9000',
+    timeoutMs: 1500,
+  });
+  const sonarProjectRes = await sonarClient.createProject('demo', 'Demo');
+  assert.equal(sonarProjectRes.ok, false);
+  assert.equal(sonarProjectRes.status, 403);
+  assert.match(sonarProjectRes.error || '', /SSRF_BLOCKED/i);
+
+  const gitarClient = new GitarApiClient('http://169.254.169.254', 'dummy-token');
+  const gitarRes = await gitarClient.listOnboardedRepositories();
+  assert.equal(gitarRes.ok, false);
+  assert.equal(gitarRes.status, 403);
+  assert.match(gitarRes.error || '', /SSRF_BLOCKED/i);
+});
+
+test('Upload, GitHub import orphan prevention, and ingestion/analysis rate limiting (429 RATE_LIMITED)', async () => {
+  await withIsolatedKeystoreEnv(async (tmpDir) => {
+    const { app, authService, getDb } = await createWinHoodApp({
+      dataDir: tmpDir,
+      enforceProductionAuth: true,
+      rateLimits: {
+        ingestionMax: 2,
+        analysisMax: 2,
+        backupMax: 2,
+        windowMs: 60_000,
+      },
+    });
+
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      const bootFile = authService.getBootstrapMetadata().bootstrapTokenFilePath;
+      const bootstrapToken = readBootstrapTokenFromFile(bootFile);
+      const bootRes = await fetch(`${baseUrl}/api/auth/bootstrap-admin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bootstrapToken,
+          name: 'Rate Limit Admin',
+          email: 'ratelimit.admin@winhood.local',
+          password: 'RateLimitAdminStrong!2026',
+        }),
+      });
+      assert.equal(bootRes.status, 201);
+      const bootJson = (await bootRes.json()) as { sessionId: string; csrfToken: string };
+      const authHeaders = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${bootJson.sessionId}`,
+        'x-csrf-token': bootJson.csrfToken,
+      };
+
+      const initialProjectsCount = getDb().projects.length;
+
+      // 1. Invalid upload (traversal) must fail without leaving orphan project
+      const badUploadRes = await fetch(`${baseUrl}/api/projects/upload`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          name: 'Orphan Check Upload',
+          objective: 'Should not create orphan project',
+          filesMap: { '../evil.ts': 'export const bad = 1;' },
+        }),
+      });
+      assert.equal(badUploadRes.status, 400);
+      assert.equal(getDb().projects.length, initialProjectsCount);
+
+      // 2. Invalid GitHub import repoFullName/branch must fail without leaving orphan project
+      const badGhRes = await fetch(`${baseUrl}/api/github/import`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          repoFullName: 'owner/../evil',
+          repoName: 'evil',
+          defaultBranch: 'main;rm -rf /',
+        }),
+      });
+      assert.equal(badGhRes.status, 400);
+      assert.equal(getDb().projects.length, initialProjectsCount);
+
+      // 3. Third ingestion request in the same bucket hits rate limit (429 RATE_LIMITED)
+      const limitedRes = await fetch(`${baseUrl}/api/projects/upload`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          name: 'Third Request',
+          objective: 'Hits rate limiter',
+          filesMap: { 'src/index.ts': 'export const ok = true;' },
+        }),
+      });
+      assert.equal(limitedRes.status, 429);
+      assert.ok(limitedRes.headers.get('retry-after'));
+      const limitedJson = (await limitedRes.json()) as { error: string };
+      assert.equal(limitedJson.error, 'RATE_LIMITED');
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+test('enforceVerifiedQualityGateOnRun downgrades tampered evidence chain to INCONCLUSIVE and clears winner', () => {
+  const now = new Date().toISOString();
+  const filesMap = {
+    'src/safe.ts': 'export function add(a: number, b: number): number { return a + b; }\n',
+  };
+  const inv = buildTechnicalInventory(filesMap, '/isolated/sw-verify-a');
+  const swA = {
+    id: 'sw-verify-a',
+    projectId: 'proj-verify',
+    name: 'Verified Alpha',
+    vendor: 'WinHood QA',
+    description: 'Clean TS module',
+    category: 'SECURITY',
+    version: '1.0.0',
+    languages: ['TypeScript'],
+    architecture: 'Modular',
+    operatingSystem: 'Linux',
+    distributionModel: 'Source',
+    licenseType: 'MIT',
+    officialUrl: '',
+    repositoryUrl: '',
+    documentationUrl: '',
+    owner: 'QA',
+    notes: '',
+    sourceType: 'LOCAL_AUTHORIZED' as const,
+    commitHash: 'abc1234',
+    packageSha256: inv.packageSha256,
+    createdAt: now,
+    inventory: {
+      totalFiles: inv.totalFiles,
+      eligibleFiles: inv.eligibleFiles,
+      totalLinesOfCode: inv.totalLinesOfCode,
+      totalSizeBytes: inv.totalSizeBytes,
+      languageBreakdown: inv.languageBreakdown,
+      files: inv.files,
+      isolatedStoragePath: '/isolated/sw-verify-a',
+      verifiedIntegrity: inv.verifiedIntegrity,
+    },
+    sourceFilesContent: filesMap,
+  };
+
+  const run = executeBenchmarkRunOrchestration({
+    runId: 'run-qg-verify-1',
+    projectId: 'proj-verify',
+    projectName: 'QG Verification Test',
+    profileName: 'Sonar way',
+    softwares: [swA],
+    weights: { ...DEFAULT_CATEGORY_WEIGHTS },
+    enabledCategories: [...ALL_BENCHMARK_CATEGORIES],
+    qualityGateId: 'qg-sonar-way-mqr',
+    enablePenaltyCaps: true,
+    equivalenceEnvironment: {
+      cpuCoresLimit: 4,
+      memoryMbLimit: 4096,
+      osTarget: 'Linux',
+      workloadConcurrency: 50,
+      dastFormalAuthorization: false,
+      authorizedByOwner: 'QA',
+    },
+  });
+
+  assert.equal(run.evidenceVerification?.valid, true);
+  assert.notEqual(run.qualityGate?.status, 'INCONCLUSIVE');
+
+  // Tamper evidence chain
+  if (run.evidenceChain.length > 0) {
+    run.evidenceChain[0].resultSummary = 'TAMPERED_RESULT_SUMMARY';
+  }
+  const guarded = enforceVerifiedQualityGateOnRun(run);
+  assert.equal(guarded.evidenceVerification?.valid, false);
+  assert.equal(guarded.qualityGate?.status, 'INCONCLUSIVE');
+  assert.equal(guarded.winnerSoftwareId, null);
+  assert.equal(guarded.qualityGate?.executiveDecision, 'INCONCLUSIVE');
+  assert.equal(guarded.scoreCards[0]?.separatedIndicators?.qualityGateDecision, 'INCONCLUSIVE');
+});
+
 
 
 

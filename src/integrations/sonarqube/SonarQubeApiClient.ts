@@ -1,5 +1,6 @@
 import type { SonarPaginationSummary } from '../../types/benchmark';
 import { computeSha256 } from '../../engine/scoringEngine';
+import { SsrfGuard } from '../../execution/SsrfGuard';
 
 export interface SonarApiClientConfig {
   serverUrl: string;
@@ -146,8 +147,24 @@ export class SonarQubeApiClient {
     const url = `${this.baseUrl}${endpointPath.startsWith('/') ? endpointPath : `/${endpointPath}`}`;
 
     try {
+      const ssrf = await SsrfGuard.validateUrl({
+        targetUrl: url,
+        allowExplicitLoopback: SsrfGuard.isExplicitLoopbackUrl(this.baseUrl),
+      });
+      if (!ssrf.allowed) {
+        clearTimeout(timer);
+        return {
+          ok: false,
+          status: 403,
+          data: null,
+          rawHash: computeSha256(`SSRF_BLOCKED|${url}`),
+          error: `SSRF_BLOCKED: ${ssrf.reason}`,
+        };
+      }
+
       const res = await fetch(url, {
         ...options,
+        redirect: 'manual',
         headers: {
           ...this.buildHeaders(),
           ...(options.headers as Record<string, string> | undefined),
@@ -155,6 +172,15 @@ export class SonarQubeApiClient {
         signal: controller.signal,
       });
       clearTimeout(timer);
+      if (res.status >= 300 && res.status < 400) {
+        return {
+          ok: false,
+          status: res.status,
+          data: null,
+          rawHash: computeSha256(`SSRF_REDIRECT_BLOCKED|${url}|${res.status}`),
+          error: `SSRF_REDIRECT_BLOCKED: Redirecionamento HTTP ${res.status} bloqueado.`,
+        };
+      }
       const rawText = await res.text();
       const rawHash = computeSha256(rawText || `STATUS_${res.status}`);
 

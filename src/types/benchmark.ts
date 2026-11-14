@@ -1123,6 +1123,13 @@ export interface BenchmarkRun {
   environmentEquivalent: boolean;
   comparabilityReport?: ComparabilityReport;
   signedManifest?: SignedEvidenceManifest;
+  evidenceVerification?: {
+    valid: boolean;
+    verificationState: ManifestVerificationState;
+    verifiedAt: string;
+    message: string;
+    tamperedIndices: number[];
+  };
   criteriaOutcomesBySoftware?: Record<string, CriterionEvaluationOutcome[]>;
   progress?: BenchmarkRunProgress;
   scoreCards: SoftwareScoreCard[];

@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { exec } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import express from 'express';
@@ -67,6 +67,7 @@ import {
   ALGORITHM_VERSION,
   DEFAULT_BENCHMARK_PROFILES,
   createInitialRunningBenchmark,
+  enforceVerifiedQualityGateOnRun,
   executeBenchmarkRunOrchestration,
   recalculateBenchmarkRunScoreCards,
 } from './src/engine/benchmarkOrchestrator';
@@ -102,6 +103,7 @@ import {
 import { PersistentDatabaseManager } from './src/storage/PersistentDatabaseManager';
 import { ProjectBackupService } from './src/services/backup/ProjectBackupService';
 import { SsrfGuard, type AuthorizedPerfTarget } from './src/execution/SsrfGuard';
+import { SandboxExecutor } from './src/execution/SandboxExecutor';
 import { ReferenceRegistry } from './src/intelligence/reference/ReferenceRegistry';
 import { ReferenceSynchronizer } from './src/intelligence/synchronization/ReferenceSynchronizer';
 import { BenchmarkMatcher } from './src/intelligence/comparison/BenchmarkMatcher';
@@ -390,6 +392,94 @@ function validateSonarServerOrigin(rawServerUrl: string, platform: 'SONARCLOUD' 
     throw new Error('Para a plataforma SONARCLOUD, o host oficial deve ser estritamente https://sonarcloud.io.');
   }
   return parsed.origin;
+}
+
+async function validateSonarServerOriginSafe(
+  rawServerUrl: string,
+  platform: 'SONARCLOUD' | 'SONARQUBE_SERVER'
+): Promise<string> {
+  const safeOrigin = validateSonarServerOrigin(rawServerUrl, platform);
+  const ssrf = await SsrfGuard.validateUrl({
+    targetUrl: safeOrigin,
+    allowExplicitLoopback: SsrfGuard.isExplicitLoopbackUrl(safeOrigin),
+  });
+  if (!ssrf.allowed) {
+    throw new Error(ssrf.reason || 'URL do servidor Sonar bloqueada pelo SsrfGuard.');
+  }
+  return safeOrigin;
+}
+
+async function fetchWithTimeoutAndNoRedirect(
+  url: string,
+  init: RequestInit,
+  timeoutMs = 8000
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      ...init,
+      redirect: 'manual',
+      signal: controller.signal,
+    });
+    if (response.status >= 300 && response.status < 400) {
+      throw new Error(`SSRF_REDIRECT_BLOCKED: Redirecionamento HTTP ${response.status} bloqueado.`);
+    }
+    return response;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+interface RateLimitOptions {
+  windowMs: number;
+  maxRequests: number;
+  bucketName: string;
+}
+
+function createInMemoryRateLimiter(opts: RateLimitOptions): express.RequestHandler {
+  const buckets = new Map<string, { count: number; resetAt: number }>();
+  const cleanupTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of buckets.entries()) {
+      if (entry.resetAt <= now) {
+        buckets.delete(key);
+      }
+    }
+  }, Math.max(opts.windowMs, 15_000));
+  cleanupTimer.unref();
+
+  return (req, res, next) => {
+    const now = Date.now();
+    const actorKey =
+      String((req as any).authUser?.id || '') ||
+      String(req.ip || req.socket?.remoteAddress || 'unknown');
+    const compositeKey = `${opts.bucketName}:${actorKey}`;
+
+    let entry = buckets.get(compositeKey);
+    if (!entry || entry.resetAt <= now) {
+      entry = { count: 0, resetAt: now + opts.windowMs };
+      buckets.set(compositeKey, entry);
+    }
+
+    entry.count += 1;
+    const remaining = Math.max(0, opts.maxRequests - entry.count);
+    const retryAfterSeconds = Math.max(1, Math.ceil((entry.resetAt - now) / 1000));
+
+    res.setHeader('X-RateLimit-Limit', String(opts.maxRequests));
+    res.setHeader('X-RateLimit-Remaining', String(remaining));
+
+    if (entry.count > opts.maxRequests) {
+      res.setHeader('Retry-After', String(retryAfterSeconds));
+      return res.status(429).json({
+        error: 'RATE_LIMITED',
+        bucket: opts.bucketName,
+        retryAfterSeconds,
+        message: `Limite de requisições excedido para ${opts.bucketName}. Tente novamente em ${retryAfterSeconds}s.`,
+      });
+    }
+    return next();
+  };
 }
 
 function ensureDirectories(dataDir = DATA_DIR, artifactsDir = ISOLATED_ARTIFACTS_DIR) {
@@ -882,6 +972,12 @@ function appendAuditLog(
 export async function createWinHoodApp(options?: {
   dataDir?: string;
   enforceProductionAuth?: boolean;
+  rateLimits?: {
+    ingestionMax?: number;
+    analysisMax?: number;
+    backupMax?: number;
+    windowMs?: number;
+  };
 }) {
   const dataDir = resolveWinHoodDataRoot(options?.dataDir);
   ensureWinHoodDirectories(dataDir);
@@ -893,6 +989,22 @@ export async function createWinHoodApp(options?: {
   const app = express();
   app.set('trust proxy', 1);
   const backupService = new ProjectBackupService(dataDir);
+  const rateLimitWindowMs = options?.rateLimits?.windowMs ?? 60_000;
+  const ingestionRateLimiter = createInMemoryRateLimiter({
+    bucketName: 'ingestion',
+    windowMs: rateLimitWindowMs,
+    maxRequests: options?.rateLimits?.ingestionMax ?? 30,
+  });
+  const analysisRateLimiter = createInMemoryRateLimiter({
+    bucketName: 'analysis',
+    windowMs: rateLimitWindowMs,
+    maxRequests: options?.rateLimits?.analysisMax ?? 40,
+  });
+  const backupRateLimiter = createInMemoryRateLimiter({
+    bucketName: 'backup',
+    windowMs: rateLimitWindowMs,
+    maxRequests: options?.rateLimits?.backupMax ?? 30,
+  });
   app.disable('x-powered-by');
   app.use((_req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -963,6 +1075,9 @@ export async function createWinHoodApp(options?: {
     ).length;
 
     const latestRun = db.runs[0] || null;
+    if (latestRun && latestRun.signedManifest) {
+      enforceVerifiedQualityGateOnRun(latestRun);
+    }
     const allFindings = latestRun ? latestRun.findings : [];
     const vulnerabilitiesCount = allFindings.filter((f) =>
       ['SAST', 'SCA', 'SECRETS', 'DAST', 'DATABASE'].includes(f.category)
@@ -1127,34 +1242,38 @@ export async function createWinHoodApp(options?: {
     return { token: undefined, source: null };
   };
 
-  const allowedOrigins = new Set(
-    [
-      'http://localhost:3000',
-      'http://127.0.0.1:3000',
-      ...(process.env.WINHOOD_ALLOWED_ORIGINS || '')
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean),
-    ]
-  );
+  const allowedOriginMap = new Map<string, string>();
+  for (const candidate of [
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+    ...(process.env.WINHOOD_ALLOWED_ORIGINS || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  ]) {
+    allowedOriginMap.set(candidate, candidate);
+  }
 
-  const isAllowedOrigin = (origin: string): boolean => {
-    if (!origin) return false;
-    if (allowedOrigins.has(origin)) return true;
-    if (
-      process.env.WINHOOD_RUNTIME_ENV === 'ELECTRON_DESKTOP' &&
-      /^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(origin)
-    ) {
-      return true;
+  // tssecurity:S8348: Nunca refletir req.headers.origin diretamente; retornar apenas valor canônico reconstruído da allowlist.
+  const resolveAllowedCorsOrigin = (origin: string): string | null => {
+    if (!origin) return null;
+    if (process.env.WINHOOD_RUNTIME_ENV === 'ELECTRON_DESKTOP') {
+      const m = /^http:\/\/(127\.0\.0\.1|localhost):(\d{1,5})$/.exec(origin);
+      if (!m) return null;
+      const portNum = Number.parseInt(m[2], 10);
+      if (portNum < 1 || portNum > 65535) return null;
+      const safeHostLiteral = m[1] === '127.0.0.1' ? '127.0.0.1' : 'localhost';
+      return `http://${safeHostLiteral}:${portNum}`;
     }
-    return false;
+    return allowedOriginMap.get(origin) ?? null;
   };
 
   // Security CORS + Telemetry + Session Authentication + CSRF double-submit middleware
   app.use('/api', (req, res, next) => {
-    const origin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
-    if (origin && isAllowedOrigin(origin)) {
-      res.setHeader('Access-Control-Allow-Origin', origin);
+    const rawOrigin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
+    const canonicalCorsOrigin = resolveAllowedCorsOrigin(rawOrigin);
+    if (canonicalCorsOrigin) {
+      res.setHeader('Access-Control-Allow-Origin', canonicalCorsOrigin);
       res.setHeader('Access-Control-Allow-Credentials', 'true');
       res.setHeader(
         'Access-Control-Allow-Headers',
@@ -1168,7 +1287,7 @@ export async function createWinHoodApp(options?: {
       res.setHeader('Vary', 'Origin');
     }
     if (req.method === 'OPTIONS') {
-      if (origin && !isAllowedOrigin(origin)) {
+      if (rawOrigin && !canonicalCorsOrigin) {
         return res.status(403).json({ error: 'ORIGIN_NOT_ALLOWED' });
       }
       return res.status(204).end();
@@ -1844,11 +1963,37 @@ export async function createWinHoodApp(options?: {
     res.json(profile);
   });
 
-  const execAsync = promisify(exec);
+  const execFileAsync = promisify(execFile);
+
+  function resolveDockerBinaryPath(): string {
+    if (process.platform === 'win32') {
+      const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
+      const candidate = path.win32.join(programFiles, 'Docker', 'Docker', 'resources', 'bin', 'docker.exe');
+      return fs.existsSync(candidate) ? candidate : 'docker';
+    }
+    for (const candidate of ['/usr/bin/docker', '/usr/local/bin/docker', '/bin/docker']) {
+      if (fs.existsSync(candidate)) return candidate;
+    }
+    return 'docker';
+  }
+
+  function runDockerCli(args: string[], timeoutMs: number) {
+    const controlledEnv: NodeJS.ProcessEnv = {
+      PATH: SandboxExecutor.getControlledSafePath(),
+    };
+    if (process.platform === 'win32' && process.env.SystemRoot) {
+      controlledEnv.SystemRoot = process.env.SystemRoot;
+    }
+    return execFileAsync(resolveDockerBinaryPath(), args, {
+      timeout: timeoutMs,
+      shell: false,
+      env: controlledEnv,
+    });
+  }
 
   async function checkDockerCliAvailable(): Promise<boolean> {
     try {
-      const { stdout } = await execAsync('docker --version', { timeout: 2500 });
+      const { stdout } = await runDockerCli(['--version'], 2500);
       return stdout.toLowerCase().includes('docker');
     } catch {
       return false;
@@ -1893,9 +2038,9 @@ export async function createWinHoodApp(options?: {
 
       // Check if container is already running or exists
       try {
-        const { stdout: psOut } = await execAsync(
-          'docker ps -a --filter name=sonarqube --format "{{.Status}}"',
-          { timeout: 4000 }
+        const { stdout: psOut } = await runDockerCli(
+          ['ps', '-a', '--filter', 'name=sonarqube', '--format', '{{.Status}}'],
+          4000
         );
         const statusText = psOut.trim();
 
@@ -1911,7 +2056,7 @@ export async function createWinHoodApp(options?: {
 
         if (statusText) {
           // Container exists but stopped: start it
-          await execAsync('docker start sonarqube', { timeout: 6000 });
+          await runDockerCli(['start', 'sonarqube'], 6000);
           return res.json({
             ok: true,
             available: true,
@@ -1925,9 +2070,19 @@ export async function createWinHoodApp(options?: {
       }
 
       // Create and run new container
-      await execAsync(
-        'docker run -d --name sonarqube -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true -p 9000:9000 sonarqube:latest',
-        { timeout: 8000 }
+      await runDockerCli(
+        [
+          'run',
+          '-d',
+          '--name',
+          'sonarqube',
+          '-e',
+          'SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true',
+          '-p',
+          '9000:9000',
+          'sonarqube:latest',
+        ],
+        8000
       );
 
       return res.json({
@@ -1954,7 +2109,7 @@ export async function createWinHoodApp(options?: {
       if (!isDockerInstalled) {
         return res.json({ ok: false, message: 'Docker não disponível no sistema operacional.' });
       }
-      await execAsync('docker stop sonarqube', { timeout: 6000 });
+      await runDockerCli(['stop', 'sonarqube'], 6000);
       return res.json({ ok: true, message: 'Container SonarQube pausado com sucesso.' });
     } catch (err: any) {
       return res.status(500).json({ ok: false, error: err?.message || 'Falha ao pausar container.' });
@@ -2206,7 +2361,7 @@ export async function createWinHoodApp(options?: {
     }
   });
 
-  app.post('/api/projects/:id/backup', (req, res) => {
+  app.post('/api/projects/:id/backup', backupRateLimiter, (req, res) => {
     if (!requireWritePermission(res, req, 'projects:write')) return;
     const project = db.projects.find((p) => p.id === req.params.id);
     if (!project) {
@@ -2245,7 +2400,7 @@ export async function createWinHoodApp(options?: {
     }
   });
 
-  app.post('/api/projects/backups/:backupId/restore', (req, res) => {
+  app.post('/api/projects/backups/:backupId/restore', backupRateLimiter, (req, res) => {
     if (!requireWritePermission(res, req, 'projects:write')) return;
     try {
       const { restoredProject, restoredSoftwares } = backupService.restoreBackup(req.params.backupId);
@@ -2294,7 +2449,7 @@ export async function createWinHoodApp(options?: {
   });
 
   // 5.1 Project Upload Endpoint (/api/projects/upload)
-  app.post('/api/projects/upload', (req, res) => {
+  app.post('/api/projects/upload', ingestionRateLimiter, (req, res) => {
     if (!requireWritePermission(res, req, 'projects:write')) return;
     const {
       name,
@@ -2329,6 +2484,23 @@ export async function createWinHoodApp(options?: {
     if (!name || !name.trim() || !objective || !objective.trim()) {
       return res.status(400).json({
         error: 'Nome do Projeto e Objetivo são obrigatórios para upload.',
+      });
+    }
+
+    if (!filesMap || typeof filesMap !== 'object' || Object.keys(filesMap).length === 0) {
+      return res.status(400).json({
+        error: 'SOURCE_REQUIRED',
+        message: 'Nenhum arquivo enviado. É obrigatório fornecer os arquivos reais do projeto para upload.',
+      });
+    }
+
+    const uploadSecurity = validateSourceUploadSecurity(filesMap);
+    if (!uploadSecurity.valid) {
+      return res.status(400).json({
+        error: 'UPLOAD_SECURITY_VIOLATION',
+        message: `Upload bloqueado pela validação de segurança: ${uploadSecurity.violations.join(' ')}`,
+        violations: uploadSecurity.violations,
+        rejectedFiles: uploadSecurity.rejectedFiles,
       });
     }
 
@@ -2381,23 +2553,6 @@ export async function createWinHoodApp(options?: {
       `Projeto "${project.name}" criado via upload com UUID ${project.id}.`,
       getRequestActor(req, res)
     );
-
-    if (!filesMap || Object.keys(filesMap).length === 0) {
-      return res.status(400).json({
-        error: 'SOURCE_REQUIRED',
-        message: 'Nenhum arquivo enviado. É obrigatório fornecer os arquivos reais do projeto para upload.',
-      });
-    }
-
-    const uploadSecurity = validateSourceUploadSecurity(filesMap);
-    if (!uploadSecurity.valid) {
-      return res.status(400).json({
-        error: 'UPLOAD_SECURITY_VIOLATION',
-        message: `Upload bloqueado pela validação de segurança: ${uploadSecurity.violations.join(' ')}`,
-        violations: uploadSecurity.violations,
-        rejectedFiles: uploadSecurity.rejectedFiles,
-      });
-    }
 
     const swName = (softwareName || name).trim();
     const swVendor = (softwareVendor || owner || 'Upload Local').trim();
@@ -2662,7 +2817,7 @@ export async function createWinHoodApp(options?: {
   ];
 
   // 5.4 Search GitHub Repositories (/api/github/search)
-  app.get('/api/github/search', async (req, res) => {
+  app.get('/api/github/search', ingestionRateLimiter, async (req, res) => {
     const q = ((req.query.q as string) || '').trim();
     if (!q) {
       return res.json({ items: CURATED_GITHUB_REPOSITORIES, source: 'CURATED_SECURITY_BENCHMARKS' });
@@ -2670,17 +2825,24 @@ export async function createWinHoodApp(options?: {
 
     try {
       const ghUrl = `https://api.github.com/search/repositories?q=${encodeURIComponent(q)}&sort=stars&order=desc&per_page=12`;
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3500);
-
-      const ghRes = await fetch(ghUrl, {
-        headers: {
-          'User-Agent': 'WinHood-Benchmark-Platform',
-          Accept: 'application/vnd.github.v3+json',
-        },
-        signal: controller.signal,
+      const ssrfCheck = await SsrfGuard.validateUrl({
+        targetUrl: ghUrl,
+        allowExplicitLoopback: false,
       });
-      clearTimeout(timeoutId);
+      if (!ssrfCheck.allowed) {
+        throw new Error(ssrfCheck.reason || 'SSRF_BLOCKED');
+      }
+
+      const ghRes = await fetchWithTimeoutAndNoRedirect(
+        ghUrl,
+        {
+          headers: {
+            'User-Agent': 'WinHood-Benchmark-Platform',
+            Accept: 'application/vnd.github.v3+json',
+          },
+        },
+        3500
+      );
 
       if (ghRes.ok) {
         const data = (await ghRes.json()) as { items?: Array<any> };
@@ -2727,7 +2889,7 @@ export async function createWinHoodApp(options?: {
   });
 
   // 5.5 Import GitHub Repository (/api/github/import)
-  app.post('/api/github/import', async (req, res) => {
+  app.post('/api/github/import', ingestionRateLimiter, async (req, res) => {
     if (!requireWritePermission(res, req, 'projects:write')) return;
     const {
       projectId,
@@ -2786,8 +2948,209 @@ export async function createWinHoodApp(options?: {
     }
 
     const nowIso = new Date().toISOString();
-    let targetProject = db.projects.find((p) => p.id === projectId);
+    const existingProject = projectId ? db.projects.find((p) => p.id === projectId) : undefined;
+    if (projectId && !existingProject) {
+      return res.status(404).json({ error: 'Projeto informado para importação não encontrado.' });
+    }
 
+    let filesMap: Record<string, string> = {};
+    const branch = sanitizedBranch;
+    let realCommitSha = '';
+    let treeSha = '';
+    let totalDiscovered = 0;
+    let failedCount = 0;
+    let rateLimited = false;
+
+    const encodedOwner = encodeURIComponent(repoOwnerSegment);
+    const encodedRepo = encodeURIComponent(repoSlugSegment);
+    const encodedBranchPath = branch
+      .split('/')
+      .filter(Boolean)
+      .map((seg) => encodeURIComponent(seg))
+      .join('/');
+
+    // 100% Ingestão Real e Rastreável (P0 / Seção 4.2) — rede validada por SsrfGuard antes de criar projeto no DB
+    try {
+      // 1. Obter SHA real do Commit da branch informada com validação explícita de origin e SsrfGuard
+      const commitUrl = new URL(
+        `/repos/${encodedOwner}/${encodedRepo}/commits/${encodedBranchPath}`,
+        'https://api.github.com'
+      );
+      if (commitUrl.origin !== 'https://api.github.com') {
+        throw new Error('Origem de API inválida');
+      }
+      const commitSsrf = await SsrfGuard.validateUrl({
+        targetUrl: commitUrl.toString(),
+        allowExplicitLoopback: false,
+      });
+      if (!commitSsrf.allowed) {
+        throw new Error(commitSsrf.reason || 'SSRF_BLOCKED');
+      }
+
+      const commitRes = await fetchWithTimeoutAndNoRedirect(
+        commitUrl.toString(),
+        {
+          headers: {
+            'User-Agent': 'WinHood-Security-Analyzer',
+            Accept: 'application/vnd.github.v3+json',
+          },
+        },
+        5000
+      );
+
+      if (commitRes.status === 403) {
+        rateLimited = true;
+      } else if (commitRes.ok) {
+        const commitData = (await commitRes.json()) as { sha?: string };
+        const candidateSha = (commitData.sha || '').trim();
+        if (/^[a-fA-F0-9]{7,40}$/.test(candidateSha)) {
+          realCommitSha = candidateSha;
+        }
+      }
+
+      // 2. Se obteve o commit, buscar a árvore completa a partir do SHA real
+      const encodedTreeRef = realCommitSha
+        ? encodeURIComponent(realCommitSha)
+        : encodedBranchPath;
+      const treeUrl = new URL(
+        `/repos/${encodedOwner}/${encodedRepo}/git/trees/${encodedTreeRef}?recursive=1`,
+        'https://api.github.com'
+      );
+      if (treeUrl.origin !== 'https://api.github.com') {
+        throw new Error('Origem de API inválida');
+      }
+      const treeSsrf = await SsrfGuard.validateUrl({
+        targetUrl: treeUrl.toString(),
+        allowExplicitLoopback: false,
+      });
+      if (!treeSsrf.allowed) {
+        throw new Error(treeSsrf.reason || 'SSRF_BLOCKED');
+      }
+
+      const treeRes = await fetchWithTimeoutAndNoRedirect(
+        treeUrl.toString(),
+        {
+          headers: {
+            'User-Agent': 'WinHood-Security-Analyzer',
+            Accept: 'application/vnd.github.v3+json',
+          },
+        },
+        5000
+      );
+
+      if (treeRes.status === 403) {
+        rateLimited = true;
+      } else if (treeRes.ok) {
+        const treeData = (await treeRes.json()) as {
+          sha?: string;
+          tree?: Array<{ path: string; type: string; size?: number }>;
+        };
+        treeSha = treeData.sha || realCommitSha;
+        const allBlobs = (treeData.tree || []).filter((item) => item.type === 'blob' && item.path);
+        totalDiscovered = allBlobs.length;
+
+        const eligibleTreeItems = allBlobs
+          .filter((item) => {
+            const ext = path.extname(item.path).toLowerCase();
+            const segments = item.path.split('/').filter(Boolean);
+            return (
+              ['.ts', '.tsx', '.js', '.jsx', '.py', '.sql', '.json', '.cs', '.java', '.go', '.rs', '.md', '.yml', '.yaml', '.toml'].includes(ext) &&
+              segments.length > 0 &&
+              segments.length <= 20 &&
+              !item.path.includes('..') &&
+              !item.path.startsWith('/') &&
+              !item.path.includes('node_modules/') &&
+              !item.path.includes('dist/') &&
+              !item.path.includes('vendor/') &&
+              !item.path.includes('.git/') &&
+              (item.size === undefined || item.size < 500000)
+            );
+          })
+          .slice(0, 100); // Lote de até 100 arquivos reais sem cap silencioso de 25
+
+        if (eligibleTreeItems.length > 0) {
+          const rawSsrf = await SsrfGuard.validateUrl({
+            targetUrl: 'https://raw.githubusercontent.com',
+            allowExplicitLoopback: false,
+          });
+          if (!rawSsrf.allowed) {
+            throw new Error(rawSsrf.reason || 'SSRF_BLOCKED');
+          }
+
+          const fetchPromises = eligibleTreeItems.map(async (item) => {
+            try {
+              const safePathSegments = item.path
+                .split('/')
+                .filter((seg) => seg.length > 0 && seg !== '.' && seg !== '..')
+                .map((seg) => encodeURIComponent(seg))
+                .join('/');
+              const rawUrl = new URL(
+                `/${encodedOwner}/${encodedRepo}/${encodedTreeRef}/${safePathSegments}`,
+                'https://raw.githubusercontent.com'
+              );
+              if (rawUrl.origin !== 'https://raw.githubusercontent.com') {
+                return null;
+              }
+              const rawRes = await fetchWithTimeoutAndNoRedirect(
+                rawUrl.toString(),
+                {
+                  headers: { 'User-Agent': 'WinHood-Security-Analyzer' },
+                },
+                5000
+              );
+              if (rawRes.ok) {
+                const text = await rawRes.text();
+                if (Buffer.byteLength(text, 'utf8') > 500_000) {
+                  return null;
+                }
+                return { path: item.path, content: text };
+              }
+            } catch {
+              failedCount += 1;
+            }
+            return null;
+          });
+
+          const fetchedFiles = await Promise.all(fetchPromises);
+          let cumulativeBytes = 0;
+          const MAX_CUMULATIVE_BYTES = 8 * 1024 * 1024;
+          for (const f of fetchedFiles) {
+            if (f && f.content && f.content.trim().length > 0) {
+              const byteLen = Buffer.byteLength(f.content, 'utf8');
+              if (cumulativeBytes + byteLen > MAX_CUMULATIVE_BYTES) {
+                break;
+              }
+              filesMap[f.path] = f.content;
+              cumulativeBytes += byteLen;
+            }
+          }
+        }
+      }
+    } catch {
+      // Falha de rede capturada abaixo
+    }
+
+    // Regra P0: Jamais inventar README ou package.json se a importação falhar!
+    if (Object.keys(filesMap).length === 0) {
+      return res.status(rateLimited ? 429 : 502).json({
+        error: rateLimited ? 'RATE_LIMITED' : 'FETCH_FAILED',
+        message: rateLimited
+          ? 'Rate limit da API do GitHub atingido ou acesso restrito. Aguarde alguns minutos ou utilize autenticação com token.'
+          : `Não foi possível obter arquivos reais do repositório ${repoFullName}. Regra WinHood: Não são permitidos fallbacks sintéticos.`,
+      });
+    }
+
+    const uploadSecurity = validateSourceUploadSecurity(filesMap, 2 * 1024 * 1024, 100, 8 * 1024 * 1024);
+    if (!uploadSecurity.valid) {
+      return res.status(400).json({
+        error: 'UPLOAD_SECURITY_VIOLATION',
+        message: `Importação GitHub bloqueada pela validação de segurança: ${uploadSecurity.violations.join(' ')}`,
+        violations: uploadSecurity.violations,
+        rejectedFiles: uploadSecurity.rejectedFiles,
+      });
+    }
+
+    let targetProject = existingProject;
     if (!targetProject) {
       const projId = crypto.randomUUID();
       targetProject = {
@@ -2819,146 +3182,6 @@ export async function createWinHoodApp(options?: {
         targetProject.id,
         `Projeto "${targetProject.name}" criado a partir do GitHub.`
       );
-    }
-
-    let filesMap: Record<string, string> = {};
-    const branch = sanitizedBranch;
-    let realCommitSha = '';
-    let treeSha = '';
-    let totalDiscovered = 0;
-    let failedCount = 0;
-    let rateLimited = false;
-
-    const encodedOwner = encodeURIComponent(repoOwnerSegment);
-    const encodedRepo = encodeURIComponent(repoSlugSegment);
-    const encodedBranchPath = branch
-      .split('/')
-      .filter(Boolean)
-      .map((seg) => encodeURIComponent(seg))
-      .join('/');
-
-    // 100% Ingestão Real e Rastreável (P0 / Seção 4.2)
-    try {
-      // 1. Obter SHA real do Commit da branch informada com validação explícita de origin
-      const commitUrl = new URL(
-        `/repos/${encodedOwner}/${encodedRepo}/commits/${encodedBranchPath}`,
-        'https://api.github.com'
-      );
-      if (commitUrl.origin !== 'https://api.github.com') {
-        throw new Error('Origem de API inválida');
-      }
-
-      const commitRes = await fetch(commitUrl.toString(), {
-        headers: {
-          'User-Agent': 'WinHood-Security-Analyzer',
-          Accept: 'application/vnd.github.v3+json',
-        },
-      });
-
-      if (commitRes.status === 403) {
-        rateLimited = true;
-      } else if (commitRes.ok) {
-        const commitData = (await commitRes.json()) as { sha?: string };
-        const candidateSha = (commitData.sha || '').trim();
-        if (/^[a-fA-F0-9]{7,40}$/.test(candidateSha)) {
-          realCommitSha = candidateSha;
-        }
-      }
-
-      // 2. Se obteve o commit, buscar a árvore completa a partir do SHA real
-      const encodedTreeRef = realCommitSha
-        ? encodeURIComponent(realCommitSha)
-        : encodedBranchPath;
-      const treeUrl = new URL(
-        `/repos/${encodedOwner}/${encodedRepo}/git/trees/${encodedTreeRef}?recursive=1`,
-        'https://api.github.com'
-      );
-      if (treeUrl.origin !== 'https://api.github.com') {
-        throw new Error('Origem de API inválida');
-      }
-
-      const treeRes = await fetch(treeUrl.toString(), {
-        headers: {
-          'User-Agent': 'WinHood-Security-Analyzer',
-          Accept: 'application/vnd.github.v3+json',
-        },
-      });
-
-      if (treeRes.status === 403) {
-        rateLimited = true;
-      } else if (treeRes.ok) {
-        const treeData = (await treeRes.json()) as {
-          sha?: string;
-          tree?: Array<{ path: string; type: string; size?: number }>;
-        };
-        treeSha = treeData.sha || realCommitSha;
-        const allBlobs = (treeData.tree || []).filter((item) => item.type === 'blob' && item.path);
-        totalDiscovered = allBlobs.length;
-
-        const eligibleTreeItems = allBlobs
-          .filter((item) => {
-            const ext = path.extname(item.path).toLowerCase();
-            return (
-              ['.ts', '.tsx', '.js', '.jsx', '.py', '.sql', '.json', '.cs', '.java', '.go', '.rs', '.md', '.yml', '.yaml', '.toml'].includes(ext) &&
-              !item.path.includes('..') &&
-              !item.path.startsWith('/') &&
-              !item.path.includes('node_modules/') &&
-              !item.path.includes('dist/') &&
-              !item.path.includes('vendor/') &&
-              !item.path.includes('.git/') &&
-              (item.size === undefined || item.size < 500000)
-            );
-          })
-          .slice(0, 100); // Lote de até 100 arquivos reais sem cap silencioso de 25
-
-        if (eligibleTreeItems.length > 0) {
-          const fetchPromises = eligibleTreeItems.map(async (item) => {
-            try {
-              const safePathSegments = item.path
-                .split('/')
-                .filter((seg) => seg.length > 0 && seg !== '.' && seg !== '..')
-                .map((seg) => encodeURIComponent(seg))
-                .join('/');
-              const rawUrl = new URL(
-                `/${encodedOwner}/${encodedRepo}/${encodedTreeRef}/${safePathSegments}`,
-                'https://raw.githubusercontent.com'
-              );
-              if (rawUrl.origin !== 'https://raw.githubusercontent.com') {
-                return null;
-              }
-              const rawRes = await fetch(rawUrl.toString(), {
-                headers: { 'User-Agent': 'WinHood-Security-Analyzer' },
-              });
-              if (rawRes.ok) {
-                const text = await rawRes.text();
-                return { path: item.path, content: text };
-              }
-            } catch {
-              failedCount += 1;
-            }
-            return null;
-          });
-
-          const fetchedFiles = await Promise.all(fetchPromises);
-          for (const f of fetchedFiles) {
-            if (f && f.content && f.content.trim().length > 0) {
-              filesMap[f.path] = f.content;
-            }
-          }
-        }
-      }
-    } catch {
-      // Falha de rede capturada abaixo
-    }
-
-    // Regra P0: Jamais inventar README ou package.json se a importação falhar!
-    if (Object.keys(filesMap).length === 0) {
-      return res.status(rateLimited ? 429 : 502).json({
-        error: rateLimited ? 'RATE_LIMITED' : 'FETCH_FAILED',
-        message: rateLimited
-          ? 'Rate limit da API do GitHub atingido ou acesso restrito. Aguarde alguns minutos ou utilize autenticação com token.'
-          : `Não foi possível obter arquivos reais do repositório ${repoFullName}. Regra WinHood: Não são permitidos fallbacks sintéticos.`,
-      });
     }
 
     let detectedVersion = 'NOT_DECLARED';
@@ -3056,7 +3279,7 @@ export async function createWinHoodApp(options?: {
     });
   });
 
-  app.post('/api/softwares', (req, res) => {
+  app.post('/api/softwares', ingestionRateLimiter, (req, res) => {
     if (!requireWritePermission(res, req, 'projects:write')) return;
     const body = req.body as Partial<Software> & {
       templatePreset?: 'VAULTCORE' | 'KEESAFE' | 'CUSTOM_FILES';
@@ -3281,7 +3504,7 @@ export async function createWinHoodApp(options?: {
   });
 
   // Ingest / update files in a software
-  app.post('/api/softwares/:id/ingest', (req, res) => {
+  app.post('/api/softwares/:id/ingest', ingestionRateLimiter, (req, res) => {
     if (!requireWritePermission(res, req, 'projects:write')) return;
     const sw = db.softwares.find((s) => s.id === req.params.id);
     if (!sw) {
@@ -3303,6 +3526,15 @@ export async function createWinHoodApp(options?: {
     }
 
     const mergedFiles = { ...(sw.sourceFilesContent || {}), ...filesMap };
+    const mergedSecurity = validateSourceUploadSecurity(mergedFiles);
+    if (!mergedSecurity.valid) {
+      return res.status(400).json({
+        error: 'UPLOAD_SECURITY_VIOLATION',
+        message: `Inventário combinado excede limites de segurança: ${mergedSecurity.violations.join(' ')}`,
+        violations: mergedSecurity.violations,
+        rejectedFiles: mergedSecurity.rejectedFiles,
+      });
+    }
     const slug = `${sw.id}_rev_${Date.now()}`;
     const isolatedPath = writeIsolatedArtifactsToDisk(slug, mergedFiles, isolatedArtifactsDir);
     const inv = buildTechnicalInventory(mergedFiles, isolatedPath);
@@ -3474,11 +3706,14 @@ export async function createWinHoodApp(options?: {
     if (!run) {
       return res.status(404).json({ error: 'Execução de benchmark não encontrada.' });
     }
+    if (run.signedManifest) {
+      enforceVerifiedQualityGateOnRun(run);
+    }
     return res.json({ run });
   });
 
   // Quick 1-Click Zero-Configuration Analysis
-  app.post('/api/benchmark-runs/quick-run', (req, res) => {
+  app.post('/api/benchmark-runs/quick-run', analysisRateLimiter, (req, res) => {
     if (!requireWritePermission(res, req, 'runs:execute')) return;
     const actor = getRequestActor(req, res);
     const { projectId, softwareId } = req.body as {
@@ -3625,7 +3860,7 @@ export async function createWinHoodApp(options?: {
     });
   });
 
-  app.post('/api/benchmark-runs', (req, res) => {
+  app.post('/api/benchmark-runs', analysisRateLimiter, (req, res) => {
     if (!requireWritePermission(res, req, 'runs:execute')) return;
     const actor = getRequestActor(req, res);
     const {
@@ -4270,7 +4505,7 @@ export async function createWinHoodApp(options?: {
     return res.json({ suite });
   });
 
-  app.post('/api/security-assessment/compare', (req, res) => {
+  app.post('/api/security-assessment/compare', analysisRateLimiter, (req, res) => {
     if (!requireWritePermission(res, req, 'security:ops')) return;
     const { runId, scopeAllowlist } = req.body as {
       runId?: string;
@@ -4561,10 +4796,14 @@ export async function createWinHoodApp(options?: {
 
   // 11. Reports Export (/api/reports/:runId/export & /api/benchmark-runs/:runId/export)
   app.get(['/api/reports/:runId/export', '/api/benchmark-runs/:runId/export'], (req, res) => {
+    if (!requireWritePermission(res, req, 'reports:export')) return;
     const run =
       db.runs.find((r) => r.id === req.params.runId) || db.runs[0];
     if (!run) {
       return res.status(404).json({ error: 'Execução não encontrada para exportação de relatório.' });
+    }
+    if (run.signedManifest) {
+      enforceVerifiedQualityGateOnRun(run);
     }
     const format = resolveSafeExportFormat(req.query.format);
     const reportType = resolveSafeReportType(req.query.type);
@@ -5228,7 +5467,7 @@ export async function createWinHoodApp(options?: {
 
     let safeOrigin: string;
     try {
-      safeOrigin = validateSonarServerOrigin(
+      safeOrigin = await validateSonarServerOriginSafe(
         serverUrl || (resolvedPlatform === 'SONARCLOUD' ? 'https://sonarcloud.io' : 'http://localhost:9000'),
         resolvedPlatform
       );
@@ -5308,14 +5547,18 @@ export async function createWinHoodApp(options?: {
       // Validar token imediatamente na API do SonarCloud / SonarQube se acessível
       try {
         const authUrl = new URL('/api/authentication/validate', safeOrigin);
-        const authRes = await fetch(authUrl.toString(), {
-          method: 'GET',
-          headers: {
-            Accept: 'application/json',
-            Authorization: `Bearer ${cleanToken}`,
-            'User-Agent': 'WinHood-SonarExporter/2.0',
+        const authRes = await fetchWithTimeoutAndNoRedirect(
+          authUrl.toString(),
+          {
+            method: 'GET',
+            headers: {
+              Accept: 'application/json',
+              Authorization: `Bearer ${cleanToken}`,
+              'User-Agent': 'WinHood-SonarExporter/2.0',
+            },
           },
-        });
+          5000
+        );
         if (authRes.ok) {
           const authJson = (await authRes.json()) as { valid?: boolean };
           existing.lastVerifiedAt = nowIso;
@@ -5415,7 +5658,7 @@ export async function createWinHoodApp(options?: {
 
     let safeOrigin: string;
     try {
-      safeOrigin = validateSonarServerOrigin(proj.serverUrl, proj.platform);
+      safeOrigin = await validateSonarServerOriginSafe(proj.serverUrl, proj.platform);
     } catch (err: any) {
       return res.status(400).json({ error: err?.message || 'URL do servidor Sonar inválida.' });
     }
@@ -5423,14 +5666,18 @@ export async function createWinHoodApp(options?: {
     const nowIso = new Date().toISOString();
     try {
       const validateUrl = new URL('/api/authentication/validate', safeOrigin);
-      const authRes = await fetch(validateUrl.toString(), {
-        method: 'GET',
-        headers: {
-          Accept: 'application/json',
-          Authorization: `Bearer ${plainToken}`,
-          'User-Agent': 'WinHood-SonarExporter/2.0',
+      const authRes = await fetchWithTimeoutAndNoRedirect(
+        validateUrl.toString(),
+        {
+          method: 'GET',
+          headers: {
+            Accept: 'application/json',
+            Authorization: `Bearer ${plainToken}`,
+            'User-Agent': 'WinHood-SonarExporter/2.0',
+          },
         },
-      });
+        6000
+      );
 
       if (authRes.status === 401 || authRes.status === 403) {
         proj.lastVerifiedAt = nowIso;
@@ -5457,14 +5704,18 @@ export async function createWinHoodApp(options?: {
       if (isValid) {
         try {
           const tokensUrl = new URL('/api/user_tokens/search', safeOrigin);
-          const tokensRes = await fetch(tokensUrl.toString(), {
-            method: 'GET',
-            headers: {
-              Accept: 'application/json',
-              Authorization: `Bearer ${plainToken}`,
-              'User-Agent': 'WinHood-SonarExporter/2.0',
+          const tokensRes = await fetchWithTimeoutAndNoRedirect(
+            tokensUrl.toString(),
+            {
+              method: 'GET',
+              headers: {
+                Accept: 'application/json',
+                Authorization: `Bearer ${plainToken}`,
+                'User-Agent': 'WinHood-SonarExporter/2.0',
+              },
             },
-          });
+            6000
+          );
           if (tokensRes.ok) {
             const tokensJson = (await tokensRes.json()) as {
               userTokens?: Array<{
@@ -5520,6 +5771,7 @@ export async function createWinHoodApp(options?: {
   });
 
   app.get('/api/sonar/saved-projects/:id/export-json', async (req, res) => {
+    if (!requireWritePermission(res, req, 'reports:export')) return;
     if (!Array.isArray(db.savedSonarProjects)) {
       db.savedSonarProjects = [];
     }
@@ -5541,7 +5793,7 @@ export async function createWinHoodApp(options?: {
 
     let safeOrigin: string;
     try {
-      safeOrigin = validateSonarServerOrigin(proj.serverUrl, proj.platform);
+      safeOrigin = await validateSonarServerOriginSafe(proj.serverUrl, proj.platform);
     } catch (err: any) {
       return res.status(400).json({ error: err?.message || 'URL do servidor Sonar inválida.' });
     }
@@ -5569,7 +5821,7 @@ export async function createWinHoodApp(options?: {
         const compUrl = new URL('/api/components/show', safeOrigin);
         compUrl.searchParams.set('component', proj.projectKey);
         if (compUrl.origin === safeOrigin) {
-          const compRes = await fetch(compUrl.toString(), { method: 'GET', headers: reqHeaders });
+          const compRes = await fetchWithTimeoutAndNoRedirect(compUrl.toString(), { method: 'GET', headers: reqHeaders }, 8000);
           if (compRes.ok) {
             const compData = (await compRes.json()) as {
               component?: Record<string, unknown>;
@@ -5589,7 +5841,7 @@ export async function createWinHoodApp(options?: {
         const qgUrl = new URL('/api/qualitygates/project_status', safeOrigin);
         qgUrl.searchParams.set('projectKey', proj.projectKey);
         if (qgUrl.origin === safeOrigin) {
-          const qgRes = await fetch(qgUrl.toString(), { method: 'GET', headers: reqHeaders });
+          const qgRes = await fetchWithTimeoutAndNoRedirect(qgUrl.toString(), { method: 'GET', headers: reqHeaders }, 8000);
           if (qgRes.ok) {
             const qgData = (await qgRes.json()) as {
               projectStatus?: Record<string, unknown>;
@@ -5614,7 +5866,7 @@ export async function createWinHoodApp(options?: {
         measuresUrl.searchParams.set('component', proj.projectKey);
         measuresUrl.searchParams.set('metricKeys', SONAR_FULL_METRIC_KEYS);
         if (measuresUrl.origin === safeOrigin) {
-          const mRes = await fetch(measuresUrl.toString(), { method: 'GET', headers: reqHeaders });
+          const mRes = await fetchWithTimeoutAndNoRedirect(measuresUrl.toString(), { method: 'GET', headers: reqHeaders }, 8000);
           if (mRes.ok) {
             const mData = (await mRes.json()) as {
               component?: {
@@ -5677,10 +5929,14 @@ export async function createWinHoodApp(options?: {
           return res.status(400).json({ error: 'Origem da URL de busca inválida.' });
         }
 
-        const response = await fetch(searchUrl.toString(), {
-          method: 'GET',
-          headers: reqHeaders,
-        });
+        const response = await fetchWithTimeoutAndNoRedirect(
+          searchUrl.toString(),
+          {
+            method: 'GET',
+            headers: reqHeaders,
+          },
+          10_000
+        );
 
         if (response.status === 401 || response.status === 403) {
           proj.lastVerificationStatus = 'INVALID';
@@ -5762,7 +6018,7 @@ export async function createWinHoodApp(options?: {
           hsUrl.searchParams.set('p', String(hsPage));
 
           if (hsUrl.origin !== safeOrigin) break;
-          const hsRes = await fetch(hsUrl.toString(), { method: 'GET', headers: reqHeaders });
+          const hsRes = await fetchWithTimeoutAndNoRedirect(hsUrl.toString(), { method: 'GET', headers: reqHeaders }, 8000);
           if (!hsRes.ok) break;
 
           const hsData = (await hsRes.json()) as {
@@ -5796,7 +6052,7 @@ export async function createWinHoodApp(options?: {
         const brUrl = new URL('/api/project_branches/list', safeOrigin);
         brUrl.searchParams.set('project', proj.projectKey);
         if (brUrl.origin === safeOrigin) {
-          const brRes = await fetch(brUrl.toString(), { method: 'GET', headers: reqHeaders });
+          const brRes = await fetchWithTimeoutAndNoRedirect(brUrl.toString(), { method: 'GET', headers: reqHeaders }, 8000);
           if (brRes.ok) {
             const brData = (await brRes.json()) as { branches?: unknown[] };
             projectBranches = Array.isArray(brData.branches) ? brData.branches : [];
@@ -5812,7 +6068,7 @@ export async function createWinHoodApp(options?: {
         anUrl.searchParams.set('ps', '50');
         anUrl.searchParams.set('p', '1');
         if (anUrl.origin === safeOrigin) {
-          const anRes = await fetch(anUrl.toString(), { method: 'GET', headers: reqHeaders });
+          const anRes = await fetchWithTimeoutAndNoRedirect(anUrl.toString(), { method: 'GET', headers: reqHeaders }, 8000);
           if (anRes.ok) {
             const anData = (await anRes.json()) as { analyses?: unknown[] };
             projectAnalyses = Array.isArray(anData.analyses) ? anData.analyses : [];
@@ -6061,7 +6317,7 @@ export async function createWinHoodApp(options?: {
       });
     }
 
-    const safeOrigin = 'https://sonarcloud.io';
+    const safeOrigin = await validateSonarServerOriginSafe('https://sonarcloud.io', 'SONARCLOUD');
     const reqHeaders = {
       Accept: 'application/json',
       Authorization: `Bearer ${effectiveToken}`,
@@ -6072,9 +6328,10 @@ export async function createWinHoodApp(options?: {
       // 1. Quality Gate
       let qualityGate: any = null;
       try {
-        const qgRes = await fetch(
+        const qgRes = await fetchWithTimeoutAndNoRedirect(
           `${safeOrigin}/api/qualitygates/project_status?projectKey=${encodeURIComponent(effectiveKey)}`,
-          { headers: reqHeaders }
+          { headers: reqHeaders },
+          8000
         );
         if (qgRes.ok) {
           const qgJson = await qgRes.json();
@@ -6089,9 +6346,10 @@ export async function createWinHoodApp(options?: {
       const measuresMap: Record<string, string | number> = {};
       try {
         const mKeys = DEFAULT_SONAR_METRIC_KEYS.join(',');
-        const mRes = await fetch(
+        const mRes = await fetchWithTimeoutAndNoRedirect(
           `${safeOrigin}/api/measures/component?component=${encodeURIComponent(effectiveKey)}&metricKeys=${mKeys}`,
-          { headers: reqHeaders }
+          { headers: reqHeaders },
+          8000
         );
         if (mRes.ok) {
           const mJson = await mRes.json();
@@ -6111,9 +6369,10 @@ export async function createWinHoodApp(options?: {
       // 3. Hotspots
       let hotspots: any[] = [];
       try {
-        const hsRes = await fetch(
+        const hsRes = await fetchWithTimeoutAndNoRedirect(
           `${safeOrigin}/api/hotspots/search?projectKey=${encodeURIComponent(effectiveKey)}&ps=500`,
-          { headers: reqHeaders }
+          { headers: reqHeaders },
+          8000
         );
         if (hsRes.ok) {
           const hsJson = await hsRes.json();
@@ -6130,9 +6389,10 @@ export async function createWinHoodApp(options?: {
       let issuesFailed = false;
       do {
         const orgParam = effectiveOrg ? `&organization=${encodeURIComponent(effectiveOrg)}` : '';
-        const issRes = await fetch(
+        const issRes = await fetchWithTimeoutAndNoRedirect(
           `${safeOrigin}/api/issues/search?componentKeys=${encodeURIComponent(effectiveKey)}${orgParam}&ps=500&p=${page}&additionalFields=_all&facets=severities,types,rules,statuses`,
-          { headers: reqHeaders }
+          { headers: reqHeaders },
+          10_000
         );
         if (!issRes.ok) {
           issuesFailed = true;
@@ -6150,9 +6410,10 @@ export async function createWinHoodApp(options?: {
       let realProfiles: any[] = [];
       try {
         const orgParam = effectiveOrg ? `&organization=${encodeURIComponent(effectiveOrg)}` : '';
-        const qpRes = await fetch(
+        const qpRes = await fetchWithTimeoutAndNoRedirect(
           `${safeOrigin}/api/qualityprofiles/search?project=${encodeURIComponent(effectiveKey)}${orgParam}`,
-          { headers: reqHeaders }
+          { headers: reqHeaders },
+          8000
         );
         if (qpRes.ok) {
           const qpJson = await qpRes.json();
@@ -6166,9 +6427,10 @@ export async function createWinHoodApp(options?: {
       let verifiedGateName: string | undefined;
       try {
         const orgParam = effectiveOrg ? `&organization=${encodeURIComponent(effectiveOrg)}` : '';
-        const qgNameRes = await fetch(
+        const qgNameRes = await fetchWithTimeoutAndNoRedirect(
           `${safeOrigin}/api/qualitygates/get_by_project?project=${encodeURIComponent(effectiveKey)}${orgParam}`,
-          { headers: reqHeaders }
+          { headers: reqHeaders },
+          8000
         );
         if (qgNameRes.ok) {
           const qgNameJson = await qgNameRes.json();
@@ -7687,7 +7949,7 @@ export async function createWinHoodApp(options?: {
     return res.json({ ok: true, targets: db.authorizedTargets });
   });
 
-  app.post('/api/execution/run-tests', (req, res) => {
+  app.post('/api/execution/run-tests', analysisRateLimiter, (req, res) => {
     if (!requireWritePermission(res, req, 'tests:run')) return;
     const actor = getRequestActor(req, res);
     const { softwareId, runId } = (req.body || {}) as { softwareId?: string; runId?: string };
@@ -7810,7 +8072,7 @@ export async function createWinHoodApp(options?: {
     return res.json({ coverage: parsed, attachedToRunId });
   });
 
-  app.post('/api/execution/run-perf', async (req, res) => {
+  app.post('/api/execution/run-perf', analysisRateLimiter, async (req, res) => {
     if (!requireWritePermission(res, req, 'perf:run')) return;
     const actor = getRequestActor(req, res);
     const {

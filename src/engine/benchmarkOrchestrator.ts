@@ -41,6 +41,7 @@ import { executeRealStaticAnalysisOnSource } from './staticAnalyzer';
 import {
   buildVerifiableEvidenceChain,
   signEvidenceManifestHmacSha256,
+  verifyEvidenceChainAndManifest,
 } from './evidenceProvenanceEngine';
 import {
   METHODOLOGY_CATALOG_VERSION,
@@ -1056,8 +1057,57 @@ export function executeBenchmarkRunOrchestration(params: {
     executiveSummary,
   };
 
+  enforceVerifiedQualityGateOnRun(finalResult);
   params.onProgress?.(finalResult.progress!);
   return finalResult;
+}
+
+/**
+ * Segurança (Prioridade 6): Verifica obrigatoriamente o manifesto assinado (HMAC-SHA256 / Ed25519)
+ * e a integridade encadeada SHA-256 antes que qualquer decisão de Quality Gate ou vencedor
+ * possa ser considerada confiável. Preserva `signedManifest.verificationState === 'SIGNED'` sem mutação.
+ */
+export function enforceVerifiedQualityGateOnRun(run: BenchmarkRun): BenchmarkRun {
+  const verification = verifyEvidenceChainAndManifest(run.evidenceChain || [], run.signedManifest);
+  run.evidenceVerification = {
+    valid: verification.valid,
+    verificationState: verification.verificationState,
+    verifiedAt: verification.verificationTimestamp,
+    message: verification.message,
+    tamperedIndices: verification.tamperedIndices,
+  };
+
+  if (!verification.valid) {
+    run.winnerSoftwareId = null;
+    for (const sc of run.scoreCards || []) {
+      if (sc.qualityGate) {
+        sc.qualityGate.status = 'INCONCLUSIVE';
+        sc.qualityGate.executiveDecision = 'INCONCLUSIVE';
+        sc.qualityGate.conditionsFailed = Math.max(1, sc.qualityGate.conditionsFailed || 0);
+        if (!sc.qualityGate.failedMetrics.includes('EVIDENCE_CHAIN_VERIFICATION_FAILED')) {
+          sc.qualityGate.failedMetrics = [
+            ...sc.qualityGate.failedMetrics,
+            'EVIDENCE_CHAIN_VERIFICATION_FAILED',
+          ];
+        }
+      }
+      if (sc.separatedIndicators) {
+        sc.separatedIndicators.qualityGateDecision = 'INCONCLUSIVE';
+      }
+    }
+    if (run.qualityGate) {
+      run.qualityGate.status = 'INCONCLUSIVE';
+      run.qualityGate.executiveDecision = 'INCONCLUSIVE';
+      run.qualityGate.conditionsFailed = Math.max(1, run.qualityGate.conditionsFailed || 0);
+      if (!run.qualityGate.failedMetrics.includes('EVIDENCE_CHAIN_VERIFICATION_FAILED')) {
+        run.qualityGate.failedMetrics = [
+          ...run.qualityGate.failedMetrics,
+          'EVIDENCE_CHAIN_VERIFICATION_FAILED',
+        ];
+      }
+    }
+  }
+  return run;
 }
 
 /**
@@ -1188,6 +1238,9 @@ export function recalculateBenchmarkRunScoreCards(
   run.ratings = (winner || topCandidate || updatedScoreCards[0])?.ratings;
   run.executiveSummary = executiveSummary;
 
+  if (run.signedManifest) {
+    enforceVerifiedQualityGateOnRun(run);
+  }
   return run;
 }
 

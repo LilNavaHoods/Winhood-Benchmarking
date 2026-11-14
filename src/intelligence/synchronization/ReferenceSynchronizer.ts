@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import type { ReferenceSnapshotRecord, ReferenceSourceKey, SbomComponentRecord } from '../../types/benchmark';
+import { SsrfGuard } from '../../execution/SsrfGuard';
 import {
   ReferenceRegistry,
   type SyncedAdvisoryCacheEntry,
@@ -15,12 +16,23 @@ export interface ReferenceSyncOutcome {
 async function fetchJsonWithHeaders(
   url: string,
   init?: RequestInit,
-  timeoutMs = 4500
+  timeoutMs = 4500,
+  allowExplicitLoopback = false
 ): Promise<{ json: any; etag: string | null }> {
+  const ssrf = await SsrfGuard.validateUrl({
+    targetUrl: url,
+    allowExplicitLoopback: allowExplicitLoopback && SsrfGuard.isExplicitLoopbackUrl(url),
+  });
+  if (!ssrf.allowed) {
+    throw new Error(`SSRF_BLOCKED: ${ssrf.reason}`);
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { ...init, signal: controller.signal });
+    const res = await fetch(url, { ...init, redirect: 'manual', signal: controller.signal });
+    if (res.status >= 300 && res.status < 400) {
+      throw new Error(`SSRF_REDIRECT_BLOCKED: HTTP ${res.status}`);
+    }
     if (!res.ok) {
       throw new Error(`HTTP ${res.status} ${res.statusText}`);
     }
@@ -351,7 +363,8 @@ export class ReferenceSynchronizer {
           const { json: statusData, etag } = await fetchJsonWithHeaders(
             `${baseServer}/api/system/status`,
             { headers },
-            2500
+            2500,
+            true
           );
           const updatedBase = {
             ...existing,

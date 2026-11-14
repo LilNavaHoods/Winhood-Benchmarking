@@ -1,4 +1,5 @@
 import { spawn, type SpawnOptions } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { SonarScannerType } from '../../types/benchmark';
@@ -93,7 +94,9 @@ export class SonarScannerExecutor {
         lowerExec === 'gradle');
 
     if (isWinBatchScript) {
-      const comSpec = process.env.ComSpec || 'C:\\Windows\\System32\\cmd.exe';
+      const comSpec =
+        process.env.ComSpec ||
+        path.win32.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe');
       const quotedCmd = quoteWindowsCmdArgument(executablePath);
       const quotedArgs = args.map((a) => quoteWindowsCmdArgument(a)).join(' ');
       const innerCommandLine = `"${quotedCmd}${quotedArgs ? ` ${quotedArgs}` : ''}"`;
@@ -179,9 +182,9 @@ export class SonarScannerExecutor {
       };
     }
 
-    // Gravar arquivo temporário dedicado (.winhood-sonar-*.properties) para NUNCA sobrescrever
-    // um sonar-project.properties já existente no projeto do usuário (Seção 5.5)
-    const tempPropsFileName = `.winhood-sonar-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.properties`;
+    // Gravar arquivo temporário dedicado (.winhood-sonar-*.properties) com UUID CSPRNG para NUNCA
+    // sobrescrever sonar-project.properties existente nem usar PRNG previsível (typescript:S2245)
+    const tempPropsFileName = `.winhood-sonar-${crypto.randomUUID()}.properties`;
     const propsFilePath = path.join(params.projectBaseDir, tempPropsFileName);
 
     try {
