@@ -99,6 +99,7 @@ export interface AstParseResult {
   hasCryptoSignals: boolean;
   hasWeakCryptoSignals: boolean;
   hasPreparedStatementSignals: boolean;
+  todoCommentLines?: number[];
 }
 
 export interface AnalysisScope {
@@ -118,11 +119,19 @@ export interface RuleDefinition {
   category: NormalizedFinding['category'];
   severity: SeverityLevel;
   cwe: string;
+  owaspTop10?: string;
+  cweTop25Rank?: number | null;
+  cvssBase?: number;
+  version: string;
+  sinceEngineVersion: string;
+  deprecated?: boolean;
   languages: SupportedAstLanguage[];
   requiresAst: boolean;
   effortMinutes: number;
   remediation: string;
   packId: string;
+  positiveExamples?: string[];
+  negativeExamples?: string[];
 }
 
 export interface RulePackMetadata {
@@ -151,10 +160,57 @@ export interface AnalyzerExecution {
   stdout?: string;
   stderr?: string;
   rawOutputSha256: string;
+  timedOut?: boolean;
+  slaBudgetMs?: number;
 }
 
 export interface AnalyzerResult {
   execution: AnalyzerExecution;
   findings: NormalizedFinding[];
   limitations: string[];
+  ruleCatalogSha256?: string;
+  deterministicDigestSha256?: string;
+}
+
+export type PluginSupportedLanguage =
+  | SupportedAstLanguage
+  | 'Terraform'
+  | 'Kubernetes'
+  | 'Dockerfile'
+  | 'GitHubActions';
+
+export interface AnalyzerPluginContext {
+  scope: AnalysisScope;
+  files: Array<{ filePath: string; content: string }>;
+  parseResults: AstParseResult[];
+  slaBudgetMs: number;
+  deterministicTimestamp?: string;
+}
+
+export interface AnalyzerPluginOutput {
+  pluginId: string;
+  pluginVersion: string;
+  filesScanned: number;
+  filesFailed: number;
+  candidates: AstIssueCandidate[];
+  limitations: string[];
+  timedOut?: boolean;
+  durationMs: number;
+}
+
+export interface AnalyzerPlugin {
+  id: string;
+  name: string;
+  version: string;
+  supportedLanguages: PluginSupportedLanguage[];
+  supportedExtensions: string[];
+  capabilities: Array<'AST' | 'TAINT' | 'SECRETS' | 'IAC' | 'QUALITY'>;
+  matchesFile: (filePath: string, content: string) => boolean;
+  analyze: (ctx: AnalyzerPluginContext) => AnalyzerPluginOutput;
+}
+
+export interface DeterministicAnalysisOptions {
+  deterministicTimestamp?: string;
+  slaBudgetMsPerPlugin?: number;
+  enablePluginIds?: string[];
 }

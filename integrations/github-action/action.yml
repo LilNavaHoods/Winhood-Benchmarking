@@ -1,0 +1,27 @@
+name: "WinHood Independent Audit & Quality Gate"
+description: "Runs WinHood static/taint/secrets/IaC analysis, generates SARIF 2.1.0 & CycloneDX SBOM, and enforces versioned Quality Gates."
+inputs:
+  path:
+    description: "Workspace path to audit"
+    required: false
+    default: "."
+  gate:
+    description: "Versioned Quality Gate ID"
+    required: false
+    default: "winhood-standard-v2"
+  sarif-output:
+    description: "Path to write SARIF 2.1.0 report"
+    required: false
+    default: "winhood-results.sarif"
+  enforce-gate:
+    description: "Fail workflow when Quality Gate blocks or rejects"
+    required: false
+    default: "true"
+outputs:
+  gate-decision:
+    description: "Resulting Quality Gate state (APPROVED, APPROVED_WITH_RESERVATIONS, BLOCKED, INCONCLUSIVE, REJECTED)"
+  exit-code:
+    description: "WinHood CLI exit code (0/1/2/3)"
+runs:
+  using: "node20"
+  main: "entrypoint.mjs"

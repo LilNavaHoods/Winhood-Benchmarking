@@ -366,6 +366,31 @@ const SCREEN_HELP_CATALOG: Record<Exclude<AppNavSection, 'user_guide'>, ScreenGu
       },
     ],
   },
+  governance: {
+    stepBadge: 'GOVERNANÇA, GATES & PORTFÓLIO',
+    screenTitle: 'Como operar Quality Gates, Webhooks Assinados, Portfólio & Rastreabilidade',
+    plainSummary:
+      'Centraliza Quality Gates versionados com exit codes de CI/CD, webhooks assinados HMAC-SHA256, PR/MR decoration, evolução de portfólio entre releases, matriz de rastreabilidade OWASP/CWE/PCI/ISO (sem alegação de certificação) e catálogo público de regras e OpenAPI 3.0.3.',
+    howToSteps: [
+      '1. Escolha ou crie um Quality Gate versionado e avalie contra a execução atual para obter a decisão acionável e exit code de CLI.',
+      '2. Audite a evolução entre releases em "Portfólio & Releases", verificando escopo coberto e dimensões ainda não mensuradas.',
+      '3. Consulte a "Matriz Conformidade" e o "Catálogo Regras & OpenAPI" para due diligence técnica e integrações CI/IDE.',
+    ],
+    abInterpretationTip:
+      'Quality Gates são versionados e assinados no manifesto de evidência da execução para garantir que decisões de bloqueio ou aprovação sejam auditáveis e reproduzíveis.',
+    guideChapterId: 'glossary-faq',
+    guideChapterLabel: 'Governança, Gates & Padrões Abertos',
+    glossaryTerms: [
+      {
+        term: 'Rastreabilidade ≠ Certificação',
+        meaning: 'O mapeamento OWASP/CWE/PCI DSS/ISO 27001 apenas vincula achados técnicos a controles de referência, sem substituir auditoria ou certificação oficial.',
+      },
+      {
+        term: 'CLI Exit Codes (0/1/2/3)',
+        meaning: '0 = APPROVED/RESERVATIONS, 1 = BLOCKED/REJECTED, 2 = INCONCLUSIVE, 3 = erro operacional de execução.',
+      },
+    ],
+  },
   reports: {
     stepBadge: 'PASSO 6 DA JORNADA',
     screenTitle: 'Como gerar e exportar Relatórios Técnicos & Laudos A/B',

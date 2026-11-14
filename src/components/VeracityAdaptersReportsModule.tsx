@@ -275,6 +275,12 @@ export const VeracityAdaptersReportsModule: React.FC<
   const [exportingFormat, setExportingFormat] = useState<string | null>(null);
   const [exportFeedback, setExportFeedback] = useState<string | null>(null);
   const [verifyingChain, setVerifyingChain] = useState<boolean>(false);
+  const [sbomSigStatus, setSbomSigStatus] = useState<{
+    verified: boolean | null;
+    algorithm?: string;
+    keyId?: string;
+    bundleSha256?: string;
+  } | null>(null);
   const [chainVerificationResult, setChainVerificationResult] = useState<{
     valid: boolean;
     tamperedIndices: number[];
@@ -553,7 +559,19 @@ export const VeracityAdaptersReportsModule: React.FC<
         headers: { Accept: 'application/json' },
       });
       if (response.ok) {
-        const data = (await response.json()) as { document?: unknown };
+        const data = (await response.json()) as {
+          document?: unknown;
+          signature?: { algorithm?: string; keyId?: string; bundleSha256?: string };
+          signatureVerified?: boolean | null;
+        };
+        if (data?.signature) {
+          setSbomSigStatus({
+            verified: typeof data.signatureVerified === 'boolean' ? data.signatureVerified : null,
+            algorithm: data.signature.algorithm,
+            keyId: data.signature.keyId,
+            bundleSha256: data.signature.bundleSha256,
+          });
+        }
         if (data?.document) {
           triggerJsonDownload(JSON.stringify(data.document, null, 2));
           setExportFeedback(`SBOM CycloneDX v1.5 (${filename}) exportado com sucesso.`);
@@ -575,6 +593,41 @@ export const VeracityAdaptersReportsModule: React.FC<
       } else {
         setExportFeedback('Erro ao exportar SBOM CycloneDX v1.5.');
       }
+    } finally {
+      setExportingFormat(null);
+    }
+  };
+
+  const handleDownloadPdfReport = async () => {
+    if (!latestRun) return;
+    setExportingFormat('pdf');
+    setExportFeedback(null);
+    const filename = `winhood_${latestRun.id}_${selectedReportType.toLowerCase()}.pdf`;
+    try {
+      const response = await fetch(
+        `/api/reports/${encodeURIComponent(latestRun.id)}/export?format=pdf&type=${encodeURIComponent(selectedReportType)}`,
+        {
+          method: 'GET',
+          credentials: 'include',
+          headers: { Accept: 'application/pdf' },
+        }
+      );
+      if (!response.ok) {
+        setExportFeedback(`Falha ao gerar PDF auditável (HTTP ${response.status}).`);
+        return;
+      }
+      const blob = await response.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+      setExportFeedback(`Laudo PDF auditável (${filename}) gerado e baixado com sucesso.`);
+    } catch {
+      setExportFeedback('Erro de comunicação ao baixar laudo PDF.');
     } finally {
       setExportingFormat(null);
     }
@@ -852,6 +905,30 @@ export const VeracityAdaptersReportsModule: React.FC<
                         </div>
                       )}
                     </div>
+                    {(latestRun.signedManifest.engineVersion ||
+                      latestRun.signedManifest.ruleCatalogSha256 ||
+                      latestRun.signedManifest.gateDecision) && (
+                      <div className="md:col-span-4 pt-2 border-t border-[#31d6c4]/20 flex flex-wrap gap-x-6 gap-y-1 text-[10px] text-slate-500">
+                        {latestRun.signedManifest.engineVersion && (
+                          <span>
+                            Motor: <strong className="text-slate-300">v{latestRun.signedManifest.engineVersion}</strong>
+                          </span>
+                        )}
+                        {latestRun.signedManifest.gateDecision && (
+                          <span>
+                            Quality Gate:{' '}
+                            <strong className="text-[#31d6c4]">
+                              {latestRun.signedManifest.gateDecision} ({latestRun.signedManifest.gateVersion || 'v1'})
+                            </strong>
+                          </span>
+                        )}
+                        {latestRun.signedManifest.ruleCatalogSha256 && (
+                          <span title={latestRun.signedManifest.ruleCatalogSha256}>
+                            Catálogo Regras: <strong className="text-slate-300">{latestRun.signedManifest.ruleCatalogSha256.slice(0, 14)}...</strong>
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -1135,11 +1212,39 @@ export const VeracityAdaptersReportsModule: React.FC<
 
               <button
                 type="button"
+                disabled={!latestRun || exportingFormat !== null}
+                onClick={() => void handleDownloadPdfReport()}
+                className="w-full inline-flex items-center justify-between px-4 py-2.5 rounded-lg text-xs font-semibold border border-[#31d6c4]/50 bg-[#31d6c4]/15 text-[#0e9f8e] dark:text-[#31d6c4] hover:bg-[#31d6c4]/25 disabled:opacity-50 cursor-pointer"
+                title="Gerar e baixar PDF auditável nativo (%PDF-1.4) com hashes de manifesto e cobertura"
+              >
+                <span>
+                  {exportingFormat === 'pdf'
+                    ? 'Gerando Laudo PDF Auditável...'
+                    : 'Exportar Laudo Auditável (.pdf)'}
+                </span>
+                <Download className="w-4 h-4 text-[#31d6c4]" />
+              </button>
+
+              {sbomSigStatus && (
+                <div className="p-2.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10] font-mono text-[10px] space-y-0.5">
+                  <div className={sbomSigStatus.verified ? 'text-emerald-500 font-bold' : 'text-amber-500 font-bold'}>
+                    Assinatura SBOM: {sbomSigStatus.verified ? 'VERIFICADA (HMAC-SHA256)' : 'ASSINADA / NÃO VERIFICADA'}
+                  </div>
+                  {sbomSigStatus.bundleSha256 && (
+                    <div className="text-slate-400 truncate">
+                      Bundle SHA-256: {sbomSigStatus.bundleSha256}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <button
+                type="button"
                 disabled={!latestRun}
                 onClick={handlePrintPdfReport}
                 className="w-full inline-flex items-center justify-between px-4 py-2.5 rounded-lg text-xs font-semibold border border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50 cursor-pointer"
               >
-                <span>Imprimir / Salvar Relatório Executivo (PDF)</span>
+                <span>Imprimir / Salvar Via Navegador (Print)</span>
                 <Printer className="w-4 h-4 text-[#31d6c4]" />
               </button>
             </div>

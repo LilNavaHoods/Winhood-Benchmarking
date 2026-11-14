@@ -1,0 +1,49 @@
+{
+  "name": "winhood-audit-vscode",
+  "displayName": "WinHood Independent Audit & Quality Gate",
+  "description": "Displays inline SAST/Secrets/IaC findings and Quality Gate status from WinHood API directly inside VS Code.",
+  "version": "1.0.0",
+  "publisher": "winhood",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Linters", "Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "winhood.runAudit",
+        "title": "WinHood: Run Independent Audit & Evaluate Quality Gate"
+      }
+    ],
+    "configuration": {
+      "title": "WinHood Audit",
+      "properties": {
+        "winhood.apiBaseUrl": {
+          "type": "string",
+          "default": "http://localhost:3000",
+          "description": "Base URL of the WinHood server or local desktop daemon."
+        },
+        "winhood.qualityGateId": {
+          "type": "string",
+          "default": "winhood-standard-v2",
+          "description": "Versioned Quality Gate ID to evaluate."
+        },
+        "winhood.apiToken": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Bearer token when connecting to an authenticated WinHood server."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.7.0"
+  }
+}

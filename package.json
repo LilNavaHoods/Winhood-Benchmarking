@@ -3,9 +3,13 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "bin": {
+    "winhood": "./cli/winhood-cli.ts"
+  },
   "scripts": {
     "dev": "tsx server.ts",
     "start": "tsx server.ts",
+    "cli": "tsx cli/winhood-cli.ts",
     "build": "vite build",
     "build:desktop": "node scripts/build-desktop.mjs",
     "desktop": "tsx electron-main.ts",
@@ -14,8 +18,9 @@
     "preview": "vite preview",
     "clean": "rm -rf dist dist-desktop server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/engine/analyzer.test.ts src/analyzers/analyzers.test.ts src/intelligence/intelligence.test.ts src/security/security.test.ts src/integrations/sonarqube/sonarcloud.test.ts src/desktop/desktop.test.ts",
-    "test:unit": "tsx --test src/engine/analyzer.test.ts src/analyzers/analyzers.test.ts src/intelligence/intelligence.test.ts src/integrations/sonarqube/sonarcloud.test.ts",
+    "test": "tsx --test src/engine/analyzer.test.ts src/analyzers/analyzers.test.ts src/analyzers/pluginsAndIac.test.ts src/gate/gateAndCompliance.test.ts src/cli/cliAndApi.test.ts src/intelligence/intelligence.test.ts src/security/security.test.ts src/integrations/sonarqube/sonarcloud.test.ts src/desktop/desktop.test.ts",
+    "test:coverage": "node --experimental-test-coverage --import tsx --test src/engine/analyzer.test.ts src/analyzers/analyzers.test.ts src/analyzers/pluginsAndIac.test.ts src/gate/gateAndCompliance.test.ts src/cli/cliAndApi.test.ts src/intelligence/intelligence.test.ts src/security/security.test.ts src/integrations/sonarqube/sonarcloud.test.ts src/desktop/desktop.test.ts",
+    "test:unit": "tsx --test src/engine/analyzer.test.ts src/analyzers/analyzers.test.ts src/analyzers/pluginsAndIac.test.ts src/gate/gateAndCompliance.test.ts src/cli/cliAndApi.test.ts src/intelligence/intelligence.test.ts src/integrations/sonarqube/sonarcloud.test.ts",
     "test:security": "tsx --test src/security/security.test.ts",
     "test:sonarcloud": "tsx --test src/integrations/sonarqube/sonarcloud.test.ts",
     "test:desktop": "tsx --test src/desktop/desktop.test.ts",

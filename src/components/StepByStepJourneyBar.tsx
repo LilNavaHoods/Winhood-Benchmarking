@@ -28,6 +28,7 @@ export type AppNavSection =
   | 'hardware_benchmark'
   | 'veracity'
   | 'reference_intelligence'
+  | 'governance'
   | 'reports'
   | 'user_guide';
 

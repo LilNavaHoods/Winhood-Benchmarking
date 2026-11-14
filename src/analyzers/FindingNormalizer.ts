@@ -34,8 +34,9 @@ export class FindingNormalizer {
     toolVersion: string;
     filesMap: Record<string, string>;
     index: number;
+    collectedAt?: string;
   }): NormalizedFinding {
-    const { candidate, scope, toolName, toolVersion, filesMap, index } = params;
+    const { candidate, scope, toolName, toolVersion, filesMap, index, collectedAt } = params;
     const content = filesMap[candidate.filePath] || '';
     const ctx = EvidenceCollector.extractContextLines(content, candidate.lineNumber);
     const maskedFlows = (candidate.executionFlows || []).map((step) => {
@@ -83,7 +84,7 @@ export class FindingNormalizer {
       executionFlows: maskedFlows,
       remediation: candidate.remediation,
       remediationEffortMinutes: candidate.effortMinutes,
-      collectedAt: new Date().toISOString(),
+      collectedAt: collectedAt || new Date().toISOString(),
     });
   }
 

@@ -251,6 +251,8 @@ export class ParserRegistry {
   ): AstParseResult {
     const lines = content.split(/\r?\n/);
     const getSnippet = (lineNo: number): string => (lines[lineNo - 1] || '').trim();
+    const isNoSonarLine = (lineNo: number): boolean =>
+      /\/\/\s*NOSONAR\b|\/\*\s*NOSONAR\b/i.test(lines[lineNo - 1] || '');
     const getLine = (node: any): number => node?.loc?.start?.line ?? 1;
     const getEndLine = (node: any): number => node?.loc?.end?.line ?? getLine(node);
     const getSourceText = (node: any): string =>
@@ -502,8 +504,14 @@ export class ParserRegistry {
           }
         }
 
-        // Empty Catch Clause
-        if (node.type === 'CatchClause' && Array.isArray(node.body?.body) && node.body.body.length === 0) {
+        // Empty Catch Clause (respects explanatory comments and NOSONAR)
+        if (
+          node.type === 'CatchClause' &&
+          Array.isArray(node.body?.body) &&
+          node.body.body.length === 0 &&
+          !(Array.isArray(node.body?.innerComments) && node.body.innerComments.length > 0) &&
+          !isNoSonarLine(getLine(node))
+        ) {
           const lineNo = getLine(node);
           issues.push({
             ruleId: 'ts:S2486',
@@ -525,7 +533,7 @@ export class ParserRegistry {
         }
 
         // Explicit `any` keyword
-        if (node.type === 'TSAnyKeyword' && !filePath.toLowerCase().includes('test')) {
+        if (node.type === 'TSAnyKeyword' && !filePath.toLowerCase().includes('test') && !isNoSonarLine(getLine(node))) {
           const lineNo = getLine(node);
           issues.push({
             ruleId: 'ts:S4204',
@@ -631,7 +639,7 @@ export class ParserRegistry {
           }
 
           // Dynamic SQL construction via binary + or template interpolation
-          if (containsSqlConcat(node.init)) {
+          if (containsSqlConcat(node.init) && !isNoSonarLine(lineNo)) {
             issues.push({
               ruleId: 'ts:S3649',
               title: 'Consulta SQL dinâmica construída por concatenação/interpolação',
@@ -652,9 +660,54 @@ export class ParserRegistry {
           }
         }
 
+        if (node.type === 'AssignmentExpression' && node.right && containsSqlConcat(node.right)) {
+          const lineNo = getLine(node);
+          if (!isNoSonarLine(lineNo)) {
+            issues.push({
+              ruleId: 'ts:S3649',
+              title: 'Consulta SQL dinâmica construída por concatenação/interpolação',
+              description:
+                'String SQL atribuída dinamicamente com identificadores sem uso de placeholders parametrizados.',
+              category: 'SAST',
+              severity: 'CRITICAL',
+              cwe: 'CWE-89',
+              filePath,
+              lineNumber: lineNo,
+              endLineNumber: lineNo,
+              snippet: getSnippet(lineNo),
+              remediation: 'Utilizar Prepared Statements com marcadores parametrizados (? ou $1).',
+              detectionMethod: 'AST_ANALYSIS',
+              confidence: 'HIGH',
+              effortMinutes: 30,
+            });
+          }
+        }
+
         // Return statements
         if (node.type === 'ReturnStatement' && node.argument) {
           returnValues.push(...extractIdentifiersFromExpr(node.argument));
+          if (containsSqlConcat(node.argument)) {
+            const lineNo = getLine(node);
+            if (!isNoSonarLine(lineNo)) {
+              issues.push({
+                ruleId: 'ts:S3649',
+                title: 'Consulta SQL dinâmica retornada com concatenação/interpolação',
+                description:
+                  'String SQL construída dinamicamente sem uso de placeholders parametrizados.',
+                category: 'SAST',
+                severity: 'CRITICAL',
+                cwe: 'CWE-89',
+                filePath,
+                lineNumber: lineNo,
+                endLineNumber: lineNo,
+                snippet: getSnippet(lineNo),
+                remediation: 'Utilizar Prepared Statements com marcadores parametrizados (? ou $1).',
+                detectionMethod: 'AST_ANALYSIS',
+                confidence: 'HIGH',
+                effortMinutes: 30,
+              });
+            }
+          }
         }
 
         // Call expressions: sinks, crypto, audit signals, call-graph
@@ -694,15 +747,17 @@ export class ParserRegistry {
 
           // Weak hash / cipher
           if (
-            (/createHash/i.test(callee) && /^(md5|sha1)$/i.test(firstArgStr)) ||
-            /CryptoJS\.(MD5|SHA1)/i.test(callee)
+            ((/createHash/i.test(callee) && /^(md5|sha1)$/i.test(firstArgStr)) ||
+              (/createCipheriv/i.test(callee) && /^(des|rc4)/i.test(firstArgStr)) ||
+              /CryptoJS\.(MD5|SHA1)/i.test(callee)) &&
+            !isNoSonarLine(lineNo)
           ) {
             hasWeakCryptoSignals = true;
             issues.push({
               ruleId: 'ts:S4790',
               title: `Algoritmo criptográfico fraco (${firstArgStr || calleeBase}) detectado via AST`,
               description:
-                'MD5/SHA-1 possuem colisões conhecidas e são inadequados para senhas ou integridade crítica.',
+                'MD5/SHA-1/DES/RC4 possuem colisões ou fraquezas conhecidas e são inadequados para senhas ou integridade crítica.',
               category: 'SAST',
               severity: 'CRITICAL',
               cwe: 'CWE-328',
@@ -718,8 +773,8 @@ export class ParserRegistry {
             });
           }
 
-          // Insecure Math.random() in non-test code
-          if (callee === 'Math.random' && !filePath.toLowerCase().includes('test')) {
+          // Insecure Math.random() in non-test code (respects NOSONAR)
+          if (callee === 'Math.random' && !filePath.toLowerCase().includes('test') && !isNoSonarLine(lineNo)) {
             issues.push({
               ruleId: 'ts:S2245',
               title: 'Gerador pseudoaleatório previsível Math.random() em lógica de aplicação',
@@ -739,21 +794,56 @@ export class ParserRegistry {
             });
           }
 
-          // Command execution / eval
-          if (calleeBase === 'execSync' || calleeBase === 'exec' || callee === 'eval') {
-            const hasDynamicArg = args.some(
-              (a: any) =>
-                (a.type === 'TemplateLiteral' && a.expressions?.length > 0) ||
-                a.type === 'BinaryExpression' ||
-                a.type === 'Identifier' ||
-                a.type === 'MemberExpression'
-            );
-            if (hasDynamicArg) {
+          // Command execution / eval (excludes RegExp.prototype.exec; respects shell: false, static literals & sanitized paths)
+          const isChildProcessExec =
+            calleeBase === 'execSync' ||
+            callee === 'exec' ||
+            callee === 'child_process.exec' ||
+            callee === 'cp.exec' ||
+            callee === 'childProcess.exec';
+          if ((isChildProcessExec || callee === 'eval') && !isNoSonarLine(lineNo)) {
+            const hasShellFalseOption =
+              callee !== 'eval' &&
+              args.slice(1).some(
+                (opt: any) =>
+                  opt?.type === 'ObjectExpression' &&
+                  Array.isArray(opt.properties) &&
+                  opt.properties.some(
+                    (p: any) =>
+                      p?.type === 'ObjectProperty' &&
+                      (p.key?.name === 'shell' || p.key?.value === 'shell') &&
+                      p.value?.type === 'BooleanLiteral' &&
+                      p.value.value === false
+                  )
+              );
+
+            const cmdArg = args[0];
+            let isCmdDynamic =
+              Boolean(cmdArg) &&
+              ((cmdArg.type === 'TemplateLiteral' && cmdArg.expressions?.length > 0) ||
+                cmdArg.type === 'BinaryExpression' ||
+                cmdArg.type === 'Identifier' ||
+                cmdArg.type === 'MemberExpression' ||
+                cmdArg.type === 'CallExpression');
+
+            // If cmdArg is a local constant bound to a static literal or sanitized value, do not flag as uncontrolled RCE
+            if (isCmdDynamic && cmdArg?.type === 'Identifier') {
+              const binding = variableBindings.find((b) => b.varName === cmdArg.name);
+              if (
+                binding &&
+                (binding.isSanitized ||
+                  (binding.dependencies.length === 0 && /^['"`][^$`]*['"`]$/.test(binding.expressionText.trim())))
+              ) {
+                isCmdDynamic = false;
+              }
+            }
+
+            if (isCmdDynamic && !hasShellFalseOption) {
               issues.push({
                 ruleId: 'ts:S2076',
                 title: `Execução de comando/código dinâmica em ${callee}`,
                 description:
-                  'Invocação de shell ou eval com argumento dinâmico permite injeção de comandos arbitrários.',
+                  'Invocação de shell ou eval com argumento dinâmico não controlado permite injeção de comandos arbitrários.',
                 category: 'SAST',
                 severity: 'BLOCKER',
                 cwe: 'CWE-78',
@@ -772,7 +862,7 @@ export class ParserRegistry {
 
           // Direct SQL execution with unsafe argument
           if (/^(query|execute|raw|exec)$/i.test(calleeBase) && args[0]) {
-            if (containsSqlConcat(args[0])) {
+            if (containsSqlConcat(args[0]) && !isNoSonarLine(lineNo)) {
               issues.push({
                 ruleId: 'ts:S3649',
                 title: 'Execução SQL com string concatenada/interpolada',
@@ -796,23 +886,25 @@ export class ParserRegistry {
         // new Function(...)
         if (node.type === 'NewExpression' && getCalleeText(node.callee) === 'Function') {
           const lineNo = getLine(node);
-          issues.push({
-            ruleId: 'ts:S1523',
-            title: 'Construção dinâmica via new Function() detectada',
-            description:
-              'Avaliação dinâmica de código equivale a eval() e expõe superfície de Code Injection.',
-            category: 'SAST',
-            severity: 'CRITICAL',
-            cwe: 'CWE-95',
-            filePath,
-            lineNumber: lineNo,
-            endLineNumber: lineNo,
-            snippet: getSnippet(lineNo),
-            remediation: 'Substituir por funções estáticas tipadas ou tabela de despacho segura.',
-            detectionMethod: 'AST_ANALYSIS',
-            confidence: 'HIGH',
-            effortMinutes: 25,
-          });
+          if (!isNoSonarLine(lineNo)) {
+            issues.push({
+              ruleId: 'ts:S1523',
+              title: 'Construção dinâmica via new Function() detectada',
+              description:
+                'Avaliação dinâmica de código equivale a eval() e expõe superfície de Code Injection.',
+              category: 'SAST',
+              severity: 'CRITICAL',
+              cwe: 'CWE-95',
+              filePath,
+              lineNumber: lineNo,
+              endLineNumber: lineNo,
+              snippet: getSnippet(lineNo),
+              remediation: 'Substituir por funções estáticas tipadas ou tabela de despacho segura.',
+              detectionMethod: 'AST_ANALYSIS',
+              confidence: 'HIGH',
+              effortMinutes: 25,
+            });
+          }
         }
 
         const nextNesting =
@@ -1007,6 +1099,17 @@ export class ParserRegistry {
 
     traverseTop(ast.program, false);
 
+    const todoCommentLines: number[] = [];
+    if (Array.isArray(ast?.comments)) {
+      for (const c of ast.comments) {
+        const val = String(c?.value || '');
+        if (/\b(TODO|FIXME|HACK)\b/i.test(val) && !/\bNOSONAR\b/i.test(val)) {
+          const lno = c?.loc?.start?.line;
+          if (typeof lno === 'number') todoCommentLines.push(lno);
+        }
+      }
+    }
+
     return {
       filePath,
       language,
@@ -1025,6 +1128,7 @@ export class ParserRegistry {
       hasCryptoSignals,
       hasWeakCryptoSignals,
       hasPreparedStatementSignals,
+      todoCommentLines,
     };
   }
 
@@ -1047,6 +1151,21 @@ export class ParserRegistry {
     let hasPrepared = false;
     let hasAudit = false;
     let currentFn = '<module>';
+    let currentFnIndent = -1;
+
+    const getLineIndent = (lineNo: number): number => {
+      const raw = lines[lineNo - 1] || '';
+      const m = raw.match(/^(\s*)/);
+      return m ? m[1]!.length : 0;
+    };
+
+    const detectSanitizerContextPy = (expr: string): { isSanitized: boolean; sanitizerName?: string; sanitizerContext?: AstFunctionNode['variableBindings'][number]['sanitizerContext'] } => {
+      if (/\b(?:int|float)\s*\(/.test(expr)) return { isSanitized: true, sanitizerName: 'int', sanitizerContext: 'NUMERIC' };
+      if (/\b(?:escape|html\.escape|bleach\.clean)\s*\(/.test(expr)) return { isSanitized: true, sanitizerName: 'html.escape', sanitizerContext: 'HTML_ESCAPE' };
+      if (/\b(?:os\.path\.basename|Path\([^)]+\)\.name)\b/.test(expr)) return { isSanitized: true, sanitizerName: 'basename', sanitizerContext: 'PATH_BASENAME' };
+      if (/\b(?:urllib\.parse\.quote|quote_plus)\s*\(/.test(expr)) return { isSanitized: true, sanitizerName: 'urllib.parse.quote', sanitizerContext: 'URL_ENCODE' };
+      return { isSanitized: false };
+    };
 
     for (let idx = 0; idx < tokens.length; idx++) {
       const tok = tokens[idx]!;
@@ -1054,6 +1173,20 @@ export class ParserRegistry {
       const next2 = tokens[idx + 2];
 
       if (tok.type === 'COMMENT') continue;
+
+      if (currentFn !== '<module>') {
+        const lineIndent = getLineIndent(tok.line);
+        const lineText = (lines[tok.line - 1] || '').trim();
+        if (lineText.length > 0 && lineIndent <= currentFnIndent && tok.value !== 'def') {
+          const prevFn = functions.find((f) => f.name === currentFn);
+          if (prevFn && prevFn.endLine < tok.line) prevFn.endLine = tok.line - 1;
+          currentFn = '<module>';
+          currentFnIndent = -1;
+        } else {
+          const prevFn = functions.find((f) => f.name === currentFn);
+          if (prevFn) prevFn.endLine = Math.max(prevFn.endLine, tok.line);
+        }
+      }
 
       if (tok.type === 'KEYWORD' && (tok.value === 'import' || tok.value === 'from')) {
         if (next && next.type === 'IDENT') {
@@ -1067,13 +1200,21 @@ export class ParserRegistry {
 
       if (tok.type === 'KEYWORD' && tok.value === 'def' && next?.type === 'IDENT') {
         currentFn = next.value;
+        currentFnIndent = getLineIndent(tok.line);
         const params: string[] = [];
         let j = idx + 2;
         if (tokens[j]?.value === '(') {
           j += 1;
+          let expectParamName = true;
           while (j < tokens.length && tokens[j]!.value !== ')') {
-            if (tokens[j]!.type === 'IDENT' && tokens[j]!.value !== 'self') {
-              params.push(tokens[j]!.value);
+            const pTok = tokens[j]!;
+            if (pTok.value === ',') {
+              expectParamName = true;
+            } else if (pTok.value === ':' || pTok.value === '=') {
+              expectParamName = false;
+            } else if (expectParamName && pTok.type === 'IDENT' && pTok.value !== 'self' && pTok.value !== 'cls') {
+              params.push(pTok.value);
+              expectParamName = false;
             }
             j += 1;
           }
@@ -1096,6 +1237,18 @@ export class ParserRegistry {
       if (tok.type === 'KEYWORD' && ['if', 'elif', 'for', 'while', 'except', 'and', 'or'].includes(tok.value)) {
         cyclomatic += 1;
         cognitive += 1;
+      }
+
+      // return statement in Python
+      if (tok.type === 'KEYWORD' && tok.value === 'return' && currentFn !== '<module>') {
+        const fnObj = functions.find((f) => f.name === currentFn);
+        if (fnObj) {
+          let k = idx + 1;
+          while (k < tokens.length && tokens[k]!.line === tok.line) {
+            if (tokens[k]!.type === 'IDENT') fnObj.returnValues.push(tokens[k]!.value);
+            k += 1;
+          }
+        }
       }
 
       // except ... : pass
@@ -1122,33 +1275,57 @@ export class ParserRegistry {
         }
       }
 
-      // Secrets in variable assignment: ident = "secret"
-      if (tok.type === 'IDENT' && next?.value === '=' && next2?.type === 'STRING') {
-        const raw = next2.value.slice(1, -1);
-        if (SECRET_IDENTIFIER_HINT.test(tok.value) && raw.length >= 12 && !PLACEHOLDER_SECRET_HINT.test(raw)) {
-          if (shannonEntropy(raw) >= 2.8) {
-            issues.push({
-              ruleId: 'py:S6418',
-              title: `Segredo hardcoded em Python (${tok.value})`,
-              description: 'Chave ou senha atribuída como string literal em módulo Python.',
-              category: 'SECRETS',
-              severity: 'BLOCKER',
-              cwe: 'CWE-798',
-              filePath,
+      // Variable bindings & Secrets in Python assignments: ident = expr
+      if (tok.type === 'IDENT' && next?.value === '=' && tokens[idx - 1]?.value !== '=') {
+        if (currentFn !== '<module>') {
+          const fnObj = functions.find((f) => f.name === currentFn);
+          if (fnObj) {
+            const deps: string[] = [];
+            let k = idx + 2;
+            while (k < tokens.length && tokens[k]!.line === tok.line) {
+              if (tokens[k]!.type === 'IDENT') deps.push(tokens[k]!.value);
+              k += 1;
+            }
+            const exprLine = (lines[tok.line - 1] || '').split('=')[1]?.trim() || '';
+            const san = detectSanitizerContextPy(exprLine);
+            fnObj.variableBindings.push({
+              varName: tok.value,
               lineNumber: tok.line,
-              endLineNumber: tok.line,
-              snippet: (lines[tok.line - 1] || '').trim(),
-              remediation: 'Ler segredo via os.environ ou gerenciador de segredos.',
-              detectionMethod: 'AST_ANALYSIS',
-              confidence: 'HIGH',
-              effortMinutes: 25,
+              expressionText: exprLine,
+              dependencies: Array.from(new Set(deps)),
+              isSanitized: san.isSanitized,
+              sanitizerName: san.sanitizerName,
+              sanitizerContext: san.sanitizerContext,
             });
+          }
+        }
+        if (next2?.type === 'STRING') {
+          const raw = next2.value.slice(1, -1);
+          if (SECRET_IDENTIFIER_HINT.test(tok.value) && raw.length >= 12 && !PLACEHOLDER_SECRET_HINT.test(raw)) {
+            if (shannonEntropy(raw) >= 2.8) {
+              issues.push({
+                ruleId: 'py:S6418',
+                title: `Segredo hardcoded em Python (${tok.value})`,
+                description: 'Chave ou senha atribuída como string literal em módulo Python.',
+                category: 'SECRETS',
+                severity: 'BLOCKER',
+                cwe: 'CWE-798',
+                filePath,
+                lineNumber: tok.line,
+                endLineNumber: tok.line,
+                snippet: (lines[tok.line - 1] || '').trim(),
+                remediation: 'Ler segredo via os.environ ou gerenciador de segredos.',
+                detectionMethod: 'AST_ANALYSIS',
+                confidence: 'HIGH',
+                effortMinutes: 25,
+              });
+            }
           }
         }
       }
 
       // Call expressions: name(...) or obj.name(...)
-      if (tok.type === 'IDENT' && next?.value === '(') {
+      if (tok.type === 'IDENT' && next?.value === '(' && tokens[idx - 1]?.value !== 'def') {
         const prevIdent = tokens[idx - 1]?.value === '.' ? `${tokens[idx - 2]?.value || ''}.${tok.value}` : tok.value;
         const callArgs: string[] = [];
         let k = idx + 2;
@@ -1236,7 +1413,7 @@ export class ParserRegistry {
             effortMinutes: 25,
           });
         }
-        if (tok.value === 'execute' && (site.snippet.includes('f"') || site.snippet.includes('+'))) {
+        if (tok.value === 'execute' && (site.snippet.includes('f"') || site.snippet.includes('f\'') || site.snippet.includes('+'))) {
           issues.push({
             ruleId: 'py:B608',
             title: 'SQL construído com f-string ou concatenação em cursor.execute()',
@@ -1269,7 +1446,7 @@ export class ParserRegistry {
       astParsed: true,
       parserKind: 'STRUCTURAL_PARSER',
       errorCount: 0,
-      parserEngine: 'winhood-python-structural-ast-v1',
+      parserEngine: 'winhood-python-structural-ast-v2',
       loc: lines.filter((l) => l.trim().length > 0 && !l.trim().startsWith('#')).length,
       cyclomaticComplexity: cyclomatic,
       cognitiveComplexity: cognitive,
@@ -1291,7 +1468,7 @@ export class ParserRegistry {
   ): AstParseResult {
     const keywords = new Set([
       'import', 'using', 'use', 'package', 'namespace', 'class', 'struct', 'interface',
-      'public', 'private', 'protected', 'func', 'fn', 'void', 'if', 'else', 'for',
+      'public', 'private', 'protected', 'static', 'func', 'fn', 'void', 'if', 'else', 'for',
       'while', 'switch', 'case', 'try', 'catch', 'match', 'return', 'new', 'unsafe',
     ]);
     const tokens = tokenizeGenericSource(content, keywords, false);
@@ -1307,13 +1484,66 @@ export class ParserRegistry {
     let hasWeakCrypto = false;
     let hasCrypto = false;
     let hasPrepared = false;
+    let currentFn: AstFunctionNode | null = null;
+    let currentFnBraceDepth = -1;
+
+    const extractParamsFromParen = (openParenIdx: number): { params: string[]; closeIdx: number } => {
+      const params: string[] = [];
+      let j = openParenIdx + 1;
+      let depth = 1;
+      const chunkIdents: string[] = [];
+      while (j < tokens.length && depth > 0) {
+        const t = tokens[j]!;
+        if (t.value === '(') depth += 1;
+        else if (t.value === ')') {
+          depth -= 1;
+          if (depth === 0) break;
+        } else if (t.value === ',' && depth === 1) {
+          if (chunkIdents.length > 0) {
+            // In Go: (param Type) -> first ident; in Java/C#: (Type param) -> last ident
+            params.push(language === 'Go' ? chunkIdents[0]! : chunkIdents[chunkIdents.length - 1]!);
+            chunkIdents.length = 0;
+          }
+        } else if (t.type === 'IDENT' && depth === 1) {
+          chunkIdents.push(t.value);
+        }
+        j += 1;
+      }
+      if (chunkIdents.length > 0) {
+        params.push(language === 'Go' ? chunkIdents[0]! : chunkIdents[chunkIdents.length - 1]!);
+      }
+      return { params: params.filter((p) => p && !['string', 'int', 'void', 'error', 'bool'].includes(p)), closeIdx: j };
+    };
+
+    const detectBraceSanitizer = (expr: string): { isSanitized: boolean; sanitizerName?: string; sanitizerContext?: AstFunctionNode['variableBindings'][number]['sanitizerContext'] } => {
+      if (/\b(?:strconv\.Atoi|Integer\.parseInt|int\.Parse|Long\.parseLong)\s*\(/.test(expr)) {
+        return { isSanitized: true, sanitizerName: 'parseInt', sanitizerContext: 'NUMERIC' };
+      }
+      if (/\b(?:html\.EscapeString|HtmlUtils\.htmlEscape|ESAPI\.encoder)\b/.test(expr)) {
+        return { isSanitized: true, sanitizerName: 'htmlEscape', sanitizerContext: 'HTML_ESCAPE' };
+      }
+      if (/\b(?:filepath\.Base|Paths\.get\([^)]+\)\.getFileName)\b/.test(expr)) {
+        return { isSanitized: true, sanitizerName: 'filepath.Base', sanitizerContext: 'PATH_BASENAME' };
+      }
+      return { isSanitized: false };
+    };
 
     for (let idx = 0; idx < tokens.length; idx++) {
       const tok = tokens[idx]!;
       if (tok.type === 'COMMENT') continue;
 
       if (tok.value === '{') nesting += 1;
-      else if (tok.value === '}') nesting = Math.max(0, nesting - 1);
+      else if (tok.value === '}') {
+        nesting = Math.max(0, nesting - 1);
+        if (currentFn && nesting < currentFnBraceDepth) {
+          currentFn.endLine = tok.line;
+          currentFn = null;
+          currentFnBraceDepth = -1;
+        }
+      }
+      if (currentFn) {
+        currentFn.endLine = Math.max(currentFn.endLine, tok.line);
+      }
 
       if (tok.type === 'KEYWORD' && ['if', 'for', 'while', 'case', 'catch', 'match'].includes(tok.value)) {
         cyclomatic += 1;
@@ -1375,20 +1605,111 @@ export class ParserRegistry {
         });
       }
 
-      // Function declarations in Go/Rust
-      if ((tok.value === 'func' || tok.value === 'fn') && tokens[idx + 1]?.type === 'IDENT') {
-        functions.push({
-          name: tokens[idx + 1]!.value,
-          filePath,
-          startLine: tok.line,
-          endLine: tok.line,
-          params: [],
-          cyclomaticComplexity: 1,
-          cognitiveComplexity: 0,
-          isExported: true,
-          callsMade: [],
-          returnValues: [],
-          variableBindings: [],
+      // Function declarations in Go / Rust (supports Go receiver methods: func (r *Repo) Name(params))
+      if ((tok.value === 'func' || tok.value === 'fn') && tokens[idx + 1]) {
+        let nameIdx = idx + 1;
+        if (tokens[nameIdx]?.value === '(') {
+          while (nameIdx < tokens.length && tokens[nameIdx]!.value !== ')') nameIdx++;
+          nameIdx += 1;
+        }
+        const nameTok = tokens[nameIdx];
+        if (nameTok?.type === 'IDENT') {
+          let openParenIdx = nameIdx + 1;
+          while (openParenIdx < tokens.length && tokens[openParenIdx]!.value !== '(' && tokens[openParenIdx]!.line === nameTok.line) {
+            openParenIdx++;
+          }
+          const { params, closeIdx } =
+            tokens[openParenIdx]?.value === '('
+              ? extractParamsFromParen(openParenIdx)
+              : { params: [], closeIdx: nameIdx };
+          const fnNode: AstFunctionNode = {
+            name: nameTok.value,
+            filePath,
+            startLine: tok.line,
+            endLine: tok.line,
+            params,
+            cyclomaticComplexity: 1,
+            cognitiveComplexity: 0,
+            isExported: language === 'Go' ? /^[A-Z]/.test(nameTok.value) : true,
+            callsMade: [],
+            returnValues: [],
+            variableBindings: [],
+          };
+          functions.push(fnNode);
+          currentFn = fnNode;
+          currentFnBraceDepth = nesting + 1;
+          idx = Math.max(idx, closeIdx);
+          continue;
+        }
+      }
+
+      // Method declarations in Java / C#: (public|private|protected|static) ReturnType methodName(Type p1, ...) {
+      if (
+        (language === 'Java' || language === 'C#') &&
+        tok.type === 'IDENT' &&
+        tokens[idx + 1]?.value === '(' &&
+        tokens[idx - 1]?.type === 'IDENT' &&
+        tokens[idx - 1]?.value !== 'new' &&
+        tokens[idx - 1]?.value !== 'return'
+      ) {
+        const { params, closeIdx } = extractParamsFromParen(idx + 1);
+        let probe = closeIdx + 1;
+        while (probe < tokens.length && tokens[probe]!.value === 'throws') {
+          probe += 2;
+        }
+        if (tokens[probe]?.value === '{') {
+          const fnNode: AstFunctionNode = {
+            name: tok.value,
+            filePath,
+            startLine: tok.line,
+            endLine: tok.line,
+            params,
+            cyclomaticComplexity: 1,
+            cognitiveComplexity: 0,
+            isExported: true,
+            callsMade: [],
+            returnValues: [],
+            variableBindings: [],
+          };
+          functions.push(fnNode);
+          currentFn = fnNode;
+          currentFnBraceDepth = nesting + 1;
+          idx = closeIdx;
+          continue;
+        }
+      }
+
+      // Return statements inside brace functions
+      if (tok.type === 'KEYWORD' && tok.value === 'return' && currentFn) {
+        let k = idx + 1;
+        while (k < tokens.length && tokens[k]!.line === tok.line && tokens[k]!.value !== ';') {
+          if (tokens[k]!.type === 'IDENT') currentFn.returnValues.push(tokens[k]!.value);
+          k += 1;
+        }
+      }
+
+      // Variable bindings inside functions (= or :=)
+      if (
+        currentFn &&
+        tok.type === 'IDENT' &&
+        (tokens[idx + 1]?.value === '=' || (tokens[idx + 1]?.value === ':' && tokens[idx + 2]?.value === '='))
+      ) {
+        const deps: string[] = [];
+        let k = idx + (tokens[idx + 1]?.value === ':' ? 3 : 2);
+        while (k < tokens.length && tokens[k]!.line === tok.line && tokens[k]!.value !== ';') {
+          if (tokens[k]!.type === 'IDENT') deps.push(tokens[k]!.value);
+          k += 1;
+        }
+        const exprLine = (lines[tok.line - 1] || '').split(/=|:= /)[1]?.trim() || '';
+        const san = detectBraceSanitizer(exprLine);
+        currentFn.variableBindings.push({
+          varName: tok.value,
+          lineNumber: tok.line,
+          expressionText: exprLine,
+          dependencies: Array.from(new Set(deps)),
+          isSanitized: san.isSanitized,
+          sanitizerName: san.sanitizerName,
+          sanitizerContext: san.sanitizerContext,
         });
       }
 
@@ -1396,23 +1717,38 @@ export class ParserRegistry {
       if (tok.type === 'IDENT' && tokens[idx + 1]?.value === '(') {
         const snippet = (lines[tok.line - 1] || '').trim();
         const callee = tokens[idx - 1]?.value === '.' ? `${tokens[idx - 2]?.value || ''}.${tok.value}` : tok.value;
-        callSites.push({
+        const argsText: string[] = [];
+        let k = idx + 2;
+        let depth = 1;
+        while (k < tokens.length && depth > 0) {
+          if (tokens[k]!.value === '(') depth += 1;
+          else if (tokens[k]!.value === ')') depth -= 1;
+          else if (tokens[k]!.type === 'IDENT' || tokens[k]!.type === 'STRING') {
+            argsText.push(tokens[k]!.value);
+          }
+          k += 1;
+        }
+        const site: AstCallSite = {
           callee,
           calleeBase: tok.value,
           filePath,
           lineNumber: tok.line,
-          argsText: [],
-          argIdentifiers: [],
+          argsText,
+          argIdentifiers: argsText.filter((a) => !a.startsWith('"') && !a.startsWith("'")),
           snippet,
-          enclosingFunction: '<block>',
+          enclosingFunction: currentFn?.name || '<block>',
           inTryBlock: false,
-        });
+        };
+        callSites.push(site);
+        if (currentFn) {
+          currentFn.callsMade.push(site);
+        }
 
-        if (/^(executeQuery|ExecuteReader|Exec|Raw)$/i.test(tok.value) && snippet.includes('+')) {
+        if (/^(executeQuery|ExecuteReader|Exec|Query|QueryRow|Raw)$/i.test(tok.value) && (snippet.includes('+') || snippet.includes('fmt.Sprintf'))) {
           issues.push({
             ruleId: `${language.toLowerCase()}:S2077`,
             title: `SQL concatenado em ${callee}() (${language})`,
-            description: 'Consulta SQL construída por concatenação com operador "+" em chamada de banco.',
+            description: 'Consulta SQL construída por concatenação com operador "+" ou Sprintf em chamada de banco.',
             category: 'SAST',
             severity: 'BLOCKER',
             cwe: 'CWE-89',
@@ -1420,7 +1756,7 @@ export class ParserRegistry {
             lineNumber: tok.line,
             endLineNumber: tok.line,
             snippet,
-            remediation: 'Utilizar PreparedStatement / SqlParameter / query parametrizada.',
+            remediation: 'Utilizar PreparedStatement / SqlParameter / query parametrizada ($1 ou ?).',
             detectionMethod: 'AST_ANALYSIS',
             confidence: 'HIGH',
             effortMinutes: 30,
@@ -1450,25 +1786,28 @@ export class ParserRegistry {
       }
 
       // Hardcoded secret assignment
-      if (tok.type === 'IDENT' && tokens[idx + 1]?.value === '=' && tokens[idx + 2]?.type === 'STRING') {
-        const raw = tokens[idx + 2]!.value.slice(1, -1);
-        if (SECRET_IDENTIFIER_HINT.test(tok.value) && raw.length >= 12 && !PLACEHOLDER_SECRET_HINT.test(raw) && shannonEntropy(raw) >= 2.8) {
-          issues.push({
-            ruleId: `${language.toLowerCase()}:S6418`,
-            title: `Credencial hardcoded detectada em ${tok.value} (${language})`,
-            description: 'Literal string de alta entropia atribuído diretamente no código.',
-            category: 'SECRETS',
-            severity: 'BLOCKER',
-            cwe: 'CWE-798',
-            filePath,
-            lineNumber: tok.line,
-            endLineNumber: tok.line,
-            snippet: (lines[tok.line - 1] || '').trim(),
-            remediation: 'Mover segredo para cofre/variável de ambiente.',
-            detectionMethod: 'AST_ANALYSIS',
-            confidence: 'HIGH',
-            effortMinutes: 25,
-          });
+      if (tok.type === 'IDENT' && (tokens[idx + 1]?.value === '=' || (tokens[idx + 1]?.value === ':' && tokens[idx + 2]?.value === '='))) {
+        const strTok = tokens[idx + 1]?.value === ':' ? tokens[idx + 3] : tokens[idx + 2];
+        if (strTok?.type === 'STRING') {
+          const raw = strTok.value.slice(1, -1);
+          if (SECRET_IDENTIFIER_HINT.test(tok.value) && raw.length >= 12 && !PLACEHOLDER_SECRET_HINT.test(raw) && shannonEntropy(raw) >= 2.8) {
+            issues.push({
+              ruleId: `${language.toLowerCase()}:S6418`,
+              title: `Credencial hardcoded detectada em ${tok.value} (${language})`,
+              description: 'Literal string de alta entropia atribuído diretamente no código.',
+              category: 'SECRETS',
+              severity: 'BLOCKER',
+              cwe: 'CWE-798',
+              filePath,
+              lineNumber: tok.line,
+              endLineNumber: tok.line,
+              snippet: (lines[tok.line - 1] || '').trim(),
+              remediation: 'Mover segredo para cofre/variável de ambiente.',
+              detectionMethod: 'AST_ANALYSIS',
+              confidence: 'HIGH',
+              effortMinutes: 25,
+            });
+          }
         }
       }
     }
@@ -1479,7 +1818,7 @@ export class ParserRegistry {
       astParsed: true,
       parserKind: 'STRUCTURAL_PARSER',
       errorCount: 0,
-      parserEngine: `winhood-${language.toLowerCase()}-structural-ast-v1`,
+      parserEngine: `winhood-${language.toLowerCase()}-structural-ast-v2`,
       loc: lines.filter((l) => l.trim().length > 0 && !l.trim().startsWith('//')).length,
       cyclomaticComplexity: cyclomatic,
       cognitiveComplexity: cognitive,

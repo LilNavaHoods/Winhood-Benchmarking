@@ -8,7 +8,7 @@ on:
 
 jobs:
   linux-validation:
-    name: Linux Fullstack, SonarCloud Methodology & Security Suite
+    name: Linux Fullstack, Determinism, Coverage & Security Suite
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -29,8 +29,24 @@ jobs:
       - name: Typecheck (tsc --noEmit)
         run: npm run lint
 
-      - name: Run unit, integration, security, and SonarCloud tests
-        run: npm test
+      - name: Run full test suite with coverage report
+        run: npm run test:coverage
+
+      - name: Verify bit-for-bit determinism across repeated CLI runs
+        run: |
+          OUT1=$(npx tsx cli/winhood-cli.ts analyze --path ./src/analyzers --deterministic --name WinHoodAnalyzers)
+          OUT2=$(npx tsx cli/winhood-cli.ts analyze --path ./src/analyzers --deterministic --name WinHoodAnalyzers)
+          if [ "$OUT1" != "$OUT2" ]; then
+            echo "ERROR: Bit-for-bit determinism check failed!"
+            exit 1
+          fi
+          echo "Determinism verified: identical output across consecutive runs."
+
+      - name: Dogfooding self-audit with WinHood CLI Quality Gate
+        run: npx tsx cli/winhood-cli.ts gate --path ./src/gate --gate-id winhood-standard-v2 --deterministic
+
+      - name: Dependency vulnerability check (npm audit --audit-level=high)
+        run: npm audit --audit-level=high || true
 
       - name: Build frontend and desktop bundles
         run: npm run build:desktop

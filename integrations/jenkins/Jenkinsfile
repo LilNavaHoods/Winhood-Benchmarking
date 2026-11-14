@@ -1,0 +1,28 @@
+pipeline {
+  agent any
+  stages {
+    stage('WinHood Independent Audit & Gate') {
+      steps {
+        sh 'npx tsx cli/winhood-cli.ts sbom --path . --format cyclonedx --out winhood-sbom.cdx.json'
+        script {
+          def exitCode = sh(
+            script: 'npx tsx cli/winhood-cli.ts gate --path . --gate winhood-standard-v2 --deterministic > winhood-gate.json',
+            returnStatus: true
+          )
+          if (exitCode == 1) {
+            error("WinHood Quality Gate BLOCKED/REJECTED (exitCode=1)")
+          } else if (exitCode == 2) {
+            unstable("WinHood Quality Gate INCONCLUSIVE (exitCode=2)")
+          } else if (exitCode >= 3) {
+            error("WinHood CLI execution error (exitCode=${exitCode})")
+          }
+        }
+      }
+      post {
+        always {
+          archiveArtifacts artifacts: 'winhood-sbom.cdx.json,winhood-gate.json', allowEmptyArchive: true
+        }
+      }
+    }
+  }
+}

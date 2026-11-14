@@ -1,4 +1,4 @@
-import { execSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -22,21 +22,34 @@ export class ToolAvailabilityService {
     executablePath: string;
     versionOutput: string | null;
   } {
-    const cmd = os.platform() === 'win32' ? `where ${binaryName}` : `which ${binaryName}`;
+    if (!/^[a-zA-Z0-9._-]+$/.test(binaryName)) {
+      return { detected: false, executablePath: '', versionOutput: null };
+    }
+    const locatorBin = os.platform() === 'win32' ? 'where' : 'which';
     try {
-      const located = execSync(cmd, { encoding: 'utf8', timeout: 1200 }).trim().split('\n')[0];
+      const locateRes = spawnSync(locatorBin, [binaryName], {
+        encoding: 'utf8',
+        timeout: 1200,
+        shell: false,
+      });
+      if (locateRes.status !== 0 || !locateRes.stdout) {
+        return { detected: false, executablePath: '', versionOutput: null };
+      }
+      const located = locateRes.stdout.trim().split(/\r?\n/)[0]?.trim() || '';
       if (!located) {
         return { detected: false, executablePath: '', versionOutput: null };
       }
       let versionOutput: string | null = null;
       try {
-        versionOutput = execSync(`${binaryName} --version 2>&1`, {
+        const verRes = spawnSync(located, ['--version'], {
           encoding: 'utf8',
           timeout: 1500,
-        })
-          .trim()
-          .split('\n')[0];
+          shell: false,
+        });
+        const combined = `${verRes.stdout || ''}\n${verRes.stderr || ''}`.trim();
+        versionOutput = combined ? combined.split(/\r?\n/)[0]?.trim() || null : null;
       } catch {
+        // Ignore tools that fail or do not support --version
         versionOutput = null;
       }
       return {
@@ -45,6 +58,7 @@ export class ToolAvailabilityService {
         versionOutput,
       };
     } catch {
+      // Ignore path resolution failures when binary is unavailable
       return { detected: false, executablePath: '', versionOutput: null };
     }
   }

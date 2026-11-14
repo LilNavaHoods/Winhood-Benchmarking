@@ -1,0 +1,14 @@
+winhood_audit_gate:
+  stage: test
+  image: node:20-alpine
+  script:
+    - npm ci
+    - npx tsx cli/winhood-cli.ts analyze --path . --gate winhood-standard-v2 --deterministic --format sarif --out winhood.sarif
+    - npx tsx cli/winhood-cli.ts gate --path . --gate winhood-standard-v2 --deterministic > winhood-gate.json
+  artifacts:
+    when: always
+    paths:
+      - winhood.sarif
+      - winhood-gate.json
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

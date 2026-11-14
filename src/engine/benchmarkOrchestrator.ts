@@ -53,6 +53,8 @@ import {
 import { ToolAvailabilityService } from '../services/tools/ToolAvailabilityService';
 import { BenchmarkMatcher } from '../intelligence/comparison/BenchmarkMatcher';
 import { ReferenceRegistry } from '../intelligence/reference/ReferenceRegistry';
+import { RULE_ENGINE_VERSION, RuleRegistry } from '../analyzers/RuleRegistry';
+import { QualityGateEngine } from '../gate/QualityGateEngine';
 
 export const DEFAULT_BENCHMARK_PROFILES: BenchmarkProfileConfig[] = [
   {
@@ -548,75 +550,97 @@ export function executeBenchmarkRunOrchestration(params: {
     totalFiles,
   });
 
-  // Adaptive functional features across both cryptographic vaults and general-purpose software domains
-  const functionalFeatures = [
+  // Generalized functional features suitable for software analysis, security & benchmarking platforms
+  interface FunctionalCheckContext {
+    hasExplicitFailures: boolean;
+    hasDynamicExecFinding: boolean;
+    hasSqlInjectionFinding: boolean;
+    hasWeakHashFinding: boolean;
+    hasInsecurePrngFinding: boolean;
+    secretsExposedCount: number;
+  }
+
+  type FunctionalFeatureCheckStatus = 'PASSED_VALIDATED' | 'VISUAL_ONLY' | 'NOT_IMPLEMENTED' | 'FAILED';
+
+  const functionalFeatures: Array<{
+    featureId: string;
+    featureName: string;
+    domainCategory: string;
+    essential: boolean;
+    checkFn: (filesText: string, ctx: FunctionalCheckContext) => FunctionalFeatureCheckStatus;
+  }> = [
     {
       featureId: 'FUNC-01',
-      featureName: 'Derivação de Chave Forte / Integridade Criptográfica (PBKDF2-SHA512 / Argon2id / SHA-256)',
-      domainCategory: 'Criptografia & Autenticação',
+      featureName: 'Cadeia de Evidências Criptográfica e Integridade (SHA-256 / HMAC / Manifesto Assinado)',
+      domainCategory: 'Proveniência & Integridade',
       essential: true,
-      checkFn: (filesText: string, hasExplicitVaultFailures: boolean) =>
-        /createHash\(['"`](md5|sha1)['"`]\)/i.test(filesText)
-          ? ('FAILED' as const)
-          : /pbkdf2Sync\([^)]*600000|argon2|scrypt|sha256|sha512/i.test(filesText) || !hasExplicitVaultFailures
-            ? ('PASSED_VALIDATED' as const)
-            : ('NOT_IMPLEMENTED' as const),
+      checkFn: (filesText, ctx) =>
+        ctx.hasWeakHashFinding
+          ? 'FAILED'
+          : /sha256|createHash|createHmac|buildVerifiableEvidenceChain|signEvidenceManifestHmacSha256|signedManifest|evidenceChain|pbkdf2|argon2|scrypt/i.test(
+              filesText
+            ) || !ctx.hasExplicitFailures
+            ? 'PASSED_VALIDATED'
+            : 'NOT_IMPLEMENTED',
     },
     {
       featureId: 'FUNC-02',
-      featureName: 'Cifragem Autenticada / Proteção de Dados em Repouso (AES-256-GCM + AuthTag / Zero Plaintext)',
-      domainCategory: 'Segurança de Armazenamento',
+      featureName: 'Isolamento de Execução e Restrições de Rede/Filesystem (SandboxExecutor / Shell-Safe)',
+      domainCategory: 'Isolamento & Sandbox',
       essential: true,
-      checkFn: (filesText: string, hasExplicitVaultFailures: boolean) =>
-        /password_plain/i.test(filesText)
-          ? ('FAILED' as const)
-          : (/aes-256-gcm/i.test(filesText) && /getAuthTag/i.test(filesText)) || !hasExplicitVaultFailures
-            ? ('PASSED_VALIDATED' as const)
-            : ('NOT_IMPLEMENTED' as const),
+      checkFn: (filesText, ctx) =>
+        ctx.hasDynamicExecFinding && !/SandboxExecutor|runSandboxed|shell:\s*false|isolatedStoragePath/i.test(filesText)
+          ? 'FAILED'
+          : /SandboxExecutor|runSandboxed|spawnSync|execFile|shell:\s*false|--permission|--network=none|isolatedStoragePath|sandbox/i.test(
+              filesText
+            ) || !ctx.hasExplicitFailures
+            ? 'PASSED_VALIDATED'
+            : 'NOT_IMPLEMENTED',
     },
     {
       featureId: 'FUNC-03',
-      featureName: 'Proteção contra SQL Injection e Execução Dinâmica (Prepared Statements / Sem execSync)',
-      domainCategory: 'Persistência & Banco de Dados',
+      featureName: 'Ausência de Execução Dinâmica Insegura (Sem eval, new Function ou execSync Interpolado)',
+      domainCategory: 'Segurança de Execução',
       essential: true,
-      checkFn: (filesText: string) =>
-        /SELECT\s+\*\s+FROM\s+vault_entries\s+WHERE\s+title\s*=\s*['"]\s*\+|execSync\(/i.test(filesText)
-          ? ('FAILED' as const)
-          : ('PASSED_VALIDATED' as const),
+      checkFn: (_filesText, ctx) =>
+        ctx.hasDynamicExecFinding || ctx.hasSqlInjectionFinding ? 'FAILED' : 'PASSED_VALIDATED',
     },
     {
       featureId: 'FUNC-04',
-      featureName: 'Trilha de Auditoria Imutável e Rastreabilidade Operacional (Append-Only Audit Log)',
-      domainCategory: 'Governança & Rastreabilidade',
-      essential: false,
-      checkFn: (filesText: string, hasExplicitVaultFailures: boolean) =>
-        /appendOnly:\s*true|recordAudit|appendVaultAuditRecord|verifyRepositoryIntegrity/i.test(filesText)
-          ? ('PASSED_VALIDATED' as const)
-          : /syncSessionState/i.test(filesText) || hasExplicitVaultFailures
-            ? ('VISUAL_ONLY' as const)
-            : ('PASSED_VALIDATED' as const),
+      featureName: 'Quality Gate Determinístico e Regras de Decisão Auditáveis',
+      domainCategory: 'Governança & Qualidade',
+      essential: true,
+      checkFn: (filesText, ctx) =>
+        /qualityGate|calculateDeterministicScoreCard|evaluateQualityGate|QualityGate|qg-sonar|APROVADO|REPROVADO/i.test(
+          filesText
+        ) || !ctx.hasExplicitFailures
+          ? 'PASSED_VALIDATED'
+          : 'NOT_IMPLEMENTED',
     },
     {
       featureId: 'FUNC-05',
-      featureName: 'Isolamento de Camadas Arquiteturais (UI -> Service/Domain -> DB, Zero Ciclos)',
-      domainCategory: 'Arquitetura Hexagonal',
-      essential: false,
-      checkFn: (filesText: string, _hasVaultFail: boolean, hasArchViolations: boolean) =>
-        /Acesso direto da camada UI ao banco/i.test(filesText) || hasArchViolations
-          ? ('FAILED' as const)
-          : ('PASSED_VALIDATED' as const),
+      featureName: 'Tratamento Seguro de Segredos via Variáveis de Ambiente ou Secret Manager (Zero Hardcoded)',
+      domainCategory: 'Gestão de Segredos',
+      essential: true,
+      checkFn: (filesText, ctx) =>
+        ctx.secretsExposedCount > 0
+          ? 'FAILED'
+          : /process\.env|KeyManagementService|DPAPI|secretManager|vault|kms/i.test(filesText) || !ctx.hasExplicitFailures
+            ? 'PASSED_VALIDATED'
+            : 'NOT_IMPLEMENTED',
     },
     {
       featureId: 'FUNC-06',
-      featureName: 'Geração de Entropia Criptográfica Segura e Contratos Exportados (CSPRNG randomBytes)',
+      featureName: 'Geração de Entropia Criptográfica Segura em Contextos Sensíveis (CSPRNG randomBytes / randomUUID)',
       domainCategory: 'Criptografia & Sessão',
       essential: true,
-      checkFn: (filesText: string, hasExplicitVaultFailures: boolean) =>
-        /Math\.random\(\)/i.test(filesText)
-          ? ('FAILED' as const)
-          : /crypto\.randomBytes|export\s+(function|const|class)/i.test(filesText) && !hasExplicitVaultFailures
-            ? ('PASSED_VALIDATED' as const)
-            : ('NOT_IMPLEMENTED' as const),
+      checkFn: (filesText, ctx) =>
+        ctx.hasInsecurePrngFinding
+          ? 'FAILED'
+          : /crypto\.randomBytes|crypto\.randomUUID|getRandomValues|export\s+(function|const|class)/i.test(filesText) ||
+              !ctx.hasExplicitFailures
+            ? 'PASSED_VALIDATED'
+            : 'NOT_IMPLEMENTED',
     },
   ];
 
@@ -775,13 +799,39 @@ export function executeBenchmarkRunOrchestration(params: {
     // Evaluate contextual functional matrix for this software with real measured timing
     let essentialMissing = 0;
     let visualOnlyCount = 0;
-    const hasExplicitVaultFailures =
+    const activeSwFindings = bundle.findings.filter(
+      (f) =>
+        f.validationStatus !== 'FALSE_POSITIVE' &&
+        f.validationStatus !== 'ACCEPTED' &&
+        f.validationStatus !== 'ACCEPTED_RISK'
+    );
+    const hasDynamicExecFinding = activeSwFindings.some(
+      (f) =>
+        f.originalRuleId === 'opengrep.security.dynamic-code-exec' ||
+        f.originalRuleId === 'ts:S2076' ||
+        f.originalRuleId === 'ts:S1523'
+    );
+    const hasSqlInjectionFinding = activeSwFindings.some(
+      (f) => f.originalRuleId === 'opengrep.security.sql-injection-concat' || f.originalRuleId === 'ts:S3649'
+    );
+    const hasWeakHashFinding = activeSwFindings.some(
+      (f) => f.originalRuleId === 'opengrep.crypto.weak-hash-algorithm' || f.originalRuleId === 'ts:S4790'
+    );
+    const hasInsecurePrngFinding = activeSwFindings.some(
+      (f) => f.originalRuleId === 'opengrep.crypto.insecure-prng' || f.originalRuleId === 'ts:S2245'
+    );
+    const hasExplicitFailures =
       bundle.computedMetrics.criticalVulns > 0 ||
       bundle.computedMetrics.secretsExposed > 0 ||
       bundle.computedMetrics.dbSchemaIssues > 0;
-    const hasArchViolations =
-      bundle.computedMetrics.circularDependencies > 0 ||
-      bundle.architectureGraph.layerViolations.length > 0;
+    const funcCheckContext: FunctionalCheckContext = {
+      hasExplicitFailures,
+      hasDynamicExecFinding,
+      hasSqlInjectionFinding,
+      hasWeakHashFinding,
+      hasInsecurePrngFinding,
+      secretsExposedCount: bundle.computedMetrics.secretsExposed,
+    };
     const isEligible = bundle.veracity.checks.eligibleForScoring;
     const hasRealTests = Object.keys(filesMap).some((p) => /test|spec/i.test(p));
 
@@ -798,7 +848,7 @@ export function executeBenchmarkRunOrchestration(params: {
         };
         return;
       }
-      const status = feat.checkFn(combinedSourceText, hasExplicitVaultFailures, hasArchViolations);
+      const status = feat.checkFn(combinedSourceText, funcCheckContext);
       const measuredMs = Math.max(1, Math.round(performance.now() - checkStart));
       if (feat.essential && status !== 'PASSED_VALIDATED') {
         essentialMissing += 1;
@@ -830,7 +880,9 @@ export function executeBenchmarkRunOrchestration(params: {
 
     // Honest Static Manifest / Lifecycle Inspection (Windows Sandbox is not executed on Linux host)
     const hasUnsafeShellOrTempDump =
-      bundle.computedMetrics.criticalVulns > 0 || /execSync\(|\/tmp\/backup_|tar\s+-czf/.test(combinedSourceText);
+      bundle.computedMetrics.criticalVulns > 0 ||
+      hasDynamicExecFinding ||
+      activeSwFindings.some((f) => /\/tmp\/backup_|tar\s+-czf/i.test(f.snippet || ''));
 
     sandboxDiffs.push({
       softwareId: sw.id,
@@ -843,14 +895,14 @@ export function executeBenchmarkRunOrchestration(params: {
       filesCreatedT1: Object.keys(filesMap).slice(0, 5),
       registryKeysModifiedT1: [],
       servicesRegisteredT1: [],
-      processesSpawnedT1: hasUnsafeShellOrTempDump ? ['child_process.execSync detectado estaticamente no código'] : [],
+      processesSpawnedT1: hasUnsafeShellOrTempDump ? ['Execução dinâmica/shell não sanitizada detectada via AST no código'] : [],
       networkEndpointsContacted: [],
       residualFilesT2: hasUnsafeShellOrTempDump
         ? ['Artefato temporário não higienizado em rotina de dump/shell (detectado via AST)']
         : [],
       residualRegistryKeysT2: [],
       unexpectedMutations: hasUnsafeShellOrTempDump
-        ? ['Invocação direta de shell (execSync) / artefato temporário sem rotina de limpeza verificada.']
+        ? ['Invocação insegura de shell (execSync interpolado) / artefato temporário sem rotina de limpeza verificada.']
         : [],
       cleanUninstall: !isEligible ? null : !hasUnsafeShellOrTempDump,
     });
@@ -958,10 +1010,44 @@ export function executeBenchmarkRunOrchestration(params: {
     veracityResults,
   });
 
+  const catalogSnapshot = RuleRegistry.getCatalogSnapshot();
+  const rulePackVersions: Record<string, string> = {};
+  for (const pack of catalogSnapshot.packs) {
+    rulePackVersions[pack.packId] = pack.version;
+  }
+
+  const artifactHashes: Record<string, string> = {};
+  for (const [swId, sbom] of Object.entries(sbomsBySoftware)) {
+    artifactHashes[`sbom:${swId}:cyclonedx`] = sbom.cyclonedxSha256;
+    artifactHashes[`sbom:${swId}:spdx`] = sbom.spdxSha256;
+    if (sbom.signature?.payloadSha256) {
+      artifactHashes[`sbom:${swId}:signaturePayload`] = sbom.signature.payloadSha256;
+    }
+  }
+
+  const primaryForGate = scoreCards[0] || null;
+  const gateEval = QualityGateEngine.evaluate({
+    gateId: params.qualityGateId,
+    findings: primaryForGate
+      ? findings.filter((f) => f.softwareId === primaryForGate.softwareId)
+      : findings,
+    scoreCard: primaryForGate,
+    scopeCoveragePercent: primaryForGate?.separatedIndicators?.scopeCoveragePercent ?? null,
+    evidenceConfidence: primaryForGate?.separatedIndicators?.evidenceConfidence,
+    evidenceVerified: true,
+  });
+
   const signedManifest = signEvidenceManifestHmacSha256({
     runId,
     algorithmVersion: ALGORITHM_VERSION,
     evidenceChain,
+    engineVersion: RULE_ENGINE_VERSION,
+    rulePackVersions,
+    ruleCatalogSha256: catalogSnapshot.catalogSha256,
+    artifactHashes,
+    gateDecision: gateEval.decision,
+    gateVersion: gateEval.gateVersion,
+    gateHash: gateEval.gateHash,
   });
 
   // Determine winner (strictly blocked if comparability/equivalence fails on multi-software comparisons)

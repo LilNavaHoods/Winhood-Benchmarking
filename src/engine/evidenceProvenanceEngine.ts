@@ -193,12 +193,52 @@ export function buildVerifiableEvidenceChain(params: {
   return evidenceChain;
 }
 
+interface ManifestExtendedGovernance {
+  engineVersion?: string;
+  rulePackVersions?: Record<string, string>;
+  ruleCatalogSha256?: string;
+  artifactHashes?: Record<string, string>;
+  gateDecision?: string;
+  gateVersion?: string;
+  gateHash?: string;
+}
+
+function normalizeExtendedGovernance(ext?: ManifestExtendedGovernance): Record<string, unknown> | null {
+  if (!ext) return null;
+  const hasAny = Boolean(
+    ext.engineVersion ||
+      ext.rulePackVersions ||
+      ext.ruleCatalogSha256 ||
+      ext.artifactHashes ||
+      ext.gateDecision ||
+      ext.gateVersion ||
+      ext.gateHash
+  );
+  if (!hasAny) return null;
+
+  const sortRecord = (rec?: Record<string, string>) =>
+    rec
+      ? Object.fromEntries(Object.entries(rec).sort(([a], [b]) => a.localeCompare(b)))
+      : undefined;
+
+  return {
+    engineVersion: ext.engineVersion || null,
+    rulePackVersions: sortRecord(ext.rulePackVersions) || null,
+    ruleCatalogSha256: ext.ruleCatalogSha256 || null,
+    artifactHashes: sortRecord(ext.artifactHashes) || null,
+    gateDecision: ext.gateDecision || null,
+    gateVersion: ext.gateVersion || null,
+    gateHash: ext.gateHash || null,
+  };
+}
+
 function buildManifestPayloadSha256(params: {
   runId: string;
   algorithmVersion: string;
   evidenceChain: EvidenceRecord[];
+  extendedGovernance?: ManifestExtendedGovernance;
 }): { merkleOrChainRootSha256: string; manifestPayloadSha256: string; sourceHashes: string[]; toolsHash: string; resultsHash: string } {
-  const { runId, algorithmVersion, evidenceChain } = params;
+  const { runId, algorithmVersion, evidenceChain, extendedGovernance } = params;
   const merkleOrChainRootSha256 =
     evidenceChain.length > 0
       ? evidenceChain[evidenceChain.length - 1]!.sha256
@@ -222,7 +262,8 @@ function buildManifestPayloadSha256(params: {
     )
   );
 
-  const manifestCanonicalBody = JSON.stringify({
+  const normalizedExt = normalizeExtendedGovernance(extendedGovernance);
+  const baseBody: Record<string, unknown> = {
     runId,
     algorithmVersion,
     recordsCount: evidenceChain.length,
@@ -234,7 +275,12 @@ function buildManifestPayloadSha256(params: {
       sha256: r.sha256,
       prev: r.previousRecordSha256,
     })),
-  });
+  };
+  if (normalizedExt) {
+    baseBody.extendedGovernance = normalizedExt;
+  }
+
+  const manifestCanonicalBody = JSON.stringify(baseBody);
 
   return {
     merkleOrChainRootSha256,
@@ -258,6 +304,13 @@ export function signEvidenceManifestHmacSha256(params: {
   generatedAt?: string;
   secret?: string;
   includeEd25519?: boolean;
+  engineVersion?: string;
+  rulePackVersions?: Record<string, string>;
+  ruleCatalogSha256?: string;
+  artifactHashes?: Record<string, string>;
+  gateDecision?: string;
+  gateVersion?: string;
+  gateHash?: string;
 }): SignedEvidenceManifest {
   const activeKey = KeyManagementService.getActiveEvidenceHmacKey();
   const {
@@ -268,7 +321,24 @@ export function signEvidenceManifestHmacSha256(params: {
     generatedAt = new Date().toISOString(),
     secret = activeKey.secret,
     includeEd25519 = true,
+    engineVersion,
+    rulePackVersions,
+    ruleCatalogSha256,
+    artifactHashes,
+    gateDecision,
+    gateVersion,
+    gateHash,
   } = params;
+
+  const extendedGovernance: ManifestExtendedGovernance = {
+    engineVersion,
+    rulePackVersions,
+    ruleCatalogSha256,
+    artifactHashes,
+    gateDecision,
+    gateVersion,
+    gateHash,
+  };
 
   const {
     merkleOrChainRootSha256,
@@ -276,7 +346,7 @@ export function signEvidenceManifestHmacSha256(params: {
     sourceHashes,
     toolsHash,
     resultsHash,
-  } = buildManifestPayloadSha256({ runId, algorithmVersion, evidenceChain });
+  } = buildManifestPayloadSha256({ runId, algorithmVersion, evidenceChain, extendedGovernance });
 
   const digitalSignatureHmacSha256 = hmacSha256Hex(manifestPayloadSha256, secret);
 
@@ -309,6 +379,13 @@ export function signEvidenceManifestHmacSha256(params: {
     sourceHashes,
     toolsHash,
     resultsHash,
+    ...(engineVersion ? { engineVersion } : {}),
+    ...(rulePackVersions ? { rulePackVersions } : {}),
+    ...(ruleCatalogSha256 ? { ruleCatalogSha256 } : {}),
+    ...(artifactHashes ? { artifactHashes } : {}),
+    ...(gateDecision ? { gateDecision } : {}),
+    ...(gateVersion ? { gateVersion } : {}),
+    ...(gateHash ? { gateHash } : {}),
     digitalSignatureHmacSha256,
     hmacSignature: digitalSignatureHmacSha256,
     ed25519Signature,
@@ -423,6 +500,15 @@ export function verifyEvidenceChainAndManifest(
       runId: signedManifest.runId,
       algorithmVersion: signedManifest.algorithmVersion,
       evidenceChain,
+      extendedGovernance: {
+        engineVersion: signedManifest.engineVersion,
+        rulePackVersions: signedManifest.rulePackVersions,
+        ruleCatalogSha256: signedManifest.ruleCatalogSha256,
+        artifactHashes: signedManifest.artifactHashes,
+        gateDecision: signedManifest.gateDecision,
+        gateVersion: signedManifest.gateVersion,
+        gateHash: signedManifest.gateHash,
+      },
     });
 
     const resolvedSecret =

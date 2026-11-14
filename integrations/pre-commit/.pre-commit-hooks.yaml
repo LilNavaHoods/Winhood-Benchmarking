@@ -1,0 +1,16 @@
+repos:
+  - repo: local
+    hooks:
+      - id: winhood-audit-gate
+        name: WinHood Independent Audit & Quality Gate
+        entry: npx tsx cli/winhood-cli.ts gate --path . --gate winhood-standard-v2 --deterministic
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit, pre-push]
+      - id: winhood-sbom-verify
+        name: WinHood Signed SBOM Generation
+        entry: npx tsx cli/winhood-cli.ts sbom --path . --format cyclonedx --out .winhood-sbom.cdx.json
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

@@ -24,6 +24,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Play,
+  Scale,
   ShieldAlert,
   ShieldCheck,
   Sliders,
@@ -128,6 +129,11 @@ const MarketResearchAndCompetitorsModule = lazy(() =>
 const ReferenceIntelligenceModule = lazy(() =>
   import('./components/ReferenceIntelligenceModule').then((m) => ({
     default: m.ReferenceIntelligenceModule,
+  }))
+);
+const GovernancePortfolioModule = lazy(() =>
+  import('./components/GovernancePortfolioModule').then((m) => ({
+    default: m.GovernancePortfolioModule,
   }))
 );
 
@@ -649,6 +655,7 @@ export default function App() {
       items: [
         { id: 'veracity', stepBadge: '5', label: 'Veracidade & Adaptadores', icon: ShieldCheck },
         { id: 'reference_intelligence', stepBadge: '5B', label: 'Inteligência & Golden', icon: Database },
+        { id: 'governance', stepBadge: '5C', label: 'Governança, Gates & Portfólio', icon: Scale },
         { id: 'reports', stepBadge: '6', label: 'Relatórios & Auditoria', icon: FileText },
         { id: 'user_guide', label: 'Guia de Utilização', icon: BookOpen },
       ],
@@ -1126,6 +1133,14 @@ export default function App() {
 
             {activeNav === 'reference_intelligence' && (
               <ReferenceIntelligenceModule
+                latestRun={dashboardData?.latestRun || null}
+                softwares={softwares}
+                onNotify={notify}
+              />
+            )}
+
+            {activeNav === 'governance' && (
+              <GovernancePortfolioModule
                 latestRun={dashboardData?.latestRun || null}
                 softwares={softwares}
                 onNotify={notify}

@@ -263,6 +263,7 @@ export type CriterionVerificationMethod =
   | 'RUNTIME_EXECUTION'
   | 'PERFORMANCE_TEST'
   | 'EXTERNAL_TOOL'
+  | 'EXTERNAL_SARIF_IMPORT'
   | 'MANUAL_ASSESSMENT'
   | 'DOCUMENTATION_REVIEW'
   | 'CONTRACT_VALIDATION';
@@ -390,6 +391,13 @@ export interface SignedEvidenceManifest {
   configHash?: string;
   scopeSummary?: string;
   datasetVersion?: string;
+  engineVersion?: string;
+  rulePackVersions?: Record<string, string>;
+  ruleCatalogSha256?: string;
+  artifactHashes?: Record<string, string>;
+  gateDecision?: string;
+  gateVersion?: string;
+  gateHash?: string;
   authenticityProofType:
     | 'HMAC_SHA256_PROTECTED_SERVER_KEY'
     | 'HMAC_SHA256_AND_ED25519'
@@ -2198,6 +2206,17 @@ export interface SbomComponentRecord {
   sha256?: string | null;
 }
 
+export interface SbomSignatureRecord {
+  algorithm: 'HMAC-SHA256' | 'HMAC-SHA256+ED25519';
+  signedAt: string;
+  payloadSha256: string;
+  hmacSignature: string;
+  signingKeyId: string;
+  ed25519Signature?: string;
+  ed25519PublicKeyPem?: string;
+  ed25519KeyId?: string;
+}
+
 export interface SbomDocumentBundle {
   softwareId: string;
   softwareName: string;
@@ -2212,6 +2231,8 @@ export interface SbomDocumentBundle {
   spdx23Json: Record<string, unknown>;
   cyclonedxSha256: string;
   spdxSha256: string;
+  deterministicMode?: boolean;
+  signature?: SbomSignatureRecord;
 }
 
 export interface ScaVulnerabilityCorrelation {

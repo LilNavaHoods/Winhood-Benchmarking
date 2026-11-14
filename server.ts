@@ -111,7 +111,20 @@ import { GoldenDatasetRunner } from './src/validation/GoldenDatasetRunner';
 import { ControlledTestAndPerfRunner } from './src/execution/ControlledTestAndPerfRunner';
 import { CoverageReportParser } from './src/execution/CoverageReportParser';
 import { SbomGenerator } from './src/analyzers/sca/SbomGenerator';
-import { ScaCorrelator } from './src/analyzers/sca/ScaCorrelator';
+import {
+  DEFAULT_ENTERPRISE_LICENSE_POLICY,
+  ScaCorrelator,
+} from './src/analyzers/sca/ScaCorrelator';
+import { AnalyzerRegistry } from './src/analyzers/AnalyzerRegistry';
+import { RULE_ENGINE_VERSION, RuleRegistry } from './src/analyzers/RuleRegistry';
+import { SarifCodec } from './src/analyzers/SarifCodec';
+import { SecretScanner } from './src/analyzers/SecretsCatalog';
+import { QualityGateEngine, type QualityGateDefinition } from './src/gate/QualityGateEngine';
+import { ComplianceMapper } from './src/evidence/ComplianceMapper';
+import { PortfolioEngine } from './src/engine/portfolioEngine';
+import { PdfReportGenerator } from './src/reports/PdfReportGenerator';
+import { buildOpenApiSpec } from './src/api/openApiSpec';
+import { PrDecorationAdapter, type PrCiProvider } from './src/integrations/ci/PrDecorationAdapter';
 import { SonarMetricsMapper } from './src/integrations/sonarqube/SonarMetricsMapper';
 import { SonarQualityGateMapper } from './src/integrations/sonarqube/SonarQualityGateMapper';
 import { DEFAULT_SONAR_METRIC_KEYS } from './src/integrations/sonarqube/SonarQubeApiClient';
@@ -157,17 +170,18 @@ const REPORT_TYPE_LITERALS: Record<
   TECHNICAL_AUDIT: 'TECHNICAL_AUDIT',
   DEVSECOPS_SARIF: 'DEVSECOPS_SARIF',
 };
-const EXPORT_FORMAT_LITERALS: Record<string, 'json' | 'sarif' | 'html' | 'csv' | 'md'> = {
+const EXPORT_FORMAT_LITERALS: Record<string, 'json' | 'sarif' | 'html' | 'csv' | 'md' | 'pdf'> = {
   json: 'json',
   sarif: 'sarif',
   html: 'html',
   csv: 'csv',
   md: 'md',
+  pdf: 'pdf',
 };
 const SAFE_REPO_REGEX = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/;
 const SAFE_BRANCH_REGEX = /^[a-zA-Z0-9._/-]+$/;
 
-function resolveSafeExportFormat(raw: unknown): 'json' | 'sarif' | 'html' | 'csv' | 'md' {
+function resolveSafeExportFormat(raw: unknown): 'json' | 'sarif' | 'html' | 'csv' | 'md' | 'pdf' {
   const requestedFormatKey = typeof raw === 'string' ? raw.toLowerCase() : 'json';
   const mapped = Object.prototype.hasOwnProperty.call(EXPORT_FORMAT_LITERALS, requestedFormatKey)
     ? EXPORT_FORMAT_LITERALS[requestedFormatKey]
@@ -181,6 +195,8 @@ function resolveSafeExportFormat(raw: unknown): 'json' | 'sarif' | 'html' | 'csv
       return 'csv';
     case 'md':
       return 'md';
+    case 'pdf':
+      return 'pdf';
     default:
       return 'json';
   }
@@ -1336,6 +1352,7 @@ export async function createWinHoodApp(options?: {
     const reqPath = req.path;
     const publicApiPaths = new Set([
       '/health',
+      '/openapi.json',
       '/auth/bootstrap-status',
       '/auth/bootstrap-admin',
       '/auth/register',
@@ -1364,7 +1381,7 @@ export async function createWinHoodApp(options?: {
         ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method.toUpperCase())
       ) {
         const expectedCsrf = String((req as any).authSession?.csrfToken || '');
-        const providedCsrf = String(req.headers['x-csrf-token'] || '').trim();
+        const providedCsrf = String(req.headers['x-csrf-token'] || req.headers['x-winhood-csrf'] || '').trim();
         const expBuf = Buffer.from(expectedCsrf, 'utf8');
         const provBuf = Buffer.from(providedCsrf, 'utf8');
         if (
@@ -2561,7 +2578,9 @@ export async function createWinHoodApp(options?: {
       try {
         const pkg = JSON.parse(filesMap['package.json']);
         if (pkg.version) swVersion = String(pkg.version);
-      } catch {}
+      } catch {
+        // Ignore malformed optional package.json during metadata extraction
+      }
     }
     if (!swVersion) swVersion = 'NOT_DECLARED';
 
@@ -3189,7 +3208,9 @@ export async function createWinHoodApp(options?: {
       try {
         const pkg = JSON.parse(filesMap['package.json']);
         if (pkg.version) detectedVersion = String(pkg.version);
-      } catch {}
+      } catch {
+        // Ignore malformed optional package.json during GitHub import metadata extraction
+      }
     }
 
     const slug = `${repoName.toLowerCase().replace(/[^a-z0-9]+/g, '_')}_${Date.now()}`;
@@ -4818,6 +4839,17 @@ export async function createWinHoodApp(options?: {
       `Relatório ${reportType} exportado em formato ${format.toUpperCase()}.`
     );
     saveDatabase(db);
+
+    if (format === 'pdf') {
+      const pdfBuffer = PdfReportGenerator.generateFromRun(run);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="winhood_${safeFileRunId}_${safeFileReportType}.pdf"`
+      );
+      return res.end(pdfBuffer);
+    }
 
     if (format === 'sarif') {
       // Formato oficial SARIF 2.1.0 para GitHub Code Scanning, SonarQube MQR, Semgrep Taint e CodeQL
@@ -8215,6 +8247,8 @@ export async function createWinHoodApp(options?: {
       return res.status(404).json({ error: 'SBOM não disponível para o software informado.' });
     }
 
+    const sbomVerification = SbomGenerator.verifySbomSignature(sbom);
+
     return res.json({
       runId: run?.id || 'on-demand',
       softwareId,
@@ -8224,6 +8258,8 @@ export async function createWinHoodApp(options?: {
       componentsCount: sbom.componentsCount,
       directCount: sbom.directCount,
       transitiveCount: sbom.transitiveCount,
+      signature: sbom.signature || null,
+      signatureVerification: sbomVerification,
       scaCorrelations: correlations || [],
     });
   });
@@ -8300,6 +8336,310 @@ export async function createWinHoodApp(options?: {
       reencryptedTokensCount: reencryptedCount,
       createdAt: newRecord.createdAt,
       keys: KeyManagementService.getStatus(),
+    });
+  });
+
+  // ============================================================================
+  // AUTONOMOUS GOVERNANCE, OPENAPI 3.0.3, QUALITY GATES, COMPLIANCE & PORTFOLIO
+  // ============================================================================
+  app.get(['/api/openapi.json', '/openapi.json'], (req, res) => {
+    const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+    const hostHeader = req.headers['x-forwarded-host'] || req.headers.host || `localhost:${PORT}`;
+    res.json(buildOpenApiSpec(`${proto}://${hostHeader}`));
+  });
+
+  app.get('/api/rules/catalog', (_req, res) => {
+    res.json({
+      ...RuleRegistry.getCatalogSnapshot(),
+      plugins: AnalyzerRegistry.listNativePlugins(),
+    });
+  });
+
+  app.get('/api/secrets/catalog', (_req, res) => {
+    res.json(SecretScanner.getCatalogMetadata());
+  });
+
+  app.get('/api/quality-gates', (_req, res) => {
+    const gates = QualityGateEngine.listGates().map((g) => ({
+      ...g,
+      gateHash: QualityGateEngine.computeGateHash(g),
+    }));
+    res.json({ gates });
+  });
+
+  app.post('/api/quality-gates', (req, res) => {
+    if (!requireWritePermission(res, req, 'security:ops')) return;
+    const body = (req.body || {}) as Partial<QualityGateDefinition>;
+    if (!body.id || !body.name || !Array.isArray(body.conditions) || body.conditions.length === 0) {
+      return res.status(400).json({
+        error: 'Informe id, name e ao menos uma condição booleana em conditions[].',
+      });
+    }
+    const created: QualityGateDefinition = {
+      id: String(body.id).replace(/[^a-zA-Z0-9._-]/g, '-'),
+      name: String(body.name),
+      version: String(body.version || '1.0.0'),
+      description: String(body.description || 'Custom versioned WinHood Quality Gate'),
+      requireVerifiedEvidence: body.requireVerifiedEvidence !== false,
+      createdAt: new Date().toISOString(),
+      conditions: body.conditions,
+    };
+    QualityGateEngine.registerGate(created);
+    appendAuditLog(
+      db,
+      'QUALITY_GATE_REGISTERED',
+      'QUALITY_GATE',
+      created.id,
+      `Quality Gate "${created.name}" v${created.version} registrado (hash=${QualityGateEngine.computeGateHash(created).slice(0, 12)}).`,
+      getRequestActor(req, res)
+    );
+    saveDatabase(db);
+    return res.status(201).json({
+      gate: created,
+      gateHash: QualityGateEngine.computeGateHash(created),
+    });
+  });
+
+  app.post('/api/quality-gates/evaluate', (req, res) => {
+    const body = (req.body || {}) as {
+      runId?: string;
+      gateId?: string;
+      findings?: NormalizedFinding[];
+      scopeCoveragePercent?: number | null;
+      evidenceConfidence?: 'HIGH' | 'MEDIUM' | 'LOW';
+    };
+    const run = body.runId ? db.runs.find((r) => r.id === body.runId) : db.runs[0];
+    if (body.findings && Array.isArray(body.findings)) {
+      const evaluation = QualityGateEngine.evaluate({
+        gateId: body.gateId,
+        findings: body.findings,
+        scopeCoveragePercent: body.scopeCoveragePercent ?? 100,
+        evidenceConfidence: body.evidenceConfidence ?? 'HIGH',
+        evidenceVerified: true,
+      });
+      return res.json({ evaluation });
+    }
+    if (!run) {
+      return res.status(404).json({ error: 'Execução não encontrada para avaliação do Quality Gate.' });
+    }
+    const evaluation = QualityGateEngine.evaluateFromRun(run, body.gateId);
+    return res.json({ runId: run.id, evaluation });
+  });
+
+  app.post('/api/webhooks/sign-test', async (req, res) => {
+    if (!requireWritePermission(res, req, 'security:ops')) return;
+    const body = (req.body || {}) as {
+      runId?: string;
+      gateId?: string;
+      targetUrl?: string;
+      secret?: string;
+    };
+    const run = body.runId ? db.runs.find((r) => r.id === body.runId) : db.runs[0];
+    const evaluation = run
+      ? QualityGateEngine.evaluateFromRun(run, body.gateId)
+      : QualityGateEngine.evaluate({
+          gateId: body.gateId,
+          findings: [],
+          scopeCoveragePercent: 100,
+          evidenceConfidence: 'HIGH',
+          evidenceVerified: true,
+        });
+
+    if (body.targetUrl && body.targetUrl.trim().length > 0) {
+      const dispatchResult = await QualityGateEngine.dispatchSignedWebhook({
+        targetUrl: body.targetUrl.trim(),
+        evaluation,
+        runId: run?.id,
+        secret: body.secret,
+      });
+      return res.status(dispatchResult.blockedBySsrf ? 400 : 200).json({
+        mode: 'DISPATCHED',
+        evaluation,
+        dispatchResult,
+      });
+    }
+
+    const signed = QualityGateEngine.signWebhookPayload({
+      event: 'quality_gate.evaluated',
+      runId: run?.id,
+      evaluation,
+      secret: body.secret,
+    });
+    return res.json({
+      mode: 'SIGNED_PREVIEW',
+      evaluation,
+      signedPayload: {
+        headerName: 'X-WinHood-Signature',
+        signatureHeader: signed.signatureHeader,
+        keyId: signed.keyId,
+        payloadSha256: signed.payloadSha256,
+        body: JSON.parse(signed.bodyJson),
+      },
+    });
+  });
+
+  app.get('/api/compliance/:runId/matrix', (req, res) => {
+    const run = db.runs.find((r) => r.id === req.params.runId) || db.runs[0];
+    if (!run) {
+      return res.status(404).json({ error: 'Execução não encontrada para matriz de rastreabilidade.' });
+    }
+    const matrix = ComplianceMapper.buildTraceabilityMatrix({
+      runId: run.id,
+      findings: run.findings || [],
+    });
+    return res.json({ matrix });
+  });
+
+  app.get('/api/portfolio/summary', (_req, res) => {
+    const summary = PortfolioEngine.buildSummary({
+      runs: db.runs,
+      softwares: db.softwares,
+    });
+    return res.json({ summary });
+  });
+
+  app.post('/api/integrations/pr-decoration', (req, res) => {
+    const body = (req.body || {}) as {
+      provider?: PrCiProvider;
+      repository?: string;
+      pullRequestOrMrId?: string | number;
+      runId?: string;
+      baselineRunId?: string;
+      gateId?: string;
+    };
+    const run = (body.runId ? db.runs.find((r) => r.id === body.runId) : db.runs[0]) || null;
+    if (!run) {
+      return res.status(404).json({ error: 'Execução não encontrada para geração de PR/MR decoration.' });
+    }
+    const baselineRun = body.baselineRunId
+      ? db.runs.find((r) => r.id === body.baselineRunId) || null
+      : null;
+    const decoration = PrDecorationAdapter.buildDecoration({
+      provider: body.provider || 'GITHUB',
+      repository: body.repository || run.projectName || 'org/repo',
+      pullRequestOrMrId: body.pullRequestOrMrId ?? 1,
+      run,
+      baselineRun,
+      gateId: body.gateId,
+    });
+    return res.json({ decoration });
+  });
+
+  app.post('/api/analyze/sarif', (req, res) => {
+    const body = (req.body || {}) as {
+      softwareName?: string;
+      softwareVersion?: string;
+      gateId?: string;
+      filesMap?: Record<string, string>;
+      sarifInput?: unknown;
+      deterministicTimestamp?: string;
+    };
+
+    if (body.sarifInput) {
+      const imported = SarifCodec.importSarif210(body.sarifInput, {
+        runId: 'sarif-import',
+        softwareId: 'imported-sw',
+        softwareName: body.softwareName || 'External SARIF Target',
+        softwareVersion: body.softwareVersion || '1.0.0',
+      });
+      if (!imported.valid) {
+        return res.status(400).json({ error: 'SARIF_INVALID', details: imported.errors });
+      }
+      const gateEval = QualityGateEngine.evaluate({
+        gateId: body.gateId,
+        findings: imported.findings,
+        scopeCoveragePercent: 100,
+        evidenceConfidence: 'MEDIUM',
+        evidenceVerified: true,
+        deterministicTimestamp: body.deterministicTimestamp,
+      });
+      return res.json({
+        mode: 'SARIF_IMPORT',
+        importedToolNames: imported.importedToolNames,
+        payloadSha256: imported.payloadSha256,
+        findingsCount: imported.findings.length,
+        findings: imported.findings,
+        gateEvaluation: gateEval,
+      });
+    }
+
+    const filesMap = body.filesMap && typeof body.filesMap === 'object' ? body.filesMap : {};
+    const swStub = {
+      id: 'api-sarif-sw',
+      projectId: 'api-sarif-proj',
+      name: body.softwareName || 'SubmittedWorkspace',
+      vendor: 'API',
+      description: 'On-demand SARIF audit',
+      version: body.softwareVersion || '1.0.0',
+      languages: [],
+      architecture: 'Unknown',
+      operatingSystem: process.platform,
+      distributionModel: 'Source',
+      licenseType: 'Unknown',
+      officialUrl: '',
+      repositoryUrl: '',
+      documentationUrl: '',
+      owner: 'api',
+      notes: '',
+      sourceType: 'LOCAL_AUTHORIZED',
+      commitHash: 'API_HEAD',
+      packageSha256: 'API_SUBMISSION',
+      createdAt: body.deterministicTimestamp || new Date().toISOString(),
+      inventory: {
+        totalFiles: Object.keys(filesMap).length,
+        eligibleFiles: Object.keys(filesMap).length,
+        totalLinesOfCode: 0,
+        totalSizeBytes: 0,
+        languageBreakdown: {},
+        files: [],
+        isolatedStoragePath: '/api',
+        verifiedIntegrity: true,
+      },
+      sourceFilesContent: filesMap,
+    } as Software;
+
+    const pipeline = AnalyzerRegistry.runNativeAstAndTaintPipeline(
+      {
+        runId: 'api-sarif',
+        softwareId: swStub.id,
+        softwareName: swStub.name,
+        softwareVersion: swStub.version,
+        commitHash: 'API_HEAD',
+        filesMap,
+      },
+      { deterministicTimestamp: body.deterministicTimestamp }
+    );
+    const sbom = SbomGenerator.generateFromSoftware(swStub, {
+      deterministicTimestamp: body.deterministicTimestamp,
+    });
+    const sca = ScaCorrelator.correlateSbom({
+      software: swStub,
+      sbom,
+      runId: 'api-sarif',
+      licensePolicy: DEFAULT_ENTERPRISE_LICENSE_POLICY,
+    });
+    const allFindings = [...pipeline.findings, ...sca.findings];
+    const totalFiles = Object.keys(filesMap).length;
+    const gateEvaluation = QualityGateEngine.evaluate({
+      gateId: body.gateId,
+      findings: allFindings,
+      scopeCoveragePercent: totalFiles > 0 ? 100 : 0,
+      evidenceConfidence: totalFiles > 0 ? 'HIGH' : 'LOW',
+      evidenceVerified: true,
+      deterministicTimestamp: body.deterministicTimestamp,
+    });
+    const sarif = SarifCodec.exportSarif210(allFindings, {
+      toolVersion: RULE_ENGINE_VERSION,
+    });
+    return res.json({
+      mode: 'NATIVE_ANALYSIS',
+      engineVersion: RULE_ENGINE_VERSION,
+      deterministicDigestSha256: pipeline.deterministicDigestSha256,
+      ruleCatalogSha256: pipeline.ruleCatalogSha256,
+      findingsCount: allFindings.length,
+      sbomComponentsCount: sbom.componentsCount,
+      gateEvaluation,
+      sarif,
     });
   });
 

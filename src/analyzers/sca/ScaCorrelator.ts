@@ -157,6 +157,8 @@ export class ScaCorrelator {
     dbVersion?: string;
     runId?: string;
     dataDir?: string;
+    licensePolicy?: LicensePolicyConfig;
+    deterministicTimestamp?: string;
   }): {
     correlations: ScaVulnerabilityCorrelation[];
     findings: NormalizedFinding[];
@@ -168,12 +170,13 @@ export class ScaCorrelator {
       dbVersion = 'OSV-NVD-EPSS-KEV-2026.11',
       runId = 'sca-scan',
       dataDir,
+      deterministicTimestamp,
     } = params;
     const toolsAvailability = ScaCorrelator.getScaToolsAvailability();
     const correlations: ScaVulnerabilityCorrelation[] = [];
     const findings: NormalizedFinding[] = [];
     const seenKeys = new Set<string>();
-    const nowIso = new Date().toISOString();
+    const nowIso = deterministicTimestamp || new Date().toISOString();
 
     // Load live-synced OSV/NVD/EPSS/KEV cache from ReferenceRegistry if available
     let syncedBundle = {
@@ -443,6 +446,166 @@ export class ScaCorrelator {
       }
     }
 
+    if (params.licensePolicy) {
+      const licEval = ScaCorrelator.evaluateLicensePolicy({
+        sbom,
+        software,
+        policy: params.licensePolicy,
+        runId,
+        collectedAt: nowIso,
+      });
+      findings.push(...licEval.findings);
+    }
+
     return { correlations, findings, toolsAvailability };
   }
+
+  public static evaluateLicensePolicy(params: {
+    sbom: SbomDocumentBundle;
+    software: Software;
+    policy: LicensePolicyConfig;
+    runId?: string;
+    collectedAt?: string;
+  }): {
+    violations: LicensePolicyViolation[];
+    findings: NormalizedFinding[];
+    compliant: boolean;
+  } {
+    const {
+      sbom,
+      software,
+      policy,
+      runId = 'sca-license',
+      collectedAt = new Date().toISOString(),
+    } = params;
+    const violations: LicensePolicyViolation[] = [];
+    const findings: NormalizedFinding[] = [];
+    const deniedUpper = new Set(policy.deniedLicenses.map((l) => l.toUpperCase()));
+    const restrictedUpper = new Set(policy.restrictedCopyleftLicenses.map((l) => l.toUpperCase()));
+    const allowedUpper = new Set(policy.allowedLicenses.map((l) => l.toUpperCase()));
+
+    for (const comp of sbom.components) {
+      const lic = (comp.license || 'UNKNOWN').trim();
+      const licUpper = lic.toUpperCase();
+      let reason: LicensePolicyViolation['reason'] | null = null;
+      let severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' = 'MEDIUM';
+
+      if (deniedUpper.has(licUpper)) {
+        reason = 'DENIED_LICENSE';
+        severity = 'CRITICAL';
+      } else if (restrictedUpper.has(licUpper)) {
+        reason = 'RESTRICTED_COPYLEFT';
+        severity = 'HIGH';
+      } else if (licUpper === 'UNKNOWN' && policy.failOnUnknownLicense) {
+        reason = 'UNKNOWN_LICENSE';
+        severity = 'MEDIUM';
+      } else if (allowedUpper.size > 0 && licUpper !== 'UNKNOWN' && !allowedUpper.has(licUpper)) {
+        reason = 'NOT_IN_ALLOWLIST';
+        severity = 'HIGH';
+      }
+
+      if (!reason) continue;
+
+      violations.push({
+        packageName: comp.name,
+        version: comp.version,
+        ecosystem: comp.ecosystem,
+        license: lic,
+        reason,
+        severity,
+        manifestFile: comp.manifestFile,
+      });
+
+      findings.push(
+        enrichLegacyOrExternalFinding({
+          id: `f-lic-${runId}-${software.id}-${comp.name}-${comp.version}`.replace(/[^a-zA-Z0-9_-]/g, '_'),
+          runId,
+          softwareId: software.id,
+          softwareName: software.name,
+          softwareVersion: software.version,
+          toolName: 'WinHood SCA License Policy Gate',
+          toolVersion: '4.3.0',
+          originType: 'WINHOOD_SCA_ENGINE',
+          detectionMethod: 'SBOM_CORRELATION',
+          originalRuleId: 'sca:LIC-001',
+          category: 'SCA',
+          cwe: 'CWE-1104',
+          severity,
+          confidence: 'HIGH',
+          validationStatus: 'VALIDATED',
+          lifecycleState: 'CONFIRMED',
+          title: `Violação de política de licença (${lic}) em ${comp.name}@${comp.version}`,
+          description: `Dependência ${comp.name}@${comp.version} possui licença "${lic}" (${reason}) em desacordo com a política "${policy.policyId}".`,
+          filePath: comp.manifestFile,
+          lineNumber: 1,
+          snippet: `"${comp.name}": "${comp.version}" /* license: ${lic} */`,
+          remediation: 'Substituir dependência por pacote com licença compatível ou registrar exceção formal.',
+          remediationEffortMinutes: 30,
+          collectedAt,
+        })
+      );
+    }
+
+    return {
+      violations,
+      findings,
+      compliant: violations.length === 0,
+    };
+  }
+
+  public static mergeIncrementalAdvisories<
+    T extends { packageName: string; affectedVersionRange: string; cveId?: string | null; ghsaId?: string | null; syncedAt?: string }
+  >(existing: T[], incoming: T[]): { merged: T[]; addedCount: number; updatedCount: number } {
+    const map = new Map<string, T>();
+    const makeKey = (item: T) =>
+      `${item.packageName.toLowerCase()}::${item.affectedVersionRange}::${item.cveId || item.ghsaId || 'NO_ID'}`;
+    for (const item of existing) {
+      map.set(makeKey(item), item);
+    }
+    let addedCount = 0;
+    let updatedCount = 0;
+    for (const item of incoming) {
+      const k = makeKey(item);
+      if (map.has(k)) {
+        map.set(k, item);
+        updatedCount += 1;
+      } else {
+        map.set(k, item);
+        addedCount += 1;
+      }
+    }
+    return {
+      merged: Array.from(map.values()),
+      addedCount,
+      updatedCount,
+    };
+  }
 }
+
+export interface LicensePolicyConfig {
+  policyId: string;
+  name: string;
+  allowedLicenses: string[];
+  deniedLicenses: string[];
+  restrictedCopyleftLicenses: string[];
+  failOnUnknownLicense: boolean;
+}
+
+export interface LicensePolicyViolation {
+  packageName: string;
+  version: string;
+  ecosystem: SbomComponentRecord['ecosystem'];
+  license: string;
+  reason: 'DENIED_LICENSE' | 'RESTRICTED_COPYLEFT' | 'UNKNOWN_LICENSE' | 'NOT_IN_ALLOWLIST';
+  severity: 'CRITICAL' | 'HIGH' | 'MEDIUM';
+  manifestFile: string;
+}
+
+export const DEFAULT_ENTERPRISE_LICENSE_POLICY: LicensePolicyConfig = {
+  policyId: 'winhood-enterprise-license-v1',
+  name: 'Enterprise Permissive & Weak-Copyleft Policy',
+  allowedLicenses: ['MIT', 'Apache-2.0', 'BSD-2-Clause', 'BSD-3-Clause', 'ISC', 'MPL-2.0', '0BSD', 'CC0-1.0', 'Unlicense'],
+  deniedLicenses: ['AGPL-3.0', 'AGPL-3.0-only', 'GPL-3.0', 'GPL-3.0-only', 'SSPL-1.0'],
+  restrictedCopyleftLicenses: ['GPL-2.0', 'LGPL-3.0', 'EUPL-1.2'],
+  failOnUnknownLicense: false,
+};

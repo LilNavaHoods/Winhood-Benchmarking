@@ -4,8 +4,17 @@ import { ToolAvailabilityService } from '../services/tools/ToolAvailabilityServi
 import type { NormalizedFinding, SeverityLevel } from '../types/benchmark';
 import { FindingNormalizer } from './FindingNormalizer';
 import { ParserRegistry } from './ParserRegistry';
+import { AnalyzerPluginManager } from './plugins/AnalyzerPluginSystem';
+import { RULE_ENGINE_VERSION, RuleRegistry } from './RuleRegistry';
 import { TaintAnalyzer } from './TaintAnalyzer';
-import type { AnalysisScope, AnalyzerExecution, AnalyzerResult } from './types';
+import type {
+  AnalysisScope,
+  AnalyzerExecution,
+  AnalyzerPlugin,
+  AnalyzerResult,
+  AstIssueCandidate,
+  DeterministicAnalysisOptions,
+} from './types';
 
 export interface ExternalEngineDescriptor {
   id: string;
@@ -92,20 +101,74 @@ export const EXTERNAL_STATIC_ENGINES: ExternalEngineDescriptor[] = [
 ];
 
 export class AnalyzerRegistry {
-  public static runNativeAstAndTaintPipeline(scope: AnalysisScope): AnalyzerResult {
+  public static listNativePlugins(): Array<{
+    id: string;
+    name: string;
+    version: string;
+    supportedLanguages: string[];
+    capabilities: string[];
+  }> {
+    return AnalyzerPluginManager.listPlugins().map((p: AnalyzerPlugin) => ({
+      id: p.id,
+      name: p.name,
+      version: p.version,
+      supportedLanguages: p.supportedLanguages,
+      capabilities: p.capabilities,
+    }));
+  }
+
+  public static runNativeAstAndTaintPipeline(
+    scope: AnalysisScope,
+    options?: DeterministicAnalysisOptions
+  ): AnalyzerResult {
     const startMs = performance.now();
-    const startedAt = new Date().toISOString();
-    const filesEntries = Object.entries(scope.filesMap || {});
+    const fixedTs = options?.deterministicTimestamp;
+    const startedAt = fixedTs || new Date().toISOString();
+
+    const filesEntries = Object.entries(scope.filesMap || {}).sort(([a], [b]) => a.localeCompare(b));
+    const sortedFilesMap: Record<string, string> = {};
+    for (const [k, v] of filesEntries) {
+      sortedFilesMap[k] = v;
+    }
 
     const parseResults = filesEntries.map(([filePath, content]) =>
       ParserRegistry.parseFile(filePath, content)
     );
-    const taintCandidates = TaintAnalyzer.analyzeFlows(parseResults, scope.filesMap);
+    const taintCandidates = TaintAnalyzer.analyzeFlows(parseResults, sortedFilesMap);
 
-    const allCandidates = [
+    const pluginExecution = AnalyzerPluginManager.executePlugins(
+      {
+        files: filesEntries.map(([filePath, content]) => ({ filePath, content })),
+        parseResults,
+        scope,
+        slaBudgetMs: options?.slaBudgetMsPerPlugin ?? 5000,
+        deterministicTimestamp: fixedTs,
+      },
+      options?.enablePluginIds
+    );
+
+    const rawCandidates: AstIssueCandidate[] = [
       ...parseResults.flatMap((p) => p.issues),
       ...taintCandidates,
+      ...pluginExecution.candidates,
     ];
+
+    // Deterministic deduplication preferring TAINT_ANALYSIS when identical location + rule/CWE
+    const dedupMap = new Map<string, AstIssueCandidate>();
+    for (const cand of rawCandidates) {
+      const key = `${cand.ruleId}|${cand.filePath}|${cand.lineNumber}`;
+      const existing = dedupMap.get(key);
+      if (!existing || (cand.detectionMethod === 'TAINT_ANALYSIS' && existing.detectionMethod !== 'TAINT_ANALYSIS')) {
+        dedupMap.set(key, cand);
+      }
+    }
+
+    const allCandidates = Array.from(dedupMap.values()).sort(
+      (a, b) =>
+        a.filePath.localeCompare(b.filePath) ||
+        a.lineNumber - b.lineNumber ||
+        a.ruleId.localeCompare(b.ruleId)
+    );
 
     const findings: NormalizedFinding[] = allCandidates.map((cand, idx) =>
       FindingNormalizer.fromAstCandidate({
@@ -114,45 +177,83 @@ export class AnalyzerRegistry {
         toolName:
           cand.detectionMethod === 'TAINT_ANALYSIS'
             ? 'WinHood Cross-File Taint AST Analyzer'
-            : 'WinHood Compiler AST Analyzer',
-        toolVersion: '4.1.0',
-        filesMap: scope.filesMap,
+            : cand.category === 'IAC'
+              ? 'WinHood Native IaC Plugin'
+              : cand.category === 'SECRETS'
+                ? 'WinHood Native Secrets & Entropy Plugin'
+                : 'WinHood Compiler AST Analyzer',
+        toolVersion: RULE_ENGINE_VERSION,
+        filesMap: sortedFilesMap,
         index: idx,
+        collectedAt: fixedTs,
       })
     );
 
-    const completedAt = new Date().toISOString();
-    const durationMs = Math.max(1, Math.round(performance.now() - startMs));
+    const completedAt = fixedTs || new Date().toISOString();
+    const durationMs = fixedTs ? 1 : Math.max(1, Math.round(performance.now() - startMs));
     const astFilesCount = parseResults.filter((p) => p.astParsed).length;
+    const pluginFilesSet = new Set<string>();
+    for (const f of filesEntries) {
+      if (parseResults.find((p) => p.filePath === f[0])?.astParsed) {
+        pluginFilesSet.add(f[0]);
+      }
+    }
+    const iacPluginTimedOut = pluginExecution.outputs.some((o) => o.timedOut);
+    const catalogSnapshot = RuleRegistry.getCatalogSnapshot();
+
+    const canonicalFingerprintPayload = {
+      engineVersion: RULE_ENGINE_VERSION,
+      ruleCatalogSha256: catalogSnapshot.catalogSha256,
+      files: filesEntries.map(([filePath, content]) => ({
+        filePath,
+        sha256: crypto.createHash('sha256').update(content, 'utf8').digest('hex'),
+      })),
+      findings: findings.map((f) => ({
+        ruleId: f.originalRuleId,
+        category: f.category,
+        severity: f.severity,
+        cwe: f.cwe || null,
+        filePath: f.filePath,
+        lineNumber: f.lineNumber,
+        flowSteps: (f.executionFlows || []).length,
+      })),
+    };
+    const deterministicDigestSha256 = crypto
+      .createHash('sha256')
+      .update(JSON.stringify(canonicalFingerprintPayload), 'utf8')
+      .digest('hex');
 
     const execution: AnalyzerExecution = {
       analyzerId: 'winhood-native-ast-taint',
-      analyzerName: 'WinHood Native Compiler AST & Taint Engine',
-      analyzerVersion: '4.1.0',
+      analyzerName: 'WinHood Native Compiler AST, Taint, Secrets & IaC Engine',
+      analyzerVersion: RULE_ENGINE_VERSION,
       executionMethod: 'NATIVE_AST_ENGINE',
       binaryDetected: true,
       startedAt,
       completedAt,
       durationMs,
       exitCode: 0,
-      filesProcessed: astFilesCount,
+      filesProcessed: filesEntries.length,
       filesFailed: parseResults.filter((p) => (p.errorCount || 0) > 0).length,
-      measurementState: astFilesCount > 0 ? 'STATIC_DERIVED' : 'NOT_MEASURED',
-      rawOutputSha256: crypto
-        .createHash('sha256')
-        .update(JSON.stringify({ findingsCount: findings.length, astFilesCount }))
-        .digest('hex'),
+      measurementState: filesEntries.length > 0 ? 'STATIC_DERIVED' : 'NOT_MEASURED',
+      timedOut: iacPluginTimedOut,
+      slaBudgetMs: options?.slaBudgetMsPerPlugin ?? 5000,
+      rawOutputSha256: deterministicDigestSha256,
     };
+
+    const limitations: string[] = [...pluginExecution.limitations];
+    if (astFilesCount < filesEntries.length) {
+      limitations.push(
+        `${filesEntries.length - astFilesCount} arquivo(s) não pertencem às linguagens AST imperativas (analisados por plugins IaC/Secrets/Manifestos quando aplicável).`
+      );
+    }
 
     return {
       execution,
       findings,
-      limitations:
-        astFilesCount < filesEntries.length
-          ? [
-              `${filesEntries.length - astFilesCount} arquivo(s) não pertencem às linguagens AST suportadas e não foram marcados como AST_ANALYSIS.`,
-            ]
-          : [],
+      limitations,
+      ruleCatalogSha256: catalogSnapshot.catalogSha256,
+      deterministicDigestSha256,
     };
   }
 

@@ -1,48 +1,56 @@
-# WinHood — Software Benchmark & Quality Analyzer
+# WinHood — Independent Software Audit & Comparative Benchmarking Platform
 
-Plataforma técnica full-stack para avaliação independente e benchmarking comparativo de softwares, realizando auditorias automatizadas de qualidade de código (SonarQube MQR Mode), segurança DevSecOps (SAST Taint Mode, SCA, Segredos, SBOM), acoplamento arquitetural, banco de dados SQL, equivalência funcional por domínio, validação pelo **Motor de Veracidade de 19 Pontos**, **Motor de Comparabilidade e Imparcialidade** e trilha de evidências encadeada **SHA-256** com **Manifesto Assinado Digitalmente (HMAC-SHA256)**.
+WinHood Benchmarking is an autonomous, deterministic, full-stack platform for independent software quality auditing, security verification, evidence provenance, and comparative A/B benchmarking.
 
----
-
-## 1. Arquitetura Visual (WinHood Design System)
-
-- **Theme Color Global:** `#000000` (Preto puro na meta tag, Dark Mode nativo `#080b10` / `#0f141c` e alternância Claro/Escuro).
-- **Accent Color (Destaque):** `#31d6c4` (`--accent: #31d6c4`).
-- **Tipografia:** `Plus Jakarta Sans` para estrutura de interface e `JetBrains Mono` com `tabular-nums` para alinhamento vertical estrito de métricas, notas `0.00–5.00`, latências e hashes SHA-256.
-- **Scrollbars Contextuais (`.df-hover-scroll`):** Barras de rolagem globais ocultas por padrão e reveladas sob `:hover` com 6px em ciano `#31d6c4`.
+WinHood operates strictly as an **independent audit, evidence, and benchmarking layer** built around open standards (**SARIF 2.1.0, CWE, OWASP Top 10, CVSS, CycloneDX 1.5, SPDX 2.3**). All core static, taint, secrets, IaC, SCA, Quality Gate, and reporting pipelines run natively without depending on external commercial platforms, while remaining interoperable with external scanners via SARIF 2.1.0 and SonarQube Web APIs.
 
 ---
 
-## 2. Arquitetura Técnica e Módulos Implementados
+## 1. Core Capabilities
 
-1. **Ingestão de Código-Fonte & Segurança de Upload (`/api/softwares`, `/api/projects/upload`):**
-   - Estados formais de ingestão (`METADATA_ONLY`, `SOURCE_IMPORTED`, `SOURCE_PARTIAL`, `SOURCE_VALIDATED`, `SOURCE_FAILED`, `DEMO_FIXTURE`, `TEST_FIXTURE`, `PUBLIC_DOCUMENTATION_ONLY`) e disponibilidade (`FULL_SOURCE`, `PARTIAL_SOURCE`, `PUBLIC_DOCUMENTATION_ONLY`, `CLOSED_SOURCE`).
-   - Validação de segurança (`validateSourceUploadSecurity`) bloqueando Path Traversal (`../`), Symlinks, arquivos binários/corrompidos (null-bytes) e arquivos acima de 2 MB.
-   - Avaliação e comparação de softwares avulsos ou inter-projetos sem dependência rígida de projeto único.
-2. **Catálogo Metodológico Versionado & 27 Perfis Oficiais (`src/engine/methodologyCatalogEngine.ts`):**
-   - `WINHOOD-CATALOG-v4.0.0` com 24 critérios formais nas 12 dimensões e distinção estrita entre `STATIC_EVIDENCE`, `DYNAMIC_EVIDENCE`, `DOCUMENTATION_ONLY`, `INFERRED_HEURISTIC` e `NOT_VERIFIED`.
-   - **12 Perfis Gerais por Dimensão + 15 Perfis Especializados por Domínio Funcional** (`DOMAIN_SPECIALIZED_PROFILES`), marcando categorias não aplicáveis (`NOT_APPLICABLE`, `score: null`) e normalizando pesos exclusivamente sobre as dimensões avaliadas (`originalWeights` vs `effectiveWeights`).
-3. **Motor de Comparabilidade, Imparcialidade & Pré-Análise (`/api/benchmarks/pre-analysis`):**
-   - Avalia paridade de escopo, disponibilidade de código-fonte e domínio funcional entre softwares.
-   - Bloqueia automaticamente a declaração de vencedor oficial (`winnerSoftwareId: null`) em comparações assimétricas (`FULL_SOURCE` vs `PUBLIC_DOCUMENTATION_ONLY` ou domínios incompatíveis).
-4. **Motor de Pontuação Determinística & 5 Indicadores Separados (`src/engine/scoringEngine.ts`):**
-   - Separa obrigatoriamente **5 Indicadores Executivos**: `1. Nota Técnica (0.00–5.00 | null)`, `2. Cobertura do Escopo (%)`, `3. Confiança da Evidência (HIGH/MEDIUM/LOW/NONE)`, `4. Decisão do Quality Gate (APPROVED/APPROVED_WITH_RESERVATIONS/BLOCKED/INCONCLUSIVE/REJECTED)` e `5. Estado de Veracidade`.
-   - Triagem DevSecOps em tempo real com **9 estados de ciclo de vida** (`CONFIRMED`, `PROBABLE`, `FALSE_POSITIVE`, `INCONCLUSIVE`, `NOT_REPRODUCIBLE`, `NOT_TESTED`, `ACCEPTED_RISK`, `FIXED_PENDING_RETEST`, `VERIFIED_RESOLVED`).
-5. **Motor de Evidências, Proveniência & Assinatura Digital HMAC-SHA256 (`src/engine/evidenceProvenanceEngine.ts`):**
-   - Cadeia sequencial imutável iniciada em `GENESIS_EVIDENCE_HASH`, manifesto assinado com `HMAC-SHA256` e endpoint de auditoria de integridade (`POST /api/evidence/:runId/verify`) que detecta qualquer adulteração de payload ou índice.
+1. **Autonomous & Pluggable Analysis Engine (`src/analyzers/`):**
+   - Pipeline: `ParserRegistry` (TypeScript/JavaScript AST via `@babel/parser`, Python/Java/Go/C#/Rust structural parsers) → `RuleRegistry` (`4.3.0`) → `TaintAnalyzer` (cross-file Source → Sink → Sanitizer tracking for SQLi, CMDi, Code Injection, Path Traversal, SSRF `CWE-918`, XSS, Unsafe Deserialization) → `AnalyzerPluginManager` (IaC Terraform/Kubernetes/Dockerfile/GitHub Actions, versioned `SecretsCatalog` with Shannon entropy & redaction) → `SarifCodec` (SARIF 2.1.0 import/export).
+   - Bit-for-bit deterministic digest (`deterministicDigestSha256`) for identical inputs and rule catalog versions.
+2. **Versioned Actionable Quality Gates (`src/gate/QualityGateEngine.ts`):**
+   - Boolean condition gates (`APPROVED`, `APPROVED_WITH_RESERVATIONS`, `BLOCKED`, `INCONCLUSIVE`, `REJECTED`) with gate versioning, gate SHA-256 hashes, CLI exit codes (`0/1/2/3`), SSRF-guarded HMAC-SHA256 webhooks, and GitHub/GitLab/Jenkins PR/MR decoration.
+3. **Signed SBOM & SCA License Policy (`src/analyzers/sca/`):**
+   - Deterministic **CycloneDX 1.5** and **SPDX 2.3** SBOM generation with per-component SHA-256 hashes, HMAC-SHA256 + Ed25519 signing/verification, CVE/EPSS/CISA KEV correlation, incremental advisory merging, and configurable license compliance policies (`sca:LIC-001`).
+4. **Cryptographic Evidence Chain & Audit Reporting (`src/engine/evidenceProvenanceEngine.ts`, `src/reports/`):**
+   - Append-only SHA-256 chain + HMAC-SHA256/Ed25519 signed manifest binding `engineVersion`, `rulePackVersions`, `ruleCatalogSha256`, `artifactHashes`, and Quality Gate decision/hash.
+   - Multi-format exports: **SARIF 2.1.0**, **PDF (`%PDF-1.4`)**, **HTML**, **JSON**, **CSV**, and **Markdown**.
+5. **Traceability & Portfolio Governance (`src/evidence/ComplianceMapper.ts`, `src/engine/portfolioEngine.ts`):**
+   - Engineering traceability mapping to OWASP Top 10 (2021), CWE Top 25, PCI DSS v4.0, and ISO/IEC 27001:2022 Annex A (explicitly non-certification).
+   - Cross-release score/finding deltas, technical debt tracking, and explicit uncovered scope visibility.
+6. **Developer & CI/CD Integrations (`cli/`, `integrations/`, `src/api/openApiSpec.ts`):**
+   - SemVer CLI (`4.3.0`), OpenAPI 3.0.3 (`GET /api/openapi.json`), pre-commit hook, GitHub Action, GitLab CI, Jenkins step, VS Code extension, and JetBrains plugin, alongside Windows Electron desktop parity.
 
 ---
 
-## 3. Execução e Testes Automatizados
+## 2. Documentation Index
+
+- [`RULE_CATALOG.md`](./RULE_CATALOG.md) — Public catalog of rules, CWE/OWASP/CVSS mappings, secrets patterns & exclusions.
+- [`CHANGELOG_RULES.md`](./CHANGELOG_RULES.md) — SemVer breaking-change policy and rule engine changelog.
+- [`LIMITATIONS_AND_BIAS.md`](./LIMITATIONS_AND_BIAS.md) — Explicit scope limits, taint reachability bounds, and execution SLAs.
+- [`docs/OPENAPI_AND_CLI.md`](./docs/OPENAPI_AND_CLI.md) — OpenAPI 3.0.3 contract, CLI subcommands, exit codes, and IDE/CI integrations.
+- [`SECURITY_ARCHITECTURE.md`](./SECURITY_ARCHITECTURE.md) — Auth, CSRF, RBAC, DPAPI/KMS, SSRF guard, upload safety, and sandbox isolation.
+
+---
+
+## 3. Running & Verifying
 
 ```bash
-# Instalar dependências
+# Install dependencies
 npm install
 
-# Executar suíte completa de testes unitários e de integração (node:test)
-npx --yes tsx --test src/engine/analyzer.test.ts
+# TypeScript check
+npm run lint
 
-# Iniciar servidor full-stack (Express API + Vite Frontend na porta 3000)
+# Run all unit, security, analyzer, gate, CLI & API integration tests
+npm test
+
+# Run tests with Node.js native V8 coverage report
+npm run test:coverage
+
+# Start fullstack server (Express API + Vite frontend on port 3000)
 npm run dev
 ```
-

@@ -434,7 +434,8 @@ export function executeRealStaticAnalysisOnSource(
   let hasAuditTrail = false;
   let hasCompleteDocumentation = false;
 
-  const seenLineHashes = new Map<string, number>();
+  const seenDupBlockHashes = new Map<string, number>();
+  const DUP_BLOCK_SIZE = 8;
 
   const parsedAstMap = new Map<string, ReturnType<typeof ParserRegistry.parseFile>>();
   for (const [fp, content] of eligibleEntries) {
@@ -509,6 +510,52 @@ export function executeRealStaticAnalysisOnSource(
       hasAuditTrail = true;
     }
 
+    const astInfo = parsedAstMap.get(filePath);
+    const isBabelAst = astInfo?.parserKind === 'BABEL_AST';
+    const astIssuesByLine = new Map<number, Set<string>>();
+    if (astInfo) {
+      for (const iss of astInfo.issues) {
+        const set = astIssuesByLine.get(iss.lineNumber) || new Set<string>();
+        set.add(iss.ruleId);
+        astIssuesByLine.set(iss.lineNumber, set);
+      }
+    }
+    const taintSqliLines = new Set<number>(
+      realTaintIssues
+        .filter((t) => (t.cwe === 'CWE-89' || t.ruleId.includes('S3649')) && t.filePath === filePath)
+        .map((t) => t.lineNumber)
+    );
+    const todoCommentLinesSet = new Set<number>(astInfo?.todoCommentLines || []);
+
+    // Block-level CPD duplication detection (8 consecutive normalized non-trivial lines >= 100 chars)
+    if (ELIGIBLE_EXTENSIONS.has(ext) && ext !== '.json') {
+      const sigLines = lines
+        .map((l) => l.trim())
+        .filter((t) => t.length > 0 && !t.startsWith('//') && !t.startsWith('import ') && !/^[{}()[\],;]+$/.test(t));
+      const dupIndices = new Set<number>();
+      for (let i = 0; i <= sigLines.length - DUP_BLOCK_SIZE; i++) {
+        const chunk = sigLines.slice(i, i + DUP_BLOCK_SIZE).join('\n');
+        if (chunk.length < 100) continue;
+        const prev = seenDupBlockHashes.get(chunk) || 0;
+        if (prev >= 1) {
+          for (let k = 0; k < DUP_BLOCK_SIZE; k++) {
+            dupIndices.add(i + k);
+          }
+        }
+        seenDupBlockHashes.set(chunk, prev + 1);
+      }
+      duplicatedLines += dupIndices.size;
+    }
+
+    // Use real AST complexity when available for JS/TS files
+    if (isBabelAst && astInfo && astInfo.functions.length > 0) {
+      for (const fn of astInfo.functions) {
+        functionCount += 1;
+        totalCyclomatic += fn.cyclomaticComplexity;
+        totalCognitive += fn.cognitiveComplexity;
+      }
+    }
+
     // Check line-by-line rules on code and SQL files (skip .md and .json for SAST/Code rules)
     const isCodeOrSqlFile = ELIGIBLE_EXTENSIONS.has(ext) && ext !== '.json';
     lines.forEach((rawLine, idx) => {
@@ -516,28 +563,38 @@ export function executeRealStaticAnalysisOnSource(
       const lineNumber = idx + 1;
       const trimmed = rawLine.trim();
       const ctx = extractLineContext(lines, idx);
+      const isNoSonar = /\/\/\s*NOSONAR\b|\/\*\s*NOSONAR\b/i.test(rawLine);
+      const isCommentLine =
+        trimmed.startsWith('//') ||
+        trimmed.startsWith('/*') ||
+        trimmed.startsWith('*') ||
+        trimmed.startsWith('#') ||
+        trimmed.startsWith('--');
+      const lineAstRules = astIssuesByLine.get(lineNumber);
 
-      // Track duplicated lines (ignoring braces/imports/short lines)
-      if (trimmed.length > 28 && !trimmed.startsWith('//') && !trimmed.startsWith('import ')) {
-        const prevCount = seenLineHashes.get(trimmed) || 0;
-        if (prevCount >= 1) duplicatedLines += 1;
-        seenLineHashes.set(trimmed, prevCount + 1);
+      // Fallback cyclomatic & cognitive branch estimation for non-AST / script-level files
+      if (!isBabelAst || !astInfo || astInfo.functions.length === 0) {
+        if (!isCommentLine) {
+          const branchMatches = trimmed.match(/\b(if|else\s+if|for|while|case|catch)\b|&&|\|\||\?/g);
+          if (branchMatches) {
+            totalCyclomatic += branchMatches.length;
+            totalCognitive += branchMatches.length * (rawLine.search(/\S|$/) > 8 ? 2 : 1);
+          }
+          if (/\b(function|def\s+\w+|=>\s*\{)\b/.test(trimmed)) {
+            functionCount += 1;
+            totalCyclomatic += 1;
+          }
+        }
       }
 
-      // Cyclomatic & cognitive branch estimation
-      const branchMatches = trimmed.match(/\b(if|else\s+if|for|while|case|catch)\b|&&|\|\||\?/g);
-      if (branchMatches) {
-        totalCyclomatic += branchMatches.length;
-        totalCognitive += branchMatches.length * (rawLine.search(/\S|$/) > 8 ? 2 : 1);
-      }
-      if (/\b(function|def\s+\w+|=>\s*\{)\b/.test(trimmed)) {
-        functionCount += 1;
-        totalCyclomatic += 1;
-      }
+      if (isNoSonar) return;
 
-      // 1. SAST Rules (Opengrep Engine - Taint & Pattern Mode)
+      // 1. SAST Rules (Opengrep Engine - AST-backed for JS/TS, guarded patterns for other languages)
       const upperTrimmed = trimmed.toUpperCase();
-      if (upperTrimmed.includes('SELECT ') && (trimmed.includes('+') || trimmed.includes('${'))) {
+      const hasSqliHit = isBabelAst
+        ? Boolean(lineAstRules?.has('ts:S3649')) || taintSqliLines.has(lineNumber)
+        : !isCommentLine && upperTrimmed.includes('SELECT ') && (trimmed.includes('+') || trimmed.includes('${'));
+      if (hasSqliHit) {
         criticalVulns += 1;
         const mqrImpacts: MqrCategoryImpact[] = [
           {
@@ -649,7 +706,14 @@ export function executeRealStaticAnalysisOnSource(
         });
       }
 
-      if (/\beval\s*\(|new\s+Function\s*\(|execSync\s*\(\s*`/.test(trimmed)) {
+      const hasDynamicCodeExecHit = isBabelAst
+        ? Boolean(lineAstRules?.has('ts:S2076') || lineAstRules?.has('ts:S1523'))
+        : !isCommentLine &&
+          (/\beval\s*\(|new\s+Function\s*\(/.test(trimmed) ||
+            (/execSync\s*\(/.test(trimmed) &&
+              !(/shell\s*:\s*false/i.test(trimmed)) &&
+              (/execSync\s*\(\s*`[^`]*\$\{/.test(trimmed) || /execSync\s*\([^)]*\+/.test(trimmed))));
+      if (hasDynamicCodeExecHit) {
         criticalVulns += 1;
         const mqrImpacts: MqrCategoryImpact[] = [
           {
@@ -742,7 +806,11 @@ export function executeRealStaticAnalysisOnSource(
         });
       }
 
-      if (/createHash\(['"`](md5|sha1)['"`]\)|hashlib\.(md5|sha1)\(|createCipheriv\(['"`](des|rc4)/i.test(trimmed)) {
+      const hasWeakCryptoHit = isBabelAst
+        ? Boolean(lineAstRules?.has('ts:S4790'))
+        : !isCommentLine &&
+          /createHash\(['"`](md5|sha1)['"`]\)|hashlib\.(md5|sha1)\(|createCipheriv\(['"`](des|rc4)/i.test(trimmed);
+      if (hasWeakCryptoHit) {
         highVulns += 1;
         const mqrImpacts: MqrCategoryImpact[] = [
           {
@@ -827,7 +895,14 @@ export function executeRealStaticAnalysisOnSource(
         });
       }
 
-      if (/Math\.random\(\)/.test(trimmed) && /key|token|salt|iv|nonce|secret|password/i.test(content)) {
+      const localWindowText = lines.slice(Math.max(0, idx - 12), Math.min(lines.length, idx + 13)).join('\n');
+      const hasSensitivePrngContext = /\b(key|token|salt|iv|nonce|secret|password|passwd|auth|session|csrf|otp|hash)\b/i.test(
+        localWindowText
+      );
+      const hasInsecurePrngHit = isBabelAst
+        ? Boolean(lineAstRules?.has('ts:S2245')) && hasSensitivePrngContext
+        : !isCommentLine && /Math\.random\(\)/.test(trimmed) && hasSensitivePrngContext;
+      if (hasInsecurePrngHit) {
         mediumVulns += 1;
         const mqrImpacts: MqrCategoryImpact[] = [
           {
@@ -902,11 +977,13 @@ export function executeRealStaticAnalysisOnSource(
       }
 
       // 2. Secret Scanning Rules (Gitleaks Engine)
-      if (
-        /(?:AKIA[0-9A-Z]{16}|sk-[a-zA-Z0-9]{16,}|ghp_[a-zA-Z0-9]{24,}|(?:masterKey|jwtSecret|apiKey|privateKey|dbPassword)\s*[:=]\s*['"`][^'"`\n]{8,}['"`])/i.test(
-          trimmed
-        )
-      ) {
+      const hasHardcodedSecretHit = isBabelAst
+        ? Boolean(lineAstRules?.has('ts:S6418'))
+        : !isCommentLine &&
+          /(?:AKIA[0-9A-Z]{16}|sk-[a-zA-Z0-9]{16,}|ghp_[a-zA-Z0-9]{24,}|(?:masterKey|jwtSecret|apiKey|privateKey|dbPassword)\s*[:=]\s*['"`][^'"`\n]{8,}['"`])/i.test(
+            trimmed
+          );
+      if (hasHardcodedSecretHit) {
         secretsExposed += 1;
         criticalVulns += 1;
         const mqrImpacts: MqrCategoryImpact[] = [
@@ -999,7 +1076,10 @@ export function executeRealStaticAnalysisOnSource(
       }
 
       // 3. Code Quality Rules (SonarQube / Ruff / ESLint Static Rules)
-      if (/catch\s*\([^)]*\)\s*\{\s*\}|except\s*:\s*pass/.test(trimmed)) {
+      const hasEmptyCatchHit = isBabelAst
+        ? Boolean(lineAstRules?.has('ts:S2486'))
+        : !isCommentLine && /catch\s*\([^)]*\)\s*\{\s*\}|except\s*:\s*pass/.test(trimmed);
+      if (hasEmptyCatchHit) {
         bugs += 1;
         const mqrImpacts: MqrCategoryImpact[] = [
           {
@@ -1055,7 +1135,10 @@ export function executeRealStaticAnalysisOnSource(
         });
       }
 
-      if (/:\s*any\b|as\s+any\b/.test(trimmed)) {
+      const hasExplicitAnyHit = isBabelAst
+        ? Boolean(lineAstRules?.has('ts:S4204'))
+        : !isCommentLine && /:\s*any\b|as\s+any\b/.test(trimmed);
+      if (hasExplicitAnyHit) {
         codeSmells += 1;
         const mqrImpacts: MqrCategoryImpact[] = [
           {
@@ -1102,7 +1185,10 @@ export function executeRealStaticAnalysisOnSource(
         });
       }
 
-      if (/\/\/\s*(TODO|FIXME|HACK)\b|#\s*(TODO|FIXME|HACK)\b/i.test(trimmed)) {
+      const hasTodoCommentHit = isBabelAst
+        ? todoCommentLinesSet.has(lineNumber)
+        : /\/\/\s*(TODO|FIXME|HACK)\b|#\s*(TODO|FIXME|HACK)\b/i.test(trimmed);
+      if (hasTodoCommentHit) {
         codeSmells += 1;
         const mqrImpacts: MqrCategoryImpact[] = [
           {
@@ -1149,7 +1235,7 @@ export function executeRealStaticAnalysisOnSource(
         });
       }
 
-      if (/unused|deadCode|_deprecatedUnused/i.test(trimmed)) {
+      if (isBabelAst ? Boolean(lineAstRules?.has('ts:S1763')) : !isCommentLine && /\b(_deprecatedUnused|deadCode)\b/i.test(trimmed)) {
         deadCodeSymbols += 1;
       }
 
