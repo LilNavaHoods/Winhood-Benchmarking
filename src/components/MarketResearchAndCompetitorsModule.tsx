@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import type { MarketCompetitorCandidate, Project, Software } from '../types/benchmark';
 import { WinHoodLogo } from './WinHoodLogo';
+import { csrfFetch as fetch } from '../utils/csrfFetch';
 
 interface MarketResearchAndCompetitorsModuleProps {
   projects: Project[];

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
+  "appId": "io.winhood.benchmark.analyzer",
+  "productName": "WinHood Benchmark Analyzer",
+  "copyright": "Copyright © 2026 WinHood Engineering",
+  "asar": true,
+  "asarUnpack": [
+    "dist-desktop/**",
+    "scripts/**"
+  ],
+  "directories": {
+    "output": "release-windows",
+    "buildResources": "public"
+  },
+  "files": [
+    "dist/**/*",
+    "dist-desktop/**/*",
+    "package.json"
+  ],
+  "extraMetadata": {
+    "main": "dist-desktop/electron-main.mjs"
+  },
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": ["x64"]
+      },
+      {
+        "target": "portable",
+        "arch": ["x64"]
+      }
+    ],
+    "artifactName": "WinHood-${version}-${os}-${arch}.${ext}"
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowElevation": true,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "WinHood Benchmark Analyzer",
+    "deleteAppDataOnUninstall": false,
+    "artifactName": "WinHood-Setup-${version}-${arch}.${ext}"
+  },
+  "portable": {
+    "artifactName": "WinHood-Portable-${version}-${arch}.${ext}"
+  }
+}

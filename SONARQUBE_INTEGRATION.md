@@ -1,35 +1,18 @@
-# SONARQUBE_INTEGRATION.md — Arquitetura de Integração SonarQube
+# Integração SonarQube Cloud, SonarQube Server & Community Build
 
-## 1. Visão Geral da Arquitetura
-A camada independente `SonarQubeIntegrationService` (`src/integrations/sonarqube/SonarQubeAdapter.ts`) integra o **WinHood Software Benchmark & Quality Analyzer** ao SonarQube Community Build sem copiar a interface do SonarQube, utilizando seus resultados para enriquecer a comparação técnica entre **Software A** e **Software B**.
+## 1. Arquitetura de Integração Oficial via Web API
+A camada de integração do WinHood (`src/integrations/sonarqube/`) utiliza exclusivamente os endpoints REST oficiais do SonarQube Cloud e SonarQube Server:
+- `/api/system/status` — Verificação de disponibilidade e versão do servidor.
+- `/api/authentication/validate` e `/api/user_tokens/search` — Validação do token Bearer e consulta de expiração.
+- `/api/qualityprofiles/search` — Descoberta dos Quality Profiles reais vinculados ao projeto (`VERIFIED_SONAR_WAY`, `VERIFIED_CUSTOM` ou `NOT_VERIFIED`).
+- `/api/qualitygates/project_status` e `/api/qualitygates/get_by_project` — Status do Quality Gate, condições individuais e Fudge Factor.
+- `/api/measures/component` — Coleta simultânea de 39 métricas cobrindo Standard Experience, MQR, New Code e Cobertura separada.
+- `/api/issues/search` — Paginação completa (`p`, `ps`, `total`, limite de 10.000 registros) com `additionalFields=_all` e `facets`.
+- `/api/hotspots/search` — Paginação completa de Security Hotspots e cálculo de revisão (`computeHotspotsBreakdown`).
+- `/api/ce/task` — Polling assíncrono do Compute Engine após submissão via SonarScanner.
 
-Fluxo de dados:
-`Frontend -> Backend API -> Benchmark Orchestrator -> SonarQube Adapter -> SonarScanner -> SonarQube Community Build -> Web API -> Normalização -> Banco de Dados -> Dashboard Comparativo`
-
-O frontend nunca executa diretamente processos do SonarScanner nem tem acesso aos tokens de autenticação.
-
-## 2. Modos de Operação Suportados
-- **Modo 1 — Servidor Local (`LOCAL`):** Conecta a `http://localhost:9000` (porta configurável). Inicia sob demanda apenas quando o usuário dispara uma análise e os pré-requisitos de hardware/JVM são atendidos.
-- **Modo 2 — Servidor Remoto (`REMOTE`):** Conecta a uma instância corporativa existente informando URL e `SONAR_TOKEN`, dispensando qualquer processo local.
-- **Modo 3 — SonarQube Cloud (`CLOUD`):** Adaptador opcional SaaS (`https://sonarcloud.io`) mediante consentimento explícito.
-
-## 3. Máquina de Estados (`probeSonarQube()`)
-Implementada em `src/integrations/sonarqube/SonarQubeConnection.ts`, a função `probeSonarQube()` valida conectividade HTTP real (`/api/system/status`) e autenticação (`/api/authentication/validate`), retornando um dos 10 estados canônicos:
-- `NOT_INSTALLED`
-- `NOT_CONFIGURED`
-- `CONNECTING`
-- `CONNECTED`
-- `AUTH_FAILED`
-- `SERVER_UNAVAILABLE`
-- `VERSION_UNSUPPORTED`
-- `READY`
-- `RUNNING`
-- `ERROR`
-
-## 4. Comparação Padronizada A/B
-Cada benchmark executa as análises de Software A e Software B sequencialmente na mesma instância, garantindo:
-- Mesma versão do SonarQube (`26.11.0.134175`)
-- Mesma versão do scanner apropriado
-- Mesmo Quality Profile (`Sonar way`)
-- Mesmo Quality Gate (`Sonar way (Padronizado A/B)`)
-- Separação explícita entre métricas `SONARQUBE_NATIVE`, `EXTERNAL_TEST_REPORT_IMPORTED` e `BENCHMARK_CALCULATED`.
+## 2. Preservação de `sonar-project.properties`
+`SonarScannerExecutor.ts` **nunca sobrescreve** o arquivo `sonar-project.properties` existente no repositório do usuário. Em vez disso:
+- Gera um arquivo temporário `.winhood-sonar-<timestamp>-<uuid>.properties`.
+- Passa `-Dproject.settings=<caminho_temporario>` para o processo do scanner.
+- Remove o arquivo temporário no bloco `finally`.

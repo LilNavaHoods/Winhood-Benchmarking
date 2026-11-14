@@ -109,9 +109,17 @@ import { ControlledTestAndPerfRunner } from './src/execution/ControlledTestAndPe
 import { CoverageReportParser } from './src/execution/CoverageReportParser';
 import { SbomGenerator } from './src/analyzers/sca/SbomGenerator';
 import { ScaCorrelator } from './src/analyzers/sca/ScaCorrelator';
+import { SonarMetricsMapper } from './src/integrations/sonarqube/SonarMetricsMapper';
+import { SonarQualityGateMapper } from './src/integrations/sonarqube/SonarQualityGateMapper';
+import { DEFAULT_SONAR_METRIC_KEYS } from './src/integrations/sonarqube/SonarQubeApiClient';
+import {
+  ensureWinHoodDirectories,
+  resolveWinHoodDataRoot,
+} from './src/storage/WinHoodPaths';
+import type http from 'node:http';
 
 const PORT = Number(process.env.PORT || 3000);
-const DEFAULT_DATA_DIR = path.resolve(process.cwd(), '.winhood_data');
+const DEFAULT_DATA_DIR = resolveWinHoodDataRoot();
 const DATA_DIR = DEFAULT_DATA_DIR;
 const ISOLATED_ARTIFACTS_DIR = path.join(DEFAULT_DATA_DIR, 'isolated_artifacts');
 const STORE_FILE = path.join(DEFAULT_DATA_DIR, 'winhood_persistent_db.json');
@@ -874,7 +882,8 @@ export async function createWinHoodApp(options?: {
   dataDir?: string;
   enforceProductionAuth?: boolean;
 }) {
-  const dataDir = options?.dataDir || DEFAULT_DATA_DIR;
+  const dataDir = resolveWinHoodDataRoot(options?.dataDir);
+  ensureWinHoodDirectories(dataDir);
   const isolatedArtifactsDir = path.join(dataDir, 'isolated_artifacts');
   const storeFile = path.join(dataDir, 'winhood_persistent_db.json');
   const dbManager = new PersistentDatabaseManager();
@@ -1065,10 +1074,22 @@ export async function createWinHoodApp(options?: {
     ]
   );
 
+  const isAllowedOrigin = (origin: string): boolean => {
+    if (!origin) return false;
+    if (allowedOrigins.has(origin)) return true;
+    if (
+      process.env.WINHOOD_RUNTIME_ENV === 'ELECTRON_DESKTOP' &&
+      /^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(origin)
+    ) {
+      return true;
+    }
+    return false;
+  };
+
   // Security CORS + Telemetry + Session Authentication + CSRF double-submit middleware
   app.use('/api', (req, res, next) => {
     const origin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
-    if (origin && allowedOrigins.has(origin)) {
+    if (origin && isAllowedOrigin(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Access-Control-Allow-Credentials', 'true');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-csrf-token, x-winhood-role');
@@ -1076,7 +1097,7 @@ export async function createWinHoodApp(options?: {
       res.setHeader('Vary', 'Origin');
     }
     if (req.method === 'OPTIONS') {
-      if (origin && !allowedOrigins.has(origin)) {
+      if (origin && !isAllowedOrigin(origin)) {
         return res.status(403).json({ error: 'ORIGIN_NOT_ALLOWED' });
       }
       return res.status(204).end();
@@ -1128,6 +1149,7 @@ export async function createWinHoodApp(options?: {
       '/health',
       '/auth/bootstrap-status',
       '/auth/bootstrap-admin',
+      '/auth/register',
       '/auth/login',
       '/auth/logout',
       '/auth/session',
@@ -1194,9 +1216,13 @@ export async function createWinHoodApp(options?: {
   // 1. Health & Observability
   app.get('/api/health', (_req, res) => {
     res.json({
-      status: 'HEALTHY',
+      status: 'ONLINE',
+      healthStatus: 'HEALTHY',
+      ready: true,
+      pid: process.pid,
       service: 'WinHood Software Benchmark & Quality Analyzer API',
       timestamp: new Date().toISOString(),
+      dataDir,
       storageEngine: PersistentDatabaseManager.STORAGE_KIND,
       schemaVersion: PersistentDatabaseManager.SCHEMA_VERSION,
       storageIntegrity: loaded.integrityStatus,
@@ -1269,6 +1295,56 @@ export async function createWinHoodApp(options?: {
     } catch (err: any) {
       const msg = err?.message || 'Falha no bootstrap inicial.';
       const status = msg.startsWith('BOOTSTRAP_ALREADY_COMPLETED') ? 409 : 400;
+      return res.status(status).json({ error: msg });
+    }
+  });
+
+  app.post('/api/auth/register', (req, res) => {
+    try {
+      const { name, email, password, role, enableMfa } = (req.body || {}) as {
+        name?: string;
+        email?: string;
+        password?: string;
+        role?: RbacRole;
+        enableMfa?: boolean;
+      };
+      const result = authService.registerAccount({
+        name: name || '',
+        email: email || '',
+        password: password || '',
+        role,
+        enableMfa: Boolean(enableMfa),
+        ipAddress: req.ip || '127.0.0.1',
+        userAgent: String(req.headers['user-agent'] || 'unknown'),
+      });
+      setSessionCookies(res, result.sessionId, result.csrfToken);
+      appendAuditLog(
+        db,
+        'USER_SELF_REGISTERED',
+        'AUTH',
+        result.user.id,
+        `Novo usuário "${result.user.email}" cadastrado com perfil ${result.user.role} (MFA=${result.user.mfaEnabled}).`,
+        result.user
+      );
+      saveDatabase(db);
+      return res.status(201).json({
+        authenticated: !result.totpSetup,
+        mfaRequired: Boolean(result.totpSetup),
+        user: result.user,
+        csrfToken: result.csrfToken,
+        totpSetup: result.totpSetup,
+      });
+    } catch (err: any) {
+      const msg = err?.message || 'Falha ao realizar cadastro.';
+      const status = msg.startsWith('EMAIL_ALREADY_EXISTS')
+        ? 409
+        : msg.startsWith('ROLE_ELEVATION_BLOCKED')
+          ? 403
+          : msg.startsWith('AUTH_RATE_LIMITED')
+            ? 429
+            : 400;
+      appendAuditLog(db, 'AUTH_REGISTER_FAILED', 'AUTH', String(req.body?.email || 'unknown'), msg);
+      saveDatabase(db);
       return res.status(status).json({ error: msg });
     }
   });
@@ -5715,12 +5791,11 @@ export async function createWinHoodApp(options?: {
         // Fallback
       }
 
-      // 2. Component Measures
+      // 2. Component Measures (MQR + Standard + New Code + Cobertura Separada)
       let measures: any[] = [];
       const measuresMap: Record<string, string | number> = {};
       try {
-        const mKeys =
-          'bugs,vulnerabilities,security_hotspots,code_smells,coverage,duplicated_lines_density,ncloc,sqale_index,sqale_rating,reliability_rating,security_rating,security_review_rating,alert_status,complexity,cognitive_complexity';
+        const mKeys = DEFAULT_SONAR_METRIC_KEYS.join(',');
         const mRes = await fetch(
           `${safeOrigin}/api/measures/component?component=${encodeURIComponent(effectiveKey)}&metricKeys=${mKeys}`,
           { headers: reqHeaders }
@@ -5729,7 +5804,11 @@ export async function createWinHoodApp(options?: {
           const mJson = await mRes.json();
           measures = mJson.component?.measures || [];
           for (const m of measures) {
-            measuresMap[m.metric] = m.value ?? '';
+            measuresMap[m.metric] =
+              m.value ??
+              m.period?.value ??
+              (Array.isArray(m.periods) ? m.periods[0]?.value : '') ??
+              '';
           }
         }
       } catch {
@@ -5755,13 +5834,17 @@ export async function createWinHoodApp(options?: {
       const allIssues: any[] = [];
       let page = 1;
       let totalIssues = 0;
+      let issuesFailed = false;
       do {
         const orgParam = effectiveOrg ? `&organization=${encodeURIComponent(effectiveOrg)}` : '';
         const issRes = await fetch(
           `${safeOrigin}/api/issues/search?componentKeys=${encodeURIComponent(effectiveKey)}${orgParam}&ps=500&p=${page}&additionalFields=_all&facets=severities,types,rules,statuses`,
           { headers: reqHeaders }
         );
-        if (!issRes.ok) break;
+        if (!issRes.ok) {
+          issuesFailed = true;
+          break;
+        }
         const issJson = await issRes.json();
         totalIssues = Number(issJson.total ?? (issJson.issues || []).length);
         const batch = issJson.issues || [];
@@ -5770,18 +5853,83 @@ export async function createWinHoodApp(options?: {
         page++;
       } while (allIssues.length < totalIssues && page <= 20);
 
+      // 5. Quality Profiles Reais (/api/qualityprofiles/search)
+      let realProfiles: any[] = [];
+      try {
+        const orgParam = effectiveOrg ? `&organization=${encodeURIComponent(effectiveOrg)}` : '';
+        const qpRes = await fetch(
+          `${safeOrigin}/api/qualityprofiles/search?project=${encodeURIComponent(effectiveKey)}${orgParam}`,
+          { headers: reqHeaders }
+        );
+        if (qpRes.ok) {
+          const qpJson = await qpRes.json();
+          realProfiles = Array.isArray(qpJson.profiles) ? qpJson.profiles : [];
+        }
+      } catch {
+        // Opcional
+      }
+
+      // 6. Nome Verificado do Quality Gate (/api/qualitygates/get_by_project)
+      let verifiedGateName: string | undefined;
+      try {
+        const orgParam = effectiveOrg ? `&organization=${encodeURIComponent(effectiveOrg)}` : '';
+        const qgNameRes = await fetch(
+          `${safeOrigin}/api/qualitygates/get_by_project?project=${encodeURIComponent(effectiveKey)}${orgParam}`,
+          { headers: reqHeaders }
+        );
+        if (qgNameRes.ok) {
+          const qgNameJson = await qgNameRes.json();
+          if (qgNameJson?.qualityGate?.name) {
+            verifiedGateName = String(qgNameJson.qualityGate.name);
+          }
+        }
+      } catch {
+        // Opcional
+      }
+
       const nowIso = new Date().toISOString();
+      const analysisId = `sonarcloud-live-${Date.now()}`;
+      const targetRun = db.runs[0];
+      const swId = targetRun?.softwareIds[0] || 'sw-sonarcloud-imported';
+      const swName = targetRun?.scoreCards[0]?.softwareName || effectiveKey;
+      const rawResponseHash = computeSha256(JSON.stringify({ qualityGate, measures }));
+
+      const normalizedMeasures = SonarMetricsMapper.mapMeasuresPayload({
+        analysisId,
+        projectKey: effectiveKey,
+        softwareId: swId,
+        softwareName: swName,
+        commitHash: 'HEAD',
+        rawMeasures: measures,
+        rawApiResponseHash: rawResponseHash,
+      });
+      const normalizedQualityGate = SonarQualityGateMapper.mapProjectStatusPayload({
+        analysisId,
+        projectKey: effectiveKey,
+        softwareId: swId,
+        softwareName: swName,
+        gateName: verifiedGateName,
+        newLinesCount: normalizedMeasures.newCode?.newLines ?? null,
+        newLinesToCoverCount: normalizedMeasures.newCode?.newLinesToCover ?? null,
+        projectStatus: qualityGate,
+      });
+      const hotspotsBreakdown = SonarResultParser.computeHotspotsBreakdown(hotspots);
+
       const reportPayload = {
-        schemaVersion: '1.0.0',
+        schemaVersion: '2.0.0',
         extractedAt: nowIso,
         platform: 'SONARCLOUD',
         serverUrl: safeOrigin,
         organization: effectiveOrg,
         projectKey: effectiveKey,
         qualityGate,
+        normalizedQualityGate,
         measures,
         measuresMap,
+        normalizedMeasures,
         hotspots,
+        hotspotsBreakdown,
+        qualityProfiles: realProfiles,
         totalIssues: allIssues.length,
         totalHotspots: hotspots.length,
         issues: allIssues,
@@ -5824,53 +5972,126 @@ export async function createWinHoodApp(options?: {
 
       // Propagação automática para o BenchmarkRun ativo (Seção 10)
       let syncedFindingsCount = 0;
-      if (allIssues.length > 0) {
-        const targetRun = db.runs[0];
-        if (targetRun) {
-          const parsedRecords = SonarResultParser.parseIssuesAndHotspots({
-            analysisId: `sonarcloud-live-${Date.now()}`,
-            projectKey: effectiveKey,
-            softwareId: targetRun.softwareIds[0] || 'sw-sonarcloud-imported',
-            softwareName: targetRun.scoreCards[0]?.softwareName || effectiveKey,
-            rawIssues: allIssues.map((iss) => ({
-              key: iss.key,
-              rule: iss.rule,
-              severity: iss.severity || 'MAJOR',
-              component: iss.component || '',
-              project: iss.project || effectiveKey,
-              line: iss.line,
-              message: iss.message || '',
-              effort: iss.effort,
-              type: iss.type || 'CODE_SMELL',
-              externalRuleEngine: iss.externalRuleEngine,
-            })),
-            rawHotspots: hotspots.map((hs) => ({
-              key: hs.key,
-              component: hs.component || '',
-              project: hs.project || effectiveKey,
-              securityCategory: hs.securityCategory || 'OTHERS',
-              vulnerabilityProbability: hs.vulnerabilityProbability || 'MEDIUM',
-              status: hs.status || 'TO_REVIEW',
-              resolution: hs.resolution,
-              line: hs.line,
-              message: hs.message || '',
-              ruleKey: hs.ruleKey,
-            })),
-          });
+      const parsedRecords = SonarResultParser.parseIssuesAndHotspots({
+        analysisId,
+        projectKey: effectiveKey,
+        softwareId: swId,
+        softwareName: swName,
+        rawIssues: allIssues.map((iss) => ({
+          key: iss.key,
+          rule: iss.rule,
+          severity: iss.severity || 'MAJOR',
+          component: iss.component || '',
+          project: iss.project || effectiveKey,
+          line: iss.line,
+          message: iss.message || '',
+          effort: iss.effort,
+          type: iss.type || 'CODE_SMELL',
+          externalRuleEngine: iss.externalRuleEngine,
+        })),
+        rawHotspots: hotspots.map((hs) => ({
+          key: hs.key,
+          component: hs.component || '',
+          project: hs.project || effectiveKey,
+          securityCategory: hs.securityCategory || 'OTHERS',
+          vulnerabilityProbability: hs.vulnerabilityProbability || 'MEDIUM',
+          status: hs.status || 'TO_REVIEW',
+          resolution: hs.resolution,
+          line: hs.line,
+          message: hs.message || '',
+          ruleKey: hs.ruleKey,
+        })),
+      });
 
-          const normalized = SonarResultParser.mapSonarIssuesToNormalizedFindings(
-            parsedRecords,
-            targetRun.softwareIds[0] || 'sw-sonarcloud-imported',
-            targetRun.scoreCards[0]?.softwareName || effectiveKey
-          );
+      if (allIssues.length > 0 && targetRun) {
+        const normalized = SonarResultParser.mapSonarIssuesToNormalizedFindings(
+          parsedRecords,
+          swId,
+          swName
+        );
 
-          const existingIds = new Set(targetRun.findings.map((f) => f.id));
-          const toAdd = normalized.filter((f) => !existingIds.has(f.id));
-          targetRun.findings = [...toAdd, ...targetRun.findings];
-          syncedFindingsCount = toAdd.length;
-          recalculateBenchmarkRunScoreCards(targetRun, db.softwares);
-        }
+        const existingIds = new Set(targetRun.findings.map((f) => f.id));
+        const toAdd = normalized.filter((f) => !existingIds.has(f.id));
+        targetRun.findings = [...toAdd, ...targetRun.findings];
+        syncedFindingsCount = toAdd.length;
+        recalculateBenchmarkRunScoreCards(targetRun, db.softwares);
       }
+
+      // Registrar na lista de análises Sonar para governança metodológica
+      db.toolsDb.sonar_measures = [normalizedMeasures, ...(db.toolsDb.sonar_measures || [])];
+      db.toolsDb.sonar_quality_gates = [
+        normalizedQualityGate,
+        ...(db.toolsDb.sonar_quality_gates || []),
+      ];
+      const primaryProfile = realProfiles[0];
+      const profileVerificationState = primaryProfile
+        ? primaryProfile.isBuiltIn &&
+          String(primaryProfile.name || '').toLowerCase().includes('sonar way')
+          ? ('VERIFIED_SONAR_WAY' as const)
+          : ('VERIFIED_CUSTOM' as const)
+        : ('NOT_VERIFIED' as const);
+      const paginationState =
+        issuesFailed && allIssues.length === 0
+          ? ('FAILED' as const)
+          : issuesFailed
+            ? ('PARTIAL' as const)
+            : ('COMPLETE' as const);
+
+      db.toolsDb.sonar_analyses = [
+        {
+          id: analysisId,
+          runId: targetRun?.id || 'live-extraction',
+          instanceId: 'sonar-cloud-saas',
+          projectId: effectiveKey,
+          projectKey: effectiveKey,
+          softwareId: swId,
+          softwareName: swName,
+          softwareVersion: '1.0.0',
+          commitHash: 'HEAD',
+          scannerUsed: 'SONAR_SCANNER_CLI',
+          scannerVersion: '8.4.0.16527',
+          sonarVersion: '26.11.0.134175',
+          qualityProfileName: primaryProfile?.name || 'NOT_VERIFIED',
+          qualityProfileVerificationState: profileVerificationState,
+          qualityProfileVerification: {
+            profileName: primaryProfile?.name || 'NOT_VERIFIED',
+            profileKey: primaryProfile?.key || 'NOT_VERIFIED',
+            language: primaryProfile?.language || 'MULTI',
+            isBuiltIn: Boolean(primaryProfile?.isBuiltIn),
+            isDefault: Boolean(primaryProfile?.isDefault),
+            verificationState: profileVerificationState,
+          },
+          qualityModelMode: normalizedMeasures.qualityModel || 'STANDARD_EXPERIENCE',
+          qualityGateStatus: normalizedQualityGate.status,
+          startedAt: nowIso,
+          completedAt: nowIso,
+          status: 'COMPLETED',
+          sonarExecutionState: 'RESULTS_IMPORTED',
+          cacheHit: false,
+          cacheKeySha256: computeSha256(`${effectiveKey}|${nowIso}`),
+          measuresId: normalizedMeasures.id,
+          qualityGateId: normalizedQualityGate.id,
+          issuesCount: allIssues.length,
+          externalIssuesImportedCount: parsedRecords.filter((r) => r.isExternalImportedRule).length,
+          hotspotsBreakdown,
+          issuesPagination: {
+            endpoint: '/api/issues/search',
+            totalExpected: totalIssues || allIssues.length,
+            totalReceived: allIssues.length,
+            pendingCount: Math.max(0, (totalIssues || allIssues.length) - allIssues.length),
+            totalReported: totalIssues || allIssues.length,
+            fetchedRecords: allIssues.length,
+            pagesFetched: page,
+            pageSize: 500,
+            hitSonarSearchLimit10k: allIssues.length >= 10000,
+            status: paginationState,
+            completeness: paginationState,
+            state: paginationState,
+          },
+          evidenceSha256: rawResponseHash,
+        },
+        ...(db.toolsDb.sonar_analyses || []),
+      ];
 
       appendAuditLog(
         db,
@@ -5893,6 +6114,122 @@ export async function createWinHoodApp(options?: {
         error: `Falha na extração de dados do SonarCloud: ${err?.message || 'Erro interno'}.`,
       });
     }
+  });
+
+  // 4.3 Endpoint de Governança Metodológica Oficial SonarCloud vs WinHood (GET /api/sonar/methodology-summary)
+  app.get('/api/sonar/methodology-summary', (_req, res) => {
+    const latestAnalysis = db.toolsDb?.sonar_analyses?.[0] || null;
+    const defaultProjectKey =
+      latestAnalysis?.projectKey ||
+      db.savedSonarProjects?.[0]?.projectKey ||
+      'NOT_CONFIGURED';
+    const latestMeasures =
+      (latestAnalysis &&
+        db.toolsDb?.sonar_measures?.find((m) => m.analysisId === latestAnalysis.id)) ||
+      db.toolsDb?.sonar_measures?.[0] ||
+      SonarMetricsMapper.mapMeasuresPayload({
+        analysisId: 'unmeasured',
+        projectKey: defaultProjectKey,
+        softwareId: 'unmeasured',
+        softwareName: defaultProjectKey,
+        commitHash: 'NONE',
+        rawMeasures: [],
+        rawApiResponseHash: computeSha256('unmeasured'),
+      });
+    const latestQg =
+      (latestAnalysis &&
+        db.toolsDb?.sonar_quality_gates?.find((g) => g.analysisId === latestAnalysis.id)) ||
+      db.toolsDb?.sonar_quality_gates?.[0] ||
+      SonarQualityGateMapper.mapProjectStatusPayload({
+        analysisId: 'unmeasured',
+        projectKey: defaultProjectKey,
+        softwareId: 'unmeasured',
+        softwareName: defaultProjectKey,
+        projectStatus: null,
+        apiError: false,
+      });
+    const latestHotspotsBreakdown =
+      latestAnalysis?.hotspotsBreakdown ||
+      SonarResultParser.computeHotspotsBreakdown(
+        latestMeasures.measurementState === 'MEASURED' ? [] : null
+      );
+    const latestRun = db.runs[0] || null;
+    const primaryCard = latestRun?.scoreCards?.[0] || null;
+    const nativeSonarComposite =
+      SonarMetricsMapper.computeNativeSonarScoreFromRatings(latestMeasures.metrics);
+    const issuesTotal = (db.toolsDb?.sonar_issues || []).length;
+
+    return res.json({
+      projectKey: defaultProjectKey,
+      organization: db.savedSonarProjects?.[0]?.organization || '',
+      qualityModelMode: latestMeasures.qualityModel || 'STANDARD_EXPERIENCE',
+      qualityProfileVerification: latestAnalysis?.qualityProfileVerification || {
+        profileName: latestAnalysis?.qualityProfileName || 'NOT_VERIFIED',
+        profileKey: 'NOT_VERIFIED',
+        language: 'ts',
+        isBuiltIn: false,
+        isDefault: false,
+        verificationState:
+          latestAnalysis?.qualityProfileVerificationState || 'NOT_VERIFIED',
+      },
+      qualityGate: latestQg,
+      measures: latestMeasures,
+      hotspotsBreakdown: latestHotspotsBreakdown,
+      paginationSummary: {
+        issuesPagination: latestAnalysis?.issuesPagination || {
+          endpoint: '/api/issues/search',
+          totalExpected: issuesTotal,
+          totalReceived: issuesTotal,
+          pendingCount: 0,
+          totalReported: issuesTotal,
+          fetchedRecords: issuesTotal,
+          pagesFetched: issuesTotal > 0 ? 1 : 0,
+          pageSize: 500,
+          hitSonarSearchLimit10k: false,
+          status: 'COMPLETE',
+          completeness: 'COMPLETE',
+          state: 'COMPLETE',
+        },
+        hotspotsPagination: latestAnalysis?.hotspotsPagination || {
+          endpoint: '/api/hotspots/search',
+          totalExpected: latestHotspotsBreakdown.totalIdentified ?? 0,
+          totalReceived: latestHotspotsBreakdown.totalIdentified ?? 0,
+          pendingCount: 0,
+          totalReported: latestHotspotsBreakdown.totalIdentified ?? 0,
+          fetchedRecords: latestHotspotsBreakdown.totalIdentified ?? 0,
+          pagesFetched: (latestHotspotsBreakdown.totalIdentified ?? 0) > 0 ? 1 : 0,
+          pageSize: 500,
+          hitSonarSearchLimit10k: false,
+          status: 'COMPLETE',
+          completeness: 'COMPLETE',
+          state: 'COMPLETE',
+        },
+      },
+      scoreSeparation: {
+        nativeSonarMetrics: {
+          source:
+            latestMeasures.measurementState === 'MEASURED'
+              ? 'SONARCLOUD_OFFICIAL_API'
+              : 'NOT_MEASURED',
+          reliabilityRating: latestMeasures.metrics.reliabilityRating ?? 'NOT_MEASURED',
+          securityRating: latestMeasures.metrics.securityRating ?? 'NOT_MEASURED',
+          maintainabilityRating:
+            latestMeasures.metrics.maintainabilityRating ?? 'NOT_MEASURED',
+          securityReviewRating:
+            latestMeasures.metrics.securityReviewRating ?? 'NOT_MEASURED',
+          qualityGateStatus: latestQg.status,
+          nativeSonarCompositeReference: nativeSonarComposite,
+        },
+        winhoodCalculatedScore: {
+          source: 'WINHOOD_CALCULATED',
+          overallScore: primaryCard?.groupedScores?.overallScore ?? null,
+          securityScore: primaryCard?.groupedScores?.securityScore ?? null,
+          qualityScore: primaryCard?.groupedScores?.qualityScore ?? null,
+          algorithmVersion: latestRun?.algorithmVersion || ALGORITHM_VERSION,
+          note: 'Pontuação calculada pelo motor determinístico WinHood — nunca apresentada como métrica oficial nativa do SonarCloud.',
+        },
+      },
+    });
   });
 
   const buildCompleteSonarPs1Script = (params: {
@@ -7432,38 +7769,128 @@ export async function createWinHoodApp(options?: {
   };
 }
 
-export async function startServer() {
-  const { app } = await createWinHoodApp();
+export interface StartWinHoodServerOptions {
+  dataDir?: string;
+  host?: string;
+  port?: number;
+  distPath?: string;
+  environment?:
+    | 'AI_STUDIO_PREVIEW'
+    | 'LOCAL_WEB_DEVELOPMENT'
+    | 'LOCAL_PRODUCTION'
+    | 'ELECTRON_DESKTOP'
+    | 'WINDOWS_PACKAGED'
+    | 'REMOTE_DEPLOYMENT';
+  enableVite?: boolean;
+  enforceProductionAuth?: boolean;
+}
+
+export interface StartedWinHoodServer {
+  app: express.Express;
+  server: http.Server;
+  host: string;
+  port: number;
+  url: string;
+  dataDir: string;
+  close: () => Promise<void>;
+}
+
+export async function startServer(
+  options?: StartWinHoodServerOptions
+): Promise<StartedWinHoodServer> {
+  const dataDir = resolveWinHoodDataRoot(options?.dataDir);
+  const { app } = await createWinHoodApp({
+    dataDir,
+    enforceProductionAuth: options?.enforceProductionAuth,
+  });
+
+  const isElectronDesktop =
+    options?.environment === 'ELECTRON_DESKTOP' ||
+    options?.environment === 'WINDOWS_PACKAGED' ||
+    process.env.WINHOOD_RUNTIME_ENV === 'ELECTRON_DESKTOP';
+
+  const shouldEnableVite =
+    options?.enableVite !== undefined
+      ? options.enableVite
+      : process.env.NODE_ENV !== 'production' && !isElectronDesktop;
 
   // Mount Vite or Static Dist
-  if (process.env.NODE_ENV !== 'production') {
+  if (shouldEnableVite) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.resolve(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+    const distPath = options?.distPath || path.resolve(process.cwd(), 'dist');
+    if (fs.existsSync(distPath)) {
+      app.use(express.static(distPath));
+      app.get('*', (_req, res) => {
+        res.sendFile(path.join(distPath, 'index.html'));
+      });
+    }
   }
 
   const bindHost =
-    process.env.WINHOOD_ALLOW_NETWORK_BIND === 'true'
-      ? process.env.WINHOOD_BIND_HOST || '0.0.0.0'
-      : '127.0.0.1';
+    options?.host ||
+    (isElectronDesktop
+      ? '127.0.0.1'
+      : process.env.WINHOOD_ALLOW_NETWORK_BIND === 'true'
+        ? process.env.WINHOOD_BIND_HOST || '0.0.0.0'
+        : '127.0.0.1');
 
-  app.listen(PORT, bindHost, () => {
-    console.log(`WinHood Benchmark Server listening on http://${bindHost}:${PORT}`);
-  });
+  const requestedPort = options?.port !== undefined ? options.port : PORT;
+
+  const listenOnPort = (portToTry: number): Promise<http.Server> =>
+    new Promise((resolve, reject) => {
+      const srv = app.listen(portToTry, bindHost, () => {
+        resolve(srv);
+      });
+      srv.once('error', (err: NodeJS.ErrnoException) => {
+        reject(err);
+      });
+    });
+
+  let server: http.Server;
+  try {
+    server = await listenOnPort(requestedPort);
+  } catch (err: any) {
+    if (err?.code === 'EADDRINUSE' && isElectronDesktop && requestedPort !== 0) {
+      // Dynamic fallback port on loopback for desktop mode
+      server = await listenOnPort(0);
+    } else {
+      throw err;
+    }
+  }
+
+  const addr = server.address();
+  const effectivePort =
+    typeof addr === 'object' && addr !== null ? addr.port : requestedPort;
+  const effectiveUrl = `http://${bindHost === '0.0.0.0' ? '127.0.0.1' : bindHost}:${effectivePort}`;
+
+  console.log(`WinHood Benchmark Server listening on http://${bindHost}:${effectivePort}`);
+
+  return {
+    app,
+    server,
+    host: bindHost,
+    port: effectivePort,
+    url: effectiveUrl,
+    dataDir,
+    close: () =>
+      new Promise<void>((resolve, reject) => {
+        server.close((err) => {
+          if (err) reject(err);
+          else resolve();
+        });
+      }),
+  };
 }
 
 const isEntrypoint =
   typeof process !== 'undefined' &&
   Array.isArray(process.argv) &&
-  process.argv[1] &&
+  Boolean(process.argv[1]) &&
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (isEntrypoint) {

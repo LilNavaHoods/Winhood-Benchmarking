@@ -1,0 +1,64 @@
+name: WinHood Multiplatform CI & Windows Desktop Verification
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  linux-validation:
+    name: Linux Fullstack, SonarCloud Methodology & Security Suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies deterministically
+        run: npm ci
+
+      - name: Typecheck (tsc --noEmit)
+        run: npm run lint
+
+      - name: Run unit, integration, security, and SonarCloud tests
+        run: npm test
+
+      - name: Build frontend and desktop bundles
+        run: npm run build:desktop
+
+  windows-desktop-validation:
+    name: Windows Desktop Lifecycle, userData & Packaging Verification
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22 on Windows
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies deterministically
+        run: npm ci
+
+      - name: Typecheck on Windows
+        run: npm run lint
+
+      - name: Run Windows path, scanner .bat/.cmd, and desktop lifecycle tests
+        run: npm test
+
+      - name: Build desktop bundle and SHA-256 manifest on Windows
+        run: npm run build:desktop
+
+      - name: Upload desktop build manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: winhood-desktop-build-manifest
+          path: dist-desktop/build-manifest.json

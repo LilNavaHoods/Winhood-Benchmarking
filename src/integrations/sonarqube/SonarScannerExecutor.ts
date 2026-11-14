@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type SpawnOptions } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { SonarScannerType } from '../../types/benchmark';
@@ -34,14 +34,90 @@ export interface ExecuteSonarScannerResult {
   errorMessage: string | null;
 }
 
+const FORBIDDEN_METACHAR_REGEX = /[&|;`$><\r\n\0]/;
+
+function validateSafeArg(arg: string, label: string): void {
+  if (FORBIDDEN_METACHAR_REGEX.test(arg)) {
+    throw new Error(
+      `SCANNER_UNSAFE_ARGUMENT_BLOCKED: Parâmetro '${label}' contém metacaracteres proibidos de interpretador de comandos.`
+    );
+  }
+}
+
+function quoteWindowsCmdArgument(arg: string): string {
+  validateSafeArg(arg, arg);
+  if (/[\s()^%!]/.test(arg)) {
+    return `"${arg.replace(/"/g, '""')}"`;
+  }
+  return arg;
+}
+
 /**
- * SonarScannerExecutor (P0)
- * Executes an official SonarScanner binary in an isolated child process (shell: false),
- * passes SONAR_TOKEN strictly via environment variables (never CLI args or properties file),
- * enforces timeout and memory bounds, and parses .scannerwork/report-task.txt to recover
- * the real Compute Engine ceTaskId.
+ * SonarScannerExecutor (Seção 5.5 e FASE 3)
+ * Executa o binário oficial do SonarScanner em um processo filho isolado (`shell: false`),
+ * suporta scripts `.bat`/`.cmd` no Windows 10/11 (mesmo em caminhos com espaços e parênteses como
+ * `C:\Program Files (x86)\...`), passa `SONAR_TOKEN` exclusivamente via variável de ambiente,
+ * grava arquivo temporário `.winhood-sonar-*.properties` sem sobrescrever `sonar-project.properties`
+ * existente do usuário e recupera `ceTaskId` de `.scannerwork/report-task.txt`.
  */
 export class SonarScannerExecutor {
+  /**
+   * Constrói a especificação segura de execução multi-plataforma (Linux/macOS/Windows).
+   * No Windows, executáveis `.bat` e `.cmd` (`sonar-scanner.bat`, `mvn.cmd`, `gradlew.bat`, `npx.cmd`)
+   * não podem ser iniciados diretamente via `CreateProcess` com `shell: false` (lançam `EINVAL` no Node.js).
+   * Este método valida rigorosamente cada argumento contra metacaracteres e invoca `cmd.exe /d /s /c`
+   * com `windowsVerbatimArguments: true` e `shell: false`.
+   */
+  public static buildPlatformSafeSpawnSpec(
+    executablePath: string,
+    args: string[],
+    platform: NodeJS.Platform = process.platform
+  ): {
+    command: string;
+    args: string[];
+    options: Pick<SpawnOptions, 'shell' | 'windowsVerbatimArguments' | 'windowsHide'>;
+  } {
+    validateSafeArg(executablePath, 'executablePath');
+    for (const arg of args) {
+      validateSafeArg(arg, 'scannerArg');
+    }
+
+    const isWin = platform === 'win32';
+    const lowerExec = executablePath.toLowerCase();
+    const isWinBatchScript =
+      isWin &&
+      (lowerExec.endsWith('.bat') ||
+        lowerExec.endsWith('.cmd') ||
+        lowerExec === 'npx' ||
+        lowerExec === 'mvn' ||
+        lowerExec === 'gradle');
+
+    if (isWinBatchScript) {
+      const comSpec = process.env.ComSpec || 'C:\\Windows\\System32\\cmd.exe';
+      const quotedCmd = quoteWindowsCmdArgument(executablePath);
+      const quotedArgs = args.map((a) => quoteWindowsCmdArgument(a)).join(' ');
+      const innerCommandLine = `"${quotedCmd}${quotedArgs ? ` ${quotedArgs}` : ''}"`;
+      return {
+        command: comSpec,
+        args: ['/d', '/s', '/c', innerCommandLine],
+        options: {
+          shell: false,
+          windowsVerbatimArguments: true,
+          windowsHide: true,
+        },
+      };
+    }
+
+    return {
+      command: executablePath,
+      args,
+      options: {
+        shell: false,
+        windowsHide: true,
+      },
+    };
+  }
+
   public static parseReportTaskFile(reportTaskPath: string): SonarReportTaskMetadata | null {
     try {
       if (!fs.existsSync(reportTaskPath)) return null;
@@ -103,9 +179,35 @@ export class SonarScannerExecutor {
       };
     }
 
-    // Write sonar-project.properties safely (never includes SONAR_TOKEN)
-    const propsFilePath = path.join(params.projectBaseDir, 'sonar-project.properties');
-    fs.writeFileSync(propsFilePath, params.propertiesContent, 'utf8');
+    // Gravar arquivo temporário dedicado (.winhood-sonar-*.properties) para NUNCA sobrescrever
+    // um sonar-project.properties já existente no projeto do usuário (Seção 5.5)
+    const tempPropsFileName = `.winhood-sonar-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.properties`;
+    const propsFilePath = path.join(params.projectBaseDir, tempPropsFileName);
+
+    try {
+      fs.writeFileSync(propsFilePath, params.propertiesContent, { encoding: 'utf8', mode: 0o600 });
+    } catch (writeErr: any) {
+      return {
+        executed: false,
+        exitCode: null,
+        timedOut: false,
+        durationMs: 0,
+        stdout: '',
+        stderr: '',
+        reportTask: null,
+        errorMessage: `Não foi possível gravar arquivo temporário de propriedades do scanner: ${writeErr?.message || String(writeErr)}`,
+      };
+    }
+
+    const cleanupTempProps = () => {
+      try {
+        if (fs.existsSync(propsFilePath)) {
+          fs.unlinkSync(propsFilePath);
+        }
+      } catch {
+        // Ignore cleanup errors
+      }
+    };
 
     const childEnv: NodeJS.ProcessEnv = {
       ...process.env,
@@ -117,18 +219,35 @@ export class SonarScannerExecutor {
       delete childEnv.SONAR_TOKEN;
     }
 
-    let command = params.executablePath;
-    let args: string[] = [`-Dproject.settings=${propsFilePath}`];
+    let rawCommand = params.executablePath;
+    let rawArgs: string[] = [`-Dproject.settings=${propsFilePath}`];
 
     if (params.scannerType === 'SONAR_SCANNER_MAVEN') {
-      command = params.executablePath;
-      args = ['sonar:sonar', '-B'];
+      rawCommand = params.executablePath;
+      rawArgs = ['sonar:sonar', '-B'];
     } else if (params.scannerType === 'SONAR_SCANNER_GRADLE') {
-      command = params.executablePath;
-      args = ['sonar', '--no-daemon'];
+      rawCommand = params.executablePath;
+      rawArgs = ['sonar', '--no-daemon'];
     } else if (params.scannerType === 'SONAR_SCANNER_NPM') {
-      command = 'npx';
-      args = ['--yes', '@sonar/scan', `-Dproject.settings=${propsFilePath}`];
+      rawCommand = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+      rawArgs = ['--yes', '@sonar/scan', `-Dproject.settings=${propsFilePath}`];
+    }
+
+    let spawnSpec: ReturnType<typeof SonarScannerExecutor.buildPlatformSafeSpawnSpec>;
+    try {
+      spawnSpec = SonarScannerExecutor.buildPlatformSafeSpawnSpec(rawCommand, rawArgs);
+    } catch (valErr: any) {
+      cleanupTempProps();
+      return {
+        executed: false,
+        exitCode: null,
+        timedOut: false,
+        durationMs: Math.round(performance.now() - startMs),
+        stdout: '',
+        stderr: '',
+        reportTask: null,
+        errorMessage: valErr?.message || String(valErr),
+      };
     }
 
     return new Promise((resolve) => {
@@ -138,13 +257,14 @@ export class SonarScannerExecutor {
 
       let child;
       try {
-        child = spawn(command, args, {
+        child = spawn(spawnSpec.command, spawnSpec.args, {
           cwd: params.projectBaseDir,
           env: childEnv,
-          shell: false,
+          ...spawnSpec.options,
           stdio: ['ignore', 'pipe', 'pipe'],
         });
       } catch (err: any) {
+        cleanupTempProps();
         resolve({
           executed: false,
           exitCode: null,
@@ -177,6 +297,7 @@ export class SonarScannerExecutor {
 
       child.on('error', (err) => {
         clearTimeout(timer);
+        cleanupTempProps();
         resolve({
           executed: false,
           exitCode: null,
@@ -191,6 +312,7 @@ export class SonarScannerExecutor {
 
       child.on('close', (code) => {
         clearTimeout(timer);
+        cleanupTempProps();
         const durationMs = Math.max(1, Math.round(performance.now() - startMs));
         const reportTaskCandidates = [
           path.join(params.projectBaseDir, '.scannerwork', 'report-task.txt'),

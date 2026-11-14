@@ -1565,6 +1565,124 @@ export interface SonarTaskRecord {
   evidenceSha256: string;
 }
 
+export type SonarStandardMeasurementState =
+  | 'MEASURED'
+  | 'NOT_MEASURED'
+  | 'NOT_COMPUTED'
+  | 'NOT_SUPPORTED'
+  | 'API_ERROR'
+  | 'PARTIAL'
+  | 'INCONCLUSIVE'
+  | 'FAILED';
+
+export type SonarRatingGrade = 'A' | 'B' | 'C' | 'D' | 'E' | 'NOT_MEASURED';
+
+export type SonarQualityModelMode = 'MQR' | 'STANDARD_EXPERIENCE' | 'HYBRID';
+
+export interface SonarNormalizedMetricItem {
+  originalKey: string;
+  originalName: string;
+  normalizedName: string;
+  qualityModel: 'MQR' | 'STANDARD';
+  sourceVersion: string;
+  rawValue: string | null;
+  numericValue: number | null;
+  ratingValue: 'A' | 'B' | 'C' | 'D' | 'E' | null;
+  availabilityState: SonarStandardMeasurementState;
+  unit: 'COUNT' | 'PERCENT' | 'RATING' | 'MINUTES' | 'LINES' | 'RATIO' | 'STATUS';
+  scope: 'OVERALL_CODE' | 'NEW_CODE';
+}
+
+export interface SonarOverallCodeMetrics {
+  bugs: number | null;
+  vulnerabilities: number | null;
+  codeSmells: number | null;
+  securityHotspots: number | null;
+  securityHotspotsReviewedPercent: number | null;
+  reliabilityRating: 'A' | 'B' | 'C' | 'D' | 'E' | null;
+  securityRating: 'A' | 'B' | 'C' | 'D' | 'E' | null;
+  maintainabilityRating: 'A' | 'B' | 'C' | 'D' | 'E' | null;
+  securityReviewRating: 'A' | 'B' | 'C' | 'D' | 'E' | null;
+  coveragePercent: number | null;
+  lineCoveragePercent: number | null;
+  branchCoveragePercent: number | null;
+  conditionCoveragePercent: number | null;
+  linesToCover: number | null;
+  uncoveredLines: number | null;
+  conditionsToCover: number | null;
+  uncoveredConditions: number | null;
+  coveredConditions: number | null;
+  duplicatedLinesDensityPercent: number | null;
+  duplicatedLines: number | null;
+  duplicatedBlocks: number | null;
+  technicalDebtMinutes: number | null;
+  cyclomaticComplexity: number | null;
+  cognitiveComplexity: number | null;
+  ncloc: number | null;
+  softwareQualityReliabilityIssues?: number | null;
+  softwareQualitySecurityIssues?: number | null;
+  softwareQualityMaintainabilityIssues?: number | null;
+}
+
+export interface SonarNewCodeMetrics {
+  definitionType:
+    | 'PREVIOUS_VERSION'
+    | 'NUMBER_OF_DAYS'
+    | 'SPECIFIC_VERSION'
+    | 'SPECIFIC_DATE'
+    | 'PULL_REQUEST'
+    | 'REFERENCE_BRANCH'
+    | 'UNKNOWN';
+  definitionValue: string | null;
+  periodDate: string | null;
+  scmLimitationNote: string | null;
+  newBugs: number | null;
+  newVulnerabilities: number | null;
+  newCodeSmells: number | null;
+  newSecurityHotspots: number | null;
+  newSecurityHotspotsReviewedPercent: number | null;
+  newReliabilityRating: 'A' | 'B' | 'C' | 'D' | 'E' | null;
+  newSecurityRating: 'A' | 'B' | 'C' | 'D' | 'E' | null;
+  newMaintainabilityRating: 'A' | 'B' | 'C' | 'D' | 'E' | null;
+  newCoveragePercent: number | null;
+  newLinesToCover: number | null;
+  newUncoveredLines: number | null;
+  newConditionsToCover: number | null;
+  newUncoveredConditions: number | null;
+  newCoveredConditions: number | null;
+  newDuplicatedLinesDensityPercent: number | null;
+  newLines: number | null;
+  newTechnicalDebtMinutes: number | null;
+}
+
+export interface SonarHotspotsBreakdown {
+  totalIdentified: number | null;
+  reviewedCount: number | null;
+  unreviewedCount: number | null;
+  reviewedSafeCount: number | null;
+  reviewedVulnerableCount: number | null;
+  reviewedFixedCount: number | null;
+  acceptedRiskCount: number | null;
+  reviewPercent: number | null;
+  measurementState: SonarStandardMeasurementState;
+}
+
+export interface SonarPaginationSummary {
+  endpoint?: string;
+  status?: 'COMPLETE' | 'PARTIAL' | 'FAILED' | 'NOT_AVAILABLE';
+  completeness?: 'COMPLETE' | 'PARTIAL' | 'FAILED' | 'NOT_AVAILABLE';
+  state?: 'COMPLETE' | 'PARTIAL' | 'FAILED' | 'NOT_AVAILABLE';
+  totalExpected: number | null;
+  totalReceived: number;
+  pendingCount: number | null;
+  totalReported?: number;
+  fetchedRecords?: number;
+  hitSonarSearchLimit10k?: boolean;
+  pagesFetched: number;
+  pageSize: number;
+  errorMessage?: string | null;
+}
+
 export interface SonarMeasuresRecord {
   id: string;
   analysisId: string;
@@ -1573,28 +1691,41 @@ export interface SonarMeasuresRecord {
   softwareName: string;
   commitHash: string;
   measuredAt: string;
+  measurementState?: SonarStandardMeasurementState;
+  qualityModel?: SonarQualityModelMode;
+  metricStates?: Record<string, SonarStandardMeasurementState>;
+  normalizedMetrics?: SonarNormalizedMetricItem[];
+  overallCode?: SonarOverallCodeMetrics;
+  newCode?: SonarNewCodeMetrics;
   metrics: {
-    bugs: number;
-    vulnerabilities: number;
-    securityHotspots: number;
-    securityHotspotsReviewedPercent: number;
-    codeSmells: number;
-    cyclomaticComplexity: number;
-    cognitiveComplexity: number;
-    duplicatedLinesDensityPercent: number;
-    duplicatedBlocks: number;
-    duplicatedLines: number;
-    ncloc: number;
-    technicalDebtMinutes: number;
-    maintainabilityRating: 'A' | 'B' | 'C' | 'D' | 'E';
-    reliabilityRating: 'A' | 'B' | 'C' | 'D' | 'E';
-    securityRating: 'A' | 'B' | 'C' | 'D' | 'E';
+    bugs: number | null;
+    vulnerabilities: number | null;
+    securityHotspots: number | null;
+    securityHotspotsReviewedPercent: number | null;
+    codeSmells: number | null;
+    cyclomaticComplexity: number | null;
+    cognitiveComplexity: number | null;
+    duplicatedLinesDensityPercent: number | null;
+    duplicatedBlocks: number | null;
+    duplicatedLines: number | null;
+    ncloc: number | null;
+    technicalDebtMinutes: number | null;
+    maintainabilityRating: SonarRatingGrade;
+    reliabilityRating: SonarRatingGrade;
+    securityRating: SonarRatingGrade;
+    securityReviewRating?: SonarRatingGrade;
     coveragePercent: number | null;
-    linesToCover: number;
-    uncoveredLines: number;
-    conditionsToCover: number;
+    lineCoveragePercent?: number | null;
+    branchCoveragePercent?: number | null;
+    conditionCoveragePercent?: number | null;
+    linesToCover: number | null;
+    uncoveredLines: number | null;
+    conditionsToCover: number | null;
+    uncoveredConditions?: number | null;
+    coveredConditions?: number | null;
     newCodeCoveragePercent: number | null;
     coverageReportSource: string;
+    coverageMeasurementState?: SonarStandardMeasurementState;
   };
   rawApiResponseHash: string;
 }
@@ -1620,7 +1751,11 @@ export interface SonarIssueRecord {
   message: string;
   effortMinutes: number;
   remediationGuidance: string;
-  hotspotReviewStatus?: 'TO_REVIEW' | 'REVIEWED_SAFE' | 'REVIEWED_FIXED' | 'REVIEWED_ACKNOWLEDGED';
+  hotspotReviewStatus?: 'TO_REVIEW' | 'REVIEWED_SAFE' | 'REVIEWED_FIXED' | 'REVIEWED_ACKNOWLEDGED' | 'REVIEWED_VULNERABLE';
+  hotspotResolution?: 'FIXED' | 'SAFE' | 'ACKNOWLEDGED' | null;
+  hotspotStatus?: 'TO_REVIEW' | 'REVIEWED';
+  cleanCodeAttribute?: string;
+  impacts?: Array<{ softwareQuality: 'SECURITY' | 'RELIABILITY' | 'MAINTAINABILITY'; severity: 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO' | 'BLOCKER' }>;
   evidenceSnippet: string;
   evidenceSha256: string;
 }
@@ -1628,55 +1763,93 @@ export interface SonarIssueRecord {
 export interface SonarQualityGateCondition {
   metricKey: string;
   metricLabel: string;
+  scope?: 'NEW_CODE' | 'OVERALL_CODE';
   comparator: 'GT' | 'LT' | 'EQ' | 'NE';
   errorThreshold: string;
   actualValue: string;
-  status: 'OK' | 'ERROR' | 'WARN';
+  status: 'OK' | 'ERROR' | 'WARN' | 'NONE' | 'NOT_COMPUTED';
+  reasonText?: string;
 }
 
 export interface SonarQualityGateRecord {
   id: string;
+  gateId?: string | null;
   analysisId: string;
   projectKey: string;
   softwareId: string;
   softwareName: string;
   gateName: string;
-  status: 'OK' | 'ERROR' | 'WARN' | 'NONE';
-  displayLabel: 'APROVADO' | 'REPROVADO' | 'ALERTA' | 'NÃO AVALIADO';
+  gateNameVerified?: boolean;
+  status: 'OK' | 'ERROR' | 'WARN' | 'NONE' | 'NOT_COMPUTED' | 'API_ERROR';
+  availabilityState?: SonarStandardMeasurementState;
+  displayLabel:
+    | 'APROVADO'
+    | 'REPROVADO'
+    | 'ALERTA'
+    | 'NÃO AVALIADO'
+    | 'NÃO CALCULADO'
+    | 'NÃO COMPUTADO'
+    | 'ERRO DE API';
+  fudgeFactorStatus?: 'APPLIED_SHORT_CHANGESET' | 'NOT_APPLIED' | 'UNKNOWN';
+  fudgeFactorExplanation?: string;
+  explanationSummary?: string;
   conditionsMetCount: number;
   conditionsFailedCount: number;
+  conditionsNotComputedCount?: number;
   failedMetrics: string[];
   conditions: SonarQualityGateCondition[];
   evaluatedAt: string;
 }
+
+export type SonarProfileVerificationState =
+  | 'VERIFIED_SONAR_WAY'
+  | 'VERIFIED_CUSTOM'
+  | 'NOT_VERIFIED'
+  | 'NOT_QUERIED'
+  | 'API_ERROR';
 
 export interface SonarQualityProfileRecord {
   id: string;
   key: string;
   name: string;
   language: string;
-  activeRulesCount: number;
+  activeRulesCount: number | null;
   isDefault: boolean;
-  updatedAt: string;
+  isBuiltIn?: boolean;
+  updatedAt: string | null;
+  origin?: 'SONAR_API_VERIFIED' | 'UNVERIFIED_DEFAULT';
+  verificationState?: SonarProfileVerificationState;
+  rulesSignature?: string | null;
 }
 
 export interface SonarAnalysisRecord {
   id: string;
   runId: string;
   instanceId: string;
+  projectId?: string;
   projectKey: string;
   softwareId: string;
   softwareName: string;
   softwareVersion: string;
   commitHash: string;
-  scannerUsed: SonarScannerType;
+  scannerUsed: SonarScannerType | string;
   scannerVersion: string;
   sonarVersion: string;
   qualityProfileName: string;
-  qualityGateStatus: 'OK' | 'ERROR' | 'WARN' | 'NONE';
+  qualityProfileVerificationState?: SonarProfileVerificationState;
+  qualityProfileVerification?: {
+    profileName: string;
+    profileKey: string;
+    language: string;
+    isBuiltIn: boolean;
+    isDefault: boolean;
+    verificationState: SonarProfileVerificationState;
+  };
+  qualityModelMode?: SonarQualityModelMode;
+  qualityGateStatus: 'OK' | 'ERROR' | 'WARN' | 'NONE' | 'NOT_COMPUTED' | 'API_ERROR';
   startedAt: string;
   completedAt: string;
-  status: 'COMPLETED' | 'FAILED' | 'CACHED_REUSED';
+  status: 'COMPLETED' | 'COMPLETED_WITH_WARNINGS' | 'PARTIAL' | 'FAILED' | 'CACHED_REUSED';
   sonarExecutionState?: SonarSyncExecutionState;
   isContractTestInstance?: boolean;
   cacheHit: boolean;
@@ -1685,8 +1858,21 @@ export interface SonarAnalysisRecord {
   qualityGateId: string;
   issuesCount: number;
   externalIssuesImportedCount: number;
+  issuesPagination?: SonarPaginationSummary;
+  hotspotsPagination?: SonarPaginationSummary;
+  hotspotsBreakdown?: SonarHotspotsBreakdown;
+  intermediateWarnings?: string[];
   evidenceSha256: string;
 }
+
+export type BackendConnectivityState =
+  | 'STARTING'
+  | 'ONLINE'
+  | 'OFFLINE'
+  | 'AUTH_REQUIRED'
+  | 'API_ERROR'
+  | 'RECOVERING'
+  | 'STOPPING';
 
 export interface SonarExecutionLogRecord {
   id: string;
@@ -1804,7 +1990,7 @@ export interface SonarABComparisonResult {
     project: SonarProjectRecord;
     measures: SonarMeasuresRecord['metrics'];
     qualityGate: SonarQualityGateRecord;
-    nativeSonarScore: number; // 0.00 - 5.00 derived strictly from Sonar ratings
+    nativeSonarScore: number | null; // 0.00 - 5.00 derived strictly from Sonar ratings, or null when unmeasured
     benchmarkCompositeScore: number; // 0.00 - 5.00 calculated by Benchmark Analyzer
     externalIssuesCount: number;
     nativeIssuesCount: number;
@@ -1813,7 +1999,7 @@ export interface SonarABComparisonResult {
     project: SonarProjectRecord;
     measures: SonarMeasuresRecord['metrics'];
     qualityGate: SonarQualityGateRecord;
-    nativeSonarScore: number;
+    nativeSonarScore: number | null;
     benchmarkCompositeScore: number;
     externalIssuesCount: number;
     nativeIssuesCount: number;

@@ -418,9 +418,60 @@ export class SonarQubeIntegrationService {
             : [],
         });
 
-        const qualityProfileKey = 'sonar-way-ts-26-11';
-        const rulesSignature = 'sonar-way-248-rules-v26.11';
         const sonarVersion = params.instance.version || '26.11.0.134175';
+
+        const apiClient = new SonarQubeApiClient({
+          serverUrl: params.instance.serverUrl,
+          token: params.token,
+          organizationKey: params.instance.organizationKey,
+        });
+
+        // Consultar Quality Profiles reais associados ao projeto/organização (Seção 11: nunca presumir Sonar way)
+        const qpRes = await apiClient.searchQualityProfiles(scannerConfig.projectKey);
+        let qualityProfileKey = 'NOT_VERIFIED';
+        let qualityProfileName = 'NOT_VERIFIED';
+        let rulesSignature = 'NOT_VERIFIED';
+        let qualityProfileVerificationState: SonarAnalysisRecord['qualityProfileVerificationState'] =
+          'NOT_VERIFIED';
+
+        if (!qpRes.ok) {
+          qualityProfileVerificationState = 'API_ERROR';
+        } else if (qpRes.data?.profiles && qpRes.data.profiles.length > 0) {
+          const profiles = qpRes.data.profiles;
+          const primary =
+            profiles.find((p) => p.language === 'ts' || p.language === 'js') || profiles[0];
+          qualityProfileKey = primary.key;
+          qualityProfileName = profiles
+            .map((p) => `${p.name} (${p.language}: ${p.activeRuleCount} regras)`)
+            .join(', ');
+          const totalActiveRules = profiles.reduce((acc, p) => acc + (p.activeRuleCount || 0), 0);
+          rulesSignature = `${profiles.map((p) => `${p.language}:${p.key}:${p.activeRuleCount}`).join('|')}|total=${totalActiveRules}`;
+          const allSonarWay = profiles.every((p) =>
+            p.name.toLowerCase().includes('sonar way')
+          );
+          qualityProfileVerificationState = allSonarWay
+            ? 'VERIFIED_SONAR_WAY'
+            : 'VERIFIED_CUSTOM';
+
+          // Atualizar catálogo de perfis em toolsDb com dados verificados
+          params.toolsDb.sonar_quality_profiles = profiles.map((p) => ({
+            id: `qp-${p.key}`,
+            key: p.key,
+            name: p.name,
+            language: p.language,
+            languageName: p.languageName,
+            activeRulesCount: p.activeRuleCount,
+            isDefault: p.isDefault,
+            isBuiltIn: p.isBuiltIn ?? p.name.toLowerCase().includes('sonar way'),
+            isCustom: !p.name.toLowerCase().includes('sonar way'),
+            parentKey: p.parentKey ?? null,
+            parentName: p.parentName ?? null,
+            verificationState: p.name.toLowerCase().includes('sonar way')
+              ? 'VERIFIED_SONAR_WAY'
+              : 'VERIFIED_CUSTOM',
+            updatedAt: p.rulesUpdatedAt || new Date().toISOString(),
+          }));
+        }
 
         // Verificar Cache Inteligente (Seção 11.4)
         const cacheKeyInput = {
@@ -459,12 +510,6 @@ export class SonarQubeIntegrationService {
             },
           };
         }
-
-        const apiClient = new SonarQubeApiClient({
-          serverUrl: params.instance.serverUrl,
-          token: params.token,
-          organizationKey: params.instance.organizationKey,
-        });
 
         // 1. Provisionar projeto no SonarQube
         const createRes = await apiClient.createProject(
@@ -568,7 +613,21 @@ export class SonarQubeIntegrationService {
           taskRecord.analysisId ||
           `anl-${computeSha256(`${scannerConfig.projectKey}|${Date.now()}`).slice(0, 10)}`;
 
-        // 3. Consultar medidas pela Web API (/api/measures/component)
+        // 4. Consultar issues e Security Hotspots pela Web API com paginação completa (Seção 12)
+        const issuesRes = await apiClient.fetchAllProjectIssues(scannerConfig.projectKey);
+        const hotspotsRes = await apiClient.fetchAllSecurityHotspots(scannerConfig.projectKey);
+
+        const parsedIssues = SonarResultParser.parseIssuesAndHotspots({
+          analysisId,
+          projectKey: scannerConfig.projectKey,
+          softwareId: params.software.id,
+          softwareName: params.software.name,
+          rawIssues: issuesRes.issues || [],
+          rawHotspots: hotspotsRes.hotspots || [],
+        });
+        params.toolsDb.sonar_issues.unshift(...parsedIssues);
+
+        // 5. Consultar medidas pela Web API (/api/measures/component)
         const measRes = await apiClient.getComponentMeasures(scannerConfig.projectKey);
         if (!measRes.ok || !measRes.data?.component) {
           throw new Error(
@@ -576,45 +635,71 @@ export class SonarQubeIntegrationService {
           );
         }
 
+        const rawMeasuresList = measRes.data.component.measures || [];
+        const rawReviewedPctMeasure = rawMeasuresList.find(
+          (m) => m.metric === 'security_hotspots_reviewed'
+        );
+        const measuredReviewPctFromApi =
+          rawReviewedPctMeasure?.value !== undefined
+            ? Number.parseFloat(rawReviewedPctMeasure.value)
+            : null;
+
+        const hotspotsBreakdown = SonarResultParser.computeHotspotsBreakdown(
+          hotspotsRes.ok ? hotspotsRes.hotspots : null,
+          {
+            apiError: !hotspotsRes.ok,
+            isPartial: hotspotsRes.pagination.completeness === 'PARTIAL',
+            measuredReviewPercentFromApi:
+              measuredReviewPctFromApi !== null && Number.isFinite(measuredReviewPctFromApi)
+                ? measuredReviewPctFromApi
+                : null,
+          }
+        );
+
+        const periodObj =
+          measRes.data.period ||
+          (measRes.data.periods && measRes.data.periods[0]) ||
+          undefined;
+
         const measuresRecord = SonarMetricsMapper.mapMeasuresPayload({
           analysisId,
           projectKey: scannerConfig.projectKey,
           softwareId: params.software.id,
           softwareName: params.software.name,
           commitHash: params.software.commitHash,
-          rawMeasures: measRes.data.component.measures || [],
+          rawMeasures: rawMeasuresList,
           rawApiResponseHash: measRes.rawHash,
+          newCodePeriodInfo: {
+            mode: periodObj?.mode,
+            parameter: periodObj?.parameter,
+            date: periodObj?.date,
+            scmLimitationNote: scannerConfig.scmLimitationWarning,
+          },
         });
         params.toolsDb.sonar_measures.unshift(measuresRecord);
 
-        // 4. Consultar issues e Security Hotspots pela Web API
-        const issuesRes = await apiClient.searchProjectIssues(scannerConfig.projectKey);
-        const hotspotsRes = await apiClient.searchSecurityHotspots(scannerConfig.projectKey);
-
-        const parsedIssues = SonarResultParser.parseIssuesAndHotspots({
-          analysisId,
-          projectKey: scannerConfig.projectKey,
-          softwareId: params.software.id,
-          softwareName: params.software.name,
-          rawIssues: issuesRes.data?.issues || [],
-          rawHotspots: hotspotsRes.data?.hotspots || [],
-        });
-        params.toolsDb.sonar_issues.unshift(...parsedIssues);
-
-        // 5. Consultar Quality Gate (/api/qualitygates/project_status)
+        // 6. Consultar Quality Gate associado e status das condições (/api/qualitygates/get_by_project e /api/qualitygates/project_status)
+        const qgNameRes = await apiClient.getProjectQualityGate(scannerConfig.projectKey);
         const qgRes = await apiClient.getQualityGateProjectStatus(scannerConfig.projectKey);
         const qgRecord = SonarQualityGateMapper.mapProjectStatusPayload({
           analysisId,
           projectKey: scannerConfig.projectKey,
           softwareId: params.software.id,
           softwareName: params.software.name,
+          gateName: qgNameRes.data?.qualityGate?.name || null,
+          apiError: !qgRes.ok,
+          apiErrorMessage: qgRes.error,
+          newLinesCount: measuresRecord.newCode?.newLines ?? null,
+          newLinesToCoverCount: measuresRecord.newCode?.newLinesToCover ?? null,
           projectStatus: qgRes.data?.projectStatus,
         });
         params.toolsDb.sonar_quality_gates.unshift(qgRecord);
 
         // Persistir payloads originais da Web API com hashes SHA-256 para auditabilidade integral
         try {
-          const reportsDir = path.resolve(process.cwd(), '.winhood_data', 'sonar_reports');
+          const baseDataDir =
+            process.env.WINHOOD_DATA_DIR || path.resolve(process.cwd(), '.winhood_data');
+          const reportsDir = path.join(baseDataDir, 'sonar_reports');
           fs.mkdirSync(reportsDir, { recursive: true });
           const rawBundle = {
             analysisId,
@@ -627,10 +712,14 @@ export class SonarQubeIntegrationService {
               hotspotsSha256: hotspotsRes.rawHash,
               qualityGateSha256: qgRes.rawHash,
             },
+            pagination: {
+              issues: issuesRes.pagination,
+              hotspots: hotspotsRes.pagination,
+            },
             rawPayloads: {
               measures: measRes.data,
-              issues: issuesRes.data,
-              hotspots: hotspotsRes.data,
+              issuesCount: issuesRes.issues.length,
+              hotspotsCount: hotspotsRes.hotspots.length,
               qualityGate: qgRes.data,
             },
           };
@@ -658,7 +747,7 @@ export class SonarQubeIntegrationService {
           scmFullCloneAvailable: scannerConfig.scmFullCloneAvailable,
           scmLimitationWarning: scannerConfig.scmLimitationWarning,
           qualityProfileKey,
-          qualityProfileName: 'Sonar way (Padronizado A/B)',
+          qualityProfileName,
           qualityGateName: qgRecord.gateName,
           scannerSelected: scannerConfig.scannerType,
           scannerPropertiesUsed: scannerConfig.propertiesRecord,
@@ -691,7 +780,8 @@ export class SonarQubeIntegrationService {
           scannerUsed: scannerConfig.scannerType,
           scannerVersion: scannerConfig.scannerVersion,
           sonarVersion,
-          qualityProfileName: 'Sonar way (Padronizado A/B)',
+          qualityProfileName,
+          qualityProfileVerificationState,
           qualityGateStatus: qgRecord.status,
           startedAt: taskRecord.submittedAt,
           completedAt: nowIso,
@@ -704,6 +794,9 @@ export class SonarQubeIntegrationService {
           qualityGateId: qgRecord.id,
           issuesCount: parsedIssues.length,
           externalIssuesImportedCount: externalCount,
+          issuesPagination: issuesRes.pagination,
+          hotspotsPagination: hotspotsRes.pagination,
+          hotspotsBreakdown,
           evidenceSha256: computeSha256(
             `${analysisId}|${measuresRecord.rawApiResponseHash}|${qgRecord.status}|${parsedIssues.length}`
           ),
@@ -728,7 +821,8 @@ export class SonarQubeIntegrationService {
   /**
    * Inicia um servidor HTTP efêmero local implementando os contratos oficiais da Web API do SonarQube
    * (/api/system/status, /api/authentication/validate, /api/projects/create, /api/ce/task,
-   * /api/measures/component, /api/issues/search, /api/hotspots/search, /api/qualitygates/project_status)
+   * /api/measures/component, /api/issues/search, /api/hotspots/search, /api/qualitygates/project_status,
+   * /api/qualitygates/get_by_project, /api/qualityprofiles/search)
    * alimentado pela análise estática real sobre os arquivos dos softwares A e B.
    * Também suporta injeção de falhas para validar todos os 12 cenários negativos exigidos na Seção 14.
    */
@@ -851,6 +945,51 @@ export class SonarQubeIntegrationService {
         return;
       }
 
+      if (pathname === '/api/qualityprofiles/search') {
+        res.writeHead(200);
+        res.end(
+          JSON.stringify({
+            profiles: [
+              {
+                key: 'sonar-way-ts-26-11',
+                name: 'Sonar way',
+                language: 'ts',
+                languageName: 'TypeScript',
+                activeRuleCount: 248,
+                isDefault: true,
+                isBuiltIn: true,
+                rulesUpdatedAt: '2026-11-04T15:13:10Z',
+              },
+              {
+                key: 'sonar-way-sql-26-11',
+                name: 'Sonar way',
+                language: 'sql',
+                languageName: 'SQL',
+                activeRuleCount: 94,
+                isDefault: true,
+                isBuiltIn: true,
+                rulesUpdatedAt: '2026-11-04T15:13:10Z',
+              },
+            ],
+          })
+        );
+        return;
+      }
+
+      if (pathname === '/api/qualitygates/get_by_project') {
+        res.writeHead(200);
+        res.end(
+          JSON.stringify({
+            qualityGate: {
+              id: 'qg-sonar-way-default',
+              name: 'Sonar way',
+              default: true,
+            },
+          })
+        );
+        return;
+      }
+
       if (pathname === '/api/ce/task') {
         const taskId = reqUrl.searchParams.get('id') || 'ce-default';
         if (taskId.includes('interrupted')) {
@@ -939,7 +1078,7 @@ export class SonarQubeIntegrationService {
           : 1;
         const dup = stats?.computedMetrics.duplicatedLinesPercent ?? 2.4;
         const debt = stats?.computedMetrics.technicalDebtMinutes ?? 45;
-        const cov = stats?.computedMetrics.testCoveragePercent ?? 82.5;
+        const cov = stats?.computedMetrics.testCoveragePercent ?? null;
         const analyzedFilesCount = stats?.toolExecutions[0]?.analyzedFilesCount || 4;
         const ncloc = analyzedFilesCount * 62;
 
@@ -947,43 +1086,78 @@ export class SonarQubeIntegrationService {
         const secRating = vulns === 0 ? '1.0' : vulns <= 1 ? '3.0' : '5.0';
         const maintRating = debt <= 30 ? '1.0' : debt <= 90 ? '2.0' : '3.0';
 
+        const measuresPayload: Array<{
+          metric: string;
+          value?: string;
+          period?: { value?: string };
+        }> = [
+          { metric: 'bugs', value: String(bugs) },
+          { metric: 'new_bugs', period: { value: String(bugs) } },
+          { metric: 'vulnerabilities', value: String(vulns) },
+          { metric: 'new_vulnerabilities', period: { value: String(vulns) } },
+          { metric: 'security_hotspots', value: String(hotspots) },
+          { metric: 'new_security_hotspots', period: { value: String(hotspots) } },
+          { metric: 'security_hotspots_reviewed', value: vulns === 0 ? '100.0' : '50.0' },
+          { metric: 'new_security_hotspots_reviewed', period: { value: vulns === 0 ? '100.0' : '50.0' } },
+          { metric: 'code_smells', value: String(smells) },
+          { metric: 'new_code_smells', period: { value: String(smells) } },
+          {
+            metric: 'complexity',
+            value: String(Math.round((stats?.computedMetrics.avgCyclomaticComplexity || 4) * 6)),
+          },
+          {
+            metric: 'cognitive_complexity',
+            value: String(Math.round((stats?.computedMetrics.avgCognitiveComplexity || 3) * 5)),
+          },
+          { metric: 'duplicated_lines_density', value: String(dup) },
+          { metric: 'new_duplicated_lines_density', period: { value: String(dup) } },
+          { metric: 'duplicated_blocks', value: String(dup > 5 ? 3 : 0) },
+          { metric: 'duplicated_lines', value: String(Math.round((ncloc * dup) / 100)) },
+          { metric: 'new_duplicated_lines', period: { value: String(Math.round((ncloc * dup) / 100)) } },
+          { metric: 'ncloc', value: String(ncloc) },
+          { metric: 'new_lines', period: { value: String(Math.max(25, Math.round(ncloc * 0.4))) } },
+          { metric: 'sqale_index', value: String(debt) },
+          { metric: 'new_technical_debt', period: { value: String(debt) } },
+          { metric: 'sqale_rating', value: maintRating },
+          { metric: 'new_maintainability_rating', period: { value: maintRating } },
+          { metric: 'reliability_rating', value: relRating },
+          { metric: 'new_reliability_rating', period: { value: relRating } },
+          { metric: 'security_rating', value: secRating },
+          { metric: 'new_security_rating', period: { value: secRating } },
+        ];
+
+        if (cov !== null && cov !== undefined) {
+          measuresPayload.push(
+            { metric: 'coverage', value: String(cov) },
+            { metric: 'line_coverage', value: String(cov) },
+            { metric: 'lines_to_cover', value: String(Math.round(ncloc * 0.7)) },
+            {
+              metric: 'uncovered_lines',
+              value: String(Math.round(ncloc * 0.7 * (1 - cov / 100))),
+            },
+            { metric: 'conditions_to_cover', value: '24' },
+            { metric: 'new_coverage', period: { value: String(cov) } },
+            { metric: 'new_line_coverage', period: { value: String(cov) } },
+            { metric: 'new_lines_to_cover', period: { value: String(Math.round(ncloc * 0.35)) } },
+            {
+              metric: 'new_uncovered_lines',
+              period: { value: String(Math.round(ncloc * 0.35 * (1 - cov / 100))) },
+            }
+          );
+        }
+
         res.writeHead(200);
         res.end(
           JSON.stringify({
             component: {
               key: compKey,
               name: compKey,
-              measures: [
-                { metric: 'bugs', value: String(bugs) },
-                { metric: 'vulnerabilities', value: String(vulns) },
-                { metric: 'security_hotspots', value: String(hotspots) },
-                { metric: 'security_hotspots_reviewed', value: vulns === 0 ? '100.0' : '50.0' },
-                { metric: 'code_smells', value: String(smells) },
-                {
-                  metric: 'complexity',
-                  value: String(Math.round((stats?.computedMetrics.avgCyclomaticComplexity || 4) * 6)),
-                },
-                {
-                  metric: 'cognitive_complexity',
-                  value: String(Math.round((stats?.computedMetrics.avgCognitiveComplexity || 3) * 5)),
-                },
-                { metric: 'duplicated_lines_density', value: String(dup) },
-                { metric: 'duplicated_blocks', value: String(dup > 5 ? 3 : 0) },
-                { metric: 'duplicated_lines', value: String(Math.round((ncloc * dup) / 100)) },
-                { metric: 'ncloc', value: String(ncloc) },
-                { metric: 'sqale_index', value: String(debt) },
-                { metric: 'sqale_rating', value: maintRating },
-                { metric: 'reliability_rating', value: relRating },
-                { metric: 'security_rating', value: secRating },
-                { metric: 'coverage', value: String(cov) },
-                { metric: 'lines_to_cover', value: String(Math.round(ncloc * 0.7)) },
-                {
-                  metric: 'uncovered_lines',
-                  value: String(Math.round(ncloc * 0.7 * (1 - cov / 100))),
-                },
-                { metric: 'conditions_to_cover', value: '24' },
-                { metric: 'new_coverage', value: String(cov) },
-              ],
+              measures: measuresPayload,
+            },
+            period: {
+              mode: 'REFERENCE_BRANCH',
+              parameter: 'main',
+              date: new Date().toISOString(),
             },
           })
         );
@@ -992,12 +1166,14 @@ export class SonarQubeIntegrationService {
 
       if (pathname === '/api/issues/search') {
         const compKey = reqUrl.searchParams.get('componentKeys') || '';
+        const page = Math.max(1, Number.parseInt(reqUrl.searchParams.get('p') || '1', 10));
+        const pageSize = Math.max(1, Number.parseInt(reqUrl.searchParams.get('ps') || '100', 10));
         const stats =
           realStatsByProjectKey.get(compKey) ||
           Array.from(realStatsByProjectKey.values())[0];
         const findings = stats?.findings || [];
 
-        const issues = findings.map((f, idx) => {
+        const allIssues = findings.map((f, idx) => {
           const isExternal = f.toolId === 'opengrep-sast' || f.toolId === 'gitleaks-secrets';
           const engine =
             f.toolId === 'opengrep-sast'
@@ -1034,21 +1210,38 @@ export class SonarQubeIntegrationService {
           };
         });
 
+        const startIdx = (page - 1) * pageSize;
+        const pagedIssues = allIssues.slice(startIdx, startIdx + pageSize);
+
         res.writeHead(200);
-        res.end(JSON.stringify({ total: issues.length, issues }));
+        res.end(
+          JSON.stringify({
+            total: allIssues.length,
+            p: page,
+            ps: pageSize,
+            paging: {
+              pageIndex: page,
+              pageSize,
+              total: allIssues.length,
+            },
+            issues: pagedIssues,
+          })
+        );
         return;
       }
 
       if (pathname === '/api/hotspots/search') {
         const projKey = reqUrl.searchParams.get('projectKey') || '';
+        const page = Math.max(1, Number.parseInt(reqUrl.searchParams.get('p') || '1', 10));
+        const pageSize = Math.max(1, Number.parseInt(reqUrl.searchParams.get('ps') || '100', 10));
         const stats =
           realStatsByProjectKey.get(projKey) ||
           Array.from(realStatsByProjectKey.values())[0];
-        const hasWeakCrypto = (stats?.findings || []).some((f) =>
-          f.originalRuleId.includes('CRYPTO') || f.originalRuleId.includes('PRNG')
+        const hasWeakCrypto = (stats?.findings || []).some(
+          (f) => f.originalRuleId.includes('CRYPTO') || f.originalRuleId.includes('PRNG')
         );
 
-        const hotspots = hasWeakCrypto
+        const allHotspots = hasWeakCrypto
           ? [
               {
                 key: `hs-${projKey}-crypto-1`,
@@ -1078,8 +1271,20 @@ export class SonarQubeIntegrationService {
               },
             ];
 
+        const startIdx = (page - 1) * pageSize;
+        const pagedHotspots = allHotspots.slice(startIdx, startIdx + pageSize);
+
         res.writeHead(200);
-        res.end(JSON.stringify({ hotspots }));
+        res.end(
+          JSON.stringify({
+            paging: {
+              pageIndex: page,
+              pageSize,
+              total: allHotspots.length,
+            },
+            hotspots: pagedHotspots,
+          })
+        );
         return;
       }
 
@@ -1090,45 +1295,53 @@ export class SonarQubeIntegrationService {
           Array.from(realStatsByProjectKey.values())[0];
 
         const vulns = stats?.computedMetrics.vulnerabilities ?? 0;
-        const cov = stats?.computedMetrics.testCoveragePercent ?? 82.5;
+        const cov = stats?.computedMetrics.testCoveragePercent ?? null;
         const dup = stats?.computedMetrics.duplicatedLinesPercent ?? 2.4;
 
         const secStatus = vulns === 0 ? 'OK' : 'ERROR';
-        const covStatus = cov >= 80 ? 'OK' : 'ERROR';
         const dupStatus = dup <= 5.0 ? 'OK' : 'ERROR';
-        const overallStatus =
-          secStatus === 'OK' && covStatus === 'OK' && dupStatus === 'OK'
-            ? 'OK'
-            : 'ERROR';
+        const conditions: Array<{
+          status: 'OK' | 'ERROR' | 'WARN';
+          metricKey: string;
+          comparator: 'GT' | 'LT' | 'EQ' | 'NE';
+          errorThreshold: string;
+          actualValue: string;
+        }> = [
+          {
+            status: secStatus,
+            metricKey: 'new_security_rating',
+            comparator: 'GT',
+            errorThreshold: '1',
+            actualValue: vulns === 0 ? '1' : '5',
+          },
+          {
+            status: dupStatus,
+            metricKey: 'new_duplicated_lines_density',
+            comparator: 'GT',
+            errorThreshold: '5',
+            actualValue: String(dup),
+          },
+        ];
+
+        if (cov !== null && cov !== undefined) {
+          conditions.push({
+            status: cov >= 80 ? 'OK' : 'ERROR',
+            metricKey: 'new_coverage',
+            comparator: 'LT',
+            errorThreshold: '80',
+            actualValue: String(cov),
+          });
+        }
+
+        const overallStatus = conditions.every((c) => c.status === 'OK') ? 'OK' : 'ERROR';
 
         res.writeHead(200);
         res.end(
           JSON.stringify({
             projectStatus: {
               status: overallStatus,
-              conditions: [
-                {
-                  status: secStatus,
-                  metricKey: 'new_security_rating',
-                  comparator: 'GT',
-                  errorThreshold: '1',
-                  actualValue: vulns === 0 ? '1' : '5',
-                },
-                {
-                  status: covStatus,
-                  metricKey: 'new_coverage',
-                  comparator: 'LT',
-                  errorThreshold: '80',
-                  actualValue: String(cov),
-                },
-                {
-                  status: dupStatus,
-                  metricKey: 'new_duplicated_lines_density',
-                  comparator: 'GT',
-                  errorThreshold: '5',
-                  actualValue: String(dup),
-                },
-              ],
+              ignoredConditions: false,
+              conditions,
             },
           })
         );
@@ -1253,20 +1466,43 @@ export class SonarQubeIntegrationService {
       const mA = resA.measures.metrics;
       const mB = resB.measures.metrics;
 
+      const compareLowerBetter = (
+        valA: number | null,
+        valB: number | null
+      ): 'SOFTWARE_A' | 'SOFTWARE_B' | 'TIE' | 'NOT_COLLECTED' => {
+        if (valA === null || valB === null) return 'NOT_COLLECTED';
+        if (valA === valB) return 'TIE';
+        return valA < valB ? 'SOFTWARE_A' : 'SOFTWARE_B';
+      };
+
+      const compareHigherBetter = (
+        valA: number | null,
+        valB: number | null
+      ): 'SOFTWARE_A' | 'SOFTWARE_B' | 'TIE' | 'NOT_COLLECTED' => {
+        if (valA === null || valB === null) return 'NOT_COLLECTED';
+        if (valA === valB) return 'TIE';
+        return valA > valB ? 'SOFTWARE_A' : 'SOFTWARE_B';
+      };
+
+      const fmtVal = (v: number | null, suffix = ''): string =>
+        v !== null ? `${v}${suffix}` : 'NOT_MEASURED';
+
       const comparison: SonarABComparisonResult = {
         comparisonId: `sonar-ab-${Date.now()}`,
         comparedAt: new Date().toISOString(),
-        equivalenceVerified: true,
+        equivalenceVerified:
+          resA.project.qualityProfileName === resB.project.qualityProfileName &&
+          resA.qualityGate.gateName === resB.qualityGate.gateName,
         equivalenceNotes: [
-          `Ambos os softwares foram analisados sequencialmente sob SonarQube Community Build v${activeInstance.version || '26.11.0.134175'}.`,
-          `Mesmo perfil de qualidade ("Sonar way") e mesmo Quality Gate ("Sonar way (Padronizado A/B)") aplicados sem alterações silenciosas.`,
-          `Cobertura de testes importada dos relatórios reais de execução de testes de cada software (o SonarQube não executa testes unitários).`,
+          `Ambos os softwares foram analisados sequencialmente sob SonarQube / SonarCloud v${activeInstance.version || '26.11.0.134175'}.`,
+          `Perfil de qualidade verificado: "${resA.project.qualityProfileName}" e Quality Gate verificado: "${resA.qualityGate.gateName}".`,
+          `Cobertura de testes importada dos relatórios reais de execução de testes de cada software (ausência de cobertura permanece como NOT_MEASURED).`,
         ],
         sharedConditions: {
           sonarVersion: activeInstance.version || '26.11.0.134175',
           scannerVersion: resA.analysisRecord.scannerVersion,
-          qualityProfile: 'Sonar way (TypeScript / SQL)',
-          qualityGate: 'Sonar way (Padronizado A/B)',
+          qualityProfile: resA.project.qualityProfileName,
+          qualityGate: resA.qualityGate.gateName,
           coverageCriteria: 'Importação LCOV/JUnit com limiar >= 80% de linhas cobertas',
           newCodeDefinition: 'Reference Branch (main) / Commit Baseline',
           executionOrder: 'SEQUENTIAL_SHARED_INSTANCE',
@@ -1301,124 +1537,91 @@ export class SonarQubeIntegrationService {
                 ? 'TIE'
                 : resA.qualityGate.status === 'OK'
                   ? 'SOFTWARE_A'
-                  : 'SOFTWARE_B',
+                  : resB.qualityGate.status === 'OK'
+                    ? 'SOFTWARE_B'
+                    : 'TIE',
           },
           {
             metricKey: 'bugs',
             label: 'Bugs (Confiabilidade Estática)',
             sourceType: 'SONARQUBE_NATIVE',
-            softwareAValue: `${mA.bugs} (Rating ${mA.reliabilityRating})`,
-            softwareBValue: `${mB.bugs} (Rating ${mB.reliabilityRating})`,
-            betterSoftware:
-              mA.bugs === mB.bugs ? 'TIE' : mA.bugs < mB.bugs ? 'SOFTWARE_A' : 'SOFTWARE_B',
+            softwareAValue: `${fmtVal(mA.bugs)} (Rating ${mA.reliabilityRating})`,
+            softwareBValue: `${fmtVal(mB.bugs)} (Rating ${mB.reliabilityRating})`,
+            betterSoftware: compareLowerBetter(mA.bugs, mB.bugs),
           },
           {
             metricKey: 'vulnerabilities',
             label: 'Vulnerabilidades Estáticas',
             sourceType: 'SONARQUBE_NATIVE',
-            softwareAValue: `${mA.vulnerabilities} (Rating ${mA.securityRating})`,
-            softwareBValue: `${mB.vulnerabilities} (Rating ${mB.securityRating})`,
-            betterSoftware:
-              mA.vulnerabilities === mB.vulnerabilities
-                ? 'TIE'
-                : mA.vulnerabilities < mB.vulnerabilities
-                  ? 'SOFTWARE_A'
-                  : 'SOFTWARE_B',
+            softwareAValue: `${fmtVal(mA.vulnerabilities)} (Rating ${mA.securityRating})`,
+            softwareBValue: `${fmtVal(mB.vulnerabilities)} (Rating ${mB.securityRating})`,
+            betterSoftware: compareLowerBetter(mA.vulnerabilities, mB.vulnerabilities),
           },
           {
             metricKey: 'security_hotspots',
             label: 'Security Hotspots (% Revisados)',
             sourceType: 'SONARQUBE_NATIVE',
-            softwareAValue: `${mA.securityHotspots} (${mA.securityHotspotsReviewedPercent}% rev.)`,
-            softwareBValue: `${mB.securityHotspots} (${mB.securityHotspotsReviewedPercent}% rev.)`,
-            betterSoftware:
-              mA.securityHotspotsReviewedPercent === mB.securityHotspotsReviewedPercent
-                ? 'TIE'
-                : mA.securityHotspotsReviewedPercent > mB.securityHotspotsReviewedPercent
-                  ? 'SOFTWARE_A'
-                  : 'SOFTWARE_B',
+            softwareAValue: `${fmtVal(mA.securityHotspots)} (${fmtVal(mA.securityHotspotsReviewedPercent, '% rev.')})`,
+            softwareBValue: `${fmtVal(mB.securityHotspots)} (${fmtVal(mB.securityHotspotsReviewedPercent, '% rev.')})`,
+            betterSoftware: compareHigherBetter(
+              mA.securityHotspotsReviewedPercent,
+              mB.securityHotspotsReviewedPercent
+            ),
           },
           {
             metricKey: 'code_smells',
             label: 'Code Smells & Manutenibilidade',
             sourceType: 'SONARQUBE_NATIVE',
-            softwareAValue: `${mA.codeSmells} (Rating ${mA.maintainabilityRating})`,
-            softwareBValue: `${mB.codeSmells} (Rating ${mB.maintainabilityRating})`,
-            betterSoftware:
-              mA.codeSmells === mB.codeSmells
-                ? 'TIE'
-                : mA.codeSmells < mB.codeSmells
-                  ? 'SOFTWARE_A'
-                  : 'SOFTWARE_B',
+            softwareAValue: `${fmtVal(mA.codeSmells)} (Rating ${mA.maintainabilityRating})`,
+            softwareBValue: `${fmtVal(mB.codeSmells)} (Rating ${mB.maintainabilityRating})`,
+            betterSoftware: compareLowerBetter(mA.codeSmells, mB.codeSmells),
           },
           {
             metricKey: 'complexity',
             label: 'Complexidade Ciclomática / Cognitiva',
             sourceType: 'SONARQUBE_NATIVE',
-            softwareAValue: `${mA.cyclomaticComplexity} / ${mA.cognitiveComplexity}`,
-            softwareBValue: `${mB.cyclomaticComplexity} / ${mB.cognitiveComplexity}`,
-            betterSoftware:
-              mA.cognitiveComplexity === mB.cognitiveComplexity
-                ? 'TIE'
-                : mA.cognitiveComplexity < mB.cognitiveComplexity
-                  ? 'SOFTWARE_A'
-                  : 'SOFTWARE_B',
+            softwareAValue: `${fmtVal(mA.cyclomaticComplexity)} / ${fmtVal(mA.cognitiveComplexity)}`,
+            softwareBValue: `${fmtVal(mB.cyclomaticComplexity)} / ${fmtVal(mB.cognitiveComplexity)}`,
+            betterSoftware: compareLowerBetter(mA.cognitiveComplexity, mB.cognitiveComplexity),
           },
           {
             metricKey: 'duplicated_lines_density',
             label: 'Densidade de Duplicação (%)',
             sourceType: 'SONARQUBE_NATIVE',
-            softwareAValue: `${mA.duplicatedLinesDensityPercent}%`,
-            softwareBValue: `${mB.duplicatedLinesDensityPercent}%`,
-            betterSoftware:
-              mA.duplicatedLinesDensityPercent === mB.duplicatedLinesDensityPercent
-                ? 'TIE'
-                : mA.duplicatedLinesDensityPercent < mB.duplicatedLinesDensityPercent
-                  ? 'SOFTWARE_A'
-                  : 'SOFTWARE_B',
+            softwareAValue: fmtVal(mA.duplicatedLinesDensityPercent, '%'),
+            softwareBValue: fmtVal(mB.duplicatedLinesDensityPercent, '%'),
+            betterSoftware: compareLowerBetter(
+              mA.duplicatedLinesDensityPercent,
+              mB.duplicatedLinesDensityPercent
+            ),
           },
           {
             metricKey: 'sqale_index',
             label: 'Dívida Técnica (Minutos)',
             sourceType: 'SONARQUBE_NATIVE',
-            softwareAValue: `${mA.technicalDebtMinutes} min`,
-            softwareBValue: `${mB.technicalDebtMinutes} min`,
-            betterSoftware:
-              mA.technicalDebtMinutes === mB.technicalDebtMinutes
-                ? 'TIE'
-                : mA.technicalDebtMinutes < mB.technicalDebtMinutes
-                  ? 'SOFTWARE_A'
-                  : 'SOFTWARE_B',
+            softwareAValue: fmtVal(mA.technicalDebtMinutes, ' min'),
+            softwareBValue: fmtVal(mB.technicalDebtMinutes, ' min'),
+            betterSoftware: compareLowerBetter(mA.technicalDebtMinutes, mB.technicalDebtMinutes),
           },
           {
             metricKey: 'coverage',
             label: 'Cobertura de Testes (Importada de Relatório)',
             sourceType: 'EXTERNAL_TEST_REPORT_IMPORTED',
             softwareAValue:
-              mA.coveragePercent !== null ? `${mA.coveragePercent}%` : 'Não coletada',
+              mA.coveragePercent !== null ? `${mA.coveragePercent}%` : 'NOT_MEASURED',
             softwareBValue:
-              mB.coveragePercent !== null ? `${mB.coveragePercent}%` : 'Não coletada',
-            betterSoftware:
-              mA.coveragePercent === null || mB.coveragePercent === null
-                ? 'NOT_COLLECTED'
-                : mA.coveragePercent === mB.coveragePercent
-                  ? 'TIE'
-                  : mA.coveragePercent > mB.coveragePercent
-                    ? 'SOFTWARE_A'
-                    : 'SOFTWARE_B',
+              mB.coveragePercent !== null ? `${mB.coveragePercent}%` : 'NOT_MEASURED',
+            betterSoftware: compareHigherBetter(mA.coveragePercent, mB.coveragePercent),
           },
           {
             metricKey: 'native_sonar_score',
-            label: 'Índice Nativo SonarQube (0.00 - 5.00)',
+            label: 'Índice Agregado Ratings SonarQube (0.00 - 5.00)',
             sourceType: 'SONARQUBE_NATIVE',
-            softwareAValue: nativeScoreA.toFixed(2),
-            softwareBValue: nativeScoreB.toFixed(2),
-            betterSoftware:
-              nativeScoreA === nativeScoreB
-                ? 'TIE'
-                : nativeScoreA > nativeScoreB
-                  ? 'SOFTWARE_A'
-                  : 'SOFTWARE_B',
+            softwareAValue:
+              nativeScoreA !== null ? nativeScoreA.toFixed(2) : 'NOT_MEASURED',
+            softwareBValue:
+              nativeScoreB !== null ? nativeScoreB.toFixed(2) : 'NOT_MEASURED',
+            betterSoftware: compareHigherBetter(nativeScoreA, nativeScoreB),
           },
           {
             metricKey: 'benchmark_composite_score',
@@ -1426,12 +1629,10 @@ export class SonarQubeIntegrationService {
             sourceType: 'BENCHMARK_CALCULATED',
             softwareAValue: params.compositeScoreA.toFixed(2),
             softwareBValue: params.compositeScoreB.toFixed(2),
-            betterSoftware:
-              params.compositeScoreA === params.compositeScoreB
-                ? 'TIE'
-                : params.compositeScoreA > params.compositeScoreB
-                  ? 'SOFTWARE_A'
-                  : 'SOFTWARE_B',
+            betterSoftware: compareHigherBetter(
+              params.compositeScoreA,
+              params.compositeScoreB
+            ),
           },
         ],
       };
@@ -1645,7 +1846,7 @@ export class SonarQubeIntegrationService {
         abResult.equivalenceVerified ? 'PASSED' : 'FAILED',
         'AB_COMPARISON_COMPLETED',
         elapsedAb * 0.15,
-        `Score Nativo Sonar: A=${abResult.softwareA.nativeSonarScore.toFixed(2)} vs B=${abResult.softwareB.nativeSonarScore.toFixed(2)} | Score Composto Benchmark: A=${abResult.softwareA.benchmarkCompositeScore.toFixed(2)} vs B=${abResult.softwareB.benchmarkCompositeScore.toFixed(2)}.`
+        `Score Nativo Sonar: A=${abResult.softwareA.nativeSonarScore !== null ? abResult.softwareA.nativeSonarScore.toFixed(2) : 'N/D'} vs B=${abResult.softwareB.nativeSonarScore !== null ? abResult.softwareB.nativeSonarScore.toFixed(2) : 'N/D'} | Score Composto Benchmark: A=${abResult.softwareA.benchmarkCompositeScore.toFixed(2)} vs B=${abResult.softwareB.benchmarkCompositeScore.toFixed(2)}.`
       );
 
       recordStep(

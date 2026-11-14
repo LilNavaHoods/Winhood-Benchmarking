@@ -17,6 +17,7 @@ import type {
   SecurityAssessmentSuiteBundle,
   VulnerabilityValidationState,
 } from '../types/benchmark';
+import { csrfFetch as fetch } from '../utils/csrfFetch';
 
 interface SecurityAssessmentSuiteModuleProps {
   latestRun: BenchmarkRun | null;

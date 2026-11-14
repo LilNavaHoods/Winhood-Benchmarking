@@ -34,6 +34,7 @@ import {
 } from 'lucide-react';
 import type {
   AuditLogEntry,
+  BackendConnectivityState,
   BenchmarkProfileConfig,
   BenchmarkRun,
   Project,
@@ -47,6 +48,8 @@ import { ContextualScreenHelpBanner } from './components/ContextualScreenHelpBan
 import { AnalysisProgressHeaderBanner } from './components/AnalysisProgressHeaderBanner';
 import { WinHoodLogo } from './components/WinHoodLogo';
 import { AuthGateModal, type AuthUserView } from './components/AuthGateModal';
+import { ModuleErrorBoundary } from './components/ModuleErrorBoundary';
+import { csrfFetch as fetch } from './utils/csrfFetch';
 
 // Lazy-loaded modules (Seção 11.7 — Otimização do frontend: Code Splitting & Lazy Loading sob demanda)
 const ProjectsAndSoftwaresModule = lazy(() =>
@@ -134,6 +137,8 @@ export default function App() {
   const [authenticated, setAuthenticated] = useState<boolean>(false);
   const [mfaRequired, setMfaRequired] = useState<boolean>(false);
   const [bootstrapRequired, setBootstrapRequired] = useState<boolean>(false);
+  const [backendState, setBackendState] = useState<BackendConnectivityState>('STARTING');
+  const [backendErrorDetail, setBackendErrorDetail] = useState<string | null>(null);
   const [bootstrapTokenFileHint, setBootstrapTokenFileHint] = useState<string>(
     '.winhood_data/bootstrap_admin_token.txt'
   );
@@ -211,13 +216,23 @@ export default function App() {
 
   const [activeRunningRun, setActiveRunningRun] = useState<BenchmarkRun | null>(null);
 
-  const checkAuthSession = useCallback(async () => {
+  const checkAuthSession = useCallback(async (isRecovery = false) => {
     setAuthLoading(true);
+    if (isRecovery) {
+      setBackendState('RECOVERING');
+    }
     try {
       const [sessRes, bsRes] = await Promise.all([
         fetch('/api/auth/session'),
         fetch('/api/auth/bootstrap-status'),
       ]);
+      if (sessRes.status >= 500 || bsRes.status >= 500) {
+        setBackendState('API_ERROR');
+        setBackendErrorDetail(
+          `Servidor backend respondeu com erro interno (HTTP ${sessRes.status >= 500 ? sessRes.status : bsRes.status}).`
+        );
+        return;
+      }
       if (bsRes.ok) {
         const bsData = await bsRes.json();
         setBootstrapRequired(Boolean(bsData.bootstrapRequired));
@@ -227,20 +242,32 @@ export default function App() {
       }
       if (sessRes.ok) {
         const sessData = await sessRes.json();
-        setAuthenticated(Boolean(sessData.authenticated));
-        setMfaRequired(Boolean(sessData.mfaRequired));
+        const isAuthed = Boolean(sessData.authenticated);
+        const isMfaReq = Boolean(sessData.mfaRequired);
+        setAuthenticated(isAuthed);
+        setMfaRequired(isMfaReq);
         setBootstrapRequired(Boolean(sessData.bootstrapRequired));
         setCurrentUser(sessData.user || null);
+        setBackendErrorDetail(null);
         if (sessData.user?.role === 'ADMIN') {
           setIsAdminOrigin(true);
         }
-      } else {
+        setBackendState(isAuthed && !isMfaReq ? 'ONLINE' : 'AUTH_REQUIRED');
+      } else if (sessRes.status === 401 || sessRes.status === 403) {
         setAuthenticated(false);
         setMfaRequired(false);
         setCurrentUser(null);
+        setBackendErrorDetail(null);
+        setBackendState('AUTH_REQUIRED');
+      } else {
+        setBackendState('API_ERROR');
+        setBackendErrorDetail(`Resposta inesperada da sessão: HTTP ${sessRes.status}`);
       }
-    } catch {
-      setAuthenticated(false);
+    } catch (err: any) {
+      setBackendState('OFFLINE');
+      setBackendErrorDetail(
+        err?.message || 'Não foi possível estabelecer conexão HTTP com o servidor backend local.'
+      );
     } finally {
       setAuthLoading(false);
     }
@@ -252,28 +279,43 @@ export default function App() {
     setLoading(true);
     try {
       const res = await fetch('/api/bootstrap');
-      if (res.ok) {
-        const data = await res.json();
-        if (data.user) {
-          setCurrentUser(data.user);
-          if (data.user.role === 'ADMIN') setIsAdminOrigin(true);
-        }
-        if (data.dashboard) {
-          setDashboardData(data.dashboard);
-          if (data.dashboard.latestRun?.status === 'RUNNING') {
-            setActiveRunningRun(data.dashboard.latestRun);
-          } else if (activeRunningRun && data.dashboard.latestRun?.status !== 'RUNNING') {
-            setActiveRunningRun(null);
-          }
-        }
-        setProjects(data.projects || []);
-        setSoftwares(data.softwares || []);
-        setProfiles(data.profiles || []);
-        setAdapters(data.adapters || []);
-        setAuditLogs(data.auditLogs || []);
+      if (res.status === 401 || res.status === 403) {
+        setAuthenticated(false);
+        setBackendState('AUTH_REQUIRED');
+        return;
       }
-    } catch {
-      notify('Falha ao sincronizar estado com o servidor backend.', 'error');
+      if (!res.ok) {
+        setBackendState('API_ERROR');
+        setBackendErrorDetail(`Endpoint /api/bootstrap retornou HTTP ${res.status}.`);
+        notify(`Erro da API ao carregar dados (HTTP ${res.status}).`, 'error');
+        return;
+      }
+      const data = await res.json();
+      setBackendState('ONLINE');
+      setBackendErrorDetail(null);
+      if (data.user) {
+        setCurrentUser(data.user);
+        if (data.user.role === 'ADMIN') setIsAdminOrigin(true);
+      }
+      if (data.dashboard) {
+        setDashboardData(data.dashboard);
+        if (data.dashboard.latestRun?.status === 'RUNNING') {
+          setActiveRunningRun(data.dashboard.latestRun);
+        } else if (activeRunningRun && data.dashboard.latestRun?.status !== 'RUNNING') {
+          setActiveRunningRun(null);
+        }
+      }
+      setProjects(data.projects || []);
+      setSoftwares(data.softwares || []);
+      setProfiles(data.profiles || []);
+      setAdapters(data.adapters || []);
+      setAuditLogs(data.auditLogs || []);
+    } catch (err: any) {
+      setBackendState('OFFLINE');
+      setBackendErrorDetail(
+        err?.message || 'Conexão recusada ou interrompida com o servidor backend.'
+      );
+      notify('Falha de conexão com o servidor backend (OFFLINE).', 'error');
     } finally {
       setLoading(false);
     }
@@ -892,7 +934,41 @@ export default function App() {
           </div>
         )}
 
-        {/* Active Module Viewport (Lazy-Loaded via Suspense) */}
+        {/* Banner explícito de Conectividade do Backend (Seção 4.2 — Diferencia OFFLINE/API_ERROR de AUTH_REQUIRED) */}
+        {(backendState === 'OFFLINE' ||
+          backendState === 'API_ERROR' ||
+          backendState === 'RECOVERING') && (
+          <div
+            role="alert"
+            className="px-6 py-3 bg-amber-500/15 border-b border-amber-500/40 text-amber-800 dark:text-amber-300 text-xs flex flex-wrap items-center justify-between gap-3"
+          >
+            <div className="flex items-center gap-2.5">
+              <ShieldAlert className="w-4 h-4 shrink-0 text-amber-500" />
+              <div>
+                <span className="font-bold font-mono mr-2">[{backendState}]</span>
+                <span>
+                  {backendState === 'OFFLINE'
+                    ? 'Servidor backend indisponível no momento (distinto de falha de login/autenticação).'
+                    : backendState === 'RECOVERING'
+                      ? 'Reconectando ao servidor backend local...'
+                      : 'O servidor backend respondeu com erro de API.'}{' '}
+                  {backendErrorDetail ? `(${backendErrorDetail})` : ''}
+                </span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                void checkAuthSession(true);
+              }}
+              className="px-3 py-1 rounded bg-amber-500 text-slate-950 font-bold hover:bg-amber-400 transition-colors cursor-pointer shrink-0"
+            >
+              Tentar Reconectar Backend
+            </button>
+          </div>
+        )}
+
+        {/* Active Module Viewport (Lazy-Loaded via Suspense + ModuleErrorBoundary) */}
         <main className="flex-1 p-6 lg:p-8 max-w-[1440px] w-full mx-auto">
           {/* Contextual Help Banner for the Active Screen */}
           <ContextualScreenHelpBanner
@@ -900,13 +976,14 @@ export default function App() {
             onOpenGuideChapter={handleOpenGuideChapter}
           />
 
-          <Suspense
-            fallback={
-              <div className="h-64 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] animate-pulse p-6 text-xs text-slate-500 font-mono">
-                Carregando módulo sob demanda...
-              </div>
-            }
-          >
+          <ModuleErrorBoundary resetKey={activeNav} moduleName={activeNavLabel}>
+            <Suspense
+              fallback={
+                <div className="h-64 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] animate-pulse p-6 text-xs text-slate-500 font-mono">
+                  Carregando módulo sob demanda...
+                </div>
+              }
+            >
             {activeNav === 'dashboard' && (
               <DashboardModule
                 data={dashboardData}
@@ -1034,32 +1111,37 @@ export default function App() {
                 onNotify={notify}
               />
             )}
-          </Suspense>
+            </Suspense>
+          </ModuleErrorBoundary>
         </main>
       </div>
 
       {/* Lazy-Loaded Modals */}
       {isUploadModalOpen && (
-        <Suspense fallback={null}>
-          <ProjectUploadModal
-            isOpen={isUploadModalOpen}
-            onClose={() => setIsUploadModalOpen(false)}
-            onSuccess={fetchAllBackendState}
-            onNotify={notify}
-          />
-        </Suspense>
+        <ModuleErrorBoundary moduleName="Modal de Upload">
+          <Suspense fallback={null}>
+            <ProjectUploadModal
+              isOpen={isUploadModalOpen}
+              onClose={() => setIsUploadModalOpen(false)}
+              onSuccess={fetchAllBackendState}
+              onNotify={notify}
+            />
+          </Suspense>
+        </ModuleErrorBoundary>
       )}
 
       {isGitHubModalOpen && (
-        <Suspense fallback={null}>
-          <GitHubSearchModal
-            isOpen={isGitHubModalOpen}
-            projects={projects}
-            onClose={() => setIsGitHubModalOpen(false)}
-            onSuccess={fetchAllBackendState}
-            onNotify={notify}
-          />
-        </Suspense>
+        <ModuleErrorBoundary moduleName="Modal GitHub">
+          <Suspense fallback={null}>
+            <GitHubSearchModal
+              isOpen={isGitHubModalOpen}
+              projects={projects}
+              onClose={() => setIsGitHubModalOpen(false)}
+              onSuccess={fetchAllBackendState}
+              onNotify={notify}
+            />
+          </Suspense>
+        </ModuleErrorBoundary>
       )}
 
       {/* TOTP MFA Configuration Modal */}
@@ -1120,23 +1202,28 @@ export default function App() {
         </div>
       )}
 
-      {/* Global Auth Gate (Bootstrap Admin / Login / MFA / Recovery) */}
-      {!authLoading && (!authenticated || mfaRequired) && (
-        <AuthGateModal
-          bootstrapRequired={bootstrapRequired}
-          bootstrapTokenFileHint={bootstrapTokenFileHint}
-          mfaRequired={mfaRequired}
-          pendingUser={currentUser}
-          onAuthenticated={(user) => {
-            setCurrentUser(user);
-            setAuthenticated(true);
-            setMfaRequired(false);
-            setBootstrapRequired(false);
-            if (user.role === 'ADMIN') setIsAdminOrigin(true);
-          }}
-          onRefreshSession={checkAuthSession}
-        />
-      )}
+      {/* Global Auth Gate (Somente quando o backend respondeu AUTH_REQUIRED, nunca quando OFFLINE ou API_ERROR) */}
+      {!authLoading &&
+        backendState !== 'OFFLINE' &&
+        backendState !== 'API_ERROR' &&
+        backendState !== 'RECOVERING' &&
+        (!authenticated || mfaRequired) && (
+          <AuthGateModal
+            bootstrapRequired={bootstrapRequired}
+            bootstrapTokenFileHint={bootstrapTokenFileHint}
+            mfaRequired={mfaRequired}
+            pendingUser={currentUser}
+            onAuthenticated={(user) => {
+              setCurrentUser(user);
+              setAuthenticated(true);
+              setMfaRequired(false);
+              setBootstrapRequired(false);
+              setBackendState('ONLINE');
+              if (user.role === 'ADMIN') setIsAdminOrigin(true);
+            }}
+            onRefreshSession={() => checkAuthSession(false)}
+          />
+        )}
     </div>
   );
 }

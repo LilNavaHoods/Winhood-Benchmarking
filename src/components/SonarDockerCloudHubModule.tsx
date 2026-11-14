@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { csrfFetch as fetch } from '../utils/csrfFetch';
 import {
   Server,
   Cloud,
@@ -29,8 +30,54 @@ import {
 import type { HardwareProfile } from '../engine/workerPool';
 import type {
   SavedSonarProjectProfile,
+  SonarHotspotsBreakdown,
+  SonarMeasuresRecord,
+  SonarPaginationSummary,
+  SonarProfileVerificationState,
+  SonarQualityGateRecord,
+  SonarQualityModelMode,
   SonarTokenVerificationResult,
 } from '../types/benchmark';
+
+interface SonarMethodologySummaryPayload {
+  projectKey: string;
+  organization: string;
+  qualityModelMode: SonarQualityModelMode;
+  qualityProfileVerification: {
+    profileName: string;
+    profileKey: string;
+    language: string;
+    isBuiltIn: boolean;
+    isDefault: boolean;
+    verificationState: SonarProfileVerificationState;
+  };
+  qualityGate: SonarQualityGateRecord;
+  measures: SonarMeasuresRecord;
+  hotspotsBreakdown: SonarHotspotsBreakdown;
+  paginationSummary: {
+    issuesPagination: SonarPaginationSummary;
+    hotspotsPagination: SonarPaginationSummary;
+  };
+  scoreSeparation: {
+    nativeSonarMetrics: {
+      source: 'SONARCLOUD_OFFICIAL_API' | 'NOT_MEASURED';
+      reliabilityRating: string;
+      securityRating: string;
+      maintainabilityRating: string;
+      securityReviewRating: string;
+      qualityGateStatus: string;
+      nativeSonarCompositeReference: number | null;
+    };
+    winhoodCalculatedScore: {
+      source: 'WINHOOD_CALCULATED';
+      overallScore: number | null;
+      securityScore: number | null;
+      qualityScore: number | null;
+      algorithmVersion: string;
+      note: string;
+    };
+  };
+}
 
 interface SavedSonarProjectWithVerification
   extends Omit<SavedSonarProjectProfile, 'encryptedToken'> {
@@ -115,6 +162,24 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
   const [exportingJsonId, setExportingJsonId] = useState<string | null>(null);
   const [exportingPs1Id, setExportingPs1Id] = useState<string | null>(null);
   const [isExtractingDirect, setIsExtractingDirect] = useState(false);
+  const [methodologySummary, setMethodologySummary] =
+    useState<SonarMethodologySummaryPayload | null>(null);
+  const [loadingMethodology, setLoadingMethodology] = useState(false);
+
+  const loadMethodologySummary = async () => {
+    setLoadingMethodology(true);
+    try {
+      const res = await fetch('/api/sonar/methodology-summary');
+      if (res.ok) {
+        const data = (await res.json()) as SonarMethodologySummaryPayload;
+        setMethodologySummary(data);
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoadingMethodology(false);
+    }
+  };
 
   const loadVaultStatus = async () => {
     try {
@@ -129,7 +194,8 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
   };
 
   useEffect(() => {
-    loadVaultStatus();
+    void loadVaultStatus();
+    void loadMethodologySummary();
   }, []);
 
   const loadSavedSonarProjects = async () => {
@@ -353,6 +419,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
       // 2. Atualizar estado local e global
       await loadVaultStatus();
       await loadSavedSonarProjects();
+      await loadMethodologySummary();
       if (onRefreshRun) {
         onRefreshRun();
       }
@@ -1256,6 +1323,330 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
           )}
         </div>
       </div>
+
+      {/* PAINEL DE METODOLOGIA OFICIAL SONARCLOUD: MQR vs Standard, Quality Gate, Overall vs New Code, Cobertura Separada & Hotspots */}
+      {methodologySummary && (
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-6">
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 border-b border-slate-800 pb-4">
+            <div className="space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="px-2.5 py-0.5 rounded text-[11px] font-mono font-bold bg-[#31d6c4]/15 text-[#31d6c4] border border-[#31d6c4]/30">
+                  METODOLOGIA OFICIAL SONARCLOUD: {methodologySummary.qualityModelMode}
+                </span>
+                <span className="px-2.5 py-0.5 rounded text-[11px] font-mono bg-slate-800 text-slate-300">
+                  Quality Profile: {methodologySummary.qualityProfileVerification.profileName} ({methodologySummary.qualityProfileVerification.verificationState})
+                </span>
+                <span className="px-2.5 py-0.5 rounded text-[11px] font-mono bg-slate-800 text-slate-300">
+                  Paginação Issues: {methodologySummary.paginationSummary.issuesPagination.state || methodologySummary.paginationSummary.issuesPagination.completeness || methodologySummary.paginationSummary.issuesPagination.status} ({methodologySummary.paginationSummary.issuesPagination.fetchedRecords ?? methodologySummary.paginationSummary.issuesPagination.totalReceived}/{methodologySummary.paginationSummary.issuesPagination.totalReported ?? methodologySummary.paginationSummary.issuesPagination.totalExpected ?? 0})
+                </span>
+              </div>
+              <h2 className="text-lg font-bold text-white">
+                Governança &amp; Rastreabilidade Metodológica SonarCloud vs WinHood
+              </h2>
+              <p className="text-xs text-slate-400">
+                Separação estrita entre métricas oficiais retornadas pela Web API do SonarCloud (`SONARCLOUD_OFFICIAL_API`), métricas ausentes (`NOT_MEASURED`) e pontuações calculadas pelo motor nativo do WinHood (`WINHOOD_CALCULATED`).
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => void loadMethodologySummary()}
+              disabled={loadingMethodology}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-700 bg-slate-950 text-slate-200 hover:border-[#31d6c4] transition-colors cursor-pointer shrink-0"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loadingMethodology ? 'animate-spin' : ''}`} />
+              Atualizar Governança
+            </button>
+          </div>
+
+          {/* 1. Separação Estrita: SonarCloud Nativo vs WinHood Calculado */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-[#31d6c4] font-mono">
+                  ORIGEM: {methodologySummary.scoreSeparation.nativeSonarMetrics.source}
+                </span>
+                <span className="text-[11px] font-mono text-slate-400">
+                  Quality Gate: {methodologySummary.qualityGate.status}
+                </span>
+              </div>
+              <div className="text-sm font-bold text-white">
+                Ratings Oficiais Nativos do SonarCloud (Escala A–E)
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono">
+                <div className="p-2.5 rounded bg-slate-900 border border-slate-800">
+                  <div className="text-[10px] text-slate-400">Reliability</div>
+                  <div className="text-sm font-bold text-white mt-0.5">
+                    {methodologySummary.scoreSeparation.nativeSonarMetrics.reliabilityRating}
+                  </div>
+                </div>
+                <div className="p-2.5 rounded bg-slate-900 border border-slate-800">
+                  <div className="text-[10px] text-slate-400">Security</div>
+                  <div className="text-sm font-bold text-white mt-0.5">
+                    {methodologySummary.scoreSeparation.nativeSonarMetrics.securityRating}
+                  </div>
+                </div>
+                <div className="p-2.5 rounded bg-slate-900 border border-slate-800">
+                  <div className="text-[10px] text-slate-400">Maintainability</div>
+                  <div className="text-sm font-bold text-white mt-0.5">
+                    {methodologySummary.scoreSeparation.nativeSonarMetrics.maintainabilityRating}
+                  </div>
+                </div>
+                <div className="p-2.5 rounded bg-slate-900 border border-slate-800">
+                  <div className="text-[10px] text-slate-400">Hotspot Review</div>
+                  <div className="text-sm font-bold text-white mt-0.5">
+                    {methodologySummary.scoreSeparation.nativeSonarMetrics.securityReviewRating}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-amber-400 font-mono">
+                  ORIGEM: {methodologySummary.scoreSeparation.winhoodCalculatedScore.source}
+                </span>
+                <span className="text-[11px] font-mono text-slate-400">
+                  Algoritmo v{methodologySummary.scoreSeparation.winhoodCalculatedScore.algorithmVersion}
+                </span>
+              </div>
+              <div className="text-sm font-bold text-white">
+                Pontuação Determinística Calculada pelo WinHood (Escala 0.00–5.00)
+              </div>
+              <div className="grid grid-cols-3 gap-2 text-xs font-mono">
+                <div className="p-2.5 rounded bg-slate-900 border border-slate-800">
+                  <div className="text-[10px] text-slate-400">Overall Score</div>
+                  <div className="text-sm font-bold text-[#31d6c4] mt-0.5">
+                    {methodologySummary.scoreSeparation.winhoodCalculatedScore.overallScore !== null
+                      ? `${methodologySummary.scoreSeparation.winhoodCalculatedScore.overallScore.toFixed(2)} / 5.00`
+                      : 'NOT_MEASURED'}
+                  </div>
+                </div>
+                <div className="p-2.5 rounded bg-slate-900 border border-slate-800">
+                  <div className="text-[10px] text-slate-400">Security Score</div>
+                  <div className="text-sm font-bold text-white mt-0.5">
+                    {methodologySummary.scoreSeparation.winhoodCalculatedScore.securityScore !== null
+                      ? `${methodologySummary.scoreSeparation.winhoodCalculatedScore.securityScore.toFixed(2)} / 5.00`
+                      : 'NOT_MEASURED'}
+                  </div>
+                </div>
+                <div className="p-2.5 rounded bg-slate-900 border border-slate-800">
+                  <div className="text-[10px] text-slate-400">Quality Score</div>
+                  <div className="text-sm font-bold text-white mt-0.5">
+                    {methodologySummary.scoreSeparation.winhoodCalculatedScore.qualityScore !== null
+                      ? `${methodologySummary.scoreSeparation.winhoodCalculatedScore.qualityScore.toFixed(2)} / 5.00`
+                      : 'NOT_MEASURED'}
+                  </div>
+                </div>
+              </div>
+              <div className="text-[11px] text-slate-400">
+                {methodologySummary.scoreSeparation.winhoodCalculatedScore.note}
+              </div>
+            </div>
+          </div>
+
+          {/* 2. Quality Gate Oficial, Condições Individuais e Fudge Factor */}
+          <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-bold text-white">
+                  Quality Gate &amp; Condições Individuais ({methodologySummary.qualityGate.displayLabel})
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  {methodologySummary.qualityGate.explanationSummary}
+                </p>
+              </div>
+              <div className="text-xs font-mono text-slate-300">
+                Fudge Factor: <strong className="text-[#31d6c4]">{methodologySummary.qualityGate.fudgeFactorStatus || 'UNKNOWN'}</strong>
+              </div>
+            </div>
+
+            {methodologySummary.qualityGate.fudgeFactorExplanation && (
+              <div className="text-[11px] font-mono text-slate-400 bg-slate-900/80 border border-slate-800 rounded px-3 py-2">
+                {methodologySummary.qualityGate.fudgeFactorExplanation}
+              </div>
+            )}
+
+            {methodologySummary.qualityGate.conditions.length === 0 ? (
+              <div className="text-xs font-mono text-slate-400 p-3 rounded border border-slate-800 bg-slate-900/40">
+                Nenhuma condição individual retornada pela API do SonarCloud (`status: {methodologySummary.qualityGate.status}`).
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs font-mono tabular-nums">
+                  <thead>
+                    <tr className="border-b border-slate-800 text-slate-400">
+                      <th className="py-2 pr-3">Condição</th>
+                      <th className="py-2 px-3">Escopo</th>
+                      <th className="py-2 px-3">Valor</th>
+                      <th className="py-2 px-3">Limite</th>
+                      <th className="py-2 px-3">Estado</th>
+                      <th className="py-2 pl-3">Justificativa</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60">
+                    {methodologySummary.qualityGate.conditions.map((cond, idx) => (
+                      <tr key={`${cond.metricKey}-${idx}`}>
+                        <td className="py-2 pr-3 text-white font-semibold">{cond.metricKey}</td>
+                        <td className="py-2 px-3 text-slate-300">{cond.scope || 'OVERALL_CODE'}</td>
+                        <td className="py-2 px-3 text-slate-200">{cond.actualValue}</td>
+                        <td className="py-2 px-3 text-slate-400">
+                          {cond.comparator} {cond.errorThreshold}
+                        </td>
+                        <td className="py-2 px-3">
+                          <span
+                            className={
+                              cond.status === 'OK'
+                                ? 'text-emerald-400 font-bold'
+                                : cond.status === 'ERROR'
+                                  ? 'text-rose-400 font-bold'
+                                  : 'text-amber-400 font-bold'
+                            }
+                          >
+                            {cond.status}
+                          </span>
+                        </td>
+                        <td className="py-2 pl-3 font-sans text-slate-300">
+                          {cond.reasonText || '-'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* 3. Overall Code vs New Code & Cobertura Separada & Hotspots Breakdown */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            {/* Overall vs New Code */}
+            <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 space-y-2.5">
+              <div className="text-xs font-bold text-white uppercase tracking-wider">
+                Overall Code vs New Code (Clean as You Code)
+              </div>
+              <div className="space-y-1.5 text-xs font-mono">
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Bugs (Overall / New):</span>
+                  <span className="text-slate-200">
+                    {methodologySummary.measures.metrics.bugs ?? 'NOT_MEASURED'} /{' '}
+                    {methodologySummary.measures.newCode?.newBugs ?? 'NOT_MEASURED'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Vulnerabilities (Overall / New):</span>
+                  <span className="text-slate-200">
+                    {methodologySummary.measures.metrics.vulnerabilities ?? 'NOT_MEASURED'} /{' '}
+                    {methodologySummary.measures.newCode?.newVulnerabilities ?? 'NOT_MEASURED'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Code Smells (Overall / New):</span>
+                  <span className="text-slate-200">
+                    {methodologySummary.measures.metrics.codeSmells ?? 'NOT_MEASURED'} /{' '}
+                    {methodologySummary.measures.newCode?.newCodeSmells ?? 'NOT_MEASURED'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Duplicação % (Overall / New):</span>
+                  <span className="text-slate-200">
+                    {methodologySummary.measures.metrics.duplicatedLinesDensityPercent !== null
+                      ? `${methodologySummary.measures.metrics.duplicatedLinesDensityPercent}%`
+                      : 'NOT_MEASURED'}{' '}
+                    /{' '}
+                    {methodologySummary.measures.newCode?.newDuplicatedLinesDensityPercent !== null &&
+                    methodologySummary.measures.newCode?.newDuplicatedLinesDensityPercent !== undefined
+                      ? `${methodologySummary.measures.newCode.newDuplicatedLinesDensityPercent}%`
+                      : 'NOT_MEASURED'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Cobertura Separada */}
+            <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 space-y-2.5">
+              <div className="text-xs font-bold text-white uppercase tracking-wider">
+                Métricas de Cobertura Separadas (Sem Equivalência Artificial)
+              </div>
+              <div className="space-y-1.5 text-xs font-mono">
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Coverage Geral / New:</span>
+                  <span className="text-slate-200">
+                    {methodologySummary.measures.metrics.coveragePercent !== null
+                      ? `${methodologySummary.measures.metrics.coveragePercent}%`
+                      : 'NOT_MEASURED'}{' '}
+                    /{' '}
+                    {methodologySummary.measures.newCode?.newCoveragePercent !== null &&
+                    methodologySummary.measures.newCode?.newCoveragePercent !== undefined
+                      ? `${methodologySummary.measures.newCode.newCoveragePercent}%`
+                      : 'NOT_MEASURED'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Line Coverage:</span>
+                  <span className="text-slate-200">
+                    {methodologySummary.measures.metrics.lineCoveragePercent !== null &&
+                    methodologySummary.measures.metrics.lineCoveragePercent !== undefined
+                      ? `${methodologySummary.measures.metrics.lineCoveragePercent}%`
+                      : 'NOT_MEASURED'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Branch Coverage:</span>
+                  <span className="text-slate-200">
+                    {methodologySummary.measures.metrics.branchCoveragePercent !== null &&
+                    methodologySummary.measures.metrics.branchCoveragePercent !== undefined
+                      ? `${methodologySummary.measures.metrics.branchCoveragePercent}%`
+                      : 'NOT_MEASURED'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Uncovered Lines / Conditions:</span>
+                  <span className="text-slate-200">
+                    {methodologySummary.measures.metrics.uncoveredLines ?? 'NOT_MEASURED'} /{' '}
+                    {methodologySummary.measures.metrics.uncoveredConditions ?? 'NOT_MEASURED'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Security Hotspots Breakdown */}
+            <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 space-y-2.5">
+              <div className="text-xs font-bold text-white uppercase tracking-wider">
+                Security Hotspots Breakdown ({methodologySummary.hotspotsBreakdown.measurementState})
+              </div>
+              <div className="space-y-1.5 text-xs font-mono">
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Identificados / Não Revisados:</span>
+                  <span className="text-slate-200">
+                    {methodologySummary.hotspotsBreakdown.totalIdentified ?? 'NOT_MEASURED'} /{' '}
+                    {methodologySummary.hotspotsBreakdown.unreviewedCount ?? 'NOT_MEASURED'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Revisados (Safe / Fixed):</span>
+                  <span className="text-slate-200">
+                    {methodologySummary.hotspotsBreakdown.reviewedSafeCount ?? 'NOT_MEASURED'} /{' '}
+                    {methodologySummary.hotspotsBreakdown.reviewedFixedCount ?? 'NOT_MEASURED'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Risco Aceito (Acknowledged):</span>
+                  <span className="text-slate-200">
+                    {methodologySummary.hotspotsBreakdown.acceptedRiskCount ?? 'NOT_MEASURED'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Percentual de Revisão:</span>
+                  <span className="text-[#31d6c4] font-bold">
+                    {methodologySummary.hotspotsBreakdown.reviewPercent !== null
+                      ? `${methodologySummary.hotspotsBreakdown.reviewPercent}%`
+                      : 'NOT_MEASURED'}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* TAB 1: SonarQube Local (Docker) */}
       {activeTab === 'docker' && (

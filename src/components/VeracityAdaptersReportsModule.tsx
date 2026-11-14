@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { csrfFetch as fetch } from '../utils/csrfFetch';
 import {
   Activity,
   AlertTriangle,

@@ -742,6 +742,104 @@ export class AuthService {
     };
   }
 
+  public registerAccount(params: {
+    name: string;
+    email: string;
+    password: string;
+    role?: RbacRole;
+    enableMfa?: boolean;
+    ipAddress?: string;
+    userAgent?: string;
+  }): {
+    user: PublicUserView;
+    sessionId: string;
+    csrfToken: string;
+    totpSetup?: { secretBase32: string; otpauthUri: string };
+  } {
+    const ipAddress = params.ipAddress || '127.0.0.1';
+    this.checkIpRateLimit(ipAddress);
+
+    const cleanName = (params.name || '').trim();
+    const cleanEmail = (params.email || '').trim().toLowerCase();
+    const cleanPassword = params.password || '';
+
+    if (cleanName.length < 2) {
+      throw new Error('INVALID_NAME: O nome completo deve possuir pelo menos 2 caracteres.');
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      throw new Error('INVALID_EMAIL: Informe um endereço de e-mail válido.');
+    }
+    if (cleanPassword.length < 10) {
+      throw new Error('WEAK_PASSWORD: A senha deve possuir pelo menos 10 caracteres.');
+    }
+    if (this.db.users.some((u) => u.email === cleanEmail)) {
+      this.recordIpFailure(ipAddress);
+      throw new Error('EMAIL_ALREADY_EXISTS: Este e-mail já está cadastrado na plataforma.');
+    }
+
+    const requestedRole: RbacRole = params.role || 'SECURITY_LEAD';
+    if (requestedRole === 'ADMIN') {
+      throw new Error(
+        'ROLE_ELEVATION_BLOCKED: O perfil ADMIN exige provisionamento via Bootstrap ou atribuição por um Administrador existente.'
+      );
+    }
+    const allowedSelfRoles: ReadonlyArray<RbacRole> = ['SECURITY_LEAD', 'QA_ENGINEER', 'AUDITOR'];
+    if (!allowedSelfRoles.includes(requestedRole)) {
+      throw new Error('INVALID_ROLE: Perfil de acesso selecionado é inválido.');
+    }
+
+    const now = new Date().toISOString();
+    const totpSecret = params.enableMfa ? base32Encode(crypto.randomBytes(20)) : null;
+
+    const newUser: UserAccountRecord = {
+      id: `usr-${crypto.randomUUID().slice(0, 8)}`,
+      name: cleanName,
+      email: cleanEmail,
+      role: requestedRole,
+      passwordHash: hashPassword(cleanPassword),
+      mfaEnabled: Boolean(params.enableMfa),
+      totpSecretBase32: totpSecret,
+      disabled: false,
+      failedLoginAttempts: 0,
+      lockedUntil: null,
+      recoveryTokenSha256: null,
+      recoveryExpiresAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    this.db.users.push(newUser);
+
+    const { sessionId, session } = this.createSessionRecord(
+      newUser,
+      !newUser.mfaEnabled,
+      ipAddress,
+      params.userAgent || 'unknown'
+    );
+    this.save();
+
+    return {
+      user: {
+        id: newUser.id,
+        name: newUser.name,
+        email: newUser.email,
+        role: newUser.role,
+        mfaEnabled: newUser.mfaEnabled,
+        mfaVerified: session.mfaVerified,
+      },
+      sessionId,
+      csrfToken: session.csrfToken,
+      ...(totpSecret
+        ? {
+            totpSetup: {
+              secretBase32: totpSecret,
+              otpauthUri: `otpauth://totp/WinHood:${encodeURIComponent(cleanEmail)}?secret=${totpSecret}&issuer=WinHood`,
+            },
+          }
+        : {}),
+    };
+  }
+
   public listUsers(): Array<Omit<PublicUserView, 'mfaVerified'> & { createdAt: string; disabled: boolean }> {
     return this.db.users.map((u) => ({
       id: u.id,

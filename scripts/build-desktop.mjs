@@ -1,0 +1,102 @@
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { build } from 'esbuild';
+
+const rootDir = process.cwd();
+const distFrontendDir = path.join(rootDir, 'dist');
+const distDesktopDir = path.join(rootDir, 'dist-desktop');
+
+function computeFileSha256(filePath) {
+  const buf = fs.readFileSync(filePath);
+  return crypto.createHash('sha256').update(buf).digest('hex');
+}
+
+async function runDesktopBuild() {
+  console.log('[WinHood Desktop Build] 1/4 Building frontend bundle via Vite...');
+  const npxBin = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+  execFileSync(npxBin, ['vite', 'build'], {
+    cwd: rootDir,
+    stdio: 'inherit',
+    shell: process.platform === 'win32',
+  });
+
+  if (!fs.existsSync(path.join(distFrontendDir, 'index.html'))) {
+    throw new Error('Frontend build failed: dist/index.html was not generated.');
+  }
+
+  fs.mkdirSync(distDesktopDir, { recursive: true });
+
+  console.log('[WinHood Desktop Build] 2/4 Bundling backend server (dist-desktop/server.mjs)...');
+  await build({
+    entryPoints: [path.join(rootDir, 'server.ts')],
+    outfile: path.join(distDesktopDir, 'server.mjs'),
+    bundle: true,
+    platform: 'node',
+    target: 'node22',
+    format: 'esm',
+    packages: 'external',
+    sourcemap: true,
+  });
+
+  console.log('[WinHood Desktop Build] 3/4 Bundling Electron main process (dist-desktop/electron-main.mjs)...');
+  await build({
+    entryPoints: [path.join(rootDir, 'electron-main.ts')],
+    outfile: path.join(distDesktopDir, 'electron-main.mjs'),
+    bundle: true,
+    platform: 'node',
+    target: 'node22',
+    format: 'esm',
+    packages: 'external',
+    sourcemap: true,
+  });
+
+  console.log('[WinHood Desktop Build] 4/4 Bundling Electron preload bridge (dist-desktop/electron-preload.cjs)...');
+  await build({
+    entryPoints: [path.join(rootDir, 'electron-preload.ts')],
+    outfile: path.join(distDesktopDir, 'electron-preload.cjs'),
+    bundle: true,
+    platform: 'node',
+    target: 'node22',
+    format: 'cjs',
+    external: ['electron'],
+    sourcemap: false,
+  });
+
+  const requiredFiles = [
+    path.join(distFrontendDir, 'index.html'),
+    path.join(distDesktopDir, 'server.mjs'),
+    path.join(distDesktopDir, 'electron-main.mjs'),
+    path.join(distDesktopDir, 'electron-preload.cjs'),
+  ];
+
+  const artifacts = {};
+  for (const file of requiredFiles) {
+    if (!fs.existsSync(file) || fs.statSync(file).size === 0) {
+      throw new Error(`Missing or empty desktop build artifact: ${file}`);
+    }
+    const rel = path.relative(rootDir, file).replace(/\\/g, '/');
+    artifacts[rel] = {
+      sizeBytes: fs.statSync(file).size,
+      sha256: computeFileSha256(file),
+    };
+  }
+
+  const manifest = {
+    builtAt: new Date().toISOString(),
+    nodeVersion: process.version,
+    platform: process.platform,
+    arch: process.arch,
+    artifacts,
+  };
+
+  const manifestPath = path.join(distDesktopDir, 'build-manifest.json');
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+  console.log('[WinHood Desktop Build] Completed successfully. Manifest:', manifestPath);
+}
+
+runDesktopBuild().catch((err) => {
+  console.error('[WinHood Desktop Build Error]:', err);
+  process.exit(1);
+});

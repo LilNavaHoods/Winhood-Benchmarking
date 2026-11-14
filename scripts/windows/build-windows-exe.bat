@@ -1,46 +1,49 @@
 @echo off
 setlocal enabledelayedexpansion
 
-title WinHood Enterprise - Compilador de Executavel Windows .EXE
+title WinHood Enterprise - Build Reprodutivel Windows Desktop (.EXE / NSIS)
 color 0A
 
 echo ======================================================================
-echo       WINHOOD ENTERPRISE - COMPILADOR DE EXECUTAVEL WINDOWS (.EXE)
+echo       WINHOOD ENTERPRISE - BUILD REPRODUTIVEL WINDOWS (.EXE / NSIS)
 echo ======================================================================
-echo.
-echo [*] Este script empacota a aplicacao completa em executavel nativo .exe
-echo     com instalador NSIS para distribuicao no Windows.
 echo.
 
 where npm >nul 2>nul
 if %errorlevel% neq 0 (
-    echo [ERRO] npm nao encontrado. Verifique a instalacao do Node.js.
-    pause
+    echo [ERRO] npm nao encontrado no ambiente de build.
     exit /b 1
 )
 
-echo [1/3] Compilando frontend e modulos de alta performance (Vite Build)...
-call npm run build
+echo [1/4] Validando tipagem TypeScript (npm run lint)...
+call npm run lint
 if %errorlevel% neq 0 (
-    echo [ERRO] Falha ao compilar frontend.
-    pause
+    echo [ERRO] Falha na validacao TypeScript. Build abortado.
     exit /b 1
 )
 
-echo.
-echo [2/3] Instalando dependencias de empacotamento desktop Windows...
-call npm install -D electron electron-builder --no-save
+echo [2/4] Executando suite de testes automatizados (npm test)...
+call npm test
+if %errorlevel% neq 0 (
+    echo [ERRO] Falha nos testes automatizados. Build abortado.
+    exit /b 1
+)
 
-echo.
-echo [3/3] Gerando instalador NSIS e executavel portavel WinHood.exe...
-npx electron-builder --win nsis portable --config.win.target=nsis
+echo [3/4] Compilando frontend Vite + bundles desktop (npm run build:desktop)...
+call npm run build:desktop
+if %errorlevel% neq 0 (
+    echo [ERRO] Falha ao compilar artefatos desktop.
+    exit /b 1
+)
 
-echo.
+echo [4/4] Empacotando instalador NSIS e executavel portatil com electron-builder...
+call npx electron-builder --config electron-builder.json --win nsis portable
+if %errorlevel% neq 0 (
+    echo [AVISO] electron-builder requer o pacote electron instalado nas devDependencies do ambiente de release.
+    exit /b 1
+)
+
 echo ======================================================================
-echo  [SUCESSO] Compilacao concluida!
-echo  Os instaladores estao disponiveis no diretorio: dist/
-echo  - WinHood-Setup-1.0.0.exe (Instalador NSIS para Windows)
-echo  - WinHood-1.0.0.exe (Versao Portatil sem instalacao)
+echo  [SUCESSO] Artefatos gerados em release-windows\ e manifesto SHA-256 em dist-desktop\build-manifest.json
 echo ======================================================================
-echo.
-pause
+exit /b 0

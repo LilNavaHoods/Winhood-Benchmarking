@@ -13,6 +13,7 @@ import {
   X,
 } from 'lucide-react';
 import type { Project } from '../types/benchmark';
+import { csrfFetch as fetch } from '../utils/csrfFetch';
 
 interface GitHubRepoItem {
   id: number;

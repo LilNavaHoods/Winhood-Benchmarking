@@ -1,4 +1,9 @@
-import type { NormalizedFinding, SeverityLevel, SonarIssueRecord } from '../../types/benchmark';
+import type {
+  NormalizedFinding,
+  SeverityLevel,
+  SonarHotspotsBreakdown,
+  SonarIssueRecord,
+} from '../../types/benchmark';
 import { computeSha256, enrichLegacyOrExternalFinding } from '../../engine/scoringEngine';
 
 const EXTERNAL_ENGINE_META: Record<string, { name: string; defaultVersion: string }> = {
@@ -15,12 +20,25 @@ const EXTERNAL_ENGINE_META: Record<string, { name: string; defaultVersion: strin
   checkstyle: { name: 'Checkstyle Java Auditor', defaultVersion: '10.20.1' },
 };
 
+export interface RawSonarHotspotItem {
+  key: string;
+  component: string;
+  project: string;
+  securityCategory: string;
+  vulnerabilityProbability: 'HIGH' | 'MEDIUM' | 'LOW';
+  status: 'TO_REVIEW' | 'REVIEWED';
+  resolution?: 'FIXED' | 'SAFE' | 'ACKNOWLEDGED' | 'VULNERABLE';
+  line?: number;
+  message: string;
+  ruleKey?: string;
+}
+
 /**
- * SonarResultParser (Seção 6.2 e Seção 7)
- * Converte issues e Security Hotspots da Web API do SonarQube para o formato auditável do Benchmark Analyzer.
- * CRÍTICO (Seção 7): Distingue explicitamente achados nativos das regras do SonarQube de achados externos
- * importados via SARIF (`externalRuleEngine` / prefixo `external_*`), preservando ferramenta de origem,
- * versão, regra original e evitando duplicação.
+ * SonarResultParser (Seção 6.2, Seção 7 e Seção 10)
+ * Converte issues e Security Hotspots da Web API do SonarQube / SonarCloud para o formato auditável do WinHood.
+ * - Distingue achados nativos das regras do SonarQube de achados externos importados via SARIF (`externalRuleEngine`).
+ * - Separa Security Hotspots por estado real de revisão (TO_REVIEW, SAFE, FIXED, ACKNOWLEDGED, VULNERABLE),
+ *   sem nunca classificar um hotspot SAFE ou ACKNOWLEDGED como vulnerabilidade corrigida (FIXED).
  */
 export class SonarResultParser {
   public static parseEffortToMinutes(effortStr?: string): number {
@@ -33,6 +51,81 @@ export class SonarResultParser {
     if (hMatch) total += Number.parseInt(hMatch[1], 10) * 60;
     if (mMatch) total += Number.parseInt(mMatch[1], 10);
     return total > 0 ? total : 10;
+  }
+
+  /**
+   * Calcula o detalhamento estrito de Security Hotspots (Seção 10).
+   * - Não converte erro de API em 0 hotspots ou 100% revisados.
+   * - Nunca soma SAFE ou ACKNOWLEDGED dentro de reviewedFixedCount.
+   */
+  public static computeHotspotsBreakdown(
+    rawHotspots: RawSonarHotspotItem[] | null | undefined,
+    options?: {
+      apiError?: boolean;
+      isPartial?: boolean;
+      measuredReviewPercentFromApi?: number | null;
+    }
+  ): SonarHotspotsBreakdown {
+    if (options?.apiError || !rawHotspots) {
+      return {
+        totalIdentified: null,
+        reviewedCount: null,
+        unreviewedCount: null,
+        reviewedSafeCount: null,
+        reviewedVulnerableCount: null,
+        reviewedFixedCount: null,
+        acceptedRiskCount: null,
+        reviewPercent: null,
+        measurementState: options?.apiError ? 'API_ERROR' : 'NOT_MEASURED',
+      };
+    }
+
+    let reviewedCount = 0;
+    let unreviewedCount = 0;
+    let reviewedSafeCount = 0;
+    let reviewedVulnerableCount = 0;
+    let reviewedFixedCount = 0;
+    let acceptedRiskCount = 0;
+
+    for (const hs of rawHotspots) {
+      if (hs.status === 'REVIEWED') {
+        reviewedCount += 1;
+        if (hs.resolution === 'SAFE') {
+          reviewedSafeCount += 1;
+        } else if (hs.resolution === 'FIXED') {
+          reviewedFixedCount += 1;
+        } else if (hs.resolution === 'ACKNOWLEDGED') {
+          acceptedRiskCount += 1;
+        } else if (hs.resolution === 'VULNERABLE') {
+          reviewedVulnerableCount += 1;
+        }
+      } else {
+        unreviewedCount += 1;
+      }
+    }
+
+    const totalIdentified = rawHotspots.length;
+    let reviewPercent: number | null = null;
+    if (
+      options?.measuredReviewPercentFromApi !== undefined &&
+      options.measuredReviewPercentFromApi !== null
+    ) {
+      reviewPercent = options.measuredReviewPercentFromApi;
+    } else if (totalIdentified > 0) {
+      reviewPercent = Number(((reviewedCount / totalIdentified) * 100).toFixed(1));
+    }
+
+    return {
+      totalIdentified,
+      reviewedCount,
+      unreviewedCount,
+      reviewedSafeCount,
+      reviewedVulnerableCount,
+      reviewedFixedCount,
+      acceptedRiskCount,
+      reviewPercent,
+      measurementState: options?.isPartial ? 'PARTIAL' : 'MEASURED',
+    };
   }
 
   public static parseIssuesAndHotspots(params: {
@@ -52,18 +145,7 @@ export class SonarResultParser {
       type: 'BUG' | 'VULNERABILITY' | 'CODE_SMELL';
       externalRuleEngine?: string;
     }>;
-    rawHotspots?: Array<{
-      key: string;
-      component: string;
-      project: string;
-      securityCategory: string;
-      vulnerabilityProbability: 'HIGH' | 'MEDIUM' | 'LOW';
-      status: 'TO_REVIEW' | 'REVIEWED';
-      resolution?: 'FIXED' | 'SAFE' | 'ACKNOWLEDGED';
-      line?: number;
-      message: string;
-      ruleKey?: string;
-    }>;
+    rawHotspots?: RawSonarHotspotItem[];
   }): SonarIssueRecord[] {
     const records: SonarIssueRecord[] = [];
     const seenFingerprints = new Set<string>();
@@ -115,7 +197,7 @@ export class SonarResultParser {
         isExternalImportedRule: isExternal,
         externalOriginTool: isExternal
           ? externalMeta?.name || engineKey.toUpperCase()
-          : 'SonarQube Community Build (Nativo)',
+          : 'SonarQube / SonarCloud (Nativo)',
         externalOriginVersion: isExternal
           ? externalMeta?.defaultVersion || 'SARIF 2.1.0'
           : '26.11.0.134175',
@@ -130,7 +212,7 @@ export class SonarResultParser {
         effortMinutes: SonarResultParser.parseEffortToMinutes(item.effort),
         remediationGuidance: isExternal
           ? 'Achado importado de relatório externo (SARIF). Regras externas não fazem parte do Quality Profile nativo do SonarQube; valide a correção na ferramenta de origem.'
-          : 'Consulte a orientação Clean as You Code da regra nativa no perfil de qualidade Sonar way.',
+          : 'Consulte a orientação Clean as You Code da regra nativa no perfil de qualidade ativo do projeto.',
         evidenceSnippet: `${filePath}:${lineNumber} — ${item.message}`,
         evidenceSha256,
       });
@@ -147,10 +229,26 @@ export class SonarResultParser {
       );
 
       let reviewStatus: SonarIssueRecord['hotspotReviewStatus'] = 'TO_REVIEW';
+      let guidance =
+        'Security Hotspot pendente de revisão humana (TO_REVIEW): pontos sensíveis à segurança exigem inspeção manual para determinar se o contexto expõe uma vulnerabilidade explorável.';
       if (hs.status === 'REVIEWED') {
-        if (hs.resolution === 'SAFE') reviewStatus = 'REVIEWED_SAFE';
-        else if (hs.resolution === 'FIXED') reviewStatus = 'REVIEWED_FIXED';
-        else reviewStatus = 'REVIEWED_ACKNOWLEDGED';
+        if (hs.resolution === 'SAFE') {
+          reviewStatus = 'REVIEWED_SAFE';
+          guidance =
+            'Security Hotspot revisado como SEGURO (REVIEWED_SAFE): auditado manualmente sem risco explorável no contexto atual (não contabilizado como vulnerabilidade corrigida).';
+        } else if (hs.resolution === 'FIXED') {
+          reviewStatus = 'REVIEWED_FIXED';
+          guidance =
+            'Security Hotspot revisado como CORRIGIDO (REVIEWED_FIXED): mitigação técnica aplicada no código.';
+        } else if (hs.resolution === 'VULNERABLE') {
+          reviewStatus = 'REVIEWED_VULNERABLE';
+          guidance =
+            'Security Hotspot revisado e confirmado como VULNERÁVEL (REVIEWED_VULNERABLE): requer correção prioritária.';
+        } else {
+          reviewStatus = 'REVIEWED_ACKNOWLEDGED';
+          guidance =
+            'Security Hotspot com RISCO ACEITO / RECONHECIDO (REVIEWED_ACKNOWLEDGED): risco documentado pela equipe sem alteração imediata de código (não equivale a correção).';
+        }
       }
 
       records.push({
@@ -178,10 +276,9 @@ export class SonarResultParser {
         lineNumber,
         message: hs.message,
         effortMinutes: 20,
-        remediationGuidance:
-          'Security Hotspot estático requer revisão humana para determinar se o contexto de execução expõe uma vulnerabilidade real.',
+        remediationGuidance: guidance,
         hotspotReviewStatus: reviewStatus,
-        evidenceSnippet: `${filePath}:${lineNumber} [${hs.securityCategory}]`,
+        evidenceSnippet: `${filePath}:${lineNumber} [${hs.securityCategory}] (${reviewStatus})`,
         evidenceSha256,
       });
     }
@@ -191,7 +288,8 @@ export class SonarResultParser {
 
   /**
    * Converte issues e hotspots do SonarCloud para o modelo NormalizedFinding da plataforma WinHood,
-   * permitindo que sejam visualizados imediatamente nos módulos de Findings, Relatórios e Dashboard.
+   * preservando que Security Hotspots NUNCA sejam classificados como vulnerabilidades confirmadas (CONFIRMED)
+   * a menos que tenham sido revisados explicitamente como REVIEWED_VULNERABLE.
    */
   public static mapSonarIssuesToNormalizedFindings(
     issues: SonarIssueRecord[],
@@ -259,6 +357,13 @@ export class SonarResultParser {
                 ? 'MEDIUM'
                 : 'INFO';
 
+      const validationStatus: NormalizedFinding['validationStatus'] =
+        iss.type === 'SECURITY_HOTSPOT'
+          ? iss.hotspotReviewStatus === 'REVIEWED_VULNERABLE'
+            ? 'CONFIRMED'
+            : 'UNVERIFIED'
+          : 'CONFIRMED';
+
       return enrichLegacyOrExternalFinding({
         id: `fnd-sonar-${iss.issueKey || iss.id}`,
         runId: 'run-sonarcloud-live',
@@ -280,7 +385,7 @@ export class SonarResultParser {
         remediation: iss.remediationGuidance || 'Consulte a documentação da regra do SonarCloud.',
         remediationEffortMinutes: iss.effortMinutes || 20,
         evidenceSha256: iss.evidenceSha256 || computeSha256(`${iss.ruleKey}:${iss.filePath}:${iss.lineNumber}`),
-        validationStatus: iss.type === 'SECURITY_HOTSPOT' ? 'UNVERIFIED' : 'CONFIRMED',
+        validationStatus,
       });
     });
   }

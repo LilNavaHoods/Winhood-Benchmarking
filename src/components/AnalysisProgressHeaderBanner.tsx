@@ -7,6 +7,7 @@ import {
   StopCircle,
 } from 'lucide-react';
 import type { BenchmarkRun, BenchmarkRunProgress } from '../types/benchmark';
+import { csrfFetch as fetch } from '../utils/csrfFetch';
 
 interface AnalysisProgressHeaderBannerProps {
   activeRun: BenchmarkRun | null;

@@ -173,6 +173,35 @@ test('AuthService enforces single-use bootstrap token, scrypt password check, br
 
     const postRecovery = auth.login({ email: 'qa@winhood.local', password: 'RecoveredPassword!999' });
     assert.ok(postRecovery.sessionId);
+
+    // Self-registration blocks ADMIN elevation, enforces password policy, and creates valid session
+    assert.throws(() => {
+      auth.registerAccount({
+        name: 'Rogue Self Admin',
+        email: 'selfadmin@winhood.local',
+        password: 'StrongPassword!2026',
+        role: 'ADMIN',
+      });
+    }, /ROLE_ELEVATION_BLOCKED/);
+
+    const selfReg = auth.registerAccount({
+      name: 'Engenheira de Segurança',
+      email: 'sec.lead@winhood.local',
+      password: 'SecLeadPassword!2026',
+      role: 'SECURITY_LEAD',
+      enableMfa: false,
+    });
+    assert.equal(selfReg.user.role, 'SECURITY_LEAD');
+    assert.ok(auth.validateSession(selfReg.sessionId));
+
+    // Duplicate email rejected
+    assert.throws(() => {
+      auth.registerAccount({
+        name: 'Duplicate User',
+        email: 'sec.lead@winhood.local',
+        password: 'SecLeadPassword!2026',
+      });
+    }, /EMAIL_ALREADY_EXISTS/);
   });
 });
 
@@ -220,6 +249,35 @@ test('HTTP integration with enforceProductionAuth: auth gating, CSRF, RBAC, SSRF
       assert.ok(adminJar.winhood_session);
       assert.ok(adminJar.winhood_csrf);
       const adminCookie = `winhood_session=${adminJar.winhood_session}; winhood_csrf=${adminJar.winhood_csrf}`;
+
+      // 3b. Public self-registration (/api/auth/register) creates account + session cookies and blocks ADMIN role elevation
+      const blockedAdminReg = await fetch(`${baseUrl}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Blocked Admin',
+          email: 'blocked-admin@winhood.local',
+          password: 'StrongPassword!2026',
+          role: 'ADMIN',
+        }),
+      });
+      assert.equal(blockedAdminReg.status, 403);
+
+      const publicRegRes = await fetch(`${baseUrl}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Novo Analista AppSec',
+          email: 'novo.analista@winhood.local',
+          password: 'AnalistaStrongPassword!2026',
+          role: 'SECURITY_LEAD',
+          enableMfa: false,
+        }),
+      });
+      assert.equal(publicRegRes.status, 201);
+      const publicRegJar = extractSetCookieValues(publicRegRes);
+      assert.ok(publicRegJar.winhood_session);
+      assert.ok(publicRegJar.winhood_csrf);
 
       // 4. Missing or tampered CSRF token rejected with 403 CSRF_INVALID on mutating POST
       const missingCsrfRes = await fetch(`${baseUrl}/api/projects`, {

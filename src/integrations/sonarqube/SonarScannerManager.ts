@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import type { Software, SonarScannerRecord, SonarScannerType } from '../../types/benchmark';
 import { computeSha256 } from '../../engine/scoringEngine';
 import { ToolAvailabilityService } from '../../services/tools/ToolAvailabilityService';
@@ -8,6 +10,7 @@ export interface GeneratedScannerConfiguration {
   projectKey: string;
   projectName: string;
   projectBaseDir: string;
+  projectBaseDirExists: boolean;
   sources: string;
   tests: string;
   exclusions: string;
@@ -24,10 +27,11 @@ export interface GeneratedScannerConfiguration {
 }
 
 /**
- * SonarScannerManager (Seção 3, 3.1, 3.2, 3.3 e 3.4)
+ * SonarScannerManager (Seção 3, 3.1, 3.2, 3.3, 3.4 e 5.5)
  * Seleciona automaticamente o scanner oficial mais adequado para cada tecnologia
  * (Maven, Gradle, .NET, NPM, Python ou SonarScanner CLI), gera a configuração
- * reprodutível e garante que SONAR_TOKEN seja passado apenas via variável de ambiente.
+ * reprodutível, valida o caminho real do projeto no sistema operacional atual (Linux/Windows)
+ * e garante que SONAR_TOKEN seja passado apenas via variável de ambiente.
  */
 export class SonarScannerManager {
   public static listScanners(): SonarScannerRecord[] {
@@ -116,7 +120,31 @@ export class SonarScannerManager {
   }
 
   /**
-   * Gera a configuração oficial do SonarScanner (Seção 3.2, 3.3 e 3.4).
+   * Resolve um caminho de diretório compatível com Windows e Linux para os artefatos isolados do projeto.
+   */
+  public static resolveCrossPlatformProjectBaseDir(software: Software): {
+    projectBaseDir: string;
+    existsOnDisk: boolean;
+  } {
+    const rawCandidate = software.inventory?.isolatedStoragePath;
+    if (rawCandidate && rawCandidate.trim().length > 0 && !rawCandidate.startsWith('/isolated_artifacts/')) {
+      const normalized = path.resolve(rawCandidate);
+      return {
+        projectBaseDir: normalized,
+        existsOnDisk: fs.existsSync(normalized),
+      };
+    }
+    const baseDataDir =
+      process.env.WINHOOD_DATA_DIR || path.resolve(process.cwd(), '.winhood_data');
+    const resolved = path.join(baseDataDir, 'isolated_artifacts', software.id);
+    return {
+      projectBaseDir: resolved,
+      existsOnDisk: fs.existsSync(resolved),
+    };
+  }
+
+  /**
+   * Gera a configuração oficial do SonarScanner (Seção 3.2, 3.3, 3.4 e 5.5).
    * - Não aplica exclusões silenciosas sem registrar motivos técnicos.
    * - Nunca coloca `sonar.token` na linha de comando nem no arquivo versionado;
    *   utiliza exclusivamente variável de ambiente `SONAR_TOKEN`.
@@ -137,20 +165,24 @@ export class SonarScannerManager {
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '');
     const projectKey = `winhood-${role.toLowerCase().replace('_', '-')}-${cleanSlug}`;
-    const projectBaseDir =
-      software.inventory?.isolatedStoragePath || `/isolated_artifacts/${software.id}`;
+    const { projectBaseDir, existsOnDisk } =
+      SonarScannerManager.resolveCrossPlatformProjectBaseDir(software);
 
     const filePaths = (software.inventory?.files || []).map((f) => f.relativePath);
-    const hasSrcDir = filePaths.some((p) => p.startsWith('src/'));
+    const hasSrcDir = filePaths.some((p) => p.startsWith('src/') || p.startsWith('src\\'));
     const hasTestsDir = filePaths.some(
-      (p) => p.startsWith('tests/') || p.startsWith('test/')
+      (p) =>
+        p.startsWith('tests/') ||
+        p.startsWith('test/') ||
+        p.startsWith('tests\\') ||
+        p.startsWith('test\\')
     );
 
     const sources = hasSrcDir ? 'src' : '.';
     const tests = hasTestsDir ? 'tests' : '';
 
-    // Avaliar SCM / Blame (Seção 3.2)
-    const hasGitMetadata = filePaths.some((p) => p.startsWith('.git/'));
+    // Avaliar SCM / Blame (Seção 3.2 e 8.3)
+    const hasGitMetadata = filePaths.some((p) => p.startsWith('.git/') || p.startsWith('.git\\'));
     const scmFullCloneAvailable =
       software.sourceType === 'GIT_REPO' && hasGitMetadata;
     const scmLimitationWarning = scmFullCloneAvailable
@@ -173,11 +205,13 @@ export class SonarScannerManager {
     }
 
     const sarifPaths = params.sarifReportPaths || [];
+    // Normalizar barras no sonar.projectBaseDir para evitar problemas de escape com '\' em arquivos .properties no Windows
+    const normalizedPropsBaseDir = projectBaseDir.replace(/\\/g, '/');
     const propertiesRecord: Record<string, string> = {
       'sonar.projectKey': projectKey,
       'sonar.projectName': `${software.name} (${role})`,
       'sonar.projectVersion': software.version,
-      'sonar.projectBaseDir': projectBaseDir,
+      'sonar.projectBaseDir': normalizedPropsBaseDir,
       'sonar.sources': sources,
       'sonar.sourceEncoding': 'UTF-8',
       'sonar.host.url': serverUrl,
@@ -204,15 +238,17 @@ export class SonarScannerManager {
     const propertiesContent = lines.join('\n');
     const configSha256 = computeSha256(propertiesContent);
 
-    let cmdPreview = `SONAR_TOKEN="••••••••" sonar-scanner -Dproject.settings=sonar-project.properties`;
+    const isWin = process.platform === 'win32';
+    const scannerCliCmd = isWin ? 'sonar-scanner.bat' : 'sonar-scanner';
+    let cmdPreview = `SONAR_TOKEN="••••••••" ${scannerCliCmd} -Dproject.settings=.winhood-sonar-temp.properties`;
     if (selected.scannerType === 'SONAR_SCANNER_MAVEN') {
-      cmdPreview = `SONAR_TOKEN="••••••••" mvn sonar:sonar -Dsonar.projectKey=${projectKey} -Dsonar.host.url=${serverUrl}`;
+      cmdPreview = `SONAR_TOKEN="••••••••" ${isWin ? 'mvn.cmd' : 'mvn'} sonar:sonar -Dsonar.projectKey=${projectKey} -Dsonar.host.url=${serverUrl}`;
     } else if (selected.scannerType === 'SONAR_SCANNER_GRADLE') {
-      cmdPreview = `SONAR_TOKEN="••••••••" gradle sonar -Dsonar.projectKey=${projectKey} -Dsonar.host.url=${serverUrl}`;
+      cmdPreview = `SONAR_TOKEN="••••••••" ${isWin ? 'gradlew.bat' : 'gradle'} sonar -Dsonar.projectKey=${projectKey} -Dsonar.host.url=${serverUrl}`;
     } else if (selected.scannerType === 'SONAR_SCANNER_DOTNET') {
       cmdPreview = `SONAR_TOKEN="••••••••" dotnet sonarscanner begin /k:"${projectKey}" /d:sonar.host.url="${serverUrl}" && dotnet build && dotnet sonarscanner end`;
     } else if (selected.scannerType === 'SONAR_SCANNER_NPM') {
-      cmdPreview = `SONAR_TOKEN="••••••••" npx @sonar/scan -Dsonar.projectKey=${projectKey} -Dsonar.host.url=${serverUrl}`;
+      cmdPreview = `SONAR_TOKEN="••••••••" ${isWin ? 'npx.cmd' : 'npx'} @sonar/scan -Dproject.settings=.winhood-sonar-temp.properties`;
     } else if (selected.scannerType === 'SONAR_SCANNER_PYTHON') {
       cmdPreview = `SONAR_TOKEN="••••••••" pysonar-scanner -Dsonar.projectKey=${projectKey} -Dsonar.host.url=${serverUrl}`;
     }
@@ -223,6 +259,7 @@ export class SonarScannerManager {
       projectKey,
       projectName: `${software.name} (${role})`,
       projectBaseDir,
+      projectBaseDirExists: existsOnDisk,
       sources,
       tests,
       exclusions: exclusionsList.join(','),

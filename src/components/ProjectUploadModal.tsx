@@ -11,6 +11,7 @@ import {
   Upload,
   X,
 } from 'lucide-react';
+import { csrfFetch as fetch } from '../utils/csrfFetch';
 
 async function computeClientSha256(filesMap: Record<string, string>): Promise<string> {
   const keys = Object.keys(filesMap).sort((a, b) => a.localeCompare(b));

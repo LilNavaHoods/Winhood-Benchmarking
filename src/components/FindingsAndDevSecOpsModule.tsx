@@ -18,6 +18,7 @@ import {
 import type { BenchmarkRun, NormalizedFinding, SeverityLevel, VisualReportCategoryKey } from '../types/benchmark';
 import { CATEGORY_LABELS } from './DashboardModule';
 import { HairlineAnimatedFigure } from './HairlineAnimatedFigure';
+import { csrfFetch as fetch } from '../utils/csrfFetch';
 
 interface FindingsAndDevSecOpsModuleProps {
   latestRun: BenchmarkRun | null;

@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { ExecutionSandboxControl, IsolationLifecycleState } from '../types/benchmark';
+import { resolveNodeRuntimeForSubprocess } from '../storage/WinHoodPaths';
 
 export interface HostIsolationProbe {
   sandboxAvailable: boolean;
@@ -47,12 +48,17 @@ export interface SandboxedCommandResult {
 
 const MINIMAL_SAFE_ENV_KEYS = ['PATH', 'LANG', 'LC_ALL'];
 
-function checkBinaryCommand(bin: string, args: string[]): boolean {
+function checkBinaryCommand(
+  bin: string,
+  args: string[],
+  envOverrides?: Record<string, string>
+): boolean {
   try {
     const res = spawnSync(bin, args, {
       shell: false,
       encoding: 'utf8',
       timeout: 2500,
+      env: envOverrides ? { ...process.env, ...envOverrides } : process.env,
     });
     return res.status === 0 && !res.error;
   } catch {
@@ -61,12 +67,14 @@ function checkBinaryCommand(bin: string, args: string[]): boolean {
 }
 
 function buildMinimalEnv(tmpRoot: string, extra?: Record<string, string>): NodeJS.ProcessEnv {
+  const nodeRuntime = resolveNodeRuntimeForSubprocess();
   const cleanEnv: NodeJS.ProcessEnv = {
     TMPDIR: tmpRoot,
     TMP: tmpRoot,
     TEMP: tmpRoot,
     HOME: tmpRoot,
     NODE_ENV: 'test',
+    ...nodeRuntime.envOverrides,
   };
   for (const key of MINIMAL_SAFE_ENV_KEYS) {
     if (process.env[key]) {
@@ -100,8 +108,14 @@ export class SandboxExecutor {
       platform === 'win32' && fs.existsSync('C:\\Windows\\System32\\WindowsSandbox.exe');
 
     const nodeMajor = Number.parseInt(process.versions.node.split('.')[0] || '0', 10);
+    const nodeRuntime = resolveNodeRuntimeForSubprocess();
     const nodePermissionSupported =
-      nodeMajor >= 20 && checkBinaryCommand(process.execPath, ['--permission', '--allow-fs-read=.', '-e', 'process.exit(0)']);
+      nodeMajor >= 20 &&
+      checkBinaryCommand(
+        nodeRuntime.executablePath,
+        ['--permission', '--allow-fs-read=.', '-e', 'process.exit(0)'],
+        nodeRuntime.envOverrides
+      );
 
     let isolationMode: ExecutionSandboxControl['isolationMode'] = 'UNAVAILABLE_HOST';
     let isolationProvider = 'Nenhum provedor de sandbox isolado disponível';

@@ -14,6 +14,7 @@ import {
   Upload,
 } from 'lucide-react';
 import type { Project, Software } from '../types/benchmark';
+import { csrfFetch as fetch } from '../utils/csrfFetch';
 
 interface ProjectsAndSoftwaresModuleProps {
   projects: Project[];
