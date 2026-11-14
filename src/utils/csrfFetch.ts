@@ -96,7 +96,7 @@ export async function csrfFetch(
   if (isApiCall) {
     const nextInit: RequestInit = { ...(init || {}) };
     if (!nextInit.credentials) {
-      nextInit.credentials = 'same-origin';
+      nextInit.credentials = 'include';
     }
     const method = (nextInit.method || 'GET').toUpperCase();
     if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {

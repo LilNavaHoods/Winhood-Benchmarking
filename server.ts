@@ -100,6 +100,7 @@ import {
   type RbacRole,
 } from './src/security/AuthService';
 import { PersistentDatabaseManager } from './src/storage/PersistentDatabaseManager';
+import { ProjectBackupService } from './src/services/backup/ProjectBackupService';
 import { SsrfGuard, type AuthorizedPerfTarget } from './src/execution/SsrfGuard';
 import { ReferenceRegistry } from './src/intelligence/reference/ReferenceRegistry';
 import { ReferenceSynchronizer } from './src/intelligence/synchronization/ReferenceSynchronizer';
@@ -890,6 +891,8 @@ export async function createWinHoodApp(options?: {
   const authService = new AuthService(dataDir);
 
   const app = express();
+  app.set('trust proxy', 1);
+  const backupService = new ProjectBackupService(dataDir);
   app.disable('x-powered-by');
   app.use((_req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -1049,17 +1052,31 @@ export async function createWinHoodApp(options?: {
   };
 
   const setSessionCookies = (res: express.Response, sessionId: string, csrfToken: string) => {
+    const reqObj = (res as any).req as express.Request | undefined;
+    const isSecure =
+      Boolean(reqObj?.secure) ||
+      reqObj?.headers['x-forwarded-proto'] === 'https' ||
+      process.env.NODE_ENV === 'production' ||
+      Boolean(reqObj?.headers?.referer?.startsWith('https'));
+    const secureAttr = isSecure ? '; Secure' : '';
     const maxAgeSec = Math.floor(AuthService.SESSION_ABSOLUTE_MS / 1000);
     res.setHeader('Set-Cookie', [
-      `winhood_session=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSec}`,
-      `winhood_csrf=${encodeURIComponent(csrfToken)}; Path=/; SameSite=Lax; Max-Age=${maxAgeSec}`,
+      `winhood_session=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; SameSite=Lax${secureAttr}; Max-Age=${maxAgeSec}`,
+      `winhood_csrf=${encodeURIComponent(csrfToken)}; Path=/; SameSite=Lax${secureAttr}; Max-Age=${maxAgeSec}`,
     ]);
   };
 
   const clearSessionCookies = (res: express.Response) => {
+    const reqObj = (res as any).req as express.Request | undefined;
+    const isSecure =
+      Boolean(reqObj?.secure) ||
+      reqObj?.headers['x-forwarded-proto'] === 'https' ||
+      process.env.NODE_ENV === 'production' ||
+      Boolean(reqObj?.headers?.referer?.startsWith('https'));
+    const secureAttr = isSecure ? '; Secure' : '';
     res.setHeader('Set-Cookie', [
-      'winhood_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0',
-      'winhood_csrf=; Path=/; SameSite=Lax; Max-Age=0',
+      `winhood_session=; Path=/; HttpOnly; SameSite=Lax${secureAttr}; Max-Age=0`,
+      `winhood_csrf=; Path=/; HttpOnly; SameSite=Lax${secureAttr}; Max-Age=0`,
     ]);
   };
 
@@ -1453,6 +1470,22 @@ export async function createWinHoodApp(options?: {
       return res.json(setup);
     } catch (err: any) {
       return res.status(400).json({ error: err?.message || 'Falha ao configurar MFA.' });
+    }
+  });
+
+  app.post('/api/auth/mfa/confirm', (req, res) => {
+    const actor = getRequestActor(req, res);
+    if (actor.id === 'usr-anonymous') {
+      return res.status(401).json({ error: 'AUTH_REQUIRED' });
+    }
+    const { totpCode } = (req.body || {}) as { totpCode?: string };
+    try {
+      const user = authService.confirmMfaEnrollment(actor.id, totpCode || '');
+      appendAuditLog(db, 'AUTH_MFA_CONFIRMED', 'AUTH', user.id, `MFA ativado e confirmado para ${user.email}.`, user);
+      saveDatabase(db);
+      return res.json({ ok: true, user });
+    } catch (err: any) {
+      return res.status(400).json({ error: err?.message || 'Falha ao confirmar MFA.' });
     }
   });
 
@@ -1998,6 +2031,94 @@ export async function createWinHoodApp(options?: {
     );
     saveDatabase(db);
     return res.json({ ok: true, deletedId: removed.id });
+  });
+
+  // 5.2 Project Backups & Restoration (/api/projects/backups)
+  app.get('/api/projects/backups', (req, res) => {
+    if (!requireWritePermission(res, req, 'read:all')) return;
+    try {
+      const backups = backupService.listBackups();
+      return res.json({ backups });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || 'Falha ao listar backups.' });
+    }
+  });
+
+  app.post('/api/projects/:id/backup', (req, res) => {
+    if (!requireWritePermission(res, req, 'projects:write')) return;
+    const project = db.projects.find((p) => p.id === req.params.id);
+    if (!project) {
+      return res.status(404).json({ error: 'Projeto não encontrado.' });
+    }
+    const softwares = db.softwares.filter((s) => s.projectId === project.id);
+    try {
+      const manifest = backupService.createBackup(project, softwares);
+      appendAuditLog(
+        db,
+        'PROJECT_BACKED_UP',
+        'PROJECT',
+        project.id,
+        `Backup físico criado para o projeto "${project.name}" (ID: ${manifest.backupId}).`,
+        getRequestActor(req, res)
+      );
+      saveDatabase(db);
+      return res.status(201).json({ manifest });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || 'Falha ao criar backup do projeto.' });
+    }
+  });
+
+  app.post('/api/projects/backups/:backupId/verify', (req, res) => {
+    if (!requireWritePermission(res, req, 'audit:read')) return;
+    try {
+      const verification = backupService.verifyBackup(req.params.backupId);
+      return res.json(verification);
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || 'Falha ao verificar integridade do backup.' });
+    }
+  });
+
+  app.post('/api/projects/backups/:backupId/restore', (req, res) => {
+    if (!requireWritePermission(res, req, 'projects:write')) return;
+    try {
+      const { restoredProject, restoredSoftwares } = backupService.restoreBackup(req.params.backupId);
+      db.projects.push(restoredProject);
+      db.softwares.push(...restoredSoftwares);
+      appendAuditLog(
+        db,
+        'PROJECT_RESTORED_FROM_BACKUP',
+        'PROJECT',
+        restoredProject.id,
+        `Projeto restaurado a partir do backup ID ${req.params.backupId} como "${restoredProject.name}".`,
+        getRequestActor(req, res)
+      );
+      saveDatabase(db);
+      return res.status(201).json({ project: restoredProject, softwares: restoredSoftwares });
+    } catch (err: any) {
+      return res.status(400).json({ error: err?.message || 'Falha ao restaurar backup.' });
+    }
+  });
+
+  app.delete('/api/projects/backups/:backupId', (req, res) => {
+    if (!requireWritePermission(res, req, 'projects:write')) return;
+    try {
+      const deleted = backupService.deleteBackup(req.params.backupId);
+      if (!deleted) {
+        return res.status(404).json({ error: 'Backup não encontrado.' });
+      }
+      appendAuditLog(
+        db,
+        'PROJECT_BACKUP_DELETED',
+        'PROJECT',
+        req.params.backupId,
+        `Backup ID ${req.params.backupId} foi excluído.`,
+        getRequestActor(req, res)
+      );
+      saveDatabase(db);
+      return res.json({ ok: true, backupId: req.params.backupId });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || 'Falha ao excluir backup.' });
+    }
   });
 
   // 5.1 Project Upload Endpoint (/api/projects/upload)

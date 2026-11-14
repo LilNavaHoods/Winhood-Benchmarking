@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { WinHoodLogo } from './WinHoodLogo';
 import { csrfFetch as fetch } from '../utils/csrfFetch';
+import QRCode from 'qrcode';
 
 export interface AuthUserView {
   id: string;
@@ -59,6 +60,17 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
     secret: string;
     otpauthUrl: string;
   } | null>(null);
+  const [qrCodeDataUrl, setQrCodeDataUrl] = useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (totpSetupInfo?.otpauthUrl) {
+      QRCode.toDataURL(totpSetupInfo.otpauthUrl, { width: 180, margin: 2 })
+        .then((url) => setQrCodeDataUrl(url))
+        .catch(() => setQrCodeDataUrl(null));
+    } else {
+      setQrCodeDataUrl(null);
+    }
+  }, [totpSetupInfo]);
 
   // Login fields
   const [loginEmail, setLoginEmail] = useState('');
@@ -788,15 +800,22 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
               )}
 
               {totpSetupInfo && (
-                <div className="p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10] space-y-1.5 text-[11px]">
+                <div className="p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10] space-y-2 text-[11px] text-center">
                   <div className="font-bold text-slate-800 dark:text-slate-200">
-                    Segredo Base32 para Autenticador (RFC-6238):
+                    Escaneie o QR Code no seu Aplicativo Autenticador (Google Authenticator, Authy):
                   </div>
-                  <div className="font-mono text-[#0e9f8e] dark:text-[#31d6c4] break-all select-all">
-                    {totpSetupInfo.secret}
-                  </div>
-                  <div className="font-mono text-[10px] text-slate-500 break-all">
-                    {totpSetupInfo.otpauthUrl}
+                  {qrCodeDataUrl ? (
+                    <div className="flex justify-center p-2 bg-white rounded shadow-inner">
+                      <img src={qrCodeDataUrl} alt="QR Code TOTP MFA" className="w-36 h-36 object-contain" />
+                    </div>
+                  ) : (
+                    <div className="text-slate-400">Gerando QR Code criptográfico...</div>
+                  )}
+                  <div className="text-left space-y-1 pt-1">
+                    <div className="text-slate-500 font-semibold">Chave Base32 (Configuração Manual):</div>
+                    <div className="font-mono text-[#0e9f8e] dark:text-[#31d6c4] break-all select-all p-1 bg-slate-100 dark:bg-slate-900 rounded">
+                      {totpSetupInfo.secret}
+                    </div>
                   </div>
                 </div>
               )}

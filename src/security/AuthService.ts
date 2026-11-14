@@ -73,6 +73,7 @@ export interface UserAccountRecord {
   passwordHash: string; // scrypt:N=16384,r=8,p=1:<saltHex>:<hashHex>
   mfaEnabled: boolean;
   totpSecretBase32: string | null;
+  pendingTotpSecretBase32?: string | null;
   disabled: boolean;
   failedLoginAttempts: number;
   lockedUntil: string | null;
@@ -565,13 +566,37 @@ export class AuthService {
     const user = this.db.users.find((u) => u.id === userId);
     if (!user) throw new Error('Usuário não encontrado.');
     const secretBase32 = base32Encode(crypto.randomBytes(20));
-    user.totpSecretBase32 = secretBase32;
-    user.mfaEnabled = true;
+    user.pendingTotpSecretBase32 = secretBase32;
     user.updatedAt = new Date().toISOString();
     this.save();
     return {
       secretBase32,
-      otpauthUri: `otpauth://totp/WinHood:${encodeURIComponent(user.email)}?secret=${secretBase32}&issuer=WinHood`,
+      otpauthUri: `otpauth://totp/WinHood:${encodeURIComponent(user.email)}?secret=${secretBase32}&issuer=WinHood&algorithm=SHA1&digits=6&period=30`,
+    };
+  }
+
+  public confirmMfaEnrollment(userId: string, totpCode: string): PublicUserView {
+    const user = this.db.users.find((u) => u.id === userId);
+    if (!user) throw new Error('Usuário não encontrado.');
+    const pending = user.pendingTotpSecretBase32;
+    if (!pending) {
+      throw new Error('Nenhum setup de MFA pendente encontrado. Solicite a configuração primeiro.');
+    }
+    if (!verifyTotpCode(pending, totpCode)) {
+      throw new Error('AUTH_INVALID_MFA: Código TOTP inválido. O MFA não foi ativado.');
+    }
+    user.totpSecretBase32 = pending;
+    user.mfaEnabled = true;
+    user.pendingTotpSecretBase32 = null;
+    user.updatedAt = new Date().toISOString();
+    this.save();
+    return {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      mfaEnabled: true,
+      mfaVerified: true,
     };
   }
 
