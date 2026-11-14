@@ -5,6 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { ReferenceRegistry } from './reference/ReferenceRegistry';
+import { stripTrailingSlashes } from './synchronization/ReferenceSynchronizer';
 import { BenchmarkMatcher } from './comparison/BenchmarkMatcher';
 import { KeyManagementService } from '../security/KeyManagementService';
 import { ControlledTestAndPerfRunner } from '../execution/ControlledTestAndPerfRunner';
@@ -229,4 +230,11 @@ test('GoldenDatasetRunner executes 20 paired TP/TN cases with >= 85% Precision, 
   assert.ok((report.recall ?? 0) >= 0.85, `Expected recall >= 0.85, got ${report.recall}`);
   assert.ok((report.f1Score ?? 0) >= 0.85, `Expected F1 >= 0.85, got ${report.f1Score}`);
   assert.equal(report.reportSha256.length, 64);
+});
+
+test('stripTrailingSlashes normalizes Sonar server URLs safely without regex backtracking', () => {
+  assert.equal(stripTrailingSlashes('https://sonarcloud.io///'), 'https://sonarcloud.io');
+  assert.equal(stripTrailingSlashes('http://127.0.0.1:9000/'), 'http://127.0.0.1:9000');
+  assert.equal(stripTrailingSlashes('http://127.0.0.1:9000'), 'http://127.0.0.1:9000');
+  assert.equal(stripTrailingSlashes('/'), '');
 });

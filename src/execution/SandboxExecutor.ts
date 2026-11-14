@@ -574,7 +574,7 @@ export class SandboxExecutor {
         executed: !timedOut && res.status !== null && !res.error,
         blocked: false,
         isolationMode: probe.dockerAvailable ? 'RESTRICTED_CONTAINER' : 'NODE_PERMISSION_SUBPROCESS',
-        isolationState: timedOut ? 'EXECUTION_TERMINATED' : 'EXECUTION_TERMINATED',
+        isolationState: 'EXECUTION_TERMINATED',
         recoveryVerified: false,
         exitCode: res.status,
         stdout,

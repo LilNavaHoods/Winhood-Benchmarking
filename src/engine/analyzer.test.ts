@@ -49,6 +49,7 @@ import {
   recalculateBenchmarkRunScoreCards,
 } from './benchmarkOrchestrator';
 import { MarketCompetitorDiscoveryEngine } from './marketCompetitorDiscoveryEngine';
+import { isExposedEntryPointLine } from './securityAssessmentEngine';
 import type { NormalizedFinding, Software } from '../types/benchmark';
 
 const clamp0to5 = (v: number): number => Math.round(Math.max(0, Math.min(5, v)) * 100) / 100;
@@ -1527,6 +1528,22 @@ test('Scenario 30: Statistical Hardware Benchmark Telemetry (Warm-up + IQR + CV%
   assert.ok(scoreCard.metricProvenance?.smellsPerKloc?.metricKey === 'staticMetrics.codeSmellsPerKloc');
   assert.ok(scoreCard.metricProvenance?.bugsPerKloc?.metricKey === 'staticMetrics.bugsPerKloc');
   assert.ok(scoreCard.metricProvenance?.technicalDebtRatioPercent?.metricKey === 'staticMetrics.technicalDebtRatioPercent');
+});
+
+test('isExposedEntryPointLine detects TS/JS, Python, and OOP entry points without super-linear backtracking', () => {
+  assert.equal(isExposedEntryPointLine('export function verifyHash(input: string) {'), true);
+  assert.equal(isExposedEntryPointLine('export async function fetchAudit(id: string) {'), true);
+  assert.equal(isExposedEntryPointLine('  def handle_request(req):'), true);
+  assert.equal(isExposedEntryPointLine('public ResponseEntity<String> getStatus(String id) {'), true);
+
+  assert.equal(isExposedEntryPointLine('function internalHelper() {'), false);
+  assert.equal(isExposedEntryPointLine('public static final String VERSION = "1.0";'), false);
+  assert.equal(isExposedEntryPointLine('const defaultValue = 42;'), false);
+
+  const startedAt = performance.now();
+  const adversarial = `public ${'a'.repeat(50000)} noParenEnd`;
+  assert.equal(isExposedEntryPointLine(adversarial), false);
+  assert.ok(performance.now() - startedAt < 50);
 });
 
 

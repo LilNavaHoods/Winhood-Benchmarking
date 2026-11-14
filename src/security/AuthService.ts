@@ -3,6 +3,25 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { KeyManagementService, type VaultReencryptContext } from './KeyManagementService';
 
+/**
+ * Valida formato básico de e-mail em tempo linear O(n) sem backtracking super-linear (typescript:S8786).
+ */
+export function isValidEmailAddress(rawEmail: string): boolean {
+  if (!rawEmail || rawEmail.length > 320 || /\s/.test(rawEmail)) {
+    return false;
+  }
+  const atIndex = rawEmail.indexOf('@');
+  if (atIndex <= 0 || atIndex !== rawEmail.lastIndexOf('@')) {
+    return false;
+  }
+  const domain = rawEmail.slice(atIndex + 1);
+  if (domain.startsWith('.') || domain.endsWith('.')) {
+    return false;
+  }
+  const dotIndex = domain.indexOf('.');
+  return dotIndex > 0 && dotIndex < domain.length - 1;
+}
+
 export type RbacRole = 'ADMIN' | 'SECURITY_LEAD' | 'QA_ENGINEER' | 'AUDITOR';
 
 export type RbacPermission =
@@ -585,7 +604,7 @@ export class AuthService {
     if (cleanName.length < 2) {
       throw new Error('Nome do administrador deve possuir pelo menos 2 caracteres.');
     }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    if (!isValidEmailAddress(cleanEmail)) {
       throw new Error('E-mail inválido.');
     }
     if (cleanPassword.length < 10) {
@@ -1143,7 +1162,7 @@ export class AuthService {
     enableMfa?: boolean;
   }): PublicUserView {
     const cleanEmail = (params.email || '').trim().toLowerCase();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    if (!isValidEmailAddress(cleanEmail)) {
       throw new Error('E-mail inválido.');
     }
     if ((params.password || '').length < 10) {
@@ -1214,7 +1233,7 @@ export class AuthService {
     if (cleanName.length < 2) {
       throw new Error('INVALID_NAME: O nome completo deve possuir pelo menos 2 caracteres.');
     }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    if (!isValidEmailAddress(cleanEmail)) {
       throw new Error('INVALID_EMAIL: Informe um endereço de e-mail válido.');
     }
     if (cleanPassword.length < 10) {

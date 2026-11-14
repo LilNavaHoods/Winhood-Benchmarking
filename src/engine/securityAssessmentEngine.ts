@@ -489,7 +489,7 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
       availabilityState,
       configurationState,
       readinessState,
-      executionState: isNativeInProcess ? 'NOT_EXECUTED' : 'NOT_EXECUTED',
+      executionState: 'NOT_EXECUTED',
       binaryDetected: check.detected,
       configured: check.configured,
       signatureHash: check.detected
@@ -501,6 +501,27 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
       lastExitCode: null,
     };
   });
+}
+
+/**
+ * Identifica assinaturas prováveis de entry points expostos em tempo linear O(n),
+ * evitando backtracking super-linear (typescript:S8786) em linhas extensas.
+ */
+export function isExposedEntryPointLine(line: string): boolean {
+  const trimmed = line.trimStart();
+  if (/^def\s+[A-Za-z0-9_]/i.test(trimmed)) {
+    return true;
+  }
+  if (
+    /export\s+function\s+[A-Za-z0-9_]/i.test(line) ||
+    /export\s+async\s+function\s+[A-Za-z0-9_]/i.test(line)
+  ) {
+    return true;
+  }
+  const publicMatch = /public\s/i.exec(line);
+  return Boolean(
+    publicMatch && line.indexOf('(', publicMatch.index + publicMatch[0].length) !== -1
+  );
 }
 
 /**
@@ -559,7 +580,7 @@ export function executeSecurityAssessmentSuite(params: {
       const lines = content.split(/\r?\n/);
       lines.forEach((line, idx) => {
         const ln = idx + 1;
-        if (/export\s+(?:async\s+)?function\s+\w+|^\s*def\s+\w+|public\s+.*\(/i.test(line)) {
+        if (isExposedEntryPointLine(line)) {
           exposedEntryPoints.push(`${filePath}:${ln}`);
         }
         if (/controller|router|endpoint|handle|Controller/i.test(filePath + ' ' + line)) {

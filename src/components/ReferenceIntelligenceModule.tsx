@@ -690,10 +690,14 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
               <div>
-                <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                <label
+                  htmlFor="reference-matcher-mode"
+                  className="block font-semibold text-slate-700 dark:text-slate-300 mb-1.5"
+                >
                   Modo de Comparação
                 </label>
                 <select
+                  id="reference-matcher-mode"
                   aria-label="Modo de comparação"
                   value={matchMode}
                   onChange={(e) => setMatchMode(e.target.value as BenchmarkMatchDecision['mode'])}

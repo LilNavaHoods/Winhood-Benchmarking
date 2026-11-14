@@ -6,7 +6,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
-import { AuthService, generateTotpCode } from './AuthService';
+import { AuthService, generateTotpCode, isValidEmailAddress } from './AuthService';
 import { KeyManagementService } from './KeyManagementService';
 import { SsrfGuard } from '../execution/SsrfGuard';
 import { buildMinimalSandboxEnv, SandboxExecutor } from '../execution/SandboxExecutor';
@@ -1513,6 +1513,25 @@ test('enforceVerifiedQualityGateOnRun downgrades tampered evidence chain to INCO
   assert.equal(guarded.winnerSoftwareId, null);
   assert.equal(guarded.qualityGate?.executiveDecision, 'INCONCLUSIVE');
   assert.equal(guarded.scoreCards[0]?.separatedIndicators?.qualityGateDecision, 'INCONCLUSIVE');
+});
+
+test('isValidEmailAddress validates standard formats and rejects malformed or backtracking-prone inputs in linear time', () => {
+  assert.equal(isValidEmailAddress('admin@winhood.local'), true);
+  assert.equal(isValidEmailAddress('sec.lead+01@sub.example.org'), true);
+
+  assert.equal(isValidEmailAddress(''), false);
+  assert.equal(isValidEmailAddress('sem-arroba.com'), false);
+  assert.equal(isValidEmailAddress('@sem-local.com'), false);
+  assert.equal(isValidEmailAddress('user@semdominio'), false);
+  assert.equal(isValidEmailAddress('user@.invalid.com'), false);
+  assert.equal(isValidEmailAddress('user@invalid.com.'), false);
+  assert.equal(isValidEmailAddress('user name@winhood.local'), false);
+  assert.equal(isValidEmailAddress('a@@b.com'), false);
+
+  const startedAt = performance.now();
+  const adversarial = `${'a'.repeat(50000)}@${'b'.repeat(50000)}`;
+  assert.equal(isValidEmailAddress(adversarial), false);
+  assert.ok(performance.now() - startedAt < 50);
 });
 
 

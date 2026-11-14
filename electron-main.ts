@@ -42,6 +42,14 @@ export interface DesktopHealthCheckResult {
   errorMessage?: string;
 }
 
+export function stripTrailingSlashes(rawUrl: string): string {
+  let end = rawUrl.length;
+  while (end > 0 && rawUrl.charCodeAt(end - 1) === 47) {
+    end -= 1;
+  }
+  return end === rawUrl.length ? rawUrl : rawUrl.slice(0, end);
+}
+
 export async function waitForBackendHealth(params: {
   baseUrl: string;
   port: number;
@@ -50,7 +58,7 @@ export async function waitForBackendHealth(params: {
 }): Promise<DesktopHealthCheckResult> {
   const maxAttempts = params.maxAttempts ?? 40;
   const intervalMs = params.intervalMs ?? 200;
-  const healthUrl = `${params.baseUrl.replace(/\/+$/, '')}/api/health`;
+  const healthUrl = `${stripTrailingSlashes(params.baseUrl)}/api/health`;
   let lastError = 'Health check ainda não respondeu.';
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {

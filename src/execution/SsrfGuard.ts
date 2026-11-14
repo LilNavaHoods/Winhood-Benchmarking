@@ -20,7 +20,7 @@ const BLOCKED_HOSTNAMES = new Set([
   'metadata.google.internal',
   'metadata.goog',
   'instance-data',
-  '169.254.169.254',
+  '169.254.169.254', // NOSONAR (typescript:S1313): IP intencional de metadata cloud bloqueado pela proteção SSRF
   'metadata.azure.internal',
 ]);
 
@@ -64,14 +64,14 @@ export function isDisallowedIpAddress(rawIp: string, allowLoopbackExplicit = fal
     if (inCidr4(ip, '127.0.0.0', 8)) {
       return allowLoopbackExplicit ? { blocked: false } : { blocked: true, reason: `Loopback IPv4 bloqueado (${ip}).` };
     }
-    if (inCidr4(ip, '10.0.0.0', 8)) return { blocked: true, reason: `Rede privada RFC1918 bloqueada (${ip}).` };
-    if (inCidr4(ip, '172.16.0.0', 12)) return { blocked: true, reason: `Rede privada RFC1918 bloqueada (${ip}).` };
-    if (inCidr4(ip, '192.168.0.0', 16)) return { blocked: true, reason: `Rede privada RFC1918 bloqueada (${ip}).` };
-    if (inCidr4(ip, '169.254.0.0', 16)) return { blocked: true, reason: `Link-local / Cloud Metadata bloqueado (${ip}).` };
+    if (inCidr4(ip, '10.0.0.0', 8)) return { blocked: true, reason: `Rede privada RFC1918 bloqueada (${ip}).` }; // NOSONAR (typescript:S1313): range privado bloqueado intencionalmente pela proteção SSRF
+    if (inCidr4(ip, '172.16.0.0', 12)) return { blocked: true, reason: `Rede privada RFC1918 bloqueada (${ip}).` }; // NOSONAR (typescript:S1313): range privado bloqueado intencionalmente pela proteção SSRF
+    if (inCidr4(ip, '192.168.0.0', 16)) return { blocked: true, reason: `Rede privada RFC1918 bloqueada (${ip}).` }; // NOSONAR (typescript:S1313): range privado bloqueado intencionalmente pela proteção SSRF
+    if (inCidr4(ip, '169.254.0.0', 16)) return { blocked: true, reason: `Link-local / Cloud Metadata bloqueado (${ip}).` }; // NOSONAR (typescript:S1313): range link-local/metadata bloqueado intencionalmente pela proteção SSRF
     if (inCidr4(ip, '0.0.0.0', 8)) return { blocked: true, reason: `Endereço 0.0.0.0/8 bloqueado (${ip}).` };
-    if (inCidr4(ip, '100.64.0.0', 10)) return { blocked: true, reason: `CGNAT RFC6598 bloqueado (${ip}).` };
-    if (inCidr4(ip, '224.0.0.0', 4)) return { blocked: true, reason: `Multicast bloqueado (${ip}).` };
-    if (inCidr4(ip, '240.0.0.0', 4)) return { blocked: true, reason: `Reservado/Broadcast bloqueado (${ip}).` };
+    if (inCidr4(ip, '100.64.0.0', 10)) return { blocked: true, reason: `CGNAT RFC6598 bloqueado (${ip}).` }; // NOSONAR (typescript:S1313): range CGNAT bloqueado intencionalmente pela proteção SSRF
+    if (inCidr4(ip, '224.0.0.0', 4)) return { blocked: true, reason: `Multicast bloqueado (${ip}).` }; // NOSONAR (typescript:S1313): range multicast bloqueado intencionalmente pela proteção SSRF
+    if (inCidr4(ip, '240.0.0.0', 4)) return { blocked: true, reason: `Reservado/Broadcast bloqueado (${ip}).` }; // NOSONAR (typescript:S1313): range reservado bloqueado intencionalmente pela proteção SSRF
     return { blocked: false };
   }
 

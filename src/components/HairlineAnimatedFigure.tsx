@@ -366,7 +366,7 @@ export const HairlineAnimatedFigure: React.FC<HairlineAnimatedFigureProps> = Rea
               <path
                 d="M6 23L24 32L42 23"
                 style={{
-                  transform: isAnim ? 'translateY(0)' : 'translateY(0)',
+                  transform: 'translateY(0)',
                   opacity: isAnim ? 1 : 0.7,
                   transition: 'all 600ms ease 150ms',
                 }}

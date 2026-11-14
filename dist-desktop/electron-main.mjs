@@ -4407,7 +4407,7 @@ var SandboxExecutor = class _SandboxExecutor {
         executed: !timedOut && res.status !== null && !res.error,
         blocked: false,
         isolationMode: probe.dockerAvailable ? "RESTRICTED_CONTAINER" : "NODE_PERMISSION_SUBPROCESS",
-        isolationState: timedOut ? "EXECUTION_TERMINATED" : "EXECUTION_TERMINATED",
+        isolationState: "EXECUTION_TERMINATED",
         recoveryVerified: false,
         exitCode: res.status,
         stdout,
@@ -10457,6 +10457,7 @@ var BLOCKED_HOSTNAMES = /* @__PURE__ */ new Set([
   "metadata.goog",
   "instance-data",
   "169.254.169.254",
+  // NOSONAR (typescript:S1313): IP intencional de metadata cloud bloqueado pela proteção SSRF
   "metadata.azure.internal"
 ]);
 function ipv4ToInt(ip) {
@@ -12805,7 +12806,7 @@ function buildFull21SecurityAdaptersCatalog() {
       availabilityState,
       configurationState,
       readinessState,
-      executionState: isNativeInProcess ? "NOT_EXECUTED" : "NOT_EXECUTED",
+      executionState: "NOT_EXECUTED",
       binaryDetected: check.detected,
       configured: check.configured,
       signatureHash: check.detected ? computeSha256(`${d.id}:${check.detectedVersion || d.version}:detected`) : null,
@@ -12815,6 +12816,19 @@ function buildFull21SecurityAdaptersCatalog() {
       lastExitCode: null
     };
   });
+}
+function isExposedEntryPointLine(line) {
+  const trimmed = line.trimStart();
+  if (/^def\s+[A-Za-z0-9_]/i.test(trimmed)) {
+    return true;
+  }
+  if (/export\s+function\s+[A-Za-z0-9_]/i.test(line) || /export\s+async\s+function\s+[A-Za-z0-9_]/i.test(line)) {
+    return true;
+  }
+  const publicMatch = /public\s/i.exec(line);
+  return Boolean(
+    publicMatch && line.indexOf("(", publicMatch.index + publicMatch[0].length) !== -1
+  );
 }
 function executeSecurityAssessmentSuite(params) {
   const suiteStart = performance.now();
@@ -12849,7 +12863,7 @@ function executeSecurityAssessmentSuite(params) {
       const lines = content.split(/\r?\n/);
       lines.forEach((line, idx) => {
         const ln = idx + 1;
-        if (/export\s+(?:async\s+)?function\s+\w+|^\s*def\s+\w+|public\s+.*\(/i.test(line)) {
+        if (isExposedEntryPointLine(line)) {
           exposedEntryPoints.push(`${filePath}:${ln}`);
         }
         if (/controller|router|endpoint|handle|Controller/i.test(filePath + " " + line)) {
@@ -18966,6 +18980,21 @@ function updateHardwareProfile(updates) {
 import crypto16 from "node:crypto";
 import fs12 from "node:fs";
 import path13 from "node:path";
+function isValidEmailAddress(rawEmail) {
+  if (!rawEmail || rawEmail.length > 320 || /\s/.test(rawEmail)) {
+    return false;
+  }
+  const atIndex = rawEmail.indexOf("@");
+  if (atIndex <= 0 || atIndex !== rawEmail.lastIndexOf("@")) {
+    return false;
+  }
+  const domain = rawEmail.slice(atIndex + 1);
+  if (domain.startsWith(".") || domain.endsWith(".")) {
+    return false;
+  }
+  const dotIndex = domain.indexOf(".");
+  return dotIndex > 0 && dotIndex < domain.length - 1;
+}
 var PERMISSIONS_MATRIX = {
   ADMIN: /* @__PURE__ */ new Set([
     "read:all",
@@ -19367,7 +19396,7 @@ ${rawToken}
     if (cleanName.length < 2) {
       throw new Error("Nome do administrador deve possuir pelo menos 2 caracteres.");
     }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    if (!isValidEmailAddress(cleanEmail)) {
       throw new Error("E-mail inv\xE1lido.");
     }
     if (cleanPassword.length < 10) {
@@ -19809,7 +19838,7 @@ ${rawToken}
   }
   createUser(params) {
     const cleanEmail = (params.email || "").trim().toLowerCase();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    if (!isValidEmailAddress(cleanEmail)) {
       throw new Error("E-mail inv\xE1lido.");
     }
     if ((params.password || "").length < 10) {
@@ -19858,7 +19887,7 @@ ${rawToken}
     if (cleanName.length < 2) {
       throw new Error("INVALID_NAME: O nome completo deve possuir pelo menos 2 caracteres.");
     }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    if (!isValidEmailAddress(cleanEmail)) {
       throw new Error("INVALID_EMAIL: Informe um endere\xE7o de e-mail v\xE1lido.");
     }
     if (cleanPassword.length < 10) {
@@ -20435,6 +20464,13 @@ var ProjectBackupService = class {
 
 // src/intelligence/synchronization/ReferenceSynchronizer.ts
 import crypto19 from "node:crypto";
+function stripTrailingSlashes2(rawUrl) {
+  let end = rawUrl.length;
+  while (end > 0 && rawUrl.charCodeAt(end - 1) === 47) {
+    end -= 1;
+  }
+  return end === rawUrl.length ? rawUrl : rawUrl.slice(0, end);
+}
 async function fetchJsonWithHeaders(url, init, timeoutMs = 4500, allowExplicitLoopback = false) {
   const ssrf = await SsrfGuard.validateUrl({
     targetUrl: url,
@@ -20726,7 +20762,7 @@ var ReferenceSynchronizer = class {
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "SONARQUBE_SERVER") {
-          const baseServer = (params?.sonarServerUrl || "http://127.0.0.1:9000").replace(/\/+$/, "");
+          const baseServer = stripTrailingSlashes2(params?.sonarServerUrl || "http://127.0.0.1:9000");
           const headers = {};
           if (params?.sonarToken) {
             headers["Authorization"] = `Basic ${Buffer.from(`${params.sonarToken}:`).toString("base64")}`;
@@ -21795,7 +21831,7 @@ function escapeHtml(value) {
   const str = String(value ?? "");
   return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
-function stripTrailingSlashes2(url) {
+function stripTrailingSlashes3(url) {
   let s = url.trim();
   while (s.endsWith("/")) {
     s = s.slice(0, -1);
@@ -23358,7 +23394,7 @@ async function createWinHoodApp(options) {
       ecosystem = "nodejs"
     } = req.body;
     const cleanKey = (projectKey || "MEU_PROJETO").trim();
-    const cleanHost = stripTrailingSlashes2(hostUrl || "http://localhost:9000");
+    const cleanHost = stripTrailingSlashes3(hostUrl || "http://localhost:9000");
     const cleanToken = (token || "SEU_TOKEN").trim();
     const commands = {
       nodejs: {
@@ -28519,10 +28555,17 @@ var ELECTRON_SECURITY_WEB_PREFERENCES = Object.freeze({
   webSecurity: true,
   allowRunningInsecureContent: false
 });
+function stripTrailingSlashes4(rawUrl) {
+  let end = rawUrl.length;
+  while (end > 0 && rawUrl.charCodeAt(end - 1) === 47) {
+    end -= 1;
+  }
+  return end === rawUrl.length ? rawUrl : rawUrl.slice(0, end);
+}
 async function waitForBackendHealth(params) {
   const maxAttempts = params.maxAttempts ?? 40;
   const intervalMs = params.intervalMs ?? 200;
-  const healthUrl = `${params.baseUrl.replace(/\/+$/, "")}/api/health`;
+  const healthUrl = `${stripTrailingSlashes4(params.baseUrl)}/api/health`;
   let lastError = "Health check ainda n\xE3o respondeu.";
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -28739,6 +28782,7 @@ export {
   ELECTRON_SECURITY_WEB_PREFERENCES,
   bootstrapWindowsDesktop,
   isAuthorizedLoopbackSender,
+  stripTrailingSlashes4 as stripTrailingSlashes,
   waitForBackendHealth
 };
 //# sourceMappingURL=electron-main.mjs.map

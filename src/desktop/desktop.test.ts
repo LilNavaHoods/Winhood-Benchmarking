@@ -14,6 +14,7 @@ import {
   ELECTRON_SECURITY_WEB_PREFERENCES,
   bootstrapWindowsDesktop,
   isAuthorizedLoopbackSender,
+  stripTrailingSlashes,
 } from '../../electron-main';
 
 describe('Windows Desktop Architecture, Electron Security & Lifecycle Suite (FASE 3, 4, 5 & Seção 15.2)', () => {
@@ -187,5 +188,18 @@ describe('Windows Desktop Architecture, Electron Security & Lifecycle Suite (FAS
       await new Promise<void>((resolve) => blockerServer.close(() => resolve()));
       fs.rmSync(tmpUserData, { recursive: true, force: true });
     }
+  });
+
+  it('5. stripTrailingSlashes removes trailing slashes deterministically without super-linear regex backtracking', () => {
+    assert.equal(stripTrailingSlashes('http://127.0.0.1:3000'), 'http://127.0.0.1:3000');
+    assert.equal(stripTrailingSlashes('http://127.0.0.1:3000/'), 'http://127.0.0.1:3000');
+    assert.equal(stripTrailingSlashes('http://127.0.0.1:3000///'), 'http://127.0.0.1:3000');
+    assert.equal(stripTrailingSlashes('///'), '');
+    assert.equal(stripTrailingSlashes(''), '');
+
+    const startedAt = performance.now();
+    const longInput = `http://127.0.0.1:3000${'/'.repeat(50000)}`;
+    assert.equal(stripTrailingSlashes(longInput), 'http://127.0.0.1:3000');
+    assert.ok(performance.now() - startedAt < 50);
   });
 });

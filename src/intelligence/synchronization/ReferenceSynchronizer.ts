@@ -13,6 +13,14 @@ export interface ReferenceSyncOutcome {
   cachedFallbackSources: ReferenceSourceKey[];
 }
 
+export function stripTrailingSlashes(rawUrl: string): string {
+  let end = rawUrl.length;
+  while (end > 0 && rawUrl.charCodeAt(end - 1) === 47) {
+    end -= 1;
+  }
+  return end === rawUrl.length ? rawUrl : rawUrl.slice(0, end);
+}
+
 async function fetchJsonWithHeaders(
   url: string,
   init?: RequestInit,
@@ -355,7 +363,7 @@ export class ReferenceSynchronizer {
           this.registry.saveSnapshot({ ...updatedBase, sha256 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === 'SONARQUBE_SERVER') {
-          const baseServer = (params?.sonarServerUrl || 'http://127.0.0.1:9000').replace(/\/+$/, '');
+          const baseServer = stripTrailingSlashes(params?.sonarServerUrl || 'http://127.0.0.1:9000');
           const headers: Record<string, string> = {};
           if (params?.sonarToken) {
             headers['Authorization'] = `Basic ${Buffer.from(`${params.sonarToken}:`).toString('base64')}`;
