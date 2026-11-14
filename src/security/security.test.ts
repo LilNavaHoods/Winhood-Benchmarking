@@ -17,6 +17,7 @@ import {
   verifyEvidenceChainAndManifest,
 } from '../engine/evidenceProvenanceEngine';
 import { SonarQubeConnection } from '../integrations/sonarqube/SonarQubeConnection';
+import { ProjectBackupService } from '../services/backup/ProjectBackupService';
 import { createWinHoodApp } from '../../server';
 
 function readBootstrapTokenFromFile(filePath: string): string {
@@ -1144,5 +1145,72 @@ test('Hybrid session: first-user register clears bootstrap, Bearer/X-WinHood-Ses
     }
   });
 });
+
+test('ProjectBackupService blocks Path Traversal & Filesystem Oracle attacks on verifyBackup, restoreBackup, deleteBackup, and createBackup', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'winhood-bkp-sec-'));
+  try {
+    const svc = new ProjectBackupService(tmpDir);
+    const now = new Date().toISOString();
+    const manifest = svc.createBackup(
+      {
+        id: 'proj-sec-1',
+        name: 'Safe Backup Project',
+        description: 'Backup test',
+        category: 'SECURITY',
+        createdAt: now,
+        updatedAt: now,
+      } as any,
+      [],
+      { 'src/index.ts': 'export const ok = true;\n' }
+    );
+
+    assert.match(manifest.backupId, /^bkp-\d+-[a-f0-9]{8}$/i);
+    assert.equal(svc.listBackups().length, 1);
+    assert.equal(svc.verifyBackup(manifest.backupId).valid, true);
+
+    const restored = svc.restoreBackup(manifest.backupId);
+    assert.equal(restored.sourceFilesMap['src/index.ts'], 'export const ok = true;\n');
+
+    const maliciousIds = [
+      '../etc/passwd',
+      '..\\..\\windows\\system32',
+      '/etc/passwd',
+      `${manifest.backupId}/../other`,
+      `${manifest.backupId}\0`,
+      '',
+      'bkp-123-zzzzzzzz',
+      `bkp-${'9'.repeat(130)}-abcd1234`,
+    ];
+
+    for (const badId of maliciousIds) {
+      assert.throws(() => svc.verifyBackup(badId), /INVALID_BACKUP_ID|PATH_TRAVERSAL_BLOCKED/);
+      assert.throws(() => svc.restoreBackup(badId), /INVALID_BACKUP_ID|PATH_TRAVERSAL_BLOCKED/);
+      assert.throws(() => svc.deleteBackup(badId), /INVALID_BACKUP_ID|PATH_TRAVERSAL_BLOCKED/);
+    }
+
+    assert.throws(
+      () =>
+        svc.createBackup(
+          {
+            id: 'proj-sec-2',
+            name: 'Traversal Source',
+            description: 'Evil paths',
+            category: 'SECURITY',
+            createdAt: now,
+            updatedAt: now,
+          } as any,
+          [],
+          { '../outside.txt': 'pwned' }
+        ),
+      /PATH_TRAVERSAL_BLOCKED/
+    );
+
+    assert.equal(svc.deleteBackup(manifest.backupId), true);
+    assert.equal(svc.listBackups().length, 0);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 
 

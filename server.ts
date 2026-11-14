@@ -2236,7 +2236,12 @@ export async function createWinHoodApp(options?: {
       const verification = backupService.verifyBackup(req.params.backupId);
       return res.json(verification);
     } catch (err: any) {
-      return res.status(500).json({ error: err?.message || 'Falha ao verificar integridade do backup.' });
+      const msg = err?.message || 'Falha ao verificar integridade do backup.';
+      const status =
+        msg.startsWith('INVALID_BACKUP_ID') || msg.startsWith('PATH_TRAVERSAL_BLOCKED')
+          ? 400
+          : 500;
+      return res.status(status).json({ error: msg });
     }
   });
 
@@ -2279,7 +2284,12 @@ export async function createWinHoodApp(options?: {
       saveDatabase(db);
       return res.json({ ok: true, backupId: req.params.backupId });
     } catch (err: any) {
-      return res.status(500).json({ error: err?.message || 'Falha ao excluir backup.' });
+      const msg = err?.message || 'Falha ao excluir backup.';
+      const status =
+        msg.startsWith('INVALID_BACKUP_ID') || msg.startsWith('PATH_TRAVERSAL_BLOCKED')
+          ? 400
+          : 500;
+      return res.status(status).json({ error: msg });
     }
   });
 
