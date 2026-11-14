@@ -63,6 +63,20 @@ interface HostHardwareBenchmarkResult {
   };
   overallHostScore: number;
   tier: 'S' | 'A' | 'B' | 'C';
+  statisticalTelemetry?: {
+    warmupRoundsDiscarded: number;
+    measuredRoundsCount: number;
+    outliersFilteredCount: number;
+    medianRoundMs: number;
+    p95RoundMs: number;
+    p99RoundMs: number;
+    meanRoundMs: number;
+    stdDevMs: number;
+    iqrMs: number;
+    coefficientOfVariationPercent: number;
+    confidenceLevel: 'HIGH' | 'MODERATE' | 'LOW_NOISY_NEIGHBOR';
+    roundSamplesMs: number[];
+  };
   verificationSha256: string;
 }
 
@@ -1868,6 +1882,71 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
               <div className="text-xs text-slate-400 mt-0.5">Auditoria Determinística</div>
             </div>
           </div>
+
+          {hostResult?.statisticalTelemetry && (
+            <div className="p-3.5 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-xs font-semibold text-slate-200">
+                  Calibração Científica Multi-Rodadas ({hostResult.statisticalTelemetry.warmupRoundsDiscarded} Warm-up JIT descartadas + {hostResult.statisticalTelemetry.measuredRoundsCount} Rodadas Medidas)
+                </div>
+                <span
+                  className={`px-2 py-0.5 rounded text-[11px] font-mono font-bold border ${
+                    hostResult.statisticalTelemetry.confidenceLevel === 'HIGH'
+                      ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                      : hostResult.statisticalTelemetry.confidenceLevel === 'MODERATE'
+                        ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                        : 'bg-rose-500/15 text-rose-300 border-rose-500/30'
+                  }`}
+                >
+                  RunConfidenceLevel: {hostResult.statisticalTelemetry.confidenceLevel}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-6 gap-2 text-xs font-mono tabular-nums">
+                <div className="p-2 rounded bg-slate-950/70 border border-slate-800">
+                  <div className="text-[10px] text-slate-400">Mediana (P50)</div>
+                  <div className="text-teal-300 font-bold">
+                    {hostResult.statisticalTelemetry.medianRoundMs.toFixed(3)} ms
+                  </div>
+                </div>
+                <div className="p-2 rounded bg-slate-950/70 border border-slate-800">
+                  <div className="text-[10px] text-slate-400">P95 / P99</div>
+                  <div className="text-white font-bold">
+                    {hostResult.statisticalTelemetry.p95RoundMs.toFixed(2)} /{' '}
+                    {hostResult.statisticalTelemetry.p99RoundMs.toFixed(2)} ms
+                  </div>
+                </div>
+                <div className="p-2 rounded bg-slate-950/70 border border-slate-800">
+                  <div className="text-[10px] text-slate-400">Desvio Padrão (σ)</div>
+                  <div className="text-slate-200 font-bold">
+                    {hostResult.statisticalTelemetry.stdDevMs.toFixed(3)} ms
+                  </div>
+                </div>
+                <div className="p-2 rounded bg-slate-950/70 border border-slate-800">
+                  <div className="text-[10px] text-slate-400">IQR / Outliers</div>
+                  <div className="text-slate-200 font-bold">
+                    {hostResult.statisticalTelemetry.iqrMs.toFixed(2)} ms ({hostResult.statisticalTelemetry.outliersFilteredCount} filt.)
+                  </div>
+                </div>
+                <div className="p-2 rounded bg-slate-950/70 border border-slate-800">
+                  <div className="text-[10px] text-slate-400">Coef. Variação (CV%)</div>
+                  <div className="text-amber-300 font-bold">
+                    {hostResult.statisticalTelemetry.coefficientOfVariationPercent.toFixed(1)}%
+                  </div>
+                </div>
+                <div className="p-2 rounded bg-slate-950/70 border border-slate-800">
+                  <div className="text-[10px] text-slate-400">Estabilidade</div>
+                  <div className="text-slate-200 font-bold">
+                    {hostResult.statisticalTelemetry.coefficientOfVariationPercent <= 5
+                      ? 'Determinístico'
+                      : hostResult.statisticalTelemetry.coefficientOfVariationPercent <= 12
+                        ? 'Moderado'
+                        : 'Noisy Neighbor'}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Suitability & Attach to Run */}

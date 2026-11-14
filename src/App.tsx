@@ -6,10 +6,13 @@
 import React, { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import {
   BookOpen,
+  Check,
   CheckCircle2,
+  Copy,
   Cpu,
   Crosshair,
   Database,
+  Download,
   FileText,
   FolderGit2,
   Github,
@@ -49,7 +52,12 @@ import { AnalysisProgressHeaderBanner } from './components/AnalysisProgressHeade
 import { WinHoodLogo } from './components/WinHoodLogo';
 import { AuthGateModal, type AuthUserView } from './components/AuthGateModal';
 import { ModuleErrorBoundary } from './components/ModuleErrorBoundary';
-import { csrfFetch as fetch } from './utils/csrfFetch';
+import {
+  clearClientAuthTokens,
+  csrfFetch as fetch,
+  setGlobalCsrfToken,
+} from './utils/csrfFetch';
+import QRCode from 'qrcode';
 
 // Lazy-loaded modules (Seção 11.7 — Otimização do frontend: Code Splitting & Lazy Loading sob demanda)
 const ProjectsAndSoftwaresModule = lazy(() =>
@@ -147,8 +155,11 @@ export default function App() {
   const [mfaSetupPayload, setMfaSetupPayload] = useState<{
     secret: string;
     otpauthUrl: string;
+    qrDataUrl?: string | null;
+    recoveryCodes?: string[];
   } | null>(null);
   const [mfaVerifyCode, setMfaVerifyCode] = useState<string>('');
+  const [mfaCopiedRecovery, setMfaCopiedRecovery] = useState<boolean>(false);
 
   const [dashboardData, setDashboardData] = useState<{
     hasEvaluations: boolean;
@@ -242,6 +253,9 @@ export default function App() {
       }
       if (sessRes.ok) {
         const sessData = await sessRes.json();
+        if (sessData.csrfToken) {
+          setGlobalCsrfToken(sessData.csrfToken);
+        }
         const isAuthed = Boolean(sessData.authenticated);
         const isMfaReq = Boolean(sessData.mfaRequired);
         setAuthenticated(isAuthed);
@@ -254,6 +268,7 @@ export default function App() {
         }
         setBackendState(isAuthed && !isMfaReq ? 'ONLINE' : 'AUTH_REQUIRED');
       } else if (sessRes.status === 401 || sessRes.status === 403) {
+        clearClientAuthTokens();
         setAuthenticated(false);
         setMfaRequired(false);
         setCurrentUser(null);
@@ -464,6 +479,7 @@ export default function App() {
     try {
       await fetch('/api/auth/logout', { method: 'POST' });
     } finally {
+      clearClientAuthTokens();
       setAuthenticated(false);
       setMfaRequired(false);
       setIsAdminOrigin(false);
@@ -478,27 +494,42 @@ export default function App() {
 
   const handleOpenMfaSetup = async () => {
     try {
-      const res = await fetch('/api/auth/mfa/setup', { method: 'POST' });
+      const res = await fetch('/api/auth/totp/setup', { method: 'POST' });
       const data = await res.json();
       if (!res.ok) {
         notify(data.error || 'Falha ao iniciar configuração TOTP MFA.', 'error');
         return;
       }
-      setMfaSetupPayload({ secret: data.secret, otpauthUrl: data.otpauthUrl });
+      const secret = data.secret || data.secretBase32;
+      const otpauthUrl = data.otpauthUrl || data.otpauthUri;
+      let qrDataUrl: string | null = null;
+      if (otpauthUrl) {
+        try {
+          qrDataUrl = await QRCode.toDataURL(otpauthUrl, { width: 180, margin: 2 });
+        } catch {
+          qrDataUrl = null;
+        }
+      }
+      setMfaSetupPayload({ secret, otpauthUrl, qrDataUrl, recoveryCodes: undefined });
       setMfaVerifyCode('');
+      setMfaCopiedRecovery(false);
       setIsMfaSetupOpen(true);
     } catch {
       notify('Erro ao configurar MFA.', 'error');
     }
   };
 
-  const handleConfirmMfaSetup = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const verifyMfaSetupCode = async (codeOverride?: string) => {
+    const cleanCode = (codeOverride ?? mfaVerifyCode).replace(/\D/g, '').slice(0, 6);
+    if (cleanCode.length !== 6) {
+      notify('Informe os 6 dígitos do aplicativo autenticador.', 'error');
+      return;
+    }
     try {
-      const res = await fetch('/api/auth/mfa/verify', {
+      const res = await fetch('/api/auth/totp/verify-setup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ totpCode: mfaVerifyCode.trim() }),
+        body: JSON.stringify({ totpCode: cleanCode }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -506,12 +537,24 @@ export default function App() {
         return;
       }
       if (data.user) setCurrentUser(data.user);
-      setIsMfaSetupOpen(false);
-      setMfaSetupPayload(null);
-      notify('Autenticação MFA (TOTP) ativada e verificada!', 'success');
+      if (Array.isArray(data.recoveryCodes) && data.recoveryCodes.length > 0) {
+        setMfaSetupPayload((prev) =>
+          prev ? { ...prev, recoveryCodes: data.recoveryCodes } : null
+        );
+        notify('MFA ativado! Salve os 8 códigos de recuperação exibidos no modal.', 'success');
+      } else {
+        setIsMfaSetupOpen(false);
+        setMfaSetupPayload(null);
+        notify('Autenticação MFA (TOTP) ativada e verificada!', 'success');
+      }
     } catch {
       notify('Erro ao confirmar código MFA.', 'error');
     }
+  };
+
+  const handleConfirmMfaSetup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await verifyMfaSetupCode();
   };
 
   const handleSeedRealWorkspace = async () => {
@@ -1158,46 +1201,147 @@ export default function App() {
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
                 <KeyRound className="w-4 h-4 text-[#31d6c4]" />
-                <span>Configurar Autenticação MFA (TOTP RFC-6238)</span>
+                <span>Configurar Autenticação 2FA (TOTP RFC-6238)</span>
               </h3>
               <button
                 type="button"
-                onClick={() => setIsMfaSetupOpen(false)}
+                onClick={() => {
+                  setIsMfaSetupOpen(false);
+                  setMfaSetupPayload(null);
+                }}
                 className="text-slate-400 hover:text-slate-200 cursor-pointer"
               >
                 Fechar
               </button>
             </div>
-            <div className="p-3 rounded border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10] space-y-1.5">
-              <div className="text-slate-500">Chave Secreta Base32:</div>
-              <div className="font-mono font-bold text-[#0e9f8e] dark:text-[#31d6c4] break-all select-all">
-                {mfaSetupPayload.secret}
+
+            {mfaSetupPayload.recoveryCodes && mfaSetupPayload.recoveryCodes.length > 0 ? (
+              <div className="space-y-3">
+                <div className="p-3 rounded-lg border border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 font-semibold">
+                  Autenticação 2FA ativada com sucesso! Guarde seus 8 códigos de recuperação de uso único:
+                </div>
+                <div className="grid grid-cols-2 gap-2 font-mono text-xs">
+                  {mfaSetupPayload.recoveryCodes.map((code) => (
+                    <div
+                      key={code}
+                      className="p-2 rounded border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10] text-center select-all font-bold"
+                    >
+                      {code}
+                    </div>
+                  ))}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void navigator.clipboard
+                        .writeText(mfaSetupPayload.recoveryCodes!.join('\n'))
+                        .then(() => {
+                          setMfaCopiedRecovery(true);
+                          setTimeout(() => setMfaCopiedRecovery(false), 2500);
+                        })
+                        .catch(() => undefined);
+                    }}
+                    className="flex-1 py-2 rounded-lg border border-slate-300 dark:border-slate-700 font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    {mfaCopiedRecovery ? (
+                      <Check className="w-3.5 h-3.5 text-emerald-500" />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5" />
+                    )}
+                    <span>{mfaCopiedRecovery ? 'Copiado!' : 'Copiar Códigos'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const content = [
+                        '# WinHood Security Benchmark — Códigos de Recuperação TOTP',
+                        `# Gerado em: ${new Date().toISOString()}`,
+                        '',
+                        ...mfaSetupPayload.recoveryCodes!,
+                      ].join('\n');
+                      const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = 'winhood-recovery-codes.txt';
+                      document.body.appendChild(a);
+                      a.click();
+                      document.body.removeChild(a);
+                      URL.revokeObjectURL(url);
+                    }}
+                    className="flex-1 py-2 rounded-lg border border-slate-300 dark:border-slate-700 font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Baixar .TXT</span>
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsMfaSetupOpen(false);
+                    setMfaSetupPayload(null);
+                  }}
+                  className="w-full py-2 rounded-lg font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] cursor-pointer"
+                >
+                  Concluir e Fechar
+                </button>
               </div>
-              <div className="font-mono text-[10px] text-slate-400 break-all">
-                {mfaSetupPayload.otpauthUrl}
-              </div>
-            </div>
-            <div>
-              <label className="block font-semibold mb-1">
-                Informe o código de 6 dígitos para ativar:
-              </label>
-              <input
-                type="text"
-                required
-                inputMode="numeric"
-                maxLength={6}
-                value={mfaVerifyCode}
-                onChange={(e) => setMfaVerifyCode(e.target.value)}
-                placeholder="123456"
-                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 font-mono text-center text-base tracking-widest"
-              />
-            </div>
-            <button
-              type="submit"
-              className="w-full py-2 rounded-lg font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] cursor-pointer"
-            >
-              Validar e Ativar TOTP MFA
-            </button>
+            ) : (
+              <>
+                <div className="p-3 rounded border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10] space-y-2.5 text-center">
+                  <div className="text-slate-600 dark:text-slate-300 font-semibold">
+                    Escaneie no Google Authenticator / Authy:
+                  </div>
+                  {mfaSetupPayload.qrDataUrl && (
+                    <div className="flex justify-center p-2 bg-white rounded shadow-inner">
+                      <img
+                        src={mfaSetupPayload.qrDataUrl}
+                        alt="QR Code TOTP MFA"
+                        className="w-36 h-36 object-contain"
+                      />
+                    </div>
+                  )}
+                  <div className="text-left space-y-1">
+                    <div className="text-slate-500">Chave Secreta Base32 (Manual):</div>
+                    <div className="font-mono font-bold text-[#0e9f8e] dark:text-[#31d6c4] break-all select-all">
+                      {mfaSetupPayload.secret}
+                    </div>
+                  </div>
+                </div>
+                <div>
+                  <label htmlFor="app-mfa-verify-input" className="block font-semibold mb-1">
+                    Informe o código de 6 dígitos para ativar:
+                  </label>
+                  <input
+                    id="app-mfa-verify-input"
+                    name="one-time-code"
+                    type="text"
+                    required
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    value={mfaVerifyCode}
+                    onChange={(e) => {
+                      const clean = e.target.value.replace(/\D/g, '').slice(0, 6);
+                      setMfaVerifyCode(clean);
+                      if (clean.length === 6) {
+                        void verifyMfaSetupCode(clean);
+                      }
+                    }}
+                    placeholder="000000"
+                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 font-mono text-center text-base tracking-[0.35em] tabular-nums"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="w-full py-2 rounded-lg font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] cursor-pointer"
+                >
+                  Validar e Ativar TOTP MFA
+                </button>
+              </>
+            )}
           </form>
         </div>
       )}

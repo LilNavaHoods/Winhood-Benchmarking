@@ -895,6 +895,10 @@ export interface SoftwareScoreCard {
   };
   staticMetrics?: {
     loc: number;
+    kloc?: number;
+    bugsPerKloc?: number;
+    codeSmellsPerKloc?: number;
+    technicalDebtRatioPercent?: number;
     cyclomaticComplexity: number;
     cognitiveComplexity: number;
     duplicatedLinesPercent: number;

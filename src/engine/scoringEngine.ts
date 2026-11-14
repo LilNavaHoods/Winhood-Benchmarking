@@ -544,6 +544,10 @@ export interface RawEvaluationInput {
     circularDependenciesCount: number;
     layerViolationsCount: number;
     riskIndicators: string[];
+    kloc?: number;
+    bugsPerKloc?: number;
+    codeSmellsPerKloc?: number;
+    technicalDebtRatioPercent?: number;
   };
   metricProvenance?: Record<string, MetricProvenanceRecord>;
   sbomSummary?: SbomDocumentBundle | null;
@@ -2101,17 +2105,34 @@ export function calculateDeterministicScoreCard(
           status: 'NOT_MEASURED',
           reason: 'Métricas de runtime não medidas em worker isolado.',
         },
-    staticMetrics: input.staticMetrics || {
-      loc,
-      cyclomaticComplexity: m.avgCyclomaticComplexity,
-      cognitiveComplexity: m.avgCognitiveComplexity,
-      duplicatedLinesPercent: m.duplicatedLinesPercent,
-      couplingIndex: m.couplingIndex,
-      cohesionIndex: m.cohesionIndex,
-      circularDependenciesCount: m.circularDependencies,
-      layerViolationsCount: 0,
-      riskIndicators: [],
-    },
+    staticMetrics: (() => {
+      const kloc = Math.max(0.1, Number((loc / 1000).toFixed(3)));
+      const bugsPerKloc = Number((m.bugs / kloc).toFixed(2));
+      const codeSmellsPerKloc = Number((m.codeSmells / kloc).toFixed(2));
+      const devMinutes = Math.max(1, loc * 30);
+      const technicalDebtRatioPercent = Number(
+        Math.min(100, (m.technicalDebtMinutes / devMinutes) * 100).toFixed(2)
+      );
+      const base = input.staticMetrics || {
+        loc,
+        cyclomaticComplexity: m.avgCyclomaticComplexity,
+        cognitiveComplexity: m.avgCognitiveComplexity,
+        duplicatedLinesPercent: m.duplicatedLinesPercent,
+        couplingIndex: m.couplingIndex,
+        cohesionIndex: m.cohesionIndex,
+        circularDependenciesCount: m.circularDependencies,
+        layerViolationsCount: 0,
+        riskIndicators: [],
+      };
+      return {
+        ...base,
+        kloc: base.kloc ?? kloc,
+        bugsPerKloc: base.bugsPerKloc ?? bugsPerKloc,
+        codeSmellsPerKloc: base.codeSmellsPerKloc ?? codeSmellsPerKloc,
+        technicalDebtRatioPercent:
+          base.technicalDebtRatioPercent ?? technicalDebtRatioPercent,
+      };
+    })(),
     qualityGate: {
       gateName: input.qualityGateId === 'qg-zero-trust' ? 'WinHood Zero-Trust Gate' : 'Sonar way (MQR Official)',
       status: qualityGateStatus,
@@ -2129,7 +2150,51 @@ export function calculateDeterministicScoreCard(
     },
     isPartialEvaluation,
     unmeasuredCategories,
-    metricProvenance: input.metricProvenance,
+    metricProvenance: (() => {
+      const kloc = Math.max(0.1, Number((loc / 1000).toFixed(3)));
+      const smellsPerKloc = Number((m.codeSmells / kloc).toFixed(2));
+      const bugsPerKloc = Number((m.bugs / kloc).toFixed(2));
+      const sqaleRatio = Number(
+        Math.min(100, (m.technicalDebtMinutes / Math.max(1, loc * 30)) * 100).toFixed(2)
+      );
+      const nowIso = new Date().toISOString();
+      return {
+        ...(input.metricProvenance || {}),
+        smellsPerKloc: {
+          metricKey: 'staticMetrics.codeSmellsPerKloc',
+          value: smellsPerKloc,
+          state: (isEligibleForScoring ? 'STATIC_DERIVED' : 'NOT_MEASURED') as MetricMeasurementState,
+          origin: 'WinHood KLOC Normalizer (SQALE)',
+          method: 'codeSmells / max(0.1, LOC / 1000)',
+          toolName: 'WinHood Deterministic Scoring Engine',
+          toolVersion: ALGORITHM_VERSION,
+          measuredAt: nowIso,
+          scope: `${input.softwareName} (${loc} LOC / ${kloc} KLOC)`,
+        },
+        bugsPerKloc: {
+          metricKey: 'staticMetrics.bugsPerKloc',
+          value: bugsPerKloc,
+          state: (isEligibleForScoring ? 'STATIC_DERIVED' : 'NOT_MEASURED') as MetricMeasurementState,
+          origin: 'WinHood KLOC Normalizer',
+          method: 'bugs / max(0.1, LOC / 1000)',
+          toolName: 'WinHood Deterministic Scoring Engine',
+          toolVersion: ALGORITHM_VERSION,
+          measuredAt: nowIso,
+          scope: `${input.softwareName} (${loc} LOC / ${kloc} KLOC)`,
+        },
+        technicalDebtRatioPercent: {
+          metricKey: 'staticMetrics.technicalDebtRatioPercent',
+          value: sqaleRatio,
+          state: (isEligibleForScoring ? 'STATIC_DERIVED' : 'NOT_MEASURED') as MetricMeasurementState,
+          origin: 'SonarQube SQALE Debt Ratio Formula',
+          method: '(technicalDebtMinutes / (LOC * 30)) * 100',
+          toolName: 'WinHood Deterministic Scoring Engine',
+          toolVersion: ALGORITHM_VERSION,
+          measuredAt: nowIso,
+          scope: `${input.softwareName} (${m.technicalDebtMinutes}m / ${loc * 30}m)`,
+        },
+      };
+    })(),
     sonarNativeResults: input.sonarNativeResults || {
       available: false,
       sourceInstanceUrl: null,

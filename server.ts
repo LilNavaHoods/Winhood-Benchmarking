@@ -1051,33 +1051,80 @@ export async function createWinHoodApp(options?: {
     };
   };
 
-  const setSessionCookies = (res: express.Response, sessionId: string, csrfToken: string) => {
+  const resolveCookieSecurityContext = (res: express.Response) => {
     const reqObj = (res as any).req as express.Request | undefined;
-    const isSecure =
-      Boolean(reqObj?.secure) ||
-      reqObj?.headers['x-forwarded-proto'] === 'https' ||
-      process.env.NODE_ENV === 'production' ||
-      Boolean(reqObj?.headers?.referer?.startsWith('https'));
-    const secureAttr = isSecure ? '; Secure' : '';
-    const maxAgeSec = Math.floor(AuthService.SESSION_ABSOLUTE_MS / 1000);
+    const hostHeader = String(reqObj?.headers?.host || '');
+    const isLoopbackHttp =
+      /^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(hostHeader) &&
+      !reqObj?.secure &&
+      reqObj?.headers['x-forwarded-proto'] !== 'https';
+    const isHttps =
+      !isLoopbackHttp &&
+      (Boolean(reqObj?.secure) ||
+        reqObj?.headers['x-forwarded-proto'] === 'https' ||
+        Boolean(reqObj?.headers?.referer?.startsWith('https://')));
+    const isCrossSiteIframe =
+      isHttps &&
+      (reqObj?.headers['sec-fetch-site'] === 'cross-site' ||
+        reqObj?.headers['sec-fetch-dest'] === 'iframe');
+    const sameSiteAttr = isCrossSiteIframe
+      ? 'SameSite=None; Secure; Partitioned'
+      : `SameSite=Strict${isHttps ? '; Secure' : ''}`;
+    return { sameSiteAttr };
+  };
+
+  const setSessionCookies = (
+    res: express.Response,
+    sessionId: string,
+    csrfToken: string,
+    opts?: { trustDevice?: boolean }
+  ) => {
+    const { sameSiteAttr } = resolveCookieSecurityContext(res);
+    const maxAgeSec = opts?.trustDevice
+      ? Math.floor(AuthService.SESSION_TRUSTED_DEVICE_MS / 1000)
+      : Math.floor(AuthService.SESSION_ABSOLUTE_MS / 1000);
     res.setHeader('Set-Cookie', [
-      `winhood_session=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; SameSite=Lax${secureAttr}; Max-Age=${maxAgeSec}`,
-      `winhood_csrf=${encodeURIComponent(csrfToken)}; Path=/; SameSite=Lax${secureAttr}; Max-Age=${maxAgeSec}`,
+      `winhood_session=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; ${sameSiteAttr}; Max-Age=${maxAgeSec}`,
+      `winhood_csrf=${encodeURIComponent(csrfToken)}; Path=/; ${sameSiteAttr}; Max-Age=${maxAgeSec}`,
     ]);
+    res.setHeader('X-WinHood-Session-Token', sessionId);
+    res.setHeader('X-WinHood-CSRF-Token', csrfToken);
   };
 
   const clearSessionCookies = (res: express.Response) => {
-    const reqObj = (res as any).req as express.Request | undefined;
-    const isSecure =
-      Boolean(reqObj?.secure) ||
-      reqObj?.headers['x-forwarded-proto'] === 'https' ||
-      process.env.NODE_ENV === 'production' ||
-      Boolean(reqObj?.headers?.referer?.startsWith('https'));
-    const secureAttr = isSecure ? '; Secure' : '';
+    const { sameSiteAttr } = resolveCookieSecurityContext(res);
     res.setHeader('Set-Cookie', [
-      `winhood_session=; Path=/; HttpOnly; SameSite=Lax${secureAttr}; Max-Age=0`,
-      `winhood_csrf=; Path=/; HttpOnly; SameSite=Lax${secureAttr}; Max-Age=0`,
+      `winhood_session=; Path=/; HttpOnly; ${sameSiteAttr}; Max-Age=0`,
+      `winhood_csrf=; Path=/; ${sameSiteAttr}; Max-Age=0`,
     ]);
+  };
+
+  const extractSessionTokenFromRequest = (
+    req: express.Request
+  ): {
+    token: string | undefined;
+    source: 'COOKIE' | 'BEARER' | null;
+  } => {
+    const cookies = parseCookies(req.headers.cookie);
+    if (cookies.winhood_session && cookies.winhood_session.length >= 32) {
+      return { token: cookies.winhood_session, source: 'COOKIE' };
+    }
+    const headerSession =
+      typeof req.headers['x-winhood-session'] === 'string'
+        ? req.headers['x-winhood-session'].trim()
+        : '';
+    if (headerSession.length >= 32) {
+      return { token: headerSession, source: 'BEARER' };
+    }
+    const authHeader =
+      typeof req.headers.authorization === 'string' ? req.headers.authorization.trim() : '';
+    if (authHeader.toLowerCase().startsWith('bearer ')) {
+      const bearerTok = authHeader.slice(7).trim();
+      if (bearerTok.length >= 32) {
+        return { token: bearerTok, source: 'BEARER' };
+      }
+    }
+    return { token: undefined, source: null };
   };
 
   const allowedOrigins = new Set(
@@ -1109,7 +1156,14 @@ export async function createWinHoodApp(options?: {
     if (origin && isAllowedOrigin(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Access-Control-Allow-Credentials', 'true');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-csrf-token, x-winhood-role');
+      res.setHeader(
+        'Access-Control-Allow-Headers',
+        'Content-Type, Authorization, x-csrf-token, x-winhood-session, x-winhood-role'
+      );
+      res.setHeader(
+        'Access-Control-Expose-Headers',
+        'X-WinHood-Session-Token, X-WinHood-CSRF-Token'
+      );
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
       res.setHeader('Vary', 'Origin');
     }
@@ -1131,14 +1185,13 @@ export async function createWinHoodApp(options?: {
       }
     });
 
-    const cookies = parseCookies(req.headers.cookie);
-    const sessionToken = cookies.winhood_session;
-    if (sessionToken) {
-      const validated = authService.validateSession(sessionToken);
+    const extracted = extractSessionTokenFromRequest(req);
+    if (extracted.token) {
+      const validated = authService.validateSession(extracted.token);
       if (validated) {
         (req as any).authUser = validated.user;
         (req as any).authSession = validated.session;
-        (req as any).authMethod = 'COOKIE';
+        (req as any).authMethod = extracted.source;
       }
     }
 
@@ -1171,6 +1224,7 @@ export async function createWinHoodApp(options?: {
       '/auth/logout',
       '/auth/session',
       '/auth/mfa/verify',
+      '/auth/totp/authenticate',
       '/auth/recovery/request',
       '/auth/recovery/confirm',
     ]);
@@ -1306,6 +1360,7 @@ export async function createWinHoodApp(options?: {
         authenticated: !result.totpSetup,
         mfaRequired: Boolean(result.totpSetup),
         user: result.user,
+        sessionId: result.sessionId,
         csrfToken: result.csrfToken,
         totpSetup: result.totpSetup,
       });
@@ -1348,6 +1403,7 @@ export async function createWinHoodApp(options?: {
         authenticated: !result.totpSetup,
         mfaRequired: Boolean(result.totpSetup),
         user: result.user,
+        sessionId: result.sessionId,
         csrfToken: result.csrfToken,
         totpSetup: result.totpSetup,
       });
@@ -1368,32 +1424,42 @@ export async function createWinHoodApp(options?: {
 
   app.post('/api/auth/login', (req, res) => {
     try {
-      const { email, password, totpCode } = (req.body || {}) as {
+      const { email, password, totpCode, trustDevice } = (req.body || {}) as {
         email?: string;
         password?: string;
         totpCode?: string;
+        trustDevice?: boolean;
       };
       const outcome = authService.login({
         email: email || '',
         password: password || '',
         totpCode,
+        trustDevice: Boolean(trustDevice),
         ipAddress: req.ip || '127.0.0.1',
         userAgent: String(req.headers['user-agent'] || 'unknown'),
       });
-      setSessionCookies(res, outcome.sessionId, outcome.csrfToken);
+      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
+        trustDevice: outcome.trustDevice,
+      });
       appendAuditLog(
         db,
         outcome.mfaRequired ? 'AUTH_LOGIN_PENDING_MFA' : 'AUTH_LOGIN_SUCCESS',
         'AUTH',
         outcome.user.id,
-        `Login efetuado para ${outcome.user.email} (MFA=${outcome.user.mfaEnabled}, verified=${outcome.user.mfaVerified}).`,
+        `Login efetuado para ${outcome.user.email} (MFA=${outcome.user.mfaEnabled}, verified=${outcome.user.mfaVerified}, trustDevice=${outcome.trustDevice}).`,
         outcome.user
       );
       saveDatabase(db);
       return res.json({
         authenticated: !outcome.mfaRequired,
         mfaRequired: outcome.mfaRequired,
+        requiresTotp: outcome.requiresTotp,
+        preAuthToken: outcome.preAuthToken,
+        trustDevice: outcome.trustDevice,
+        serverTimeIso: outcome.serverTimeIso,
+        totpPeriodSeconds: outcome.totpPeriodSeconds,
         user: outcome.user,
+        sessionId: outcome.sessionId,
         csrfToken: outcome.csrfToken,
       });
     } catch (err: any) {
@@ -1409,24 +1475,27 @@ export async function createWinHoodApp(options?: {
   });
 
   app.post('/api/auth/logout', (req, res) => {
-    const cookies = parseCookies(req.headers.cookie);
-    if (cookies.winhood_session) {
-      authService.revokeSession(cookies.winhood_session);
+    const sessionToken = extractSessionTokenFromRequest(req).token;
+    if (sessionToken) {
+      authService.revokeSession(sessionToken);
     }
     clearSessionCookies(res);
     return res.json({ ok: true });
   });
 
   app.get('/api/auth/session', (req, res) => {
-    const cookies = parseCookies(req.headers.cookie);
-    const pendingSession = cookies.winhood_session
-      ? authService.validateSession(cookies.winhood_session, { allowPendingMfa: true })
+    const sessionToken = extractSessionTokenFromRequest(req).token;
+    const pendingSession = sessionToken
+      ? authService.validateSession(sessionToken, { allowPendingMfa: true })
       : null;
     if (pendingSession) {
       const mfaRequired = pendingSession.user.mfaEnabled && !pendingSession.user.mfaVerified;
       return res.json({
         authenticated: !mfaRequired,
         mfaRequired,
+        requiresTotp: mfaRequired,
+        serverTimeIso: new Date().toISOString(),
+        totpPeriodSeconds: 30,
         bootstrapRequired: authService.isBootstrapRequired(),
         user: pendingSession.user,
         csrfToken: pendingSession.session.csrfToken,
@@ -1436,29 +1505,36 @@ export async function createWinHoodApp(options?: {
       return res.json({
         authenticated: true,
         mfaRequired: false,
+        requiresTotp: false,
+        serverTimeIso: new Date().toISOString(),
+        totpPeriodSeconds: 30,
         bootstrapRequired: authService.isBootstrapRequired(),
         user: (req as any).authUser,
+        csrfToken: (req as any).authSession?.csrfToken,
       });
     }
     return res.json({
       authenticated: false,
       mfaRequired: false,
+      requiresTotp: false,
+      serverTimeIso: new Date().toISOString(),
+      totpPeriodSeconds: 30,
       bootstrapRequired: authService.isBootstrapRequired(),
       user: null,
     });
   });
 
   app.post('/api/auth/refresh', (req, res) => {
-    const cookies = parseCookies(req.headers.cookie);
-    const renewed = cookies.winhood_session ? authService.renewSession(cookies.winhood_session) : null;
+    const sessionToken = extractSessionTokenFromRequest(req).token;
+    const renewed = sessionToken ? authService.renewSession(sessionToken) : null;
     if (!renewed) {
       return res.status(401).json({ error: 'AUTH_SESSION_INVALID' });
     }
     setSessionCookies(res, renewed.sessionId, renewed.csrfToken);
-    return res.json({ ok: true, csrfToken: renewed.csrfToken });
+    return res.json({ ok: true, sessionId: renewed.sessionId, csrfToken: renewed.csrfToken });
   });
 
-  app.post('/api/auth/mfa/setup', (req, res) => {
+  app.post(['/api/auth/mfa/setup', '/api/auth/totp/setup'], (req, res) => {
     const actor = getRequestActor(req, res);
     if (actor.id === 'usr-anonymous') {
       return res.status(401).json({ error: 'AUTH_REQUIRED' });
@@ -1467,36 +1543,122 @@ export async function createWinHoodApp(options?: {
       const setup = authService.setupMfaForUser(actor.id);
       appendAuditLog(db, 'AUTH_MFA_CONFIGURED', 'AUTH', actor.id, `TOTP MFA configurado para ${actor.email}.`, actor);
       saveDatabase(db);
-      return res.json(setup);
+      return res.json({
+        ...setup,
+        serverTimeIso: new Date().toISOString(),
+      });
     } catch (err: any) {
       return res.status(400).json({ error: err?.message || 'Falha ao configurar MFA.' });
     }
   });
 
-  app.post('/api/auth/mfa/confirm', (req, res) => {
+  app.post(['/api/auth/mfa/confirm', '/api/auth/totp/verify-setup'], (req, res) => {
     const actor = getRequestActor(req, res);
     if (actor.id === 'usr-anonymous') {
       return res.status(401).json({ error: 'AUTH_REQUIRED' });
     }
     const { totpCode } = (req.body || {}) as { totpCode?: string };
     try {
-      const user = authService.confirmMfaEnrollment(actor.id, totpCode || '');
-      appendAuditLog(db, 'AUTH_MFA_CONFIRMED', 'AUTH', user.id, `MFA ativado e confirmado para ${user.email}.`, user);
+      const confirmed = authService.confirmMfaEnrollment(actor.id, totpCode || '');
+      const { recoveryCodes, ...user } = confirmed;
+      appendAuditLog(db, 'AUTH_MFA_CONFIRMED', 'AUTH', user.id, `MFA ativado e confirmado para ${user.email}. Códigos de recuperação emitidos.`, user);
       saveDatabase(db);
-      return res.json({ ok: true, user });
+      return res.json({ ok: true, user, recoveryCodes });
     } catch (err: any) {
       return res.status(400).json({ error: err?.message || 'Falha ao confirmar MFA.' });
     }
   });
 
-  app.post('/api/auth/mfa/verify', (req, res) => {
-    const cookies = parseCookies(req.headers.cookie);
-    const { totpCode } = (req.body || {}) as { totpCode?: string };
+  app.post('/api/auth/totp/authenticate', (req, res) => {
+    const { preAuthToken, totpCode, recoveryCode, trustDevice } = (req.body || {}) as {
+      preAuthToken?: string;
+      totpCode?: string;
+      recoveryCode?: string;
+      trustDevice?: boolean;
+    };
+    if (!preAuthToken) {
+      return res.status(400).json({ error: 'AUTH_PREAUTH_REQUIRED: Token de desafio MFA obrigatório.' });
+    }
     try {
-      const user = authService.verifySessionMfa(cookies.winhood_session || '', totpCode || '');
-      appendAuditLog(db, 'AUTH_MFA_VERIFIED', 'AUTH', user.id, `MFA verificado para ${user.email}.`, user);
+      const outcome = authService.authenticateWithTotpPreAuth({
+        preAuthToken,
+        totpCode,
+        recoveryCode,
+        trustDevice: typeof trustDevice === 'boolean' ? trustDevice : undefined,
+        ipAddress: req.ip || '127.0.0.1',
+        userAgent: String(req.headers['user-agent'] || 'unknown'),
+      });
+      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
+        trustDevice: outcome.trustDevice,
+      });
+      appendAuditLog(
+        db,
+        outcome.usedRecoveryCode ? 'AUTH_RECOVERY_CODE_USED' : 'AUTH_MFA_VERIFIED',
+        'AUTH',
+        outcome.user.id,
+        outcome.usedRecoveryCode
+          ? `Acesso 2FA concluído com código de recuperação para ${outcome.user.email} (restantes: ${outcome.remainingRecoveryCodesCount}).`
+          : `TOTP 2FA validado para ${outcome.user.email} (trustDevice=${outcome.trustDevice}).`,
+        outcome.user
+      );
       saveDatabase(db);
-      return res.json({ authenticated: true, mfaRequired: false, user });
+      return res.json({
+        authenticated: true,
+        mfaRequired: false,
+        requiresTotp: false,
+        user: outcome.user,
+        sessionId: outcome.sessionId,
+        csrfToken: outcome.csrfToken,
+        trustDevice: outcome.trustDevice,
+        usedRecoveryCode: outcome.usedRecoveryCode,
+        remainingRecoveryCodesCount: outcome.remainingRecoveryCodesCount,
+      });
+    } catch (err: any) {
+      const msg = err?.message || 'Código TOTP inválido.';
+      const status = msg.startsWith('AUTH_RATE_LIMITED') ? 429 : 401;
+      return res.status(status).json({ error: msg });
+    }
+  });
+
+  app.post('/api/auth/mfa/verify', (req, res) => {
+    const sessionToken = extractSessionTokenFromRequest(req).token || '';
+    const { totpCode, recoveryCode, trustDevice } = (req.body || {}) as {
+      totpCode?: string;
+      recoveryCode?: string;
+      trustDevice?: boolean;
+    };
+    try {
+      const result = authService.verifySessionMfa(sessionToken, totpCode || '', {
+        recoveryCode,
+        trustDevice: Boolean(trustDevice),
+      });
+      const validated = sessionToken ? authService.validateSession(sessionToken) : null;
+      if (trustDevice && validated) {
+        setSessionCookies(res, sessionToken, validated.session.csrfToken, {
+          trustDevice: true,
+        });
+      }
+      const { usedRecoveryCode, remainingRecoveryCodesCount, ...user } = result;
+      appendAuditLog(
+        db,
+        usedRecoveryCode ? 'AUTH_RECOVERY_CODE_USED' : 'AUTH_MFA_VERIFIED',
+        'AUTH',
+        user.id,
+        usedRecoveryCode
+          ? `MFA concluído com código de recuperação para ${user.email}.`
+          : `MFA verificado para ${user.email}.`,
+        user
+      );
+      saveDatabase(db);
+      return res.json({
+        authenticated: true,
+        mfaRequired: false,
+        user,
+        sessionId: sessionToken || undefined,
+        csrfToken: validated?.session.csrfToken,
+        usedRecoveryCode: Boolean(usedRecoveryCode),
+        remainingRecoveryCodesCount,
+      });
     } catch (err: any) {
       return res.status(401).json({ error: err?.message || 'Código TOTP inválido.' });
     }
@@ -1598,7 +1760,7 @@ export async function createWinHoodApp(options?: {
       return res.status(400).json({ error: 'Perfil RBAC inválido.' });
     }
     const actor = getRequestActor(req, res);
-    const cookies = parseCookies(req.headers.cookie);
+    const sessionToken = extractSessionTokenFromRequest(req).token;
 
     if (userId) {
       if (!requireWritePermission(res, req, 'users:manage')) return;
@@ -1612,9 +1774,9 @@ export async function createWinHoodApp(options?: {
       }
     }
 
-    if (cookies.winhood_session) {
+    if (sessionToken) {
       try {
-        const updatedUser = authService.switchSessionPreviewRole(cookies.winhood_session, role);
+        const updatedUser = authService.switchSessionPreviewRole(sessionToken, role);
         appendAuditLog(db, 'RBAC_ROLE_SWITCHED', 'AUTH', actor.id, `Perfil de sessão alterado para ${role}`, actor);
         saveDatabase(db);
         return res.json({ user: updatedUser });
@@ -4800,11 +4962,11 @@ export async function createWinHoodApp(options?: {
 </body>
 </html>`;
 
-      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader(
         'Content-Security-Policy',
-        "default-src 'none'; style-src 'unsafe-inline'"
+        "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'self' data:; base-uri 'none'; form-action 'none'"
       );
       res.setHeader(
         'Content-Disposition',
@@ -7846,6 +8008,7 @@ export async function createWinHoodApp(options?: {
       if (gitarAdapter.getConnection().reencryptStoredToken(ctx)) {
         reencryptedCount += 1;
       }
+      reencryptedCount += authService.reencryptTotpSecrets(ctx);
     });
 
     appendAuditLog(

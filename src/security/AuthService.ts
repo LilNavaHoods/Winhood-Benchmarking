@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { KeyManagementService, type VaultReencryptContext } from './KeyManagementService';
 
 export type RbacRole = 'ADMIN' | 'SECURITY_LEAD' | 'QA_ENGINEER' | 'AUDITOR';
 
@@ -72,8 +73,10 @@ export interface UserAccountRecord {
   role: RbacRole;
   passwordHash: string; // scrypt:N=16384,r=8,p=1:<saltHex>:<hashHex>
   mfaEnabled: boolean;
-  totpSecretBase32: string | null;
+  totpSecretBase32: string | null; // AES-256-GCM encrypted payload (whvault:v1:...) or legacy Base32
   pendingTotpSecretBase32?: string | null;
+  lastAcceptedTotpStep?: number | null;
+  recoveryCodeHashes?: string[];
   disabled: boolean;
   failedLoginAttempts: number;
   lockedUntil: string | null;
@@ -99,6 +102,8 @@ export interface AuthSessionRecord {
   sessionRoleOverride?: RbacRole | null;
   csrfToken: string;
   mfaVerified: boolean;
+  trustDevice?: boolean;
+  idleTimeoutMs?: number;
   createdAt: string;
   lastActivityAt: string;
   expiresAt: string;
@@ -175,7 +180,7 @@ export function generateTotpCode(secretBase32: string, atMs = Date.now()): strin
 }
 
 export function verifyTotpCode(secretBase32: string, candidateCode: string, atMs = Date.now()): boolean {
-  const clean = (candidateCode || '').trim();
+  const clean = (candidateCode || '').replace(/[\s-]/g, '').trim();
   if (!/^\d{6}$/.test(clean)) return false;
   const step = Math.floor(atMs / 1000 / 30);
   for (const delta of [-1, 0, 1]) {
@@ -185,6 +190,45 @@ export function verifyTotpCode(secretBase32: string, candidateCode: string, atMs
     }
   }
   return false;
+}
+
+function verifyTotpCodeWithStep(
+  secretBase32: string,
+  candidateCode: string,
+  lastAcceptedStep?: number | null,
+  atMs = Date.now()
+): { valid: boolean; matchedStep: number | null; replayRejected: boolean } {
+  const clean = (candidateCode || '').replace(/[\s-]/g, '').trim();
+  if (!/^\d{6}$/.test(clean)) {
+    return { valid: false, matchedStep: null, replayRejected: false };
+  }
+  const currentStep = Math.floor(atMs / 1000 / 30);
+  for (const delta of [-1, 0, 1]) {
+    const candidateStep = currentStep + delta;
+    const expected = computeHotp(secretBase32, candidateStep);
+    if (crypto.timingSafeEqual(Buffer.from(clean), Buffer.from(expected))) {
+      if (typeof lastAcceptedStep === 'number' && candidateStep <= lastAcceptedStep) {
+        return { valid: false, matchedStep: candidateStep, replayRejected: true };
+      }
+      return { valid: true, matchedStep: candidateStep, replayRejected: false };
+    }
+  }
+  return { valid: false, matchedStep: null, replayRejected: false };
+}
+
+function generateRecoveryCodesSet(count = 8): {
+  plaintextCodes: string[];
+  codeHashes: string[];
+} {
+  const plaintextCodes: string[] = [];
+  const codeHashes: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const rawHex = crypto.randomBytes(4).toString('hex').toUpperCase();
+    const formatted = `${rawHex.slice(0, 4)}-${rawHex.slice(4, 8)}`;
+    plaintextCodes.push(formatted);
+    codeHashes.push(sha256(`winhood-rc:${rawHex}`));
+  }
+  return { plaintextCodes, codeHashes };
 }
 
 export function hashPassword(password: string): string {
@@ -227,11 +271,14 @@ export class AuthService {
   private readonly authStorePath: string;
   private readonly bootstrapTokenFilePath: string;
   private readonly recoveryDir: string;
+  private readonly keystorePath: string;
   private db: PersistedAuthDatabase;
   private ipRateLimits = new Map<string, { count: number; windowStartMs: number; blockedUntilMs: number }>();
 
   public static readonly SESSION_IDLE_MS = 30 * 60 * 1000;
   public static readonly SESSION_ABSOLUTE_MS = 8 * 60 * 60 * 1000;
+  public static readonly SESSION_TRUSTED_DEVICE_MS = 30 * 24 * 60 * 60 * 1000;
+  public static readonly PREAUTH_TTL_MS = 5 * 60 * 1000;
   public static readonly MAX_LOGIN_ATTEMPTS = 5;
   public static readonly LOCKOUT_DURATION_MS = 5 * 60 * 1000;
 
@@ -240,7 +287,167 @@ export class AuthService {
     this.authStorePath = path.join(base, 'security', 'auth_users.json');
     this.bootstrapTokenFilePath = path.join(base, 'bootstrap_admin_token.txt');
     this.recoveryDir = path.join(base, 'security');
+    this.keystorePath = path.join(base, 'keys', 'keystore.json');
     this.db = this.loadOrInit(base);
+  }
+
+  private encryptSecretAtRest(plainSecret: string): string {
+    const { keyId, keyBuffer } = KeyManagementService.getActiveVaultAesKey(this.keystorePath);
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', keyBuffer, iv);
+    const encrypted = Buffer.concat([cipher.update(plainSecret, 'utf8'), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    return `whvault:v1:${keyId}:${iv.toString('hex')}:${tag.toString('hex')}:${encrypted.toString('hex')}`;
+  }
+
+  private decryptSecretAtRest(stored: string | null | undefined): string | null {
+    if (!stored) return null;
+    if (!stored.startsWith('whvault:v1:')) {
+      // Backward compatibility for pre-existing plaintext Base32 secrets
+      return stored;
+    }
+    const parts = stored.split(':');
+    if (parts.length !== 6) {
+      throw new Error('TOTP_VAULT_CORRUPTED: Formato criptográfico do segredo TOTP inválido.');
+    }
+    const [, , keyId, ivHex, tagHex, cipherHex] = parts;
+    const keyBuf =
+      KeyManagementService.getVaultKeyBufferByKeyId(keyId!, this.keystorePath) ||
+      KeyManagementService.getActiveVaultAesKey(this.keystorePath).keyBuffer;
+    const decipher = crypto.createDecipheriv('aes-256-gcm', keyBuf, Buffer.from(ivHex!, 'hex'));
+    decipher.setAuthTag(Buffer.from(tagHex!, 'hex'));
+    const plain = Buffer.concat([
+      decipher.update(Buffer.from(cipherHex!, 'hex')),
+      decipher.final(),
+    ]);
+    return plain.toString('utf8');
+  }
+
+  public reencryptTotpSecrets(ctx: VaultReencryptContext): number {
+    let updated = 0;
+    const reencryptWithCtx = (stored: string | null | undefined): string | null | undefined => {
+      if (!stored) return stored;
+      let plain: string | null = null;
+      if (stored.startsWith(`whvault:v1:${ctx.oldKeyId}:`)) {
+        const parts = stored.split(':');
+        if (parts.length === 6) {
+          const decipher = crypto.createDecipheriv(
+            'aes-256-gcm',
+            ctx.oldKeyBuffer,
+            Buffer.from(parts[3]!, 'hex')
+          );
+          decipher.setAuthTag(Buffer.from(parts[4]!, 'hex'));
+          plain = Buffer.concat([
+            decipher.update(Buffer.from(parts[5]!, 'hex')),
+            decipher.final(),
+          ]).toString('utf8');
+        }
+      } else if (!stored.startsWith('whvault:v1:')) {
+        plain = stored;
+      }
+      if (!plain) return stored;
+      const iv = crypto.randomBytes(12);
+      const cipher = crypto.createCipheriv('aes-256-gcm', ctx.newKeyBuffer, iv);
+      const encrypted = Buffer.concat([cipher.update(plain, 'utf8'), cipher.final()]);
+      const tag = cipher.getAuthTag();
+      updated += 1;
+      return `whvault:v1:${ctx.newKeyId}:${iv.toString('hex')}:${tag.toString('hex')}:${encrypted.toString('hex')}`;
+    };
+
+    for (const user of this.db.users) {
+      if (user.totpSecretBase32) {
+        user.totpSecretBase32 = reencryptWithCtx(user.totpSecretBase32) || null;
+      }
+      if (user.pendingTotpSecretBase32) {
+        user.pendingTotpSecretBase32 = reencryptWithCtx(user.pendingTotpSecretBase32) || null;
+      }
+    }
+    if (updated > 0) {
+      this.save();
+    }
+    return updated;
+  }
+
+  private createPreAuthToken(userId: string, email: string, trustDevice: boolean): string {
+    const { keyId, secret } = KeyManagementService.getActiveEvidenceHmacKey(this.keystorePath);
+    const payload = {
+      keyId,
+      uid: userId,
+      email,
+      scope: 'TOTP_CHALLENGE',
+      trustDevice: Boolean(trustDevice),
+      exp: Date.now() + AuthService.PREAUTH_TTL_MS,
+      jti: crypto.randomBytes(8).toString('hex'),
+    };
+    const encodedPayload = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+    const sig = crypto.createHmac('sha256', secret).update(encodedPayload, 'utf8').digest('base64url');
+    return `whpa1.${encodedPayload}.${sig}`;
+  }
+
+  private verifyPreAuthToken(token: string): {
+    uid: string;
+    email: string;
+    trustDevice: boolean;
+  } {
+    const parts = (token || '').trim().split('.');
+    if (parts.length !== 3 || parts[0] !== 'whpa1') {
+      throw new Error('AUTH_PREAUTH_INVALID: Token temporário de desafio MFA malformado.');
+    }
+    let decoded: {
+      keyId?: string;
+      uid?: string;
+      email?: string;
+      scope?: string;
+      trustDevice?: boolean;
+      exp?: number;
+    };
+    try {
+      decoded = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8'));
+    } catch {
+      throw new Error('AUTH_PREAUTH_INVALID: Payload do desafio MFA inválido.');
+    }
+    if (decoded.scope !== 'TOTP_CHALLENGE' || !decoded.uid || !decoded.keyId || !decoded.exp) {
+      throw new Error('AUTH_PREAUTH_INVALID: Escopo do token de desafio MFA inválido.');
+    }
+    if (Date.now() > decoded.exp) {
+      throw new Error('AUTH_PREAUTH_EXPIRED: Desafio TOTP expirado (5 minutos). Faça login novamente.');
+    }
+    const hmacSecret = KeyManagementService.getEvidenceSecretByKeyId(decoded.keyId, this.keystorePath);
+    if (!hmacSecret) {
+      throw new Error('AUTH_PREAUTH_INVALID: Chave de assinatura do desafio não reconhecida.');
+    }
+    const expectedSig = crypto
+      .createHmac('sha256', hmacSecret)
+      .update(parts[1]!, 'utf8')
+      .digest('base64url');
+    const a = Buffer.from(parts[2]!, 'utf8');
+    const b = Buffer.from(expectedSig, 'utf8');
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      throw new Error('AUTH_PREAUTH_INVALID: Assinatura HMAC do token de desafio MFA inválida.');
+    }
+    return {
+      uid: decoded.uid,
+      email: decoded.email || '',
+      trustDevice: Boolean(decoded.trustDevice),
+    };
+  }
+
+  private tryConsumeRecoveryCode(user: UserAccountRecord, rawCode: string): boolean {
+    const clean = (rawCode || '').replace(/[\s-]/g, '').trim().toUpperCase();
+    if (!/^[A-F0-9]{8}$/.test(clean) || !Array.isArray(user.recoveryCodeHashes) || user.recoveryCodeHashes.length === 0) {
+      return false;
+    }
+    const candidateHashBuf = Buffer.from(sha256(`winhood-rc:${clean}`), 'hex');
+    const matchIndex = user.recoveryCodeHashes.findIndex((storedHex) => {
+      const storedBuf = Buffer.from(storedHex, 'hex');
+      return (
+        storedBuf.length === candidateHashBuf.length &&
+        crypto.timingSafeEqual(storedBuf, candidateHashBuf)
+      );
+    });
+    if (matchIndex === -1) return false;
+    user.recoveryCodeHashes.splice(matchIndex, 1);
+    return true;
   }
 
   private loadOrInit(baseDir: string): PersistedAuthDatabase {
@@ -343,7 +550,13 @@ export class AuthService {
     user: PublicUserView;
     sessionId: string;
     csrfToken: string;
-    totpSetup?: { secretBase32: string; otpauthUri: string };
+    totpSetup?: {
+      secretBase32: string;
+      secret?: string;
+      otpauthUri: string;
+      otpauthUrl?: string;
+      recoveryCodes?: string[];
+    };
   } {
     if (!this.isBootstrapRequired()) {
       throw new Error('BOOTSTRAP_ALREADY_COMPLETED: Administrador inicial já foi configurado.');
@@ -381,6 +594,7 @@ export class AuthService {
 
     const now = new Date().toISOString();
     const totpSecret = params.enableMfa ? base32Encode(crypto.randomBytes(20)) : null;
+    const recoveryGen = totpSecret ? generateRecoveryCodesSet(8) : null;
 
     const adminUser: UserAccountRecord = {
       id: `usr-${crypto.randomUUID().slice(0, 8)}`,
@@ -389,7 +603,9 @@ export class AuthService {
       role: 'ADMIN',
       passwordHash: hashPassword(cleanPassword),
       mfaEnabled: Boolean(params.enableMfa),
-      totpSecretBase32: totpSecret,
+      totpSecretBase32: totpSecret ? this.encryptSecretAtRest(totpSecret) : null,
+      recoveryCodeHashes: recoveryGen ? recoveryGen.codeHashes : [],
+      lastAcceptedTotpStep: null,
       disabled: false,
       failedLoginAttempts: 0,
       lockedUntil: null,
@@ -435,7 +651,10 @@ export class AuthService {
         ? {
             totpSetup: {
               secretBase32: totpSecret,
+              secret: totpSecret,
               otpauthUri: `otpauth://totp/WinHood:${encodeURIComponent(cleanEmail)}?secret=${totpSecret}&issuer=WinHood`,
+              otpauthUrl: `otpauth://totp/WinHood:${encodeURIComponent(cleanEmail)}?secret=${totpSecret}&issuer=WinHood`,
+              recoveryCodes: recoveryGen?.plaintextCodes || [],
             },
           }
         : {}),
@@ -471,6 +690,7 @@ export class AuthService {
     email: string;
     password: string;
     totpCode?: string;
+    trustDevice?: boolean;
     ipAddress?: string;
     userAgent?: string;
   }): {
@@ -478,6 +698,11 @@ export class AuthService {
     sessionId: string;
     csrfToken: string;
     mfaRequired: boolean;
+    requiresTotp: boolean;
+    preAuthToken?: string;
+    trustDevice: boolean;
+    serverTimeIso: string;
+    totpPeriodSeconds: number;
   } {
     const ipAddress = params.ipAddress || '127.0.0.1';
     this.checkIpRateLimit(ipAddress);
@@ -503,29 +728,50 @@ export class AuthService {
       throw new Error('AUTH_INVALID_CREDENTIALS: Credenciais inválidas.');
     }
 
-    // Check TOTP if MFA enabled
+    // Check TOTP if MFA enabled and inline code supplied
+    const plainTotpSecret = this.decryptSecretAtRest(user.totpSecretBase32);
     let mfaVerified = !user.mfaEnabled;
-    if (user.mfaEnabled && user.totpSecretBase32 && params.totpCode) {
-      if (!verifyTotpCode(user.totpSecretBase32, params.totpCode)) {
+    if (user.mfaEnabled && plainTotpSecret && params.totpCode) {
+      const check = verifyTotpCodeWithStep(
+        plainTotpSecret,
+        params.totpCode,
+        user.lastAcceptedTotpStep
+      );
+      if (check.replayRejected) {
+        user.failedLoginAttempts += 1;
+        this.save();
+        throw new Error(
+          'AUTH_TOTP_REPLAY: Código TOTP já utilizado nesta janela de 30s. Aguarde o próximo token.'
+        );
+      }
+      if (!check.valid) {
         user.failedLoginAttempts += 1;
         this.save();
         throw new Error('AUTH_INVALID_MFA: Código TOTP MFA inválido.');
       }
+      user.lastAcceptedTotpStep = check.matchedStep;
       mfaVerified = true;
     }
 
     user.failedLoginAttempts = 0;
     user.lockedUntil = null;
     user.updatedAt = new Date().toISOString();
+    // Transparently upgrade legacy plaintext secret at rest
+    if (user.totpSecretBase32 && !user.totpSecretBase32.startsWith('whvault:v1:')) {
+      user.totpSecretBase32 = this.encryptSecretAtRest(user.totpSecretBase32);
+    }
 
+    const trustDevice = Boolean(params.trustDevice);
     const { sessionId, session } = this.createSessionRecord(
       user,
       mfaVerified,
       ipAddress,
-      params.userAgent || 'unknown'
+      params.userAgent || 'unknown',
+      { trustDevice }
     );
     this.save();
 
+    const mfaRequired = user.mfaEnabled && !mfaVerified;
     return {
       user: {
         id: user.id,
@@ -537,57 +783,210 @@ export class AuthService {
       },
       sessionId,
       csrfToken: session.csrfToken,
-      mfaRequired: user.mfaEnabled && !mfaVerified,
+      mfaRequired,
+      requiresTotp: mfaRequired,
+      ...(mfaRequired
+        ? { preAuthToken: this.createPreAuthToken(user.id, user.email, trustDevice) }
+        : {}),
+      trustDevice,
+      serverTimeIso: new Date().toISOString(),
+      totpPeriodSeconds: 30,
     };
   }
 
-  public verifySessionMfa(sessionId: string, totpCode: string): PublicUserView {
+  public authenticateWithTotpPreAuth(params: {
+    preAuthToken: string;
+    totpCode?: string;
+    recoveryCode?: string;
+    trustDevice?: boolean;
+    ipAddress?: string;
+    userAgent?: string;
+  }): {
+    user: PublicUserView;
+    sessionId: string;
+    csrfToken: string;
+    trustDevice: boolean;
+    usedRecoveryCode: boolean;
+    remainingRecoveryCodesCount: number;
+  } {
+    const ipAddress = params.ipAddress || '127.0.0.1';
+    this.checkIpRateLimit(ipAddress);
+
+    const verifiedChallenge = this.verifyPreAuthToken(params.preAuthToken);
+    const user = this.db.users.find((u) => u.id === verifiedChallenge.uid);
+    if (!user || user.disabled || !user.mfaEnabled) {
+      throw new Error('AUTH_INVALID_MFA: Conta indisponível ou MFA não configurado.');
+    }
+
+    let usedRecoveryCode = false;
+    const candidateRecovery = (params.recoveryCode || '').trim();
+    const candidateTotp = (params.totpCode || '').trim();
+
+    if (candidateRecovery) {
+      if (!this.tryConsumeRecoveryCode(user, candidateRecovery)) {
+        user.failedLoginAttempts += 1;
+        this.recordIpFailure(ipAddress);
+        this.save();
+        throw new Error('AUTH_INVALID_RECOVERY_CODE: Código de recuperação inválido ou já utilizado.');
+      }
+      usedRecoveryCode = true;
+    } else {
+      const plainTotpSecret = this.decryptSecretAtRest(user.totpSecretBase32);
+      if (!plainTotpSecret) {
+        throw new Error('AUTH_INVALID_MFA: Segredo TOTP não localizado no cofre.');
+      }
+      const check = verifyTotpCodeWithStep(
+        plainTotpSecret,
+        candidateTotp,
+        user.lastAcceptedTotpStep
+      );
+      if (check.replayRejected) {
+        throw new Error(
+          'AUTH_TOTP_REPLAY: Código TOTP já utilizado nesta janela de 30s. Aguarde o próximo token.'
+        );
+      }
+      if (!check.valid) {
+        user.failedLoginAttempts += 1;
+        this.recordIpFailure(ipAddress);
+        this.save();
+        throw new Error('AUTH_INVALID_MFA: Código TOTP inválido.');
+      }
+      user.lastAcceptedTotpStep = check.matchedStep;
+    }
+
+    user.failedLoginAttempts = 0;
+    user.lockedUntil = null;
+    user.updatedAt = new Date().toISOString();
+
+    const effectiveTrustDevice =
+      typeof params.trustDevice === 'boolean' ? params.trustDevice : verifiedChallenge.trustDevice;
+    const { sessionId, session } = this.createSessionRecord(
+      user,
+      true,
+      ipAddress,
+      params.userAgent || 'unknown',
+      { trustDevice: effectiveTrustDevice }
+    );
+    this.save();
+
+    return {
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        mfaEnabled: user.mfaEnabled,
+        mfaVerified: true,
+      },
+      sessionId,
+      csrfToken: session.csrfToken,
+      trustDevice: effectiveTrustDevice,
+      usedRecoveryCode,
+      remainingRecoveryCodesCount: user.recoveryCodeHashes?.length ?? 0,
+    };
+  }
+
+  public verifySessionMfa(
+    sessionId: string,
+    totpCode: string,
+    opts?: { recoveryCode?: string; trustDevice?: boolean }
+  ): PublicUserView & { usedRecoveryCode?: boolean; remainingRecoveryCodesCount?: number } {
     const verified = this.validateSession(sessionId, { allowPendingMfa: true });
     if (!verified) {
       throw new Error('AUTH_SESSION_INVALID: Sessão inválida ou expirada.');
     }
     const user = this.db.users.find((u) => u.id === verified.user.id);
-    if (!user || !user.mfaEnabled || !user.totpSecretBase32) {
+    const plainSecret = this.decryptSecretAtRest(user?.totpSecretBase32);
+    if (!user || !user.mfaEnabled || !plainSecret) {
       throw new Error('MFA não habilitado para este usuário.');
     }
-    if (!verifyTotpCode(user.totpSecretBase32, totpCode)) {
-      throw new Error('AUTH_INVALID_MFA: Código TOTP inválido.');
+
+    let usedRecoveryCode = false;
+    if (opts?.recoveryCode && opts.recoveryCode.trim().length > 0) {
+      if (!this.tryConsumeRecoveryCode(user, opts.recoveryCode)) {
+        throw new Error('AUTH_INVALID_RECOVERY_CODE: Código de recuperação inválido ou já utilizado.');
+      }
+      usedRecoveryCode = true;
+    } else {
+      const check = verifyTotpCodeWithStep(
+        plainSecret,
+        totpCode,
+        user.lastAcceptedTotpStep
+      );
+      if (check.replayRejected) {
+        throw new Error(
+          'AUTH_TOTP_REPLAY: Código TOTP já utilizado nesta janela de 30s. Aguarde o próximo token.'
+        );
+      }
+      if (!check.valid) {
+        throw new Error('AUTH_INVALID_MFA: Código TOTP inválido.');
+      }
+      user.lastAcceptedTotpStep = check.matchedStep;
     }
+
+    if (user.totpSecretBase32 && !user.totpSecretBase32.startsWith('whvault:v1:')) {
+      user.totpSecretBase32 = this.encryptSecretAtRest(user.totpSecretBase32);
+    }
+
+    if (opts?.trustDevice) {
+      const nowMs = Date.now();
+      verified.session.trustDevice = true;
+      verified.session.idleTimeoutMs = AuthService.SESSION_TRUSTED_DEVICE_MS;
+      verified.session.expiresAt = new Date(nowMs + AuthService.SESSION_TRUSTED_DEVICE_MS).toISOString();
+    }
+
     verified.session.mfaVerified = true;
     verified.session.lastActivityAt = new Date().toISOString();
     this.save();
     return {
       ...verified.user,
       mfaVerified: true,
+      usedRecoveryCode,
+      remainingRecoveryCodesCount: user.recoveryCodeHashes?.length ?? 0,
     };
   }
 
-  public setupMfaForUser(userId: string): { secretBase32: string; otpauthUri: string } {
+  public setupMfaForUser(userId: string): {
+    secretBase32: string;
+    secret: string;
+    otpauthUri: string;
+    otpauthUrl: string;
+  } {
     const user = this.db.users.find((u) => u.id === userId);
     if (!user) throw new Error('Usuário não encontrado.');
     const secretBase32 = base32Encode(crypto.randomBytes(20));
-    user.pendingTotpSecretBase32 = secretBase32;
+    user.pendingTotpSecretBase32 = this.encryptSecretAtRest(secretBase32);
     user.updatedAt = new Date().toISOString();
     this.save();
+    const otpauthUri = `otpauth://totp/WinHood:${encodeURIComponent(user.email)}?secret=${secretBase32}&issuer=WinHood&algorithm=SHA1&digits=6&period=30`;
     return {
       secretBase32,
-      otpauthUri: `otpauth://totp/WinHood:${encodeURIComponent(user.email)}?secret=${secretBase32}&issuer=WinHood&algorithm=SHA1&digits=6&period=30`,
+      secret: secretBase32,
+      otpauthUri,
+      otpauthUrl: otpauthUri,
     };
   }
 
-  public confirmMfaEnrollment(userId: string, totpCode: string): PublicUserView {
+  public confirmMfaEnrollment(
+    userId: string,
+    totpCode: string
+  ): PublicUserView & { recoveryCodes: string[] } {
     const user = this.db.users.find((u) => u.id === userId);
     if (!user) throw new Error('Usuário não encontrado.');
-    const pending = user.pendingTotpSecretBase32;
-    if (!pending) {
+    const pendingPlain = this.decryptSecretAtRest(user.pendingTotpSecretBase32);
+    if (!pendingPlain) {
       throw new Error('Nenhum setup de MFA pendente encontrado. Solicite a configuração primeiro.');
     }
-    if (!verifyTotpCode(pending, totpCode)) {
+    const check = verifyTotpCodeWithStep(pendingPlain, totpCode, null);
+    if (!check.valid) {
       throw new Error('AUTH_INVALID_MFA: Código TOTP inválido. O MFA não foi ativado.');
     }
-    user.totpSecretBase32 = pending;
+    const { plaintextCodes, codeHashes } = generateRecoveryCodesSet(8);
+    user.totpSecretBase32 = this.encryptSecretAtRest(pendingPlain);
     user.mfaEnabled = true;
     user.pendingTotpSecretBase32 = null;
+    user.lastAcceptedTotpStep = check.matchedStep;
+    user.recoveryCodeHashes = codeHashes;
     user.updatedAt = new Date().toISOString();
     this.save();
     return {
@@ -597,6 +996,7 @@ export class AuthService {
       role: user.role,
       mfaEnabled: true,
       mfaVerified: true,
+      recoveryCodes: plaintextCodes,
     };
   }
 
@@ -604,19 +1004,30 @@ export class AuthService {
     user: UserAccountRecord,
     mfaVerified: boolean,
     ipAddress: string,
-    userAgent: string
+    userAgent: string,
+    opts?: { trustDevice?: boolean }
   ): { sessionId: string; session: AuthSessionRecord } {
     const sessionId = crypto.randomBytes(32).toString('hex');
     const nowMs = Date.now();
+    const trustDevice = Boolean(opts?.trustDevice);
+    const absoluteMs = trustDevice
+      ? AuthService.SESSION_TRUSTED_DEVICE_MS
+      : AuthService.SESSION_ABSOLUTE_MS;
+    const idleTimeoutMs = trustDevice
+      ? AuthService.SESSION_TRUSTED_DEVICE_MS
+      : AuthService.SESSION_IDLE_MS;
+
     const session: AuthSessionRecord = {
       sessionIdHash: sha256(sessionId),
       userId: user.id,
       role: user.role,
       csrfToken: crypto.randomBytes(24).toString('hex'),
       mfaVerified,
+      trustDevice,
+      idleTimeoutMs,
       createdAt: new Date(nowMs).toISOString(),
       lastActivityAt: new Date(nowMs).toISOString(),
-      expiresAt: new Date(nowMs + AuthService.SESSION_ABSOLUTE_MS).toISOString(),
+      expiresAt: new Date(nowMs + absoluteMs).toISOString(),
       revoked: false,
       ipAddress,
       userAgent,
@@ -644,7 +1055,10 @@ export class AuthService {
       this.save();
       return null;
     }
-    if (nowMs - Date.parse(session.lastActivityAt) > AuthService.SESSION_IDLE_MS) {
+    const effectiveIdleMs =
+      session.idleTimeoutMs ||
+      (session.trustDevice ? AuthService.SESSION_TRUSTED_DEVICE_MS : AuthService.SESSION_IDLE_MS);
+    if (nowMs - Date.parse(session.lastActivityAt) > effectiveIdleMs) {
       session.revoked = true;
       this.save();
       return null;
@@ -739,6 +1153,7 @@ export class AuthService {
       throw new Error('E-mail já cadastrado.');
     }
     const now = new Date().toISOString();
+    const rawAdminCreatedTotp = params.enableMfa ? base32Encode(crypto.randomBytes(20)) : null;
     const user: UserAccountRecord = {
       id: `usr-${crypto.randomUUID().slice(0, 8)}`,
       name: params.name.trim(),
@@ -746,7 +1161,9 @@ export class AuthService {
       role: params.role,
       passwordHash: hashPassword(params.password),
       mfaEnabled: Boolean(params.enableMfa),
-      totpSecretBase32: params.enableMfa ? base32Encode(crypto.randomBytes(20)) : null,
+      totpSecretBase32: rawAdminCreatedTotp ? this.encryptSecretAtRest(rawAdminCreatedTotp) : null,
+      recoveryCodeHashes: [],
+      lastAcceptedTotpStep: null,
       disabled: false,
       failedLoginAttempts: 0,
       lockedUntil: null,
@@ -779,7 +1196,13 @@ export class AuthService {
     user: PublicUserView;
     sessionId: string;
     csrfToken: string;
-    totpSetup?: { secretBase32: string; otpauthUri: string };
+    totpSetup?: {
+      secretBase32: string;
+      secret: string;
+      otpauthUri: string;
+      otpauthUrl: string;
+      recoveryCodes: string[];
+    };
   } {
     const ipAddress = params.ipAddress || '127.0.0.1';
     this.checkIpRateLimit(ipAddress);
@@ -814,7 +1237,9 @@ export class AuthService {
     }
 
     const now = new Date().toISOString();
+    const isFirstUser = this.db.users.length === 0;
     const totpSecret = params.enableMfa ? base32Encode(crypto.randomBytes(20)) : null;
+    const recoveryGen = totpSecret ? generateRecoveryCodesSet(8) : null;
 
     const newUser: UserAccountRecord = {
       id: `usr-${crypto.randomUUID().slice(0, 8)}`,
@@ -823,7 +1248,9 @@ export class AuthService {
       role: requestedRole,
       passwordHash: hashPassword(cleanPassword),
       mfaEnabled: Boolean(params.enableMfa),
-      totpSecretBase32: totpSecret,
+      totpSecretBase32: totpSecret ? this.encryptSecretAtRest(totpSecret) : null,
+      recoveryCodeHashes: recoveryGen ? recoveryGen.codeHashes : [],
+      lastAcceptedTotpStep: null,
       disabled: false,
       failedLoginAttempts: 0,
       lockedUntil: null,
@@ -834,6 +1261,18 @@ export class AuthService {
     };
 
     this.db.users.push(newUser);
+    if (isFirstUser) {
+      this.db.bootstrapTokenSha256 = null;
+      this.db.bootstrapTokenExpiresAt = null;
+      this.db.bootstrapCompletedAt = now;
+      try {
+        if (fs.existsSync(this.bootstrapTokenFilePath)) {
+          fs.unlinkSync(this.bootstrapTokenFilePath);
+        }
+      } catch {
+        // Ignore cleanup errors for ephemeral bootstrap file
+      }
+    }
 
     const { sessionId, session } = this.createSessionRecord(
       newUser,
@@ -858,7 +1297,10 @@ export class AuthService {
         ? {
             totpSetup: {
               secretBase32: totpSecret,
+              secret: totpSecret,
               otpauthUri: `otpauth://totp/WinHood:${encodeURIComponent(cleanEmail)}?secret=${totpSecret}&issuer=WinHood`,
+              otpauthUrl: `otpauth://totp/WinHood:${encodeURIComponent(cleanEmail)}?secret=${totpSecret}&issuer=WinHood`,
+              recoveryCodes: recoveryGen?.plaintextCodes || [],
             },
           }
         : {}),

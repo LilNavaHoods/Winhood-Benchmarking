@@ -756,3 +756,393 @@ test('KeyManagementService detects keystore checksum tampering and evidenceProve
     }, /KEYSTORE_INTEGRITY_VIOLATION/);
   });
 });
+
+test('TOTP AES-256-GCM at-rest encryption, preAuthToken 2-step flow, replay protection, 8 recovery codes, 30d trustDevice cookies, and hardened HTML export CSP', async () => {
+  await withIsolatedKeystoreEnv(async (tmpDir) => {
+    const { app, authService, getDb } = await createWinHoodApp({
+      dataDir: tmpDir,
+      enforceProductionAuth: true,
+    });
+
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      // 1. Bootstrap admin cleanly (MFA disabled initially)
+      const bootMeta = authService.getBootstrapMetadata();
+      const bootToken = readBootstrapTokenFromFile(bootMeta.bootstrapTokenFilePath);
+      const bootRes = await fetch(`${baseUrl}/api/auth/bootstrap-admin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bootstrapToken: bootToken,
+          name: 'TOTP Principal',
+          email: 'totp.admin@winhood.local',
+          password: 'TotpAdminPassword!2026',
+          enableMfa: false,
+        }),
+      });
+      assert.equal(bootRes.status, 201);
+      const adminJar = extractSetCookieValues(bootRes);
+      const adminCookie = `winhood_session=${adminJar.winhood_session}; winhood_csrf=${adminJar.winhood_csrf}`;
+
+      // 2. Post-login enrollment: /api/auth/totp/setup -> pending secret MUST be AES-256-GCM encrypted on disk
+      const setupRes = await fetch(`${baseUrl}/api/auth/totp/setup`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: adminCookie,
+          'x-csrf-token': adminJar.winhood_csrf!,
+        },
+        body: JSON.stringify({}),
+      });
+      assert.equal(setupRes.status, 200);
+      const setupData = (await setupRes.json()) as {
+        secretBase32: string;
+        secret: string;
+        otpauthUri: string;
+        otpauthUrl: string;
+        serverTimeIso: string;
+      };
+      assert.ok(setupData.secretBase32.length >= 16);
+      assert.equal(setupData.secretBase32, setupData.secret);
+      assert.equal(setupData.otpauthUri, setupData.otpauthUrl);
+      assert.ok(!Number.isNaN(Date.parse(setupData.serverTimeIso)));
+
+      const authStorePath = path.join(tmpDir, 'security', 'auth_users.json');
+      const rawBeforeConfirm = fs.readFileSync(authStorePath, 'utf8');
+      assert.equal(
+        rawBeforeConfirm.includes(setupData.secretBase32),
+        false,
+        'Plaintext pending TOTP secret must NEVER be persisted to disk'
+      );
+      assert.ok(
+        rawBeforeConfirm.includes('whvault:v1:'),
+        'Encrypted pending TOTP secret must carry whvault:v1: envelope'
+      );
+
+      // 3. Confirm enrollment -> returns 8 single-use XXXX-XXXX recovery codes & encrypts totpSecretBase32 at rest
+      const stepNow = Math.floor(Date.now() / 1000 / 30);
+      const initialCode = generateTotpCode(setupData.secretBase32, stepNow * 30 * 1000);
+      const confirmRes = await fetch(`${baseUrl}/api/auth/totp/verify-setup`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: adminCookie,
+          'x-csrf-token': adminJar.winhood_csrf!,
+        },
+        body: JSON.stringify({ totpCode: initialCode }),
+      });
+      assert.equal(confirmRes.status, 200);
+      const confirmData = (await confirmRes.json()) as {
+        ok: boolean;
+        recoveryCodes: string[];
+        user: { mfaEnabled: boolean; mfaVerified: boolean };
+      };
+      assert.equal(confirmData.ok, true);
+      assert.equal(confirmData.user.mfaEnabled, true);
+      assert.equal(confirmData.recoveryCodes.length, 8);
+      for (const rc of confirmData.recoveryCodes) {
+        assert.match(rc, /^[A-Z0-9]{4}-[A-Z0-9]{4}$/);
+      }
+
+      const rawAfterConfirm = fs.readFileSync(authStorePath, 'utf8');
+      assert.equal(
+        rawAfterConfirm.includes(setupData.secretBase32),
+        false,
+        'Plaintext active TOTP secret must NEVER be persisted to disk'
+      );
+      assert.equal(
+        rawAfterConfirm.includes(confirmData.recoveryCodes[0]!),
+        false,
+        'Plaintext recovery codes must NEVER be persisted to disk'
+      );
+
+      // 4. Two-step login with preAuthToken & anti-replay check
+      // Login without totpCode returns requiresTotp: true + signed preAuthToken
+      const loginStep1Res = await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: 'totp.admin@winhood.local',
+          password: 'TotpAdminPassword!2026',
+          trustDevice: true,
+        }),
+      });
+      assert.equal(loginStep1Res.status, 200);
+      const loginStep1Json = (await loginStep1Res.json()) as {
+        authenticated: boolean;
+        requiresTotp: boolean;
+        preAuthToken: string;
+        serverTimeIso: string;
+        totpPeriodSeconds: number;
+      };
+      assert.equal(loginStep1Json.authenticated, false);
+      assert.equal(loginStep1Json.requiresTotp, true);
+      assert.ok(loginStep1Json.preAuthToken.startsWith('whpa1.'));
+      assert.equal(loginStep1Json.totpPeriodSeconds, 30);
+
+      // Attempting to replay the exact same TOTP step code used during confirm (stepNow) must be rejected with 401 AUTH_TOTP_REPLAY
+      const replayRes = await fetch(`${baseUrl}/api/auth/totp/authenticate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          preAuthToken: loginStep1Json.preAuthToken,
+          totpCode: initialCode,
+          trustDevice: true,
+        }),
+      });
+      assert.equal(replayRes.status, 401);
+      const replayJson = (await replayRes.json()) as { error: string };
+      assert.match(replayJson.error, /AUTH_TOTP_REPLAY/);
+
+      // Completing 2FA with a distinct valid TOTP window (+1 step) succeeds and issues 30-day SameSite=Strict cookies
+      const nextStepCode = generateTotpCode(setupData.secretBase32, (stepNow + 1) * 30 * 1000);
+      const authTotpRes = await fetch(`${baseUrl}/api/auth/totp/authenticate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          preAuthToken: loginStep1Json.preAuthToken,
+          totpCode: nextStepCode,
+          trustDevice: true,
+        }),
+      });
+      assert.equal(authTotpRes.status, 200);
+      const authTotpJson = (await authTotpRes.json()) as {
+        authenticated: boolean;
+        requiresTotp: boolean;
+        trustDevice: boolean;
+      };
+      assert.equal(authTotpJson.authenticated, true);
+      assert.equal(authTotpJson.requiresTotp, false);
+      assert.equal(authTotpJson.trustDevice, true);
+
+      const rawSetCookieHeaders =
+        (authTotpRes.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie?.() || [];
+      assert.ok(
+        rawSetCookieHeaders.some((c) => c.includes('winhood_session=') && c.includes('SameSite=Strict') && c.includes('Max-Age=2592000')),
+        'Trusted device login must issue SameSite=Strict 30-day (2592000s) session cookie'
+      );
+
+      // 5. Single-use recovery code works once and fails on reuse
+      const loginStep1ForRc = await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: 'totp.admin@winhood.local',
+          password: 'TotpAdminPassword!2026',
+        }),
+      });
+      const rcChallenge = (await loginStep1ForRc.json()) as { preAuthToken: string };
+      const firstRecoveryCode = confirmData.recoveryCodes[0]!;
+
+      const rcAuthRes = await fetch(`${baseUrl}/api/auth/totp/authenticate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          preAuthToken: rcChallenge.preAuthToken,
+          recoveryCode: firstRecoveryCode,
+        }),
+      });
+      assert.equal(rcAuthRes.status, 200);
+      const rcAuthJson = (await rcAuthRes.json()) as {
+        authenticated: boolean;
+        usedRecoveryCode: boolean;
+        remainingRecoveryCodesCount: number;
+      };
+      assert.equal(rcAuthJson.authenticated, true);
+      assert.equal(rcAuthJson.usedRecoveryCode, true);
+      assert.equal(rcAuthJson.remainingRecoveryCodesCount, 7);
+
+      // Reusing the consumed recovery code must fail with 401
+      const rcReuseRes = await fetch(`${baseUrl}/api/auth/totp/authenticate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          preAuthToken: rcChallenge.preAuthToken,
+          recoveryCode: firstRecoveryCode,
+        }),
+      });
+      assert.equal(rcReuseRes.status, 401);
+
+      // 6. Key rotation re-encrypts active TOTP secrets seamlessly with new AES key
+      const rotateRes = await fetch(`${baseUrl}/api/security/keys/rotate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: adminCookie,
+          'x-csrf-token': adminJar.winhood_csrf!,
+        },
+        body: JSON.stringify({
+          purpose: 'TOKEN_VAULT_AES256',
+          reason: 'Unit test TOTP re-encryption rotation',
+        }),
+      });
+      assert.equal(rotateRes.status, 200);
+      const rotateJson = (await rotateRes.json()) as { rotated: boolean; reencryptedTokensCount: number };
+      assert.equal(rotateJson.rotated, true);
+      assert.ok(rotateJson.reencryptedTokensCount >= 1);
+
+      // 7. Seed a real BenchmarkRun (via DEMO seed) and verify hardened HTML report export CSP & X-Content-Type-Options: nosniff
+      const envSwitchRes = await fetch(`${baseUrl}/api/environment/switch`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: adminCookie,
+          'x-csrf-token': adminJar.winhood_csrf!,
+        },
+        body: JSON.stringify({ mode: 'DEMO' }),
+      });
+      assert.equal(envSwitchRes.status, 200);
+
+      const seedRes = await fetch(`${baseUrl}/api/demo/seed`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: adminCookie,
+          'x-csrf-token': adminJar.winhood_csrf!,
+        },
+      });
+      assert.equal(seedRes.status, 200);
+
+      const db = getDb();
+      const seededSw = db.softwares[0];
+      assert.ok(seededSw, 'Expected seeded software');
+      const execRunRes = await fetch(`${baseUrl}/api/benchmark-runs`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: adminCookie,
+          'x-csrf-token': adminJar.winhood_csrf!,
+        },
+        body: JSON.stringify({
+          projectId: seededSw.projectId,
+          softwareIds: [seededSw.id],
+          profileName: 'Sonar way (Modo MQR)',
+        }),
+      });
+      assert.equal(execRunRes.status, 201);
+
+      const firstRunId = db.runs[0]?.id;
+      assert.ok(firstRunId, 'Expected created BenchmarkRun for HTML report export check');
+      const htmlExportRes = await fetch(`${baseUrl}/api/reports/${encodeURIComponent(firstRunId)}/export?format=html`, {
+        headers: { Cookie: adminCookie },
+      });
+      assert.equal(htmlExportRes.status, 200);
+      assert.equal(htmlExportRes.headers.get('content-type'), 'text/html; charset=utf-8');
+      assert.equal(htmlExportRes.headers.get('x-content-type-options'), 'nosniff');
+      const cspHeader = htmlExportRes.headers.get('content-security-policy') || '';
+      assert.match(cspHeader, /default-src 'none'/);
+      assert.match(cspHeader, /base-uri 'none'/);
+      assert.match(cspHeader, /form-action 'none'/);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+test('Hybrid session: first-user register clears bootstrap, Bearer/X-WinHood-Session persists /api/bootstrap without cookies, and HTTPS iframe gets Partitioned SameSite=None', async () => {
+  await withIsolatedKeystoreEnv(async (tmpDir) => {
+    const { app, authService } = await createWinHoodApp({
+      dataDir: tmpDir,
+      enforceProductionAuth: true,
+    });
+
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      assert.equal(authService.isBootstrapRequired(), true);
+      const bootMeta = authService.getBootstrapMetadata();
+      assert.ok(fs.existsSync(bootMeta.bootstrapTokenFilePath));
+
+      // 1. First user registers directly via /api/auth/register simulating cross-site HTTPS iframe proxy
+      const regRes = await fetch(`${baseUrl}/api/auth/register`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-forwarded-proto': 'https',
+          'sec-fetch-dest': 'iframe',
+          'sec-fetch-site': 'cross-site',
+        },
+        body: JSON.stringify({
+          name: 'First Frame User',
+          email: 'iframe.user@winhood.local',
+          password: 'IframeUserStrong!2026',
+          role: 'SECURITY_LEAD',
+        }),
+      });
+      assert.equal(regRes.status, 201);
+
+      const rawCookies =
+        (regRes.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie?.() || [];
+      assert.ok(
+        rawCookies.some((c) => c.includes('SameSite=None; Secure; Partitioned')),
+        'HTTPS cross-site iframe requests must receive SameSite=None; Secure; Partitioned cookies'
+      );
+      assert.ok(regRes.headers.get('x-winhood-session-token'));
+      assert.ok(regRes.headers.get('x-winhood-csrf-token'));
+
+      const regJson = (await regRes.json()) as {
+        authenticated: boolean;
+        sessionId: string;
+        csrfToken: string;
+        user: { email: string };
+      };
+      assert.equal(regJson.authenticated, true);
+      assert.ok(regJson.sessionId.length >= 32);
+      assert.ok(regJson.csrfToken.length >= 16);
+      assert.equal(authService.isBootstrapRequired(), false);
+      assert.equal(fs.existsSync(bootMeta.bootstrapTokenFilePath), false);
+
+      // 2. Subsequent /api/bootstrap & /api/auth/session with NO cookies and ONLY Authorization: Bearer <sessionId>
+      const bootstrapRes = await fetch(`${baseUrl}/api/bootstrap`, {
+        headers: {
+          Authorization: `Bearer ${regJson.sessionId}`,
+        },
+      });
+      assert.equal(bootstrapRes.status, 200);
+      const bootstrapJson = (await bootstrapRes.json()) as { user: { email: string } };
+      assert.equal(bootstrapJson.user.email, 'iframe.user@winhood.local');
+
+      const sessRes = await fetch(`${baseUrl}/api/auth/session`, {
+        headers: {
+          'x-winhood-session': regJson.sessionId,
+        },
+      });
+      assert.equal(sessRes.status, 200);
+      const sessJson = (await sessRes.json()) as {
+        authenticated: boolean;
+        csrfToken: string;
+        user: { email: string };
+      };
+      assert.equal(sessJson.authenticated, true);
+      assert.equal(sessJson.user.email, 'iframe.user@winhood.local');
+      assert.equal(sessJson.csrfToken, regJson.csrfToken);
+
+      // 3. Logout via Bearer header revokes session on server -> subsequent /api/bootstrap returns 401
+      const logoutRes = await fetch(`${baseUrl}/api/auth/logout`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${regJson.sessionId}`,
+        },
+      });
+      assert.equal(logoutRes.status, 200);
+
+      const postLogoutBootstrap = await fetch(`${baseUrl}/api/bootstrap`, {
+        headers: {
+          Authorization: `Bearer ${regJson.sessionId}`,
+        },
+      });
+      assert.equal(postLogoutBootstrap.status, 401);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+

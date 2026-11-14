@@ -3,6 +3,7 @@ import {
   AlertOctagon,
   AlertTriangle,
   ArrowRight,
+  Calculator,
   CheckCircle2,
   Clock,
   Code2,
@@ -11,6 +12,7 @@ import {
   Hash,
   Info,
   KeyRound,
+  RotateCcw,
   Search,
   ShieldAlert,
   ShieldCheck,
@@ -40,6 +42,7 @@ export const FindingsAndDevSecOpsModule: React.FC<FindingsAndDevSecOpsModuleProp
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedFindingId, setSelectedFindingId] = useState<string | null>(null);
   const [triageLoadingId, setTriageLoadingId] = useState<string | null>(null);
+  const [simulatedFixedIds, setSimulatedFixedIds] = useState<Set<string>>(() => new Set());
 
   const findings = latestRun?.findings || [];
 
@@ -140,10 +143,134 @@ export const FindingsAndDevSecOpsModule: React.FC<FindingsAndDevSecOpsModuleProp
     selectedSoftwareId,
     selectedSeverity,
     selectedCategory,
+    selectedVisualCat,
     selectedToolId,
     selectedValidationStatus,
     searchQuery,
   ]);
+
+  const whatIfProjections = useMemo(() => {
+    if (!latestRun || simulatedFixedIds.size === 0) return null;
+
+    const toScoreRating = (score: number): 'A' | 'B' | 'C' | 'D' | 'E' => {
+      if (score >= 4.4) return 'A';
+      if (score >= 3.6) return 'B';
+      if (score >= 2.7) return 'C';
+      if (score >= 1.8) return 'D';
+      return 'E';
+    };
+
+    const simulatedFindings = findings.filter((f) => simulatedFixedIds.has(f.id));
+    const totalEffortMinutes = simulatedFindings.reduce(
+      (acc, f) => acc + (f.remediationEffortMinutes || 15),
+      0
+    );
+
+    const perSoftware = latestRun.scoreCards.map((sc) => {
+      const swSimFindings = simulatedFindings.filter((f) => f.softwareId === sc.softwareId);
+      const swEffortMin = swSimFindings.reduce(
+        (acc, f) => acc + (f.remediationEffortMinutes || 15),
+        0
+      );
+
+      let secRestore = 0;
+      let qualRestore = 0;
+      let relRestore = 0;
+      let critFixed = 0;
+      let secretsFixed = 0;
+      let bugsFixed = 0;
+
+      for (const f of swSimFindings) {
+        const basePenalty =
+          f.severity === 'BLOCKER'
+            ? 0.55
+            : f.severity === 'CRITICAL'
+              ? 0.4
+              : f.severity === 'HIGH'
+                ? 0.25
+                : f.severity === 'MEDIUM'
+                  ? 0.12
+                  : 0.05;
+
+        if (f.mqrImpacts && f.mqrImpacts.length > 0) {
+          for (const imp of f.mqrImpacts) {
+            const delta = Math.abs(imp.scoreDeduction);
+            if (imp.softwareQuality === 'SECURITY') secRestore += delta;
+            else if (imp.softwareQuality === 'RELIABILITY') relRestore += delta;
+            else qualRestore += delta;
+          }
+        } else if (f.category === 'SAST' || f.category === 'SECRETS' || f.category === 'SCA' || f.category === 'DAST') {
+          secRestore += basePenalty;
+        } else {
+          qualRestore += basePenalty;
+        }
+
+        if (f.severity === 'BLOCKER' || f.severity === 'CRITICAL') critFixed += 1;
+        if (f.category === 'SECRETS') secretsFixed += 1;
+        if (f.originalRuleId?.toLowerCase().includes('bug') || f.mqrImpacts?.some((i) => i.softwareQuality === 'RELIABILITY')) {
+          bugsFixed += 1;
+        }
+      }
+
+      const projSec = Math.min(5, Number((sc.groupedScores.securityScore + secRestore).toFixed(2)));
+      const projQual = Math.min(5, Number((sc.groupedScores.qualityScore + qualRestore).toFixed(2)));
+      const relBase = sc.categoryScores?.reliability ?? sc.groupedScores.qualityScore;
+      const projRel = Math.min(5, Number((relBase + relRestore).toFixed(2)));
+      const secGain = projSec - sc.groupedScores.securityScore;
+      const qualGain = projQual - sc.groupedScores.qualityScore;
+      const projOverall = Math.min(
+        5,
+        Number((sc.groupedScores.overallScore + secGain * 0.45 + qualGain * 0.4 + Math.min(0.4, relRestore * 0.15)).toFixed(2))
+      );
+
+      const remCrit = Math.max(0, sc.metricsSummary.criticalVulns - critFixed);
+      const remSecrets = Math.max(0, sc.metricsSummary.secretsExposed - secretsFixed);
+      const projSecRating = remCrit === 0 && remSecrets === 0 && projSec >= 4.4 ? 'A' : toScoreRating(projSec);
+      const projMaintRating = toScoreRating(projQual);
+      const projRelRating = bugsFixed > 0 && projRel >= 4.4 ? 'A' : toScoreRating(projRel);
+      const projQualityGate: 'PASSED' | 'WARN' | 'FAILED' =
+        remCrit === 0 && remSecrets === 0 && projSec >= 3.8 && projQual >= 3.5
+          ? 'PASSED'
+          : remCrit <= 1 && remSecrets === 0
+            ? 'WARN'
+            : 'FAILED';
+
+      return {
+        softwareId: sc.softwareId,
+        softwareName: sc.softwareName,
+        simulatedCount: swSimFindings.length,
+        effortHours: Number((swEffortMin / 60).toFixed(1)),
+        currentOverall: sc.groupedScores.overallScore,
+        projectedOverall: projOverall,
+        projectedSecurity: projSec,
+        projectedQuality: projQual,
+        projectedRatings: {
+          security: projSecRating,
+          maintainability: projMaintRating,
+          reliability: projRelRating,
+        },
+        currentQualityGate: sc.qualityGate?.status || 'N/A',
+        projectedQualityGate: projQualityGate,
+        remainingCritical: remCrit,
+        remainingSecrets: remSecrets,
+      };
+    });
+
+    return {
+      totalSimulatedCount: simulatedFindings.length,
+      totalEffortHours: Number((totalEffortMinutes / 60).toFixed(1)),
+      perSoftware,
+    };
+  }, [latestRun, findings, simulatedFixedIds]);
+
+  const toggleSimulatedFinding = (id: string) => {
+    setSimulatedFixedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   const activeFinding = useMemo(() => {
     if (selectedFindingId) {
@@ -606,6 +733,129 @@ export const FindingsAndDevSecOpsModule: React.FC<FindingsAndDevSecOpsModuleProp
         </div>
       </div>
 
+      {/* Interactive What-If Remediation & Technical ROI Simulator (Non-destructive) */}
+      <div className="rounded-lg border border-[#31d6c4]/30 bg-white dark:bg-[#0f141c] p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Calculator className="w-4 h-4 text-[#31d6c4]" />
+            <div>
+              <h3 className="text-xs font-bold text-slate-900 dark:text-slate-100">
+                Simulador What-If de Remediação &amp; ROI Técnico (Não-Destrutivo)
+              </h3>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                Marque achados na lista abaixo ou use um preset para simular o ganho na nota MQR, Ratings A–E, Quality Gate e esforço estimado sem alterar o banco oficial.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+            <button
+              type="button"
+              onClick={() => {
+                const critIds = findings
+                  .filter((f) => f.severity === 'BLOCKER' || f.severity === 'CRITICAL')
+                  .map((f) => f.id);
+                setSimulatedFixedIds(new Set(critIds));
+              }}
+              className="px-2.5 py-1 rounded border border-rose-500/40 bg-rose-500/10 text-rose-600 dark:text-rose-300 font-semibold hover:bg-rose-500/20 cursor-pointer"
+            >
+              Simular BLOCKER / CRITICAL
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                const secIds = findings
+                  .filter((f) => f.category === 'SECRETS')
+                  .map((f) => f.id);
+                setSimulatedFixedIds(new Set(secIds));
+              }}
+              className="px-2.5 py-1 rounded border border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-300 font-semibold hover:bg-amber-500/20 cursor-pointer"
+            >
+              Simular SECRETS
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setSimulatedFixedIds(new Set(filteredFindings.map((f) => f.id)));
+              }}
+              className="px-2.5 py-1 rounded border border-[#31d6c4]/40 bg-[#31d6c4]/10 text-[#0e9f8e] dark:text-[#31d6c4] font-semibold hover:bg-[#31d6c4]/20 cursor-pointer"
+            >
+              Simular Todos Filtrados ({filteredFindings.length})
+            </button>
+            {simulatedFixedIds.size > 0 && (
+              <button
+                type="button"
+                onClick={() => setSimulatedFixedIds(new Set())}
+                className="px-2.5 py-1 rounded border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 font-semibold inline-flex items-center gap-1 cursor-pointer"
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>Limpar ({simulatedFixedIds.size})</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {whatIfProjections && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2 border-t border-slate-200 dark:border-slate-800">
+            {whatIfProjections.perSoftware.map((proj) => {
+              const deltaOverall = Number((proj.projectedOverall - proj.currentOverall).toFixed(2));
+              return (
+                <div
+                  key={proj.softwareId}
+                  className="p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10] space-y-2 text-xs font-mono tabular-nums"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-sans font-bold text-slate-900 dark:text-slate-100">
+                      {proj.softwareName}
+                    </span>
+                    <span className="text-[#0e9f8e] dark:text-[#31d6c4] font-bold">
+                      {proj.simulatedCount} correções · {proj.effortHours}h estimadas
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-4 gap-2 text-[11px]">
+                    <div>
+                      <div className="text-slate-400">Nota Projetada</div>
+                      <div className="font-bold text-slate-900 dark:text-slate-100">
+                        {proj.projectedOverall.toFixed(2)}{' '}
+                        <span className="text-emerald-500">
+                          (+{deltaOverall.toFixed(2)})
+                        </span>
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-slate-400">Segurança</div>
+                      <div className="font-bold text-[#31d6c4]">
+                        {proj.projectedSecurity.toFixed(2)} ({proj.projectedRatings.security})
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-slate-400">Qualidade</div>
+                      <div className="font-bold text-slate-200">
+                        {proj.projectedQuality.toFixed(2)} ({proj.projectedRatings.maintainability})
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-slate-400">Quality Gate</div>
+                      <div
+                        className={`font-bold ${
+                          proj.projectedQualityGate === 'PASSED'
+                            ? 'text-emerald-400'
+                            : proj.projectedQualityGate === 'WARN'
+                              ? 'text-amber-400'
+                              : 'text-rose-400'
+                        }`}
+                      >
+                        {proj.currentQualityGate} → {proj.projectedQualityGate}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
       {/* Findings Table + Evidence Detail Split */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         <div className="lg:col-span-7 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] overflow-hidden h-fit">
@@ -670,17 +920,30 @@ export const FindingsAndDevSecOpsModule: React.FC<FindingsAndDevSecOpsModuleProp
                         }`}
                       >
                         <td className="py-3 px-4 font-mono whitespace-nowrap space-y-1">
-                          <div>{renderSeverityLabel(f.severity)}</div>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              aria-label={`Simular correção de ${f.title}`}
+                              checked={simulatedFixedIds.has(f.id)}
+                              onClick={(e) => e.stopPropagation()}
+                              onChange={() => toggleSimulatedFinding(f.id)}
+                              title="Simular correção no What-If ROI"
+                              className="rounded border-slate-400 cursor-pointer"
+                            />
+                            {renderSeverityLabel(f.severity)}
+                          </div>
                           <div
                             className={`text-[10px] font-bold px-1.5 py-0.5 rounded inline-block ${
-                              f.validationStatus === 'ACCEPTED'
-                                ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
-                                : f.validationStatus === 'FALSE_POSITIVE_REVIEWED'
-                                  ? 'bg-slate-500/20 text-slate-300 border border-slate-500/30'
-                                  : 'bg-emerald-500/15 text-[#31d6c4] border border-[#31d6c4]/30'
+                              simulatedFixedIds.has(f.id)
+                                ? 'bg-[#31d6c4]/20 text-[#31d6c4] border border-[#31d6c4]/40'
+                                : f.validationStatus === 'ACCEPTED'
+                                  ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+                                  : f.validationStatus === 'FALSE_POSITIVE_REVIEWED'
+                                    ? 'bg-slate-500/20 text-slate-300 border border-slate-500/30'
+                                    : 'bg-emerald-500/15 text-[#31d6c4] border border-[#31d6c4]/30'
                             }`}
                           >
-                            {f.validationStatus}
+                            {simulatedFixedIds.has(f.id) ? 'SIMULADO_CORRIGIDO' : f.validationStatus}
                           </div>
                         </td>
                         <td className="py-3 px-3 font-medium text-slate-800 dark:text-slate-200 whitespace-nowrap">

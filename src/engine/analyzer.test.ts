@@ -1466,4 +1466,68 @@ test('Scenario 29: SonarQubeConnection AES-256-GCM Token Encryption & MarketComp
   }
 });
 
+test('Scenario 30: Statistical Hardware Benchmark Telemetry (Warm-up + IQR + CV%) and KLOC-Normalized Scoring Metrics', async () => {
+  const { ToolResourceMonitor } = await import('../services/tools/ToolResourceMonitor');
+  const hwResult = ToolResourceMonitor.runHostHardwareBenchmark();
+
+  assert.ok(hwResult.statisticalTelemetry, 'statisticalTelemetry must be populated');
+  assert.equal(hwResult.statisticalTelemetry.warmupRoundsDiscarded, 2);
+  assert.equal(hwResult.statisticalTelemetry.measuredRoundsCount, 7);
+  assert.equal(hwResult.statisticalTelemetry.roundSamplesMs.length, 7);
+  assert.ok(Number.isFinite(hwResult.statisticalTelemetry.medianRoundMs));
+  assert.ok(hwResult.statisticalTelemetry.p95RoundMs >= hwResult.statisticalTelemetry.medianRoundMs);
+  assert.ok(hwResult.statisticalTelemetry.p99RoundMs >= hwResult.statisticalTelemetry.p95RoundMs);
+  assert.ok(Number.isFinite(hwResult.statisticalTelemetry.meanRoundMs));
+  assert.ok(Number.isFinite(hwResult.statisticalTelemetry.stdDevMs));
+  assert.ok(Number.isFinite(hwResult.statisticalTelemetry.iqrMs));
+  assert.ok(Number.isFinite(hwResult.statisticalTelemetry.coefficientOfVariationPercent));
+  assert.ok(
+    ['HIGH', 'MODERATE', 'LOW_NOISY_NEIGHBOR'].includes(hwResult.statisticalTelemetry.confidenceLevel)
+  );
+
+  // KLOC-normalized scoring metrics & SQALE debt ratio provenance
+  const sampleAnalysis = executeRealStaticAnalysisOnSource({
+    runId: 'run-kloc-test',
+    softwareId: 'sw-kloc-1',
+    softwareName: 'VaultCore KLOC Test',
+    softwareVersion: '1.0.0',
+    filesMap: LEGACY_VULNERABLE_VAULT_FILES,
+  });
+
+  const scoreCard = calculateDeterministicScoreCard(
+    {
+      softwareId: 'sw-kloc-1',
+      softwareName: 'VaultCore KLOC Test',
+      softwareVersion: '1.0.0',
+      veracityClassification: sampleAnalysis.veracity.overallClassification,
+      coveragePercent: sampleAnalysis.veracity.overallCoveragePercent,
+      essentialFeaturesMissing: 1,
+      visualOnlyFeaturesCount: 0,
+      metrics: sampleAnalysis.computedMetrics,
+      staticMetrics: sampleAnalysis.staticMetrics,
+      hasEncryptionAtRest: sampleAnalysis.hasEncryptionAtRest,
+      hasAuditTrail: sampleAnalysis.hasAuditTrail,
+      hasCleanSandboxUninstall: false,
+      hasCompleteDocumentation: sampleAnalysis.hasCompleteDocumentation,
+      environmentEquivalent: true,
+      findings: sampleAnalysis.findings,
+    },
+    DEFAULT_CATEGORY_WEIGHTS,
+    true
+  );
+
+  assert.ok(scoreCard.staticMetrics);
+  assert.ok(typeof scoreCard.staticMetrics.kloc === 'number' && scoreCard.staticMetrics.kloc > 0);
+  assert.ok(typeof scoreCard.staticMetrics.bugsPerKloc === 'number' && scoreCard.staticMetrics.bugsPerKloc >= 0);
+  assert.ok(typeof scoreCard.staticMetrics.codeSmellsPerKloc === 'number' && scoreCard.staticMetrics.codeSmellsPerKloc >= 0);
+  assert.ok(
+    typeof scoreCard.staticMetrics.technicalDebtRatioPercent === 'number' &&
+      scoreCard.staticMetrics.technicalDebtRatioPercent >= 0
+  );
+  assert.ok(scoreCard.metricProvenance?.smellsPerKloc?.metricKey === 'staticMetrics.codeSmellsPerKloc');
+  assert.ok(scoreCard.metricProvenance?.bugsPerKloc?.metricKey === 'staticMetrics.bugsPerKloc');
+  assert.ok(scoreCard.metricProvenance?.technicalDebtRatioPercent?.metricKey === 'staticMetrics.technicalDebtRatioPercent');
+});
+
+
 

@@ -1,6 +1,14 @@
-import React, { useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Clock,
+  Copy,
+  Download,
+  Eye,
+  EyeOff,
   KeyRound,
   Lock,
   LogOut,
@@ -8,7 +16,12 @@ import {
   UserPlus,
 } from 'lucide-react';
 import { WinHoodLogo } from './WinHoodLogo';
-import { csrfFetch as fetch } from '../utils/csrfFetch';
+import {
+  clearClientAuthTokens,
+  csrfFetch as fetch,
+  setGlobalCsrfToken,
+  setGlobalSessionToken,
+} from '../utils/csrfFetch';
 import QRCode from 'qrcode';
 
 export interface AuthUserView {
@@ -31,6 +44,80 @@ interface AuthGateModalProps {
 
 type GateMode = 'BOOTSTRAP' | 'LOGIN' | 'REGISTER' | 'MFA' | 'RECOVERY';
 
+interface PasswordStrengthReport {
+  level: 0 | 1 | 2 | 3 | 4;
+  label: string;
+  barColor: string;
+  textColor: string;
+  checks: {
+    minLength: boolean;
+    mixedCase: boolean;
+    hasDigit: boolean;
+    hasSymbol: boolean;
+  };
+}
+
+function evaluatePasswordStrength(password: string): PasswordStrengthReport {
+  const checks = {
+    minLength: password.length >= 10,
+    mixedCase: /[a-z]/.test(password) && /[A-Z]/.test(password),
+    hasDigit: /\d/.test(password),
+    hasSymbol: /[^a-zA-Z0-9\s]/.test(password),
+  };
+
+  if (!password) {
+    return {
+      level: 0,
+      label: 'Aguardando senha (mín. 10 caracteres)',
+      barColor: 'bg-slate-300 dark:bg-slate-700',
+      textColor: 'text-slate-500',
+      checks,
+    };
+  }
+
+  let score = 0;
+  if (checks.minLength) score += 1;
+  if (checks.mixedCase) score += 1;
+  if (checks.hasDigit) score += 1;
+  if (checks.hasSymbol) score += 1;
+  if (password.length >= 14 && score >= 3) score += 1;
+
+  if (!checks.minLength || score <= 1) {
+    return {
+      level: 1,
+      label: 'Fraca',
+      barColor: 'bg-rose-500',
+      textColor: 'text-rose-500',
+      checks,
+    };
+  }
+  if (score === 2) {
+    return {
+      level: 2,
+      label: 'Razoável',
+      barColor: 'bg-amber-500',
+      textColor: 'text-amber-500',
+      checks,
+    };
+  }
+  if (score === 3 || score === 4) {
+    return {
+      level: 3,
+      label: 'Forte',
+      barColor: 'bg-emerald-500',
+      textColor: 'text-emerald-500',
+      checks,
+    };
+  }
+  return {
+    level: 4,
+    label: 'Excelente — Pronta para Cofre AES-256',
+    barColor: 'bg-[#31d6c4]',
+    textColor: 'text-[#0e9f8e] dark:text-[#31d6c4]',
+    checks,
+  };
+}
+
 export const AuthGateModal: React.FC<AuthGateModalProps> = ({
   bootstrapRequired,
   bootstrapTokenFileHint,
@@ -47,6 +134,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
 
   const [mode, setMode] = useState<GateMode>(initialMode);
   const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [infoMsg, setInfoMsg] = useState<string | null>(null);
 
@@ -54,13 +142,16 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
   const [bsName, setBsName] = useState('');
   const [bsEmail, setBsEmail] = useState('');
   const [bsPassword, setBsPassword] = useState('');
+  const [showBsPassword, setShowBsPassword] = useState(false);
   const [bsToken, setBsToken] = useState('');
   const [bsEnableMfa, setBsEnableMfa] = useState(false);
   const [totpSetupInfo, setTotpSetupInfo] = useState<{
     secret: string;
     otpauthUrl: string;
+    recoveryCodes?: string[];
   } | null>(null);
   const [qrCodeDataUrl, setQrCodeDataUrl] = useState<string | null>(null);
+  const [copiedRecovery, setCopiedRecovery] = useState(false);
 
   React.useEffect(() => {
     if (totpSetupInfo?.otpauthUrl) {
@@ -75,25 +166,44 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
   // Login fields
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
   const [loginTotp, setLoginTotp] = useState('');
+  const [trustDevice, setTrustDevice] = useState(true);
 
-  // Register (Cadastro) fields
+  // Streamlined 3-field Register (Cadastro) + Progressive Profiling
   const [regName, setRegName] = useState('');
   const [regEmail, setRegEmail] = useState('');
-  const [regRole, setRegRole] = useState<'SECURITY_LEAD' | 'QA_ENGINEER' | 'AUDITOR'>('SECURITY_LEAD');
   const [regPassword, setRegPassword] = useState('');
-  const [regPasswordConfirm, setRegPasswordConfirm] = useState('');
+  const [showRegPassword, setShowRegPassword] = useState(false);
+  const [showAdvancedRegister, setShowAdvancedRegister] = useState(false);
+  const [regRole, setRegRole] = useState<'SECURITY_LEAD' | 'QA_ENGINEER' | 'AUDITOR'>(
+    'SECURITY_LEAD'
+  );
   const [regEnableMfa, setRegEnableMfa] = useState(false);
 
-  // MFA verification field
+  // MFA verification state & two-step preAuth challenge
   const [mfaCode, setMfaCode] = useState('');
+  const [preAuthToken, setPreAuthToken] = useState<string | null>(null);
+  const [serverTimeIso, setServerTimeIso] = useState<string | null>(null);
+  const [useRecoveryMode, setUseRecoveryMode] = useState(false);
+  const [recoveryBackupCode, setRecoveryBackupCode] = useState('');
 
   // Recovery fields
   const [recEmail, setRecEmail] = useState('');
   const [recToken, setRecToken] = useState('');
   const [recNewPassword, setRecNewPassword] = useState('');
+  const [showRecPassword, setShowRecPassword] = useState(false);
   const [recStepRequested, setRecStepRequested] = useState(false);
   const [recHintPath, setRecHintPath] = useState<string | null>(null);
+
+  const regStrength = useMemo(() => evaluatePasswordStrength(regPassword), [regPassword]);
+
+  const clockDriftSeconds = useMemo(() => {
+    if (!serverTimeIso) return 0;
+    const parsed = Date.parse(serverTimeIso);
+    if (!Number.isFinite(parsed)) return 0;
+    return Math.round(Math.abs(Date.now() - parsed) / 1000);
+  }, [serverTimeIso]);
 
   React.useEffect(() => {
     if (bootstrapRequired && mode !== 'BOOTSTRAP' && mode !== 'REGISTER') {
@@ -127,14 +237,22 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
         setErrorMsg(data.error || 'Falha no provisionamento do administrador.');
         return;
       }
+      if (data.sessionId) {
+        setGlobalSessionToken(data.sessionId, trustDevice);
+      }
+      if (data.csrfToken) {
+        setGlobalCsrfToken(data.csrfToken, trustDevice);
+      }
       if (data.totpSetup) {
         setTotpSetupInfo({
           secret: data.totpSetup.secret || data.totpSetup.secretBase32,
           otpauthUrl: data.totpSetup.otpauthUrl || data.totpSetup.otpauthUri,
+          recoveryCodes: data.totpSetup.recoveryCodes || [],
         });
+        setPreAuthToken(null);
         setMode('MFA');
         setInfoMsg(
-          'Administrador criado! Registre a chave TOTP abaixo no seu autenticador e informe o código de 6 dígitos.'
+          'Administrador criado! Escaneie o QR Code, salve os códigos de recuperação e informe o token de 6 dígitos.'
         );
         return;
       }
@@ -156,15 +274,11 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
     setInfoMsg(null);
 
     if (regName.trim().length < 2) {
-      setErrorMsg('Informe seu nome completo (mínimo 2 caracteres).');
+      setErrorMsg('Informe seu nome de exibição (mínimo 2 caracteres).');
       return;
     }
     if (regPassword.length < 10) {
       setErrorMsg('A senha deve possuir no mínimo 10 caracteres.');
-      return;
-    }
-    if (regPassword !== regPasswordConfirm) {
-      setErrorMsg('A confirmação de senha não coincide com a senha informada.');
       return;
     }
 
@@ -186,14 +300,22 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
         setErrorMsg(data.error || 'Não foi possível concluir o cadastro.');
         return;
       }
+      if (data.sessionId) {
+        setGlobalSessionToken(data.sessionId, trustDevice);
+      }
+      if (data.csrfToken) {
+        setGlobalCsrfToken(data.csrfToken, trustDevice);
+      }
       if (data.totpSetup) {
         setTotpSetupInfo({
           secret: data.totpSetup.secret || data.totpSetup.secretBase32,
           otpauthUrl: data.totpSetup.otpauthUrl || data.totpSetup.otpauthUri,
+          recoveryCodes: data.totpSetup.recoveryCodes || [],
         });
+        setPreAuthToken(null);
         setMode('MFA');
         setInfoMsg(
-          'Conta criada com sucesso! Registre a chave TOTP abaixo no seu autenticador e informe o código de 6 dígitos para concluir o acesso.'
+          'Conta criada! Escaneie o QR Code abaixo no seu autenticador, guarde os códigos de backup e digite os 6 dígitos.'
         );
         return;
       }
@@ -222,6 +344,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
           email: loginEmail.trim(),
           password: loginPassword,
           totpCode: loginTotp.trim() || undefined,
+          trustDevice,
         }),
       });
       const data = await res.json();
@@ -229,7 +352,18 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
         setErrorMsg(data.error || 'Credenciais inválidas ou conta bloqueada.');
         return;
       }
-      if (data.mfaRequired) {
+      if (data.sessionId) {
+        setGlobalSessionToken(data.sessionId, trustDevice);
+      }
+      if (data.csrfToken) {
+        setGlobalCsrfToken(data.csrfToken, trustDevice);
+      }
+      if (data.requiresTotp || data.mfaRequired) {
+        setPreAuthToken(data.preAuthToken || null);
+        setServerTimeIso(data.serverTimeIso || null);
+        setMfaCode('');
+        setRecoveryBackupCode('');
+        setUseRecoveryMode(false);
         setMode('MFA');
         setInfoMsg('Informe o código TOTP de 6 dígitos do seu aplicativo autenticador.');
         return;
@@ -246,20 +380,58 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
     }
   };
 
-  const handleVerifyMfaSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const submitMfaChallenge = async (overrideCode?: string) => {
+    if (submittingRef.current) return;
+    const totpClean = (overrideCode ?? mfaCode).replace(/\D/g, '').slice(0, 6);
+    const recoveryClean = recoveryBackupCode.trim();
+
+    if (!useRecoveryMode && totpClean.length !== 6) {
+      setErrorMsg('Informe os 6 dígitos numéricos do aplicativo autenticador.');
+      return;
+    }
+    if (useRecoveryMode && recoveryClean.replace(/[\s-]/g, '').length < 8) {
+      setErrorMsg('Informe o código de recuperação no formato XXXX-XXXX.');
+      return;
+    }
+
+    submittingRef.current = true;
     setErrorMsg(null);
     setSubmitting(true);
     try {
-      const res = await fetch('/api/auth/mfa/verify', {
+      const endpoint =
+        preAuthToken && !totpSetupInfo
+          ? '/api/auth/totp/authenticate'
+          : '/api/auth/mfa/verify';
+
+      const payload =
+        preAuthToken && !totpSetupInfo
+          ? {
+              preAuthToken,
+              totpCode: useRecoveryMode ? undefined : totpClean,
+              recoveryCode: useRecoveryMode ? recoveryClean : undefined,
+              trustDevice,
+            }
+          : {
+              totpCode: useRecoveryMode ? '' : totpClean,
+              recoveryCode: useRecoveryMode ? recoveryClean : undefined,
+              trustDevice,
+            };
+
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ totpCode: mfaCode.trim() }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
       if (!res.ok) {
         setErrorMsg(data.error || 'Código TOTP inválido ou expirado.');
         return;
+      }
+      if (data.sessionId) {
+        setGlobalSessionToken(data.sessionId, trustDevice);
+      }
+      if (data.csrfToken) {
+        setGlobalCsrfToken(data.csrfToken, trustDevice);
       }
       if (data.user) {
         onAuthenticated(data.user);
@@ -269,13 +441,70 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
     } catch {
       setErrorMsg('Erro ao verificar token MFA.');
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };
 
+  const handleVerifyMfaSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await submitMfaChallenge();
+  };
+
+  const handleMfaCodeChange = (rawVal: string) => {
+    const clean = rawVal.replace(/\D/g, '').slice(0, 6);
+    setMfaCode(clean);
+    if (clean.length === 6 && !useRecoveryMode) {
+      void submitMfaChallenge(clean);
+    }
+  };
+
+  const handleMfaPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    const pasted = e.clipboardData.getData('text');
+    const digits = pasted.replace(/[\s-]/g, '').replace(/\D/g, '').slice(0, 6);
+    if (digits.length > 0) {
+      e.preventDefault();
+      setMfaCode(digits);
+      if (digits.length === 6 && !useRecoveryMode) {
+        void submitMfaChallenge(digits);
+      }
+    }
+  };
+
+  const handleCopyRecoveryCodes = async (codes: string[]) => {
+    try {
+      await navigator.clipboard.writeText(codes.join('\n'));
+      setCopiedRecovery(true);
+      setTimeout(() => setCopiedRecovery(false), 2500);
+    } catch {
+      // Clipboard fallback ignored
+    }
+  };
+
+  const handleDownloadRecoveryCodes = (codes: string[]) => {
+    const content = [
+      '# WinHood Security Benchmark — Códigos de Recuperação TOTP (Uso Único)',
+      `# Gerado em: ${new Date().toISOString()}`,
+      '',
+      ...codes,
+      '',
+    ].join('\n');
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'winhood-recovery-codes.txt';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   const handleCancelMfaLogout = async () => {
     await fetch('/api/auth/logout', { method: 'POST' });
+    clearClientAuthTokens();
     setTotpSetupInfo(null);
+    setPreAuthToken(null);
     setMode('LOGIN');
     await onRefreshSession();
   };
@@ -351,9 +580,9 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
       role="dialog"
       aria-modal="true"
       aria-labelledby="winhood-auth-title"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 backdrop-blur-sm p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 backdrop-blur-sm p-4 overflow-y-auto"
     >
-      <div className="w-full max-w-lg rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0c1017] shadow-2xl overflow-hidden">
+      <div className="w-full max-w-lg rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0c1017] shadow-2xl overflow-hidden my-auto">
         {/* Header */}
         <div className="px-6 py-5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50 dark:bg-[#080b10]">
           <div className="flex items-center gap-3">
@@ -365,12 +594,12 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
               >
                 {mode === 'BOOTSTRAP' && 'Provisionamento Inicial do Administrador'}
                 {mode === 'LOGIN' && 'Autenticação WinHood Platform'}
-                {mode === 'REGISTER' && 'Cadastro de Novo Acesso WinHood'}
+                {mode === 'REGISTER' && 'Criar Nova Conta WinHood'}
                 {mode === 'MFA' && 'Verificação em Duas Etapas (TOTP MFA)'}
                 {mode === 'RECOVERY' && 'Recuperação Segura de Senha'}
               </h2>
               <p className="text-[11px] font-mono text-[#0e9f8e] dark:text-[#31d6c4]">
-                Sessão HttpOnly · CSRF Double-Submit · Scrypt + RBAC
+                Sessão HttpOnly · Cofre AES-256-GCM · Scrypt + TOTP RFC 6238
               </p>
             </div>
           </div>
@@ -454,7 +683,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
 
           {mode === 'BOOTSTRAP' && (
             <form onSubmit={handleBootstrapSubmit} className="space-y-3.5 text-xs">
-              <div className="p-3 rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300 space-y-1">
+              <div className="p-3 rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300 space-y-2">
                 <div className="font-bold flex items-center gap-1.5">
                   <KeyRound className="w-3.5 h-3.5" />
                   <span>Nenhum administrador provisionado neste ambiente</span>
@@ -465,6 +694,16 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                     {bootstrapTokenFileHint || '.winhood_data/bootstrap_admin_token.txt'}
                   </code>
                 </p>
+                <div className="pt-1">
+                  <button
+                    type="button"
+                    onClick={() => switchModeClean('REGISTER')}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md font-bold text-[11px] bg-white dark:bg-[#0c1017] border border-amber-500/40 text-amber-700 dark:text-[#31d6c4] hover:border-[#31d6c4] transition-colors cursor-pointer"
+                  >
+                    <UserPlus className="w-3.5 h-3.5" />
+                    <span>Usar Cadastro Rápido sem Token</span>
+                  </button>
+                </div>
               </div>
 
               <div>
@@ -476,7 +715,9 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                 </label>
                 <input
                   id="bs-name-input"
+                  name="name"
                   type="text"
+                  autoComplete="name"
                   required
                   value={bsName}
                   onChange={(e) => setBsName(e.target.value)}
@@ -494,7 +735,9 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                 </label>
                 <input
                   id="bs-email-input"
+                  name="email"
                   type="email"
+                  autoComplete="email"
                   required
                   value={bsEmail}
                   onChange={(e) => setBsEmail(e.target.value)}
@@ -510,16 +753,28 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                 >
                   Senha Forte (mínimo 10 caracteres)
                 </label>
-                <input
-                  id="bs-password-input"
-                  type="password"
-                  required
-                  minLength={10}
-                  value={bsPassword}
-                  onChange={(e) => setBsPassword(e.target.value)}
-                  placeholder="Mínimo 10 caracteres"
-                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 text-slate-900 dark:text-slate-100"
-                />
+                <div className="relative">
+                  <input
+                    id="bs-password-input"
+                    name="new-password"
+                    type={showBsPassword ? 'text' : 'password'}
+                    autoComplete="new-password"
+                    required
+                    minLength={10}
+                    value={bsPassword}
+                    onChange={(e) => setBsPassword(e.target.value)}
+                    placeholder="Mínimo 10 caracteres"
+                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] pl-3 pr-10 py-2 text-slate-900 dark:text-slate-100"
+                  />
+                  <button
+                    type="button"
+                    aria-label={showBsPassword ? 'Ocultar senha' : 'Visualizar senha'}
+                    onClick={() => setShowBsPassword((v) => !v)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 cursor-pointer"
+                  >
+                    {showBsPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
               </div>
 
               <div>
@@ -531,7 +786,9 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                 </label>
                 <input
                   id="bs-token-input"
+                  name="bootstrap-token"
                   type="text"
+                  autoComplete="off"
                   required
                   value={bsToken}
                   onChange={(e) => setBsToken(e.target.value)}
@@ -574,7 +831,9 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                 </label>
                 <input
                   id="login-email-input"
+                  name="email"
                   type="email"
+                  autoComplete="username"
                   required
                   value={loginEmail}
                   onChange={(e) => setLoginEmail(e.target.value)}
@@ -590,15 +849,31 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                 >
                   Senha
                 </label>
-                <input
-                  id="login-password-input"
-                  type="password"
-                  required
-                  value={loginPassword}
-                  onChange={(e) => setLoginPassword(e.target.value)}
-                  placeholder="••••••••••"
-                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 text-slate-900 dark:text-slate-100"
-                />
+                <div className="relative">
+                  <input
+                    id="login-password-input"
+                    name="password"
+                    type={showLoginPassword ? 'text' : 'password'}
+                    autoComplete="current-password"
+                    required
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    placeholder="••••••••••"
+                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] pl-3 pr-10 py-2 text-slate-900 dark:text-slate-100"
+                  />
+                  <button
+                    type="button"
+                    aria-label={showLoginPassword ? 'Ocultar senha' : 'Visualizar senha'}
+                    onClick={() => setShowLoginPassword((v) => !v)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 cursor-pointer"
+                  >
+                    {showLoginPassword ? (
+                      <EyeOff className="w-4 h-4" />
+                    ) : (
+                      <Eye className="w-4 h-4" />
+                    )}
+                  </button>
+                </div>
               </div>
 
               <div>
@@ -606,19 +881,36 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                   htmlFor="login-totp-input"
                   className="block font-semibold text-slate-700 dark:text-slate-300 mb-1"
                 >
-                  Código TOTP MFA (opcional se não habilitado)
+                  Código TOTP MFA (opcional — será solicitado na etapa seguinte se ativo)
                 </label>
                 <input
                   id="login-totp-input"
+                  name="totp-code"
                   type="text"
                   inputMode="numeric"
+                  pattern="[0-9]*"
+                  autoComplete="one-time-code"
                   maxLength={6}
                   value={loginTotp}
-                  onChange={(e) => setLoginTotp(e.target.value)}
+                  onChange={(e) => setLoginTotp(e.target.value.replace(/\D/g, '').slice(0, 6))}
                   placeholder="000000"
-                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 font-mono text-slate-900 dark:text-slate-100"
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 font-mono text-slate-900 dark:text-slate-100 tabular-nums"
                 />
               </div>
+
+              <label
+                htmlFor="login-trust-device"
+                className="flex items-center gap-2 text-slate-700 dark:text-slate-300 cursor-pointer"
+              >
+                <input
+                  id="login-trust-device"
+                  type="checkbox"
+                  checked={trustDevice}
+                  onChange={(e) => setTrustDevice(e.target.checked)}
+                  className="rounded border-slate-400"
+                />
+                <span>Manter sessão ativa neste computador por 30 dias (cookie HttpOnly)</span>
+              </label>
 
               <button
                 type="submit"
@@ -649,17 +941,19 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
           )}
 
           {mode === 'REGISTER' && (
-            <form onSubmit={handleRegisterSubmit} className="space-y-3 text-xs">
+            <form onSubmit={handleRegisterSubmit} className="space-y-3.5 text-xs">
               <div>
                 <label
                   htmlFor="reg-name-input"
                   className="block font-semibold text-slate-700 dark:text-slate-300 mb-1"
                 >
-                  Nome Completo
+                  Nome de Exibição
                 </label>
                 <input
                   id="reg-name-input"
+                  name="name"
                   type="text"
+                  autoComplete="name"
                   required
                   minLength={2}
                   value={regName}
@@ -674,11 +968,13 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                   htmlFor="reg-email-input"
                   className="block font-semibold text-slate-700 dark:text-slate-300 mb-1"
                 >
-                  E-mail Corporativo
+                  E-mail
                 </label>
                 <input
                   id="reg-email-input"
+                  name="email"
                   type="email"
+                  autoComplete="email"
                   required
                   value={regEmail}
                   onChange={(e) => setRegEmail(e.target.value)}
@@ -688,83 +984,133 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
               </div>
 
               <div>
-                <label
-                  htmlFor="reg-role-select"
-                  className="block font-semibold text-slate-700 dark:text-slate-300 mb-1"
-                >
-                  Perfil Funcional (RBAC)
-                </label>
-                <select
-                  id="reg-role-select"
-                  value={regRole}
-                  onChange={(e) =>
-                    setRegRole(
-                      e.target.value as 'SECURITY_LEAD' | 'QA_ENGINEER' | 'AUDITOR'
-                    )
-                  }
-                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 text-slate-900 dark:text-slate-100"
-                >
-                  <option value="SECURITY_LEAD">
-                    SECURITY_LEAD — AppSec, SAST, SonarQube, Projetos & Benchmarks
-                  </option>
-                  <option value="QA_ENGINEER">
-                    QA_ENGINEER — Qualidade, Testes, Performance & Projetos
-                  </option>
-                  <option value="AUDITOR">
-                    AUDITOR — Auditoria de Evidências & Relatórios (Somente Leitura)
-                  </option>
-                </select>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
+                <div className="flex items-center justify-between mb-1">
                   <label
                     htmlFor="reg-password-input"
-                    className="block font-semibold text-slate-700 dark:text-slate-300 mb-1"
+                    className="font-semibold text-slate-700 dark:text-slate-300"
                   >
-                    Senha Forte (mín. 10 caracteres)
+                    Senha
                   </label>
+                  <span className={`text-[11px] font-mono font-semibold ${regStrength.textColor}`}>
+                    {regStrength.label}
+                  </span>
+                </div>
+                <div className="relative">
                   <input
                     id="reg-password-input"
-                    type="password"
+                    name="new-password"
+                    type={showRegPassword ? 'text' : 'password'}
+                    autoComplete="new-password"
                     required
                     minLength={10}
                     value={regPassword}
                     onChange={(e) => setRegPassword(e.target.value)}
-                    placeholder="Mínimo 10 caracteres"
-                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 text-slate-900 dark:text-slate-100"
+                    placeholder="Mínimo 10 caracteres (use o ícone para conferir)"
+                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] pl-3 pr-10 py-2 text-slate-900 dark:text-slate-100"
                   />
+                  <button
+                    type="button"
+                    aria-label={showRegPassword ? 'Ocultar senha' : 'Visualizar senha'}
+                    onClick={() => setShowRegPassword((v) => !v)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 cursor-pointer"
+                  >
+                    {showRegPassword ? (
+                      <EyeOff className="w-4 h-4" />
+                    ) : (
+                      <Eye className="w-4 h-4" />
+                    )}
+                  </button>
                 </div>
 
-                <div>
-                  <label
-                    htmlFor="reg-password-confirm-input"
-                    className="block font-semibold text-slate-700 dark:text-slate-300 mb-1"
-                  >
-                    Confirmar Senha
-                  </label>
-                  <input
-                    id="reg-password-confirm-input"
-                    type="password"
-                    required
-                    minLength={10}
-                    value={regPasswordConfirm}
-                    onChange={(e) => setRegPasswordConfirm(e.target.value)}
-                    placeholder="Repita a senha"
-                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 text-slate-900 dark:text-slate-100"
-                  />
+                {/* 4-Level Entropy Meter */}
+                <div className="grid grid-cols-4 gap-1.5 mt-2" aria-label="Medidor de força da senha">
+                  {[1, 2, 3, 4].map((step) => (
+                    <div
+                      key={step}
+                      className={`h-1.5 rounded-full transition-colors ${
+                        regStrength.level >= step
+                          ? regStrength.barColor
+                          : 'bg-slate-200 dark:bg-slate-800'
+                      }`}
+                    />
+                  ))}
+                </div>
+
+                {/* Criteria Checklist */}
+                <div className="grid grid-cols-2 gap-1.5 mt-2 text-[11px] text-slate-500 dark:text-slate-400">
+                  <span className={regStrength.checks.minLength ? 'text-emerald-500 font-medium' : ''}>
+                    {regStrength.checks.minLength ? '✓' : '○'} Mínimo 10 caracteres
+                  </span>
+                  <span className={regStrength.checks.mixedCase ? 'text-emerald-500 font-medium' : ''}>
+                    {regStrength.checks.mixedCase ? '✓' : '○'} Maiúsculas &amp; minúsculas
+                  </span>
+                  <span className={regStrength.checks.hasDigit ? 'text-emerald-500 font-medium' : ''}>
+                    {regStrength.checks.hasDigit ? '✓' : '○'} Ao menos 1 número
+                  </span>
+                  <span className={regStrength.checks.hasSymbol ? 'text-emerald-500 font-medium' : ''}>
+                    {regStrength.checks.hasSymbol ? '✓' : '○'} Símbolo especial (!@#$)
+                  </span>
                 </div>
               </div>
 
-              <label className="flex items-center gap-2 text-slate-700 dark:text-slate-300 cursor-pointer pt-1">
-                <input
-                  type="checkbox"
-                  checked={regEnableMfa}
-                  onChange={(e) => setRegEnableMfa(e.target.checked)}
-                  className="rounded border-slate-400"
-                />
-                <span>Ativar autenticação multifator (TOTP MFA) na minha conta</span>
-              </label>
+              {/* Progressive Profiling Toggle */}
+              <div className="border-t border-slate-200 dark:border-slate-800 pt-2.5">
+                <button
+                  type="button"
+                  onClick={() => setShowAdvancedRegister((v) => !v)}
+                  className="w-full flex items-center justify-between text-[11px] font-semibold text-slate-600 dark:text-slate-400 hover:text-[#31d6c4] cursor-pointer"
+                >
+                  <span>Configurações opcionais de perfil (RBAC &amp; 2FA)</span>
+                  {showAdvancedRegister ? (
+                    <ChevronUp className="w-3.5 h-3.5" />
+                  ) : (
+                    <ChevronDown className="w-3.5 h-3.5" />
+                  )}
+                </button>
+
+                {showAdvancedRegister && (
+                  <div className="mt-2.5 space-y-2.5 p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10]">
+                    <div>
+                      <label
+                        htmlFor="reg-role-select"
+                        className="block font-semibold text-slate-700 dark:text-slate-300 mb-1"
+                      >
+                        Perfil Funcional (RBAC)
+                      </label>
+                      <select
+                        id="reg-role-select"
+                        value={regRole}
+                        onChange={(e) =>
+                          setRegRole(
+                            e.target.value as 'SECURITY_LEAD' | 'QA_ENGINEER' | 'AUDITOR'
+                          )
+                        }
+                        className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0c1017] px-2.5 py-1.5 text-slate-900 dark:text-slate-100"
+                      >
+                        <option value="SECURITY_LEAD">
+                          SECURITY_LEAD — AppSec, SAST, SonarQube &amp; Benchmarks
+                        </option>
+                        <option value="QA_ENGINEER">
+                          QA_ENGINEER — Qualidade, Testes &amp; Performance
+                        </option>
+                        <option value="AUDITOR">
+                          AUDITOR — Auditoria de Evidências &amp; Relatórios
+                        </option>
+                      </select>
+                    </div>
+
+                    <label className="flex items-center gap-2 text-slate-700 dark:text-slate-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={regEnableMfa}
+                        onChange={(e) => setRegEnableMfa(e.target.checked)}
+                        className="rounded border-slate-400"
+                      />
+                      <span>Ativar autenticação 2FA (TOTP) já na criação da conta</span>
+                    </label>
+                  </div>
+                )}
+              </div>
 
               <button
                 type="submit"
@@ -799,45 +1145,157 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                 </div>
               )}
 
+              {clockDriftSeconds > 25 && (
+                <div className="p-2.5 rounded-lg border border-amber-500/40 bg-amber-500/10 text-[11px] text-amber-600 dark:text-amber-300 flex items-start gap-2">
+                  <Clock className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>
+                    Dessincronização de relógio detectada ({clockDriftSeconds}s de diferença em relação ao servidor). Se o código falhar, sincronize a hora automática do seu dispositivo.
+                  </span>
+                </div>
+              )}
+
               {totpSetupInfo && (
-                <div className="p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10] space-y-2 text-[11px] text-center">
+                <div className="p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10] space-y-2.5 text-[11px] text-center">
                   <div className="font-bold text-slate-800 dark:text-slate-200">
-                    Escaneie o QR Code no seu Aplicativo Autenticador (Google Authenticator, Authy):
+                    Escaneie o QR Code no Google Authenticator, Authy ou 1Password:
                   </div>
                   {qrCodeDataUrl ? (
                     <div className="flex justify-center p-2 bg-white rounded shadow-inner">
                       <img src={qrCodeDataUrl} alt="QR Code TOTP MFA" className="w-36 h-36 object-contain" />
                     </div>
                   ) : (
-                    <div className="text-slate-400">Gerando QR Code criptográfico...</div>
+                    <div className="text-slate-400">Gerando QR Code criptográfico offline...</div>
                   )}
                   <div className="text-left space-y-1 pt-1">
                     <div className="text-slate-500 font-semibold">Chave Base32 (Configuração Manual):</div>
-                    <div className="font-mono text-[#0e9f8e] dark:text-[#31d6c4] break-all select-all p-1 bg-slate-100 dark:bg-slate-900 rounded">
+                    <div className="font-mono text-[#0e9f8e] dark:text-[#31d6c4] break-all select-all p-1.5 bg-slate-100 dark:bg-slate-900 rounded">
                       {totpSetupInfo.secret}
                     </div>
                   </div>
+
+                  {totpSetupInfo.recoveryCodes && totpSetupInfo.recoveryCodes.length > 0 && (
+                    <div className="text-left space-y-1.5 pt-2 border-t border-slate-200 dark:border-slate-800">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-amber-600 dark:text-amber-400">
+                          8 Códigos de Recuperação de Uso Único (Salve em local seguro):
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void handleCopyRecoveryCodes(totpSetupInfo.recoveryCodes!)
+                            }
+                            className="px-2 py-0.5 rounded border border-slate-300 dark:border-slate-700 hover:border-[#31d6c4] inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            {copiedRecovery ? (
+                              <Check className="w-3 h-3 text-emerald-500" />
+                            ) : (
+                              <Copy className="w-3 h-3" />
+                            )}
+                            <span>{copiedRecovery ? 'Copiado' : 'Copiar'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleDownloadRecoveryCodes(totpSetupInfo.recoveryCodes!)
+                            }
+                            className="px-2 py-0.5 rounded border border-slate-300 dark:border-slate-700 hover:border-[#31d6c4] inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            <Download className="w-3 h-3" />
+                            <span>.TXT</span>
+                          </button>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 font-mono text-[11px]">
+                        {totpSetupInfo.recoveryCodes.map((code) => (
+                          <div
+                            key={code}
+                            className="px-2 py-1 rounded bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-center select-all"
+                          >
+                            {code}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
-              <div>
+              {!useRecoveryMode ? (
+                <div>
+                  <label
+                    htmlFor="mfa-code-input"
+                    className="block font-semibold text-slate-700 dark:text-slate-300 mb-1"
+                  >
+                    Código TOTP (6 dígitos — validação automática ao preencher)
+                  </label>
+                  <input
+                    id="mfa-code-input"
+                    name="one-time-code"
+                    type="text"
+                    required
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    autoComplete="one-time-code"
+                    autoFocus
+                    maxLength={6}
+                    value={mfaCode}
+                    onChange={(e) => handleMfaCodeChange(e.target.value)}
+                    onPaste={handleMfaPaste}
+                    placeholder="000000"
+                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2.5 font-mono text-lg tracking-[0.35em] text-center text-slate-900 dark:text-slate-100 tabular-nums"
+                  />
+                </div>
+              ) : (
+                <div>
+                  <label
+                    htmlFor="mfa-recovery-input"
+                    className="block font-semibold text-slate-700 dark:text-slate-300 mb-1"
+                  >
+                    Código de Recuperação de Uso Único (XXXX-XXXX)
+                  </label>
+                  <input
+                    id="mfa-recovery-input"
+                    name="recovery-code"
+                    type="text"
+                    required
+                    autoFocus
+                    maxLength={12}
+                    value={recoveryBackupCode}
+                    onChange={(e) => setRecoveryBackupCode(e.target.value.toUpperCase())}
+                    placeholder="A1B2-C3D4"
+                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 font-mono text-base tracking-widest text-center text-slate-900 dark:text-slate-100 uppercase"
+                  />
+                </div>
+              )}
+
+              <div className="flex items-center justify-between gap-2">
                 <label
-                  htmlFor="mfa-code-input"
-                  className="block font-semibold text-slate-700 dark:text-slate-300 mb-1"
+                  htmlFor="mfa-trust-device"
+                  className="flex items-center gap-2 text-slate-600 dark:text-slate-400 cursor-pointer"
                 >
-                  Código TOTP (6 dígitos)
+                  <input
+                    id="mfa-trust-device"
+                    type="checkbox"
+                    checked={trustDevice}
+                    onChange={(e) => setTrustDevice(e.target.checked)}
+                    className="rounded border-slate-400"
+                  />
+                  <span>Lembrar este computador (30d)</span>
                 </label>
-                <input
-                  id="mfa-code-input"
-                  type="text"
-                  required
-                  inputMode="numeric"
-                  maxLength={6}
-                  value={mfaCode}
-                  onChange={(e) => setMfaCode(e.target.value)}
-                  placeholder="123456"
-                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 font-mono text-base tracking-widest text-center text-slate-900 dark:text-slate-100"
-                />
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setErrorMsg(null);
+                    setUseRecoveryMode((v) => !v);
+                  }}
+                  className="text-[11px] font-semibold text-[#0e9f8e] dark:text-[#31d6c4] hover:underline cursor-pointer"
+                >
+                  {useRecoveryMode
+                    ? 'Voltar para código TOTP (6 dígitos)'
+                    : 'Usar código de recuperação de uso único'}
+                </button>
               </div>
 
               <div className="flex items-center gap-2">
@@ -868,7 +1326,10 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                     Informe seu e-mail cadastrado. Um token temporário de uso único será gravado no canal local seguro (<code className="font-mono">.winhood_data</code>).
                   </p>
                   <input
+                    id="rec-email-input"
+                    name="email"
                     type="email"
+                    autoComplete="email"
                     required
                     value={recEmail}
                     onChange={(e) => setRecEmail(e.target.value)}
@@ -900,22 +1361,42 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                     </div>
                   )}
                   <input
+                    id="rec-token-input"
+                    name="recovery-token"
                     type="text"
+                    autoComplete="one-time-code"
                     required
                     value={recToken}
                     onChange={(e) => setRecToken(e.target.value)}
                     placeholder="Token de recuperação de uso único"
                     className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 font-mono text-slate-900 dark:text-slate-100"
                   />
-                  <input
-                    type="password"
-                    required
-                    minLength={10}
-                    value={recNewPassword}
-                    onChange={(e) => setRecNewPassword(e.target.value)}
-                    placeholder="Nova senha forte (mín. 10 caracteres)"
-                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 text-slate-900 dark:text-slate-100"
-                  />
+                  <div className="relative">
+                    <input
+                      id="rec-new-password-input"
+                      name="new-password"
+                      type={showRecPassword ? 'text' : 'password'}
+                      autoComplete="new-password"
+                      required
+                      minLength={10}
+                      value={recNewPassword}
+                      onChange={(e) => setRecNewPassword(e.target.value)}
+                      placeholder="Nova senha forte (mín. 10 caracteres)"
+                      className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] pl-3 pr-10 py-2 text-slate-900 dark:text-slate-100"
+                    />
+                    <button
+                      type="button"
+                      aria-label={showRecPassword ? 'Ocultar senha' : 'Visualizar senha'}
+                      onClick={() => setShowRecPassword((v) => !v)}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 cursor-pointer"
+                    >
+                      {showRecPassword ? (
+                        <EyeOff className="w-4 h-4" />
+                      ) : (
+                        <Eye className="w-4 h-4" />
+                      )}
+                    </button>
+                  </div>
                   <div className="flex items-center gap-2">
                     <button
                       type="submit"

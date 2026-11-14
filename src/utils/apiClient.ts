@@ -1,4 +1,4 @@
-import { getCsrfTokenFromCookie } from './csrfFetch';
+import { csrfFetch, getCsrfTokenFromCookie, getGlobalSessionToken } from './csrfFetch';
 
 export interface ApiFetchOptions extends RequestInit {
   timeoutMs?: number;
@@ -40,7 +40,7 @@ export function enforceStrictHttpsUrl(rawUrl: string): string {
 }
 
 /**
- * Helper centralizado de requisição HTTP com AbortController, credenciais HttpOnly e CSRF.
+ * Helper centralizado de requisição HTTP com AbortController, sessão híbrida (Cookie + Bearer) e CSRF.
  */
 export async function apiFetchJson<T>(
   url: string,
@@ -58,9 +58,9 @@ export async function apiFetchJson<T>(
     : '';
 
   try {
-    const response = await fetch(secureUrl, {
+    const response = await csrfFetch(secureUrl, {
       ...options,
-      credentials: options?.credentials ?? 'same-origin',
+      credentials: options?.credentials ?? 'include',
       signal: options?.signal ?? controller.signal,
       headers: {
         Accept: 'application/json',
@@ -70,7 +70,12 @@ export async function apiFetchJson<T>(
       },
     });
 
-    if (response.status === 401 && typeof window !== 'undefined' && !secureUrl.includes('/api/auth/')) {
+    if (
+      response.status === 401 &&
+      typeof window !== 'undefined' &&
+      !secureUrl.includes('/api/auth/') &&
+      !getGlobalSessionToken()
+    ) {
       window.dispatchEvent(
         new CustomEvent('winhood:auth-required', { detail: { pathname: secureUrl, status: 401 } })
       );

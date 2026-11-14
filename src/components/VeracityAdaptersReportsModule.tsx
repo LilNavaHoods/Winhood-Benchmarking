@@ -528,6 +528,58 @@ export const VeracityAdaptersReportsModule: React.FC<
     }
   };
 
+  const handleDownloadCycloneDxSbom = async () => {
+    if (!latestRun) return;
+    setExportingFormat('cyclonedx');
+    setExportFeedback(null);
+    const filename = `winhood_${latestRun.id}_cyclonedx_v1.5.sbom.json`;
+    const firstSwId = latestRun.scoreCards?.[0]?.softwareId;
+
+    const triggerJsonDownload = (payloadText: string) => {
+      const blob = new Blob([payloadText], { type: 'application/vnd.cyclonedx+json;charset=utf-8' });
+      const blobUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+    };
+
+    try {
+      const query = firstSwId ? `?format=cyclonedx&softwareId=${encodeURIComponent(firstSwId)}` : '?format=cyclonedx';
+      const response = await fetch(`/api/runs/${encodeURIComponent(latestRun.id)}/sbom${query}`, {
+        headers: { Accept: 'application/json' },
+      });
+      if (response.ok) {
+        const data = (await response.json()) as { document?: unknown };
+        if (data?.document) {
+          triggerJsonDownload(JSON.stringify(data.document, null, 2));
+          setExportFeedback(`SBOM CycloneDX v1.5 (${filename}) exportado com sucesso.`);
+          return;
+        }
+      }
+      const localSbom = firstSwId ? latestRun.sbomsBySoftware?.[firstSwId]?.cyclonedx15Json : null;
+      if (localSbom) {
+        triggerJsonDownload(JSON.stringify(localSbom, null, 2));
+        setExportFeedback(`SBOM CycloneDX v1.5 (${filename}) exportado localmente.`);
+        return;
+      }
+      setExportFeedback('SBOM CycloneDX v1.5 indisponível para esta execução.');
+    } catch {
+      const localSbom = firstSwId ? latestRun.sbomsBySoftware?.[firstSwId]?.cyclonedx15Json : null;
+      if (localSbom) {
+        triggerJsonDownload(JSON.stringify(localSbom, null, 2));
+        setExportFeedback(`SBOM CycloneDX v1.5 (${filename}) gerado localmente.`);
+      } else {
+        setExportFeedback('Erro ao exportar SBOM CycloneDX v1.5.');
+      }
+    } finally {
+      setExportingFormat(null);
+    }
+  };
+
   const handlePrintPdfReport = () => {
     window.print();
   };
@@ -1007,6 +1059,21 @@ export const VeracityAdaptersReportsModule: React.FC<
                     : 'Exportar SARIF 2.1.0 (CodeFlows + MQR)'}
                 </span>
                 <Download className="w-4 h-4" />
+              </button>
+
+              <button
+                type="button"
+                disabled={!latestRun || exportingFormat !== null}
+                onClick={() => void handleDownloadCycloneDxSbom()}
+                className="w-full inline-flex items-center justify-between px-4 py-2.5 rounded-lg text-xs font-semibold border border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50 cursor-pointer"
+                title="Exportar inventário completo de dependências diretas e transitivas no padrão CycloneDX v1.5 (JSON)"
+              >
+                <span>
+                  {exportingFormat === 'cyclonedx'
+                    ? 'Gerando SBOM CycloneDX v1.5...'
+                    : 'Exportar SBOM CycloneDX v1.5 (JSON)'}
+                </span>
+                <Download className="w-4 h-4 text-emerald-400" />
               </button>
 
               <button

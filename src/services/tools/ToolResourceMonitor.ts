@@ -68,6 +68,20 @@ export interface HostHardwareBenchmarkResult {
   };
   overallHostScore: number;
   tier: 'S' | 'A' | 'B' | 'C';
+  statisticalTelemetry: {
+    warmupRoundsDiscarded: number;
+    measuredRoundsCount: number;
+    outliersFilteredCount: number;
+    medianRoundMs: number;
+    p95RoundMs: number;
+    p99RoundMs: number;
+    meanRoundMs: number;
+    stdDevMs: number;
+    iqrMs: number;
+    coefficientOfVariationPercent: number;
+    confidenceLevel: 'HIGH' | 'MODERATE' | 'LOW_NOISY_NEIGHBOR';
+    roundSamplesMs: number[];
+  };
   verificationSha256: string;
 }
 
@@ -226,6 +240,75 @@ export class ToolResourceMonitor {
     const host = ToolResourceMonitor.inspectHostResources();
     const stepLatenciesMs: number[] = [];
 
+    // 0. Scientific Multi-Round JIT Calibration: 2 Warm-up Rounds (discarded) + 7 Measured Rounds
+    const warmupRounds = 2;
+    const measuredRounds = 7;
+    const executeCalibrationRound = (seedOffset: number): number => {
+      const rStart = performance.now();
+      let acc = 0;
+      for (let k = 0; k < 250; k++) {
+        const digest = crypto
+          .createHash('sha256')
+          .update(`wh-round-${seedOffset}-${k}`)
+          .digest();
+        acc += digest[0]!;
+      }
+      const vec = new Float64Array(4096);
+      for (let i = 0; i < vec.length; i++) {
+        vec[i] = ((i + acc) % 31) * 0.125;
+      }
+      return Math.round((performance.now() - rStart) * 1000) / 1000;
+    };
+
+    for (let w = 0; w < warmupRounds; w++) {
+      executeCalibrationRound(w);
+    }
+    const rawRoundSamplesMs: number[] = [];
+    for (let r = 0; r < measuredRounds; r++) {
+      rawRoundSamplesMs.push(executeCalibrationRound(warmupRounds + r));
+    }
+    const sortedRounds = [...rawRoundSamplesMs].sort((a, b) => a - b);
+    const quantile = (arr: number[], q: number): number => {
+      if (arr.length === 0) return 0;
+      const pos = (arr.length - 1) * q;
+      const base = Math.floor(pos);
+      const rest = pos - base;
+      const next = arr[base + 1] !== undefined ? arr[base + 1]! : arr[base]!;
+      return arr[base]! + rest * (next - arr[base]!);
+    };
+    const q1 = quantile(sortedRounds, 0.25);
+    const q3 = quantile(sortedRounds, 0.75);
+    const iqrMs = Math.max(0, Math.round((q3 - q1) * 1000) / 1000);
+    const lowerFence = q1 - 1.5 * iqrMs;
+    const upperFence = q3 + 1.5 * iqrMs;
+    const inlierRounds = sortedRounds.filter((v) => v >= lowerFence && v <= upperFence);
+    const effectiveRounds = inlierRounds.length >= 3 ? inlierRounds : sortedRounds;
+    const outliersFilteredCount = sortedRounds.length - effectiveRounds.length;
+    const medianRoundMs = Math.round(quantile(effectiveRounds, 0.5) * 1000) / 1000;
+    const p95RoundMs = Math.round(quantile(effectiveRounds, 0.95) * 1000) / 1000;
+    const p99RoundMs = Math.round(quantile(effectiveRounds, 0.99) * 1000) / 1000;
+    const meanRoundMs =
+      effectiveRounds.length > 0
+        ? Math.round(
+            (effectiveRounds.reduce((a, b) => a + b, 0) / effectiveRounds.length) * 1000
+          ) / 1000
+        : 0;
+    const variance =
+      effectiveRounds.length > 1
+        ? effectiveRounds.reduce((acc, v) => acc + (v - meanRoundMs) ** 2, 0) /
+          (effectiveRounds.length - 1)
+        : 0;
+    const stdDevMs = Math.round(Math.sqrt(variance) * 1000) / 1000;
+    const cvBase = medianRoundMs > 0 ? medianRoundMs : meanRoundMs;
+    const coefficientOfVariationPercent =
+      cvBase > 0 ? Math.round((stdDevMs / cvBase) * 1000) / 10 : 0;
+    const confidenceLevel: 'HIGH' | 'MODERATE' | 'LOW_NOISY_NEIGHBOR' =
+      coefficientOfVariationPercent <= 5
+        ? 'HIGH'
+        : coefficientOfVariationPercent <= 12
+          ? 'MODERATE'
+          : 'LOW_NOISY_NEIGHBOR';
+
     // 1. CPU Benchmark: SHA-256 Hashing + Float64 Matrix + AST/JSON Tokenization
     const shaIterations = 6000;
     const shaStart = performance.now();
@@ -329,7 +412,7 @@ export class ToolResourceMonitor {
       checksumAcc += memArray[i];
     }
     const readSec = Math.max(0.0002, (performance.now() - readStart) / 1000);
-    const readGuardFactor = Number.isFinite(checksumAcc) ? 1 : 0;
+    const readGuardFactor = Number.isFinite(checksumAcc) && checksumAcc >= 0 ? 1 : 0;
     const sequentialReadMbPerSec = Math.round((bufferSizeMb / readSec) * readGuardFactor);
 
     const memoryScore = Math.min(
@@ -462,6 +545,20 @@ export class ToolResourceMonitor {
       },
       overallHostScore,
       tier,
+      statisticalTelemetry: {
+        warmupRoundsDiscarded: warmupRounds,
+        measuredRoundsCount: measuredRounds,
+        outliersFilteredCount,
+        medianRoundMs,
+        p95RoundMs,
+        p99RoundMs,
+        meanRoundMs,
+        stdDevMs,
+        iqrMs,
+        coefficientOfVariationPercent,
+        confidenceLevel,
+        roundSamplesMs: rawRoundSamplesMs,
+      },
       verificationSha256,
     };
   }

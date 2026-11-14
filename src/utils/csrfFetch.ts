@@ -1,14 +1,12 @@
 /**
- * Centralizador de origem HTTP e interceptor CSRF para todas as chamadas à API do WinHood (Seção 4.3).
- * - Preserva `credentials: 'same-origin'` e cabeçalho `X-CSRF-Token` em todas as mutações.
- * - Suporta resolução automática de origem dinâmica quando executado dentro do Electron Desktop
- *   sem fixar portas ou endereços hardcoded nos componentes React.
- * - Compatível com ambientes de iframe/preview onde `window.fetch` possui apenas getter (sem atribuir `window.fetch = ...`).
+ * Centralizador de origem HTTP, sessão híbrida (Cookie HttpOnly + Bearer Token fallback para iframes)
+ * e interceptor CSRF para todas as chamadas à API do WinHood.
  */
 
 declare global {
   interface Window {
     __WINHOOD_CSRF_TOKEN__?: string;
+    __WINHOOD_SESSION_TOKEN__?: string;
     __WINHOOD_BACKEND_ORIGIN__?: string;
     winhoodDesktop?: {
       isElectron: boolean;
@@ -19,17 +17,83 @@ declare global {
   }
 }
 
-export function setGlobalCsrfToken(token: string | null | undefined): void {
+const SESSION_STORAGE_KEY = 'winhood.auth.session_token';
+const CSRF_STORAGE_KEY = 'winhood.auth.csrf_token';
+
+function safeStorageGet(key: string): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.sessionStorage?.getItem(key) || window.localStorage?.getItem(key) || null;
+  } catch {
+    return null;
+  }
+}
+
+function safeStorageSet(key: string, value: string | null | undefined, persist = true): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (!value) {
+      window.localStorage?.removeItem(key);
+      window.sessionStorage?.removeItem(key);
+      return;
+    }
+    window.sessionStorage?.setItem(key, value);
+    if (persist) {
+      window.localStorage?.setItem(key, value);
+    } else {
+      window.localStorage?.removeItem(key);
+    }
+  } catch {
+    // Ignore storage quota/sandbox errors in restricted iframes
+  }
+}
+
+export function setGlobalSessionToken(
+  sessionToken: string | null | undefined,
+  persist = true
+): void {
+  if (typeof window !== 'undefined') {
+    window.__WINHOOD_SESSION_TOKEN__ = sessionToken || undefined;
+    safeStorageSet(SESSION_STORAGE_KEY, sessionToken, persist);
+  }
+}
+
+export function getGlobalSessionToken(): string | null {
+  if (typeof window === 'undefined') return null;
+  if (window.__WINHOOD_SESSION_TOKEN__) {
+    return window.__WINHOOD_SESSION_TOKEN__;
+  }
+  const stored = safeStorageGet(SESSION_STORAGE_KEY);
+  if (stored) {
+    window.__WINHOOD_SESSION_TOKEN__ = stored;
+    return stored;
+  }
+  return null;
+}
+
+export function setGlobalCsrfToken(token: string | null | undefined, persist = true): void {
   if (typeof window !== 'undefined') {
     window.__WINHOOD_CSRF_TOKEN__ = token || undefined;
+    safeStorageSet(CSRF_STORAGE_KEY, token, persist);
   }
 }
 
 export function getGlobalCsrfToken(): string | undefined {
-  if (typeof window !== 'undefined') {
+  if (typeof window === 'undefined') return undefined;
+  if (window.__WINHOOD_CSRF_TOKEN__) {
     return window.__WINHOOD_CSRF_TOKEN__;
   }
+  const stored = safeStorageGet(CSRF_STORAGE_KEY);
+  if (stored) {
+    window.__WINHOOD_CSRF_TOKEN__ = stored;
+    return stored;
+  }
   return undefined;
+}
+
+export function clearClientAuthTokens(): void {
+  setGlobalSessionToken(null);
+  setGlobalCsrfToken(null);
 }
 
 export function getCsrfTokenFromCookie(): string | null {
@@ -40,21 +104,19 @@ export function getCsrfTokenFromCookie(): string | null {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
-/**
- * Resolve a origem da API de forma centralizada:
- * - No navegador / AI Studio Preview / servidor local Express: string vazia `''` (same-origin).
- * - No Electron caso a janela seja carregada de protocolo diferente de http(s), utiliza a origem
- *   exposta pelo preload (`winhoodDesktop.getBackendOrigin()`).
- */
 export function resolveApiBaseOrigin(): string {
   if (typeof window === 'undefined') return '';
   if (window.__WINHOOD_BACKEND_ORIGIN__) {
-    return window.__WINHOOD_BACKEND_ORIGIN__.replace(/\/+$/, '');
+    let u = window.__WINHOOD_BACKEND_ORIGIN__;
+    while (u.endsWith('/')) u = u.slice(0, -1);
+    return u;
   }
   if (typeof window.winhoodDesktop?.getBackendOrigin === 'function') {
     const origin = window.winhoodDesktop.getBackendOrigin();
     if (origin && origin.startsWith('http')) {
-      return origin.replace(/\/+$/, '');
+      let u = origin;
+      while (u.endsWith('/')) u = u.slice(0, -1);
+      return u;
     }
   }
   return '';
@@ -98,18 +160,37 @@ export async function csrfFetch(
     if (!nextInit.credentials) {
       nextInit.credentials = 'include';
     }
+    const headers = new Headers(nextInit.headers || {});
+
+    // Injeta token de sessão via header para funcionar mesmo quando o navegador bloqueia cookies em iframe
+    const sessionTok = getGlobalSessionToken();
+    if (sessionTok) {
+      if (!headers.has('Authorization') && !headers.has('authorization')) {
+        headers.set('Authorization', `Bearer ${sessionTok}`);
+      }
+      if (!headers.has('X-WinHood-Session') && !headers.has('x-winhood-session')) {
+        headers.set('X-WinHood-Session', sessionTok);
+      }
+    }
+
     const method = (nextInit.method || 'GET').toUpperCase();
     if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
       const csrf = getCsrfTokenFromCookie();
-      if (csrf) {
-        const headers = new Headers(nextInit.headers || {});
-        if (!headers.has('X-CSRF-Token') && !headers.has('x-csrf-token')) {
-          headers.set('X-CSRF-Token', csrf);
-        }
-        nextInit.headers = headers;
+      if (csrf && !headers.has('X-CSRF-Token') && !headers.has('x-csrf-token')) {
+        headers.set('X-CSRF-Token', csrf);
       }
     }
-    return currentWinFetch(input, nextInit);
+
+    nextInit.headers = headers;
+    const response = await currentWinFetch(input, nextInit);
+
+    // Captura automática de novos tokens caso venham nos headers de resposta
+    const respSession = response.headers.get('x-winhood-session-token');
+    const respCsrf = response.headers.get('x-winhood-csrf-token');
+    if (respSession) setGlobalSessionToken(respSession);
+    if (respCsrf) setGlobalCsrfToken(respCsrf);
+
+    return response;
   }
 
   return currentWinFetch(input, init);
@@ -123,7 +204,6 @@ export function installGlobalCsrfFetchInterceptor(): void {
 
   try {
     const ownDesc = Object.getOwnPropertyDescriptor(window, 'fetch');
-    // Somente substitui se for uma propriedade de dados gravável (sem getter somente-leitura)
     if (ownDesc && ownDesc.writable === true && !ownDesc.get) {
       Object.defineProperty(window, 'fetch', {
         value: csrfFetch,
