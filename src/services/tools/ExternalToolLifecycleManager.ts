@@ -17,7 +17,7 @@ export interface LifecycleExecutionLimits {
 /**
  * ExternalToolLifecycleManager (Seção 11.2, 11.3 e 11.5)
  * Controla inicialização sob demanda, pré-verificação de recursos, fila de execução
- * controlada (concorrência = 1 para SonarQube em máquinas pequenas) e encerramento
+ * controlada (concorrência = 1 para MqrBridge em máquinas pequenas) e encerramento
  * automático por inatividade.
  */
 export class ExternalToolLifecycleManager {
@@ -102,7 +102,7 @@ export class ExternalToolLifecycleManager {
   }
 
   /**
-   * Pré-verificação obrigatória antes de iniciar instância local do SonarQube (Seção 11.2 & 11.3)
+   * Pré-verificação obrigatória antes de iniciar instância local do MqrBridge (Seção 11.2 & 11.3)
    */
   public requestOnDemandStart(mode: SonarInstallationMode): {
     started: boolean;
@@ -117,17 +117,17 @@ export class ExternalToolLifecycleManager {
         'LIFECYCLE_MANAGER',
         'INFO',
         'SKIP_LOCAL_START_FOR_REMOTE_MODE',
-        `Modo ${mode} configurado: nenhum processo local do SonarQube foi iniciado (economia de recursos).`
+        `Modo ${mode} configurado: nenhum processo local do MqrBridge foi iniciado (economia de recursos).`
       );
       return {
         started: false,
         state: 'READY',
         hostCheck,
-        message: `Modo ${mode} ativo. Processos locais não são iniciados quando uma instância remota ou SonarQube Cloud está em uso.`,
+        message: `Modo ${mode} ativo. Processos locais não são iniciados quando uma instância remota ou MqrBridge Cloud está em uso.`,
       };
     }
 
-    if (!hostCheck.meetsSonarQubeLocalRequirements) {
+    if (!hostCheck.meetsMqrBridgeLocalRequirements) {
       const reason = hostCheck.blockingReasons.join(' ');
       this.appendLog(
         'LIFECYCLE_MANAGER',
@@ -139,7 +139,7 @@ export class ExternalToolLifecycleManager {
         started: false,
         state: 'NOT_INSTALLED',
         hostCheck,
-        message: `Inicialização local bloqueada para preservar estabilidade: ${reason} Conecte uma instância remota (Modo 2) ou SonarQube Cloud, ou execute o script de instalação em seu servidor host com JDK 21 e 4 GB+ RAM.`,
+        message: `Inicialização local bloqueada para preservar estabilidade: ${reason} Conecte uma instância remota (Modo 2) ou MqrBridge Cloud, ou execute o script de instalação em seu servidor host com JDK 21 e 4 GB+ RAM.`,
       };
     }
 
@@ -149,7 +149,7 @@ export class ExternalToolLifecycleManager {
       'LIFECYCLE_MANAGER',
       'INFO',
       'LOCAL_SERVER_STARTED_ON_DEMAND',
-      'SonarQube Community Build iniciado sob demanda após validação de recursos (RAM >= 4 GB, CPU >= 2 cores, Disco >= 30 GB, JDK 21).'
+      'MqrBridge Community Build iniciado sob demanda após validação de recursos (RAM >= 4 GB, CPU >= 2 cores, Disco >= 30 GB, JDK 21).'
     );
 
     return {
@@ -183,7 +183,7 @@ export class ExternalToolLifecycleManager {
     );
     return {
       stopped: true,
-      message: 'Instância local do SonarQube encerrada com segurança.',
+      message: 'Instância local do MqrBridge encerrada com segurança.',
     };
   }
 

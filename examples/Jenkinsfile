@@ -1,0 +1,25 @@
+@Library('winhood-shared-library') _
+
+pipeline {
+  agent any
+  stages {
+    stage('WinHood Audit & Quality Gate') {
+      steps {
+        script {
+          winhoodAnalyze(
+            path: '.',
+            profile: 'mqr-strict',
+            gate: 'winhood-standard-v2',
+            format: 'sarif',
+            out: 'winhood-results.sarif'
+          )
+          winhoodGate(
+            path: '.',
+            gate: 'winhood-standard-v2',
+            failOn: 'BLOCKED'
+          )
+        }
+      }
+    }
+  }
+}

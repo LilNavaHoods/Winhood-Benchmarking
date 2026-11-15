@@ -1400,7 +1400,7 @@ export interface SecurityAssessmentSuiteBundle {
 }
 
 // ============================================================================
-// SONARQUBE COMMUNITY BUILD, CLOUD, IDE & GITAR AI INTEGRATION TYPES
+// MQR_BRIDGE COMMUNITY BUILD, CLOUD, IDE & GITAR AI INTEGRATION TYPES
 // ============================================================================
 
 export type SonarConnectionState =
@@ -1427,7 +1427,7 @@ export type SonarScannerType =
 
 export interface SonarVersionMetadata {
   id: string;
-  productName: 'SonarQube Community Build' | 'SonarScanner CLI';
+  productName: 'MqrBridge Community Build' | 'SonarScanner CLI';
   version: string;
   buildNumber: string;
   releaseDate: string;
@@ -1500,7 +1500,7 @@ export interface SonarInstanceRecord {
   tokenExpiresAt: string | null;
   connectionState: SonarConnectionState;
   version: string | null;
-  edition: 'Community Build' | 'SonarQube Cloud' | 'Developer/Enterprise (Não utilizado)' | null;
+  edition: 'Community Build' | 'MqrBridge Cloud' | 'Developer/Enterprise (Não utilizado)' | null;
   apiCompatibility: 'WEB_API_V2_AND_V1' | 'WEB_API_V1_LEGACY' | 'UNSUPPORTED' | 'UNKNOWN';
   lastVerifiedAt: string | null;
   lastErrorMessage: string | null;
@@ -2026,7 +2026,7 @@ export interface SonarABComparisonResult {
   indicatorClassification: Array<{
     metricKey: string;
     label: string;
-    sourceType: 'SONARQUBE_NATIVE' | 'BENCHMARK_CALCULATED' | 'EXTERNAL_TEST_REPORT_IMPORTED';
+    sourceType: 'MQR_BRIDGE_NATIVE' | 'BENCHMARK_CALCULATED' | 'EXTERNAL_TEST_REPORT_IMPORTED';
     softwareAValue: string | number;
     softwareBValue: string | number;
     betterSoftware: 'SOFTWARE_A' | 'SOFTWARE_B' | 'TIE' | 'NOT_COLLECTED';
@@ -2140,7 +2140,7 @@ export type SonarTokenStatusLabel =
 export interface SavedSonarProjectProfile {
   id: string;
   name: string;
-  platform: 'SONARCLOUD' | 'SONARQUBE_SERVER';
+  platform: 'SONARCLOUD' | 'MQR_BRIDGE_SERVER';
   serverUrl: string;
   organization: string;
   projectKey: string;
@@ -2261,8 +2261,8 @@ export interface ScaVulnerabilityCorrelation {
 }
 
 export type ReferenceSourceKey =
-  | 'SONARQUBE_SERVER'
-  | 'SONARQUBE_CLOUD'
+  | 'MQR_BRIDGE_SERVER'
+  | 'MQR_BRIDGE_CLOUD'
   | 'OWASP_BENCHMARK'
   | 'OSV_DEV'
   | 'NVD_NIST'
@@ -2306,7 +2306,7 @@ export interface BenchmarkMatchDecision {
   mode:
     | 'INDIVIDUAL'
     | 'AB_SOFTWARE'
-    | 'VS_SONARQUBE'
+    | 'VS_MQR_BRIDGE'
     | 'VS_PUBLIC_REFERENCE'
     | 'VS_INTERNAL_HISTORY';
   comparable: boolean;

@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WinHood Audit Report — gate (cli-report-run)</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 32px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Ubuntu, monospace;
+      background: #080b10;
+      color: #e2e8f0;
+      line-height: 1.5;
+    }
+    .container { max-width: 1180px; margin: 0 auto; }
+    header {
+      border: 1px solid #1e293b;
+      background: #0f172a;
+      padding: 24px;
+      border-radius: 8px;
+      margin-bottom: 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+    h1 { margin: 0 0 8px 0; font-size: 22px; color: #f8fafc; }
+    h2 {
+      font-size: 16px;
+      color: #38bdf8;
+      border-bottom: 1px solid #1e293b;
+      padding-bottom: 8px;
+      margin-top: 28px;
+    }
+    .gate-badge {
+      display: inline-block;
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-weight: 700;
+      font-size: 14px;
+      background: #94a3b822;
+      color: #94a3b8;
+      border: 1px solid #94a3b8;
+    }
+    .card {
+      background: #0f172a;
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+      padding: 18px;
+      margin-bottom: 16px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      background: #0f172a;
+      border: 1px solid #1e293b;
+    }
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid #1e293b;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #1e293b; color: #cbd5e1; font-weight: 600; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      background: #1e293b;
+      padding: 2px 5px;
+      border-radius: 4px;
+      color: #38bdf8;
+    }
+    .sev {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .sev-blocker, .sev-critical { background: #7f1d1d; color: #fecaca; }
+    .sev-high { background: #7c2d12; color: #fed7aa; }
+    .sev-medium { background: #78350f; color: #fde68a; }
+    .sev-low, .sev-info { background: #1e3a8a; color: #bfdbfe; }
+    footer.provenance-footer {
+      margin-top: 36px;
+      padding: 20px;
+      border: 1px solid #334155;
+      background: #090d16;
+      border-radius: 8px;
+      font-size: 12px;
+      color: #94a3b8;
+    }
+    footer.provenance-footer ul { margin: 8px 0; padding-left: 20px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>WINHOOD BENCHMARKING — RELATÓRIO DE AUDITORIA INDEPENDENTE (MODO MQR)</h1>
+        <div>Execução: <code>cli-report-run</code> | Projeto: <strong>gate</strong></div>
+        <div>Início: 2026-11-14T00:00:00.000Z | Conclusão: 2026-11-14T00:00:00.000Z</div>
+      </div>
+      <div>
+        <div class="gate-badge">QUALITY GATE: INCONCLUSIVE (Exit Code 2)</div>
+      </div>
+    </header>
+
+    <section>
+      <h2>1. Sumário Executivo</h2>
+      <div class="card">
+        <p>Auditoria independente Modo MQR concluída sobre 2 arquivo(s) elegíveis (1 apontamentos). Decisão do Quality Gate: APPROVED.</p>
+      </div>
+    </section>
+
+    <section>
+      <h2>2. Estado do Quality Gate (WinHood Standard Engineering Gate — v2.1.0)</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Condição</th>
+            <th>Operador / Limite</th>
+            <th>Valor Medido</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Achados BLOCKER</td>
+            <td><code>EQ 0</code></td>
+            <td><code>0</code></td>
+            <td><strong>PASS</strong></td>
+          </tr>
+<tr>
+            <td>Achados CRITICAL</td>
+            <td><code>EQ 0</code></td>
+            <td><code>0</code></td>
+            <td><strong>PASS</strong></td>
+          </tr>
+<tr>
+            <td>Segredos Expostos</td>
+            <td><code>EQ 0</code></td>
+            <td><code>0</code></td>
+            <td><strong>PASS</strong></td>
+          </tr>
+<tr>
+            <td>Cobertura de Escopo (%)</td>
+            <td><code>GTE 50</code></td>
+            <td><code>NOT_MEASURED</code></td>
+            <td><strong>INCONCLUSIVE</strong></td>
+          </tr>
+<tr>
+            <td>Confiança Mínima da Evidência (1=LOW,2=MED,3=HIGH)</td>
+            <td><code>GTE 2</code></td>
+            <td><code>NOT_MEASURED</code></td>
+            <td><strong>INCONCLUSIVE</strong></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>3. Tabela de Achados (1 total)</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Severidade</th>
+            <th>Regra</th>
+            <th>CWE</th>
+            <th>OWASP</th>
+            <th>Localização</th>
+            <th>Descrição</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+          <td><span class="sev sev-low">LOW</span></td>
+          <td><code>ts:S4204</code></td>
+          <td>CWE-710</td>
+          <td>N/A</td>
+          <td><code>QualityGateEngine.ts:640</code></td>
+          <td>Uso de tipo explícito &quot;any&quot; enfraquece segurança de tipos</td>
+        </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>4. Trilha Criptográfica de Evidência</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Bloco</th>
+            <th>Etapa</th>
+            <th>Hash Anterior (SHA-256)</th>
+            <th>Hash do Elo (SHA-256)</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td colspan="4" style="text-align:center;color:#94a3b8;">Trilha resumida no manifesto assinado abaixo.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <footer class="provenance-footer" id="winhood-provenance-footer">
+      <strong>RODAPÉ DE PROVENIÊNCIA CRIPTOGRÁFICA E ASSINATURA DO RELATÓRIO</strong>
+      <ul>
+        <li><strong>Versão do Motor (Engine Version):</strong> <code>4.3.0</code></li>
+        <li><strong>Versão do Catálogo de Regras:</strong> <code>4.3.0</code> (SHA-256: <code>76581955caed101b6654ca40441c53724bc334cb19e7aa67b654b4ccaa35ae9b</code>)</li>
+        <li><strong>Hash do Código Analisado (Code SHA-256):</strong> <code>464f02e6cf12f68babc7195f1bad6fff624e652f885443d772fec083a61bf152</code></li>
+        <li><strong>Versão do Quality Gate Aplicado:</strong> <code>winhood-standard-v2 v2.1.0</code> (Gate SHA-256: <code>3cd178dbbff657170f5a9a5d6c1cdf81f29a2de679ecaed3347d830eb29a166e</code>)</li>
+        <li><strong>Hash Canônico do Relatório (Report SHA-256):</strong> <code>e80def7f3ece7169f29bb193b15040c26aee52c1e7dd6a84a0148e138b50cb74</code></li>
+        <li><strong>Assinatura Criptográfica (HMAC-SHA256):</strong> <code>e86c5895c766c315094764a99772d5575fe90bcf7b946b85e1f3aa59e407e413</code></li>
+      </ul>
+      <div><strong>Hashes dos Artefatos Vinculados:</strong></div>
+      <ul>
+        <li><strong>findingsDigestSha256:</strong> <code>a36858a69b72e8a3ff2ac87bd04fc122ebc9caac9df4effb1f306356a77f3a30</code></li>
+<li><strong>gateDecisionSha256:</strong> <code>3cd178dbbff657170f5a9a5d6c1cdf81f29a2de679ecaed3347d830eb29a166e</code></li>
+<li><strong>workspaceCodeSha256:</strong> <code>464f02e6cf12f68babc7195f1bad6fff624e652f885443d772fec083a61bf152</code></li>
+<li><strong>deterministicDigestSha256:</strong> <code>7b2a25b773975dfb9db37b9c7604bf2ec60631f3531c4dc8a6fccd5ab8371fcc</code></li>
+<li><strong>cyclonedxSbomSha256:</strong> <code>4d5502b33656eeee114803281e1ef31c5402daf675fd659c808ba95d8fc01a5f</code></li>
+<li><strong>spdxSbomSha256:</strong> <code>94e5191a26889ef7afef0da3f4ed711d517b86bf0db1fc15425b1dbbae34deb5</code></li>
+<li><strong>gateHashSha256:</strong> <code>3cd178dbbff657170f5a9a5d6c1cdf81f29a2de679ecaed3347d830eb29a166e</code></li>
+      </ul>
+    </footer>
+  </div>
+</body>
+</html>

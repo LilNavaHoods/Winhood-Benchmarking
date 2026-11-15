@@ -4,7 +4,7 @@ import { computeSha256 } from '../../engine/scoringEngine';
 /**
  * GitarReviewMapper (Seção 9.3 e 9.4)
  * Mapeia revisões de Pull Request e patches propostos pelo Gitar AI em branch isolada,
- * deduplicando contra achados existentes do SonarQube para não somar duas vezes o mesmo problema.
+ * deduplicando contra achados existentes do MqrBridge para não somar duas vezes o mesmo problema.
  */
 export class GitarReviewMapper {
   public static mapAndDeduplicateReviews(params: {
@@ -30,7 +30,7 @@ export class GitarReviewMapper {
     const nowIso = new Date().toISOString();
 
     return params.rawReviews.map((rev, idx) => {
-      // Verificar se o SonarQube já reportou um achado na mesma linha/arquivo
+      // Verificar se o MqrBridge já reportou um achado na mesma linha/arquivo
       const matchedSonar = params.existingSonarIssues.find(
         (si) =>
           si.softwareId === params.softwareId &&

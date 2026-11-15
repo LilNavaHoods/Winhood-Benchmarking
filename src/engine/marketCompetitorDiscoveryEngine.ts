@@ -126,13 +126,13 @@ export const REAL_MARKET_SOFTWARE_CATALOG: MarketReferenceDatabaseEntry[] = [
 
   // Software Quality & DevSecOps
   {
-    name: 'SonarQube Community Build',
+    name: 'MqrBridge Community Build',
     vendor: 'SonarSource',
     category: 'Software Quality & Análise de Código',
     description: 'Plataforma open-core de inspeção contínua da qualidade do código com suporte a mais de 30 linguagens e Quality Gates.',
-    officialUrl: 'https://www.sonarsource.com/products/sonarqube/',
-    documentationUrl: 'https://docs.sonarsource.com/sonarqube-community-build/',
-    repositoryUrl: 'https://github.com/SonarSource/sonarqube',
+    officialUrl: 'https://www.sonarsource.com/products/mqr-bridge/',
+    documentationUrl: 'https://docs.sonarsource.com/mqr-bridge-community-build/',
+    repositoryUrl: 'https://github.com/SonarSource/mqr-bridge',
     licenseType: 'LGPL-3.0',
     isOpenSource: true,
     sourceAvailability: 'FULL_SOURCE',

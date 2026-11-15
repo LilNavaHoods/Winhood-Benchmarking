@@ -124,8 +124,8 @@ export const StepByStepJourneyBar: React.FC<StepByStepJourneyBarProps> = ({
     },
     {
       stepNumber: 3,
-      title: '3. SonarQube & Docker Hub',
-      subtitle: 'Docker Oficial, SonarCloud, Scanner CLI e Hardware Multi-Core',
+      title: '3. MqrBridge & Docker Hub',
+      subtitle: 'Docker Oficial, Nuvem MQR, Scanner CLI e Hardware Multi-Core',
       targetNav: 'sonar_hub',
       relatedNavs: ['sonar_hub', 'tools_integrations'],
       completed: step3Done,
@@ -214,7 +214,7 @@ export const StepByStepJourneyBar: React.FC<StepByStepJourneyBarProps> = ({
                   ? 'Comece pelo Passo 1 cadastrando pelo menos dois softwares (ou carregue o exemplo real com 1 clique).'
                   : !step2Done
                     ? 'Softwares prontos! Avance para o Passo 2 para configurar os pesos matemáticos e rodar a comparação A/B.'
-                    : 'Avaliação A/B concluída! Navegue pelos Passos 3 a 6 para auditar SonarQube, Segurança, Hardware e exportar o Laudo.'}
+                    : 'Avaliação A/B concluída! Navegue pelos Passos 3 a 6 para auditar MqrBridge, Segurança, Hardware e exportar o Laudo.'}
               </span>
             )}
           </div>

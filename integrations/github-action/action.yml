@@ -1,27 +1,43 @@
 name: "WinHood Independent Audit & Quality Gate"
-description: "Runs WinHood static/taint/secrets/IaC analysis, generates SARIF 2.1.0 & CycloneDX SBOM, and enforces versioned Quality Gates."
+author: "WinHood Benchmarking"
+description: "Runs WinHood static/taint/secrets/IaC/SCA analysis in MQR Mode, generates SARIF 2.1.0 & signed SBOM, decorates PRs, and enforces versioned Quality Gates."
+branding:
+  icon: "shield"
+  color: "blue"
 inputs:
   path:
     description: "Workspace path to audit"
     required: false
     default: "."
   gate:
-    description: "Versioned Quality Gate ID"
+    description: "Versioned Quality Gate ID to evaluate"
     required: false
     default: "winhood-standard-v2"
+  profile:
+    description: "Analysis profile (mqr-strict, mqr-standard, zero-trust)"
+    required: false
+    default: "mqr-strict"
+  fail-on:
+    description: "Minimum gate state that fails the CI step (BLOCKED, APPROVED_WITH_RESERVATIONS, INCONCLUSIVE)"
+    required: false
+    default: "BLOCKED"
   sarif-output:
     description: "Path to write SARIF 2.1.0 report"
     required: false
     default: "winhood-results.sarif"
   enforce-gate:
-    description: "Fail workflow when Quality Gate blocks or rejects"
+    description: "Fail workflow when Quality Gate blocks or matches fail-on"
     required: false
     default: "true"
 outputs:
+  decision:
+    description: "Resulting Quality Gate decision (APPROVED, APPROVED_WITH_RESERVATIONS, BLOCKED, INCONCLUSIVE, REJECTED)"
   gate-decision:
-    description: "Resulting Quality Gate state (APPROVED, APPROVED_WITH_RESERVATIONS, BLOCKED, INCONCLUSIVE, REJECTED)"
+    description: "Alias for decision output"
   exit-code:
-    description: "WinHood CLI exit code (0/1/2/3)"
+    description: "Canonical CI exit code (0=APPROVED, 1=APPROVED_WITH_RESERVATIONS, 2=BLOCKED, 3=INCONCLUSIVE, 4=ERROR)"
+  report-path:
+    description: "Resolved path to the generated SARIF 2.1.0 report"
 runs:
   using: "node20"
   main: "entrypoint.mjs"

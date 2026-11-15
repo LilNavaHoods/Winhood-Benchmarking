@@ -30,7 +30,7 @@ export interface CachedAnalysisEntry<T = unknown> {
  * - A configuração for compatível
  * - O perfil de qualidade for igual
  * - As regras relevantes forem iguais
- * - A versão do SonarQube for compatível
+ * - A versão do MqrBridge for compatível
  */
 export class ToolCacheManager {
   private cacheDir: string;

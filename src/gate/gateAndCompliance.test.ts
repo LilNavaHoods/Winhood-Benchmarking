@@ -350,4 +350,180 @@ test('PortfolioEngine computes cross-release deltas & uncovered dimensions and P
   assert.ok(pdfText.includes('xref'));
   assert.ok(pdfText.includes('%%EOF'));
   assert.ok(pdfText.includes('WINHOOD INDEPENDENT SOFTWARE AUDIT'));
+
+  const integrity = PdfReportGenerator.verifyPdfIntegrity(pdfBuffer);
+  assert.equal(integrity.valid, true, 'PDF report hash and HMAC signature must verify cleanly');
+  assert.ok(integrity.reportContentSha256);
+  assert.ok(integrity.hmacSignature);
+  assert.equal(PdfReportGenerator.verifyPdfIntegrity(pdfBuffer, 'wrong-secret').valid, false);
+
+  const htmlExp = PdfReportGenerator.exportReport(run1, 'html');
+  const htmlStr = htmlExp.buffer.toString('utf8');
+  assert.ok(htmlStr.includes('<!DOCTYPE html>'));
+  assert.ok(htmlStr.includes('id="winhood-provenance-footer"'));
+  assert.equal(htmlStr.includes('http://'), false);
+  assert.equal(htmlStr.includes('https://'), false);
+
+  const sarifExp = PdfReportGenerator.exportReport(run1, 'sarif');
+  assert.equal(JSON.parse(sarifExp.buffer.toString('utf8')).version, '2.1.0');
+
+  const jsonExp = PdfReportGenerator.exportReport(run1, 'json');
+  assert.ok(JSON.parse(jsonExp.buffer.toString('utf8')).provenanceFooter.hmacSignature);
 });
+
+test('Critical motors (src/scoring, src/evidence, src/comparability) achieve >=95% deterministic coverage', async () => {
+  const { computeDeterministicMqrScore, computeSizeNormalizedMaintainabilityScore } = await import('../scoring/index');
+  const { evaluateEvidenceConfidence } = await import('../evidence/index');
+  const { validatePairComparability } = await import('../comparability/index');
+
+  const emptyScore = computeDeterministicMqrScore({
+    dimensions: [{ dimensionId: 'perf', weight: 20, score: null, state: 'NOT_MEASURED' }],
+    criticalConfirmedFindings: 0,
+    secretsExposed: 0,
+  });
+  assert.equal(emptyScore.technicalScore, null);
+  assert.equal(emptyScore.excludedNotMeasuredCount, 1);
+
+  const validScore = computeDeterministicMqrScore({
+    dimensions: [
+      { dimensionId: 'sec', weight: 50, score: 4.8, state: 'MEASURED' },
+      { dimensionId: 'qual', weight: 30, score: 4.2, state: 'STATIC_DERIVED' },
+      { dimensionId: 'perf', weight: 20, score: null, state: 'NOT_MEASURED' },
+    ],
+    criticalConfirmedFindings: 0,
+    secretsExposed: 0,
+  });
+  assert.equal(validScore.killSwitchTriggered, false);
+  assert.ok((validScore.technicalScore ?? 0) > 4.4);
+
+  const cappedScore = computeDeterministicMqrScore({
+    dimensions: [{ dimensionId: 'sec', weight: 100, score: 4.9, state: 'MEASURED' }],
+    criticalConfirmedFindings: 1,
+    secretsExposed: 0,
+  });
+  assert.equal(cappedScore.killSwitchTriggered, true);
+  assert.equal(cappedScore.technicalScore, 2.2);
+
+  const cappedBySecret = computeDeterministicMqrScore({
+    dimensions: [{ dimensionId: 'sec', weight: 100, score: 4.9, state: 'MEASURED' }],
+    criticalConfirmedFindings: 0,
+    secretsExposed: 1,
+  });
+  assert.equal(cappedBySecret.killSwitchTriggered, true);
+
+  const defaultTsMatrix = ComplianceMapper.buildTraceabilityMatrix({
+    runId: 'run-comp-2',
+    findings: [
+      { ...makeSampleFinding({ id: 'f-fp', cwe: 'CWE-89' }), lifecycleState: undefined as any, validationStatus: 'FALSE_POSITIVE' as any },
+    ],
+  });
+  assert.equal(defaultTsMatrix.totalFindingsMapped, 0);
+
+  const maintScore = computeSizeNormalizedMaintainabilityScore({
+    nonCriticalFindingsCount: 10,
+    eligibleLinesOfCode: 5000,
+  });
+  assert.ok(maintScore >= 1.0 && maintScore <= 5.0);
+
+  const confHigh = evaluateEvidenceConfidence({
+    scopeCoverageRatio: 0.95,
+    astDepthRatio: 0.9,
+    measuredDimensionsRatio: 0.9,
+    executionDeterminismRatio: 1.0,
+    cryptographicSignatureValid: true,
+  });
+  assert.equal(confHigh.level, 'HIGH');
+
+  const confMed = evaluateEvidenceConfidence({
+    scopeCoverageRatio: 0.65,
+    astDepthRatio: 0.7,
+    measuredDimensionsRatio: 0.6,
+    executionDeterminismRatio: 0.8,
+    cryptographicSignatureValid: true,
+  });
+  assert.equal(confMed.level, 'MEDIUM');
+
+  const confLowUnsigned = evaluateEvidenceConfidence({
+    scopeCoverageRatio: 0.95,
+    astDepthRatio: 0.95,
+    measuredDimensionsRatio: 0.95,
+    executionDeterminismRatio: 1.0,
+    cryptographicSignatureValid: false,
+  });
+  assert.equal(confLowUnsigned.level, 'LOW');
+  assert.ok(confLowUnsigned.score <= 30);
+
+  const confLowScope = evaluateEvidenceConfidence({
+    scopeCoverageRatio: 0.3,
+    astDepthRatio: 0.3,
+    measuredDimensionsRatio: 0.3,
+    executionDeterminismRatio: 0.5,
+    cryptographicSignatureValid: true,
+  });
+  assert.equal(confLowScope.level, 'LOW');
+
+  const compOk = validatePairComparability(
+    {
+      softwareId: 'a',
+      engineVersion: '4.4.0',
+      ruleCatalogSha256: 'hash1',
+      scopeCoveragePercent: 92,
+      evidenceConfidence: 'HIGH',
+      functionalCategory: 'vault',
+    },
+    {
+      softwareId: 'b',
+      engineVersion: '4.4.0',
+      ruleCatalogSha256: 'hash1',
+      scopeCoveragePercent: 88,
+      evidenceConfidence: 'HIGH',
+      functionalCategory: 'vault',
+    }
+  );
+  assert.equal(compOk.comparable, true);
+  assert.equal(compOk.status, 'COMPATIBLE');
+
+  const compInconclusive = validatePairComparability(
+    {
+      softwareId: 'a',
+      engineVersion: '4.4.0',
+      ruleCatalogSha256: 'hash1',
+      scopeCoveragePercent: 90,
+      evidenceConfidence: 'LOW',
+      functionalCategory: 'vault',
+    },
+    {
+      softwareId: 'b',
+      engineVersion: '4.4.0',
+      ruleCatalogSha256: 'hash1',
+      scopeCoveragePercent: 88,
+      evidenceConfidence: 'HIGH',
+      functionalCategory: 'vault',
+    }
+  );
+  assert.equal(compInconclusive.comparable, false);
+  assert.equal(compInconclusive.status, 'INCONCLUSIVE');
+
+  const compIncompatible = validatePairComparability(
+    {
+      softwareId: 'a',
+      engineVersion: '4.3.0',
+      ruleCatalogSha256: 'hash1',
+      scopeCoveragePercent: 95,
+      evidenceConfidence: 'HIGH',
+      functionalCategory: 'vault',
+    },
+    {
+      softwareId: 'b',
+      engineVersion: '4.4.0',
+      ruleCatalogSha256: 'hash2',
+      scopeCoveragePercent: 40,
+      evidenceConfidence: 'HIGH',
+      functionalCategory: 'crm',
+    }
+  );
+  assert.equal(compIncompatible.comparable, false);
+  assert.equal(compIncompatible.status, 'INCOMPATIBLE_SCOPE');
+  assert.equal(compIncompatible.reasons.length, 4);
+});
+

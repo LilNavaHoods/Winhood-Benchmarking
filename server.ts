@@ -79,14 +79,14 @@ import {
 import { ExternalToolLifecycleManager } from './src/services/tools/ExternalToolLifecycleManager';
 import { ToolCacheManager } from './src/services/tools/ToolCacheManager';
 import { ToolResourceMonitor, type HostHardwareBenchmarkResult } from './src/services/tools/ToolResourceMonitor';
-import { SonarQubeIntegrationService } from './src/integrations/sonarqube/SonarQubeAdapter';
-import { SonarQubeConnection } from './src/integrations/sonarqube/SonarQubeConnection';
-import { SonarQubeVersionManager } from './src/integrations/sonarqube/SonarQubeVersionManager';
-import { SonarQubeInstallationManager } from './src/integrations/sonarqube/SonarQubeInstallationManager';
+import { MqrBridgeIntegrationService } from './src/integrations/mqr-bridge/SonarAdapter';
+import { MqrBridgeConnection } from './src/integrations/mqr-bridge/SonarConnection';
+import { MqrBridgeVersionManager } from './src/integrations/mqr-bridge/SonarVersionManager';
+import { MqrBridgeInstallationManager } from './src/integrations/mqr-bridge/SonarInstallationManager';
 import { GitarAdapter } from './src/integrations/gitar/GitarAdapter';
 import { GitarInstallationHealth } from './src/integrations/gitar/GitarInstallationHealth';
 import { SonarAnalysisWorker } from './src/workers/SonarAnalysisWorker';
-import { SonarResultParser } from './src/integrations/sonarqube/SonarResultParser';
+import { SonarResultParser } from './src/integrations/mqr-bridge/SonarResultParser';
 import {
   ExternalReportImportWorker,
   type SarifExternalReportPayload,
@@ -125,9 +125,9 @@ import { PortfolioEngine } from './src/engine/portfolioEngine';
 import { PdfReportGenerator } from './src/reports/PdfReportGenerator';
 import { buildOpenApiSpec } from './src/api/openApiSpec';
 import { PrDecorationAdapter, type PrCiProvider } from './src/integrations/ci/PrDecorationAdapter';
-import { SonarMetricsMapper } from './src/integrations/sonarqube/SonarMetricsMapper';
-import { SonarQualityGateMapper } from './src/integrations/sonarqube/SonarQualityGateMapper';
-import { DEFAULT_SONAR_METRIC_KEYS } from './src/integrations/sonarqube/SonarQubeApiClient';
+import { SonarMetricsMapper } from './src/integrations/mqr-bridge/SonarMetricsMapper';
+import { SonarQualityGateMapper } from './src/integrations/mqr-bridge/SonarQualityGateMapper';
+import { DEFAULT_SONAR_METRIC_KEYS } from './src/integrations/mqr-bridge/SonarApiClient';
 import {
   ensureWinHoodDirectories,
   resolveWinHoodDataRoot,
@@ -346,7 +346,7 @@ function computeSonarTokenVerification(
       statusLabel: 'INVALID_TOKEN',
       message:
         customMessage ||
-        'Token inválido ou revogado no servidor SonarCloud / SonarQube.',
+        'Token inválido ou revogado no servidor SonarCloud / MqrBridge.',
     };
   }
 
@@ -374,7 +374,7 @@ function computeSonarTokenVerification(
       statusLabel: 'EXPIRED',
       message:
         customMessage ||
-        `Token expirado em ${new Date(proj.tokenExpiresAt).toLocaleDateString('pt-BR')}. Gere um novo token no SonarCloud/SonarQube.`,
+        `Token expirado em ${new Date(proj.tokenExpiresAt).toLocaleDateString('pt-BR')}. Gere um novo token no SonarCloud/MqrBridge.`,
     };
   }
 
@@ -394,7 +394,7 @@ function computeSonarTokenVerification(
   };
 }
 
-function validateSonarServerOrigin(rawServerUrl: string, platform: 'SONARCLOUD' | 'SONARQUBE_SERVER'): string {
+function validateSonarServerOrigin(rawServerUrl: string, platform: 'SONARCLOUD' | 'MQR_BRIDGE_SERVER'): string {
   const fallback = platform === 'SONARCLOUD' ? 'https://sonarcloud.io' : 'http://localhost:9000';
   const candidate = (rawServerUrl || fallback).trim();
   const parsed = new URL(candidate);
@@ -412,7 +412,7 @@ function validateSonarServerOrigin(rawServerUrl: string, platform: 'SONARCLOUD' 
 
 async function validateSonarServerOriginSafe(
   rawServerUrl: string,
-  platform: 'SONARCLOUD' | 'SONARQUBE_SERVER'
+  platform: 'SONARCLOUD' | 'MQR_BRIDGE_SERVER'
 ): Promise<string> {
   const safeOrigin = validateSonarServerOrigin(rawServerUrl, platform);
   const ssrf = await SsrfGuard.validateUrl({
@@ -706,7 +706,7 @@ function createInitialRealWorkspaceState(
     runs: [initialRun],
     adapters: buildFull21SecurityAdaptersCatalog(),
     auditLogs,
-    toolsDb: SonarQubeIntegrationService.createInitialToolsDatabaseState(dataDir),
+    toolsDb: MqrBridgeIntegrationService.createInitialToolsDatabaseState(dataDir),
     savedSonarProjects: createDefaultSavedSonarProjects(),
     authorizedTargets: [],
     telemetry: {
@@ -752,7 +752,7 @@ function createInitialCleanWorkspaceState(
         integrityHash: computeSha256(`AUDIT|0|CLEAN_INIT|${nowIso}`),
       },
     ],
-    toolsDb: SonarQubeIntegrationService.createInitialToolsDatabaseState(dataDir),
+    toolsDb: MqrBridgeIntegrationService.createInitialToolsDatabaseState(dataDir),
     savedSonarProjects: createDefaultSavedSonarProjects(),
     authorizedTargets: [],
     telemetry: {
@@ -785,7 +785,7 @@ function loadDatabase(
         parsed.authorizedTargets = [];
       }
       if (!parsed.toolsDb) {
-        parsed.toolsDb = SonarQubeIntegrationService.createInitialToolsDatabaseState(dataDir);
+        parsed.toolsDb = MqrBridgeIntegrationService.createInitialToolsDatabaseState(dataDir);
       }
       if (!Array.isArray(parsed.savedSonarProjects)) {
         parsed.savedSonarProjects = [];
@@ -852,7 +852,7 @@ function loadDatabase(
         domainTags:
           p.domainTags && p.domainTags.length > 0
             ? p.domainTags
-            : [p.category || 'multi-category', 'devsecops', 'sonarqube-mqr'],
+            : [p.category || 'multi-category', 'devsecops', 'mqr-strict'],
         defaultQualityProfileIds: p.defaultQualityProfileIds || ['sonar-way-ts-mqr-2026'],
         defaultQualityGateId: p.defaultQualityGateId || 'qg-sonar-way-mqr',
         enabledCategories:
@@ -1073,7 +1073,7 @@ export async function createWinHoodApp(options?: {
 
   const lifecycleManager = new ExternalToolLifecycleManager();
   const toolCacheManager = new ToolCacheManager(dataDir);
-  const sonarService = new SonarQubeIntegrationService(lifecycleManager, toolCacheManager);
+  const sonarService = new MqrBridgeIntegrationService(lifecycleManager, toolCacheManager);
   const gitarAdapter = new GitarAdapter();
   const sonarWorker = new SonarAnalysisWorker(sonarService);
   const gitarWorker = new GitarReviewWorker(gitarAdapter);
@@ -2017,10 +2017,10 @@ export async function createWinHoodApp(options?: {
     }
   }
 
-  // 3.2 SonarQube Docker Official vs SonarCloud Hub
+  // 3.2 MqrBridge Docker Official vs SonarCloud Hub
   app.get('/api/sonar/docker-status', async (_req, res) => {
     const isDockerInstalled = await checkDockerCliAvailable();
-    const probeRes = await SonarQubeConnection.probeSonarQube({
+    const probeRes = await MqrBridgeConnection.probeMqrBridge({
       serverUrl: 'http://localhost:9000',
       mode: 'DOCKER',
       timeoutMs: 2000,
@@ -2028,7 +2028,7 @@ export async function createWinHoodApp(options?: {
     res.json({
       isDockerInstalled,
       dockerContainerSuggestedCommand:
-        'docker run -d --name sonarqube -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true -p 9000:9000 sonarqube:latest',
+        'docker run -d --name mqr-bridge -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true -p 9000:9000 mqr-bridge:latest',
       serverUrl: 'http://localhost:9000',
       isReachable: probeRes.httpReachable,
       connectionState: probeRes.connectionState,
@@ -2049,14 +2049,14 @@ export async function createWinHoodApp(options?: {
           available: false,
           fallbackToNative: true,
           message:
-            'Docker não detectado na máquina host. O Motor Nativo Multi-Core WinHood foi ativado automaticamente com equivalência total ao SonarQube (Ratings A–E e SARIF 2.1.0).',
+            'Docker não detectado na máquina host. O Motor Nativo Multi-Core WinHood foi ativado automaticamente com equivalência total ao MqrBridge (Ratings A–E e SARIF 2.1.0).',
         });
       }
 
       // Check if container is already running or exists
       try {
         const { stdout: psOut } = await runDockerCli(
-          ['ps', '-a', '--filter', 'name=sonarqube', '--format', '{{.Status}}'],
+          ['ps', '-a', '--filter', 'name=mqr-bridge', '--format', '{{.Status}}'],
           4000
         );
         const statusText = psOut.trim();
@@ -2067,19 +2067,19 @@ export async function createWinHoodApp(options?: {
             available: true,
             status: 'RUNNING',
             alreadyRunning: true,
-            message: 'O container oficial do SonarQube já está ativo e pronto em http://localhost:9000.',
+            message: 'O container oficial do MqrBridge já está ativo e pronto em http://localhost:9000.',
           });
         }
 
         if (statusText) {
           // Container exists but stopped: start it
-          await runDockerCli(['start', 'sonarqube'], 6000);
+          await runDockerCli(['start', 'mqr-bridge'], 6000);
           return res.json({
             ok: true,
             available: true,
             status: 'STARTING',
             message:
-              'Container SonarQube iniciado com sucesso pelo backend! O serviço estará pronto em instantes na porta 9000.',
+              'Container MqrBridge iniciado com sucesso pelo backend! O serviço estará pronto em instantes na porta 9000.',
           });
         }
       } catch {
@@ -2092,12 +2092,12 @@ export async function createWinHoodApp(options?: {
           'run',
           '-d',
           '--name',
-          'sonarqube',
+          'mqr-bridge',
           '-e',
           'SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true',
           '-p',
           '9000:9000',
-          'sonarqube:latest',
+          'mqr-bridge:latest',
         ],
         8000
       );
@@ -2107,7 +2107,7 @@ export async function createWinHoodApp(options?: {
         available: true,
         status: 'CREATED_AND_STARTING',
         message:
-          'Container oficial sonarqube:latest criado e iniciado na porta 9000 sem intervenção manual.',
+          'Container oficial mqr-bridge:latest criado e iniciado na porta 9000 sem intervenção manual.',
       });
     } catch (err: any) {
       return res.json({
@@ -2126,8 +2126,8 @@ export async function createWinHoodApp(options?: {
       if (!isDockerInstalled) {
         return res.json({ ok: false, message: 'Docker não disponível no sistema operacional.' });
       }
-      await runDockerCli(['stop', 'sonarqube'], 6000);
-      return res.json({ ok: true, message: 'Container SonarQube pausado com sucesso.' });
+      await runDockerCli(['stop', 'mqr-bridge'], 6000);
+      return res.json({ ok: true, message: 'Container MqrBridge pausado com sucesso.' });
     } catch (err: any) {
       return res.status(500).json({ ok: false, error: err?.message || 'Falha ao pausar container.' });
     }
@@ -2140,7 +2140,7 @@ export async function createWinHoodApp(options?: {
       token?: string;
       mode?: SonarInstallationMode;
     };
-    const probeRes = await SonarQubeConnection.probeSonarQube({
+    const probeRes = await MqrBridgeConnection.probeMqrBridge({
       serverUrl,
       token,
       mode,
@@ -2155,7 +2155,7 @@ export async function createWinHoodApp(options?: {
       organizationKey?: string;
       token?: string;
     };
-    const probeRes = await SonarQubeConnection.probeSonarQube({
+    const probeRes = await MqrBridgeConnection.probeMqrBridge({
       serverUrl: 'https://sonarcloud.io',
       token,
       mode: 'CLOUD',
@@ -2184,9 +2184,9 @@ export async function createWinHoodApp(options?: {
 
     const commands: Record<string, { install?: string; run: string; explanation: string }> = {
       nodejs: {
-        install: 'npm install -D sonarqube-scanner',
+        install: 'npm install -D mqr-bridge-scanner',
         run: `npx sonar-scanner -Dsonar.projectKey=${cleanKey} -Dsonar.host.url=${cleanHost} -Dsonar.login=${cleanToken}`,
-        explanation: 'Instala o pacote sonarqube-scanner e executa a varredura das pastas src/ via npx.',
+        explanation: 'Instala o pacote mqr-bridge-scanner e executa a varredura das pastas src/ via npx.',
       },
       maven: {
         run: `mvn clean verify sonar:sonar -Dsonar.projectKey=${cleanKey} -Dsonar.host.url=${cleanHost} -Dsonar.login=${cleanToken}`,
@@ -2213,7 +2213,7 @@ export async function createWinHoodApp(options?: {
       hostUrl: cleanHost,
       token: cleanToken,
       dockerRunCommand:
-        'docker run -d --name sonarqube -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true -p 9000:9000 sonarqube:latest',
+        'docker run -d --name mqr-bridge -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true -p 9000:9000 mqr-bridge:latest',
       command: commands[ecosystem] || commands.nodejs,
       allCommands: commands,
     });
@@ -2264,8 +2264,8 @@ export async function createWinHoodApp(options?: {
       Array.isArray(domainTags) && domainTags.length > 0
         ? domainTags.map((t) => String(t).trim()).filter(Boolean)
         : category
-          ? [category.trim(), 'multi-category', 'sonarqube-mqr']
-          : ['multi-category', 'devsecops', 'sonarqube-mqr'];
+          ? [category.trim(), 'multi-category', 'mqr-strict']
+          : ['multi-category', 'devsecops', 'mqr-strict'];
     const resolvedCategory = (category || resolvedTags[0] || 'Avaliação Multi-Categoria Transversal').trim();
     const resolvedEnabledCategories =
       Array.isArray(enabledCategories) && enabledCategories.length > 0
@@ -2527,8 +2527,8 @@ export async function createWinHoodApp(options?: {
       Array.isArray(domainTags) && domainTags.length > 0
         ? domainTags.map((t) => String(t).trim()).filter(Boolean)
         : category
-          ? [category.trim(), 'multi-category', 'sonarqube-mqr']
-          : ['multi-category', 'devsecops', 'sonarqube-mqr'];
+          ? [category.trim(), 'multi-category', 'mqr-strict']
+          : ['multi-category', 'devsecops', 'mqr-strict'];
     const resolvedCategory = (category || resolvedTags[0] || 'Avaliação Multi-Categoria Transversal').trim();
     const resolvedEnabledCategories =
       Array.isArray(enabledCategories) && enabledCategories.length > 0
@@ -3323,7 +3323,7 @@ export async function createWinHoodApp(options?: {
           id: 'proj-standalone-portfolio',
           name: 'Portfólio Independente de Softwares',
           category: 'Avaliação Multi-Categoria Transversal',
-          domainTags: ['multi-category', 'standalone', 'sonarqube-mqr'],
+          domainTags: ['multi-category', 'standalone', 'mqr-strict'],
           defaultQualityProfileIds: ['sonar-way-ts-mqr-2026'],
           defaultQualityGateId: 'qg-sonar-way-mqr',
           enabledCategories: [...ALL_BENCHMARK_CATEGORIES],
@@ -4852,7 +4852,7 @@ export async function createWinHoodApp(options?: {
     }
 
     if (format === 'sarif') {
-      // Formato oficial SARIF 2.1.0 para GitHub Code Scanning, SonarQube MQR, Semgrep Taint e CodeQL
+      // Formato oficial SARIF 2.1.0 para GitHub Code Scanning, Modo MQR (Modern Quality Regime), Semgrep Taint e CodeQL
       const rulesMap = new Map<string, any>();
       const sarifResults = run.findings.map((f) => {
         if (!rulesMap.has(f.originalRuleId)) {
@@ -4966,7 +4966,7 @@ export async function createWinHoodApp(options?: {
           {
             tool: {
               driver: {
-                name: 'WinHood Static & Quality Analyzer (SonarQube MQR / Semgrep Taint / CodeQL Engine)',
+                name: 'WinHood Static & Quality Analyzer (Modo MQR (Modern Quality Regime) / Semgrep Taint / CodeQL Engine)',
                 version: run.algorithmVersion,
                 informationUri: 'https://github.com/LilNavaHoods/Winhood-Benchmarking',
                 rules: Array.from(rulesMap.values()),
@@ -5307,7 +5307,7 @@ export async function createWinHoodApp(options?: {
 
     if (format === 'md') {
       const md = [
-        `# RELATÓRIO TÉCNICO WINHOOD (SONARQUBE MQR) — ${reportType}`,
+        `# RELATÓRIO TÉCNICO WINHOOD (MQR_BRIDGE MQR) — ${reportType}`,
         `- **Execução ID:** \`${run.id}\``,
         `- **Projeto:** ${run.projectName}`,
         `- **Perfil:** ${run.profileName}`,
@@ -5317,7 +5317,7 @@ export async function createWinHoodApp(options?: {
         `## 1. Resumo Executivo & 5 Indicadores Separados`,
         run.executiveSummary,
         '',
-        `## 2. Quadro Comparativo de Pontuações, Indicadores Separados & SonarQube Ratings`,
+        `## 2. Quadro Comparativo de Pontuações, Indicadores Separados & MqrBridge Ratings`,
         ...run.scoreCards.map(
           (sc) =>
             `### ${sc.softwareName} (v${sc.softwareVersion}) — Nota Técnica: **${sc.separatedIndicators?.technicalScore !== null && sc.separatedIndicators?.technicalScore !== undefined ? `${sc.separatedIndicators.technicalScore.toFixed(2)} / 5.00` : sc.groupedScores.overallScore.toFixed(2)}** (${sc.classificationLabel})\n` +
@@ -5415,7 +5415,7 @@ export async function createWinHoodApp(options?: {
   });
 
   // ============================================================================
-  // 12. SONARQUBE COMMUNITY BUILD, CLOUD, IDE, GITAR AI & RESOURCE OPTIMIZATION
+  // 12. MQR_BRIDGE COMMUNITY BUILD, CLOUD, IDE, GITAR AI & RESOURCE OPTIMIZATION
   // ============================================================================
 
   app.get('/api/tools-integrations', (_req, res) => {
@@ -5441,7 +5441,7 @@ export async function createWinHoodApp(options?: {
   });
 
   // ============================================================================
-  // 12.0 MULTI-PROJECT SONARCLOUD / SONARQUBE JSON REPORT EXPORTER & TOKEN MONITOR
+  // 12.0 MULTI-PROJECT SONARCLOUD / MQR_BRIDGE JSON REPORT EXPORTER & TOKEN MONITOR
   // ============================================================================
 
   app.get('/api/sonar/saved-projects', (_req, res) => {
@@ -5470,7 +5470,7 @@ export async function createWinHoodApp(options?: {
     } = req.body as {
       id?: string;
       name?: string;
-      platform?: 'SONARCLOUD' | 'SONARQUBE_SERVER';
+      platform?: 'SONARCLOUD' | 'MQR_BRIDGE_SERVER';
       serverUrl?: string;
       organization?: string;
       projectKey?: string;
@@ -5479,8 +5479,8 @@ export async function createWinHoodApp(options?: {
       customTokenExpiresAt?: string | null;
     };
 
-    const resolvedPlatform: 'SONARCLOUD' | 'SONARQUBE_SERVER' =
-      platform === 'SONARQUBE_SERVER' ? 'SONARQUBE_SERVER' : 'SONARCLOUD';
+    const resolvedPlatform: 'SONARCLOUD' | 'MQR_BRIDGE_SERVER' =
+      platform === 'MQR_BRIDGE_SERVER' ? 'MQR_BRIDGE_SERVER' : 'SONARCLOUD';
     const cleanProjectKey = (projectKey || '').trim();
     const cleanOrg = (organization || '').trim();
 
@@ -5568,15 +5568,15 @@ export async function createWinHoodApp(options?: {
 
     if (token && token.trim().length > 0) {
       const cleanToken = token.trim();
-      existing.encryptedToken = SonarQubeConnection.encryptToken(cleanToken);
-      existing.maskedToken = SonarQubeConnection.maskToken(cleanToken);
+      existing.encryptedToken = MqrBridgeConnection.encryptToken(cleanToken);
+      existing.maskedToken = MqrBridgeConnection.maskToken(cleanToken);
       existing.hasToken = true;
       existing.tokenCreatedAt = nowIso;
       if (computedExpiresAt !== null || policy === 'NO_EXPIRATION') {
         existing.tokenExpiresAt = computedExpiresAt;
       }
 
-      // Validar token imediatamente na API do SonarCloud / SonarQube se acessível
+      // Validar token imediatamente na API do SonarCloud / MqrBridge se acessível
       try {
         const authUrl = new URL('/api/authentication/validate', safeOrigin);
         const authRes = await fetchWithTimeoutAndNoRedirect(
@@ -5664,13 +5664,13 @@ export async function createWinHoodApp(options?: {
 
     const { token: inlineToken } = (req.body || {}) as { token?: string };
     if (inlineToken && inlineToken.trim().length > 0) {
-      proj.encryptedToken = SonarQubeConnection.encryptToken(inlineToken.trim());
-      proj.maskedToken = SonarQubeConnection.maskToken(inlineToken.trim());
+      proj.encryptedToken = MqrBridgeConnection.encryptToken(inlineToken.trim());
+      proj.maskedToken = MqrBridgeConnection.maskToken(inlineToken.trim());
       proj.hasToken = true;
     }
 
     const plainToken = proj.encryptedToken
-      ? SonarQubeConnection.decryptToken(proj.encryptedToken)
+      ? MqrBridgeConnection.decryptToken(proj.encryptedToken)
       : null;
 
     if (!plainToken) {
@@ -5813,13 +5813,13 @@ export async function createWinHoodApp(options?: {
     }
 
     const plainToken = proj.encryptedToken
-      ? SonarQubeConnection.decryptToken(proj.encryptedToken)
+      ? MqrBridgeConnection.decryptToken(proj.encryptedToken)
       : null;
 
     if (!plainToken) {
       return res.status(400).json({
         error:
-          'Token Bearer não configurado para este projeto. Insira e salve seu token do SonarCloud/SonarQube antes de baixar o relatório JSON.',
+          'Token Bearer não configurado para este projeto. Insira e salve seu token do SonarCloud/MqrBridge antes de baixar o relatório JSON.',
       });
     }
 
@@ -6336,7 +6336,7 @@ export async function createWinHoodApp(options?: {
     let effectiveToken = (token || '').trim();
 
     if (!effectiveToken && defaultProj?.encryptedToken) {
-      effectiveToken = SonarQubeConnection.decryptToken(defaultProj.encryptedToken) || '';
+      effectiveToken = MqrBridgeConnection.decryptToken(defaultProj.encryptedToken) || '';
     }
 
     if (!effectiveKey) {
@@ -6533,8 +6533,8 @@ export async function createWinHoodApp(options?: {
           serverUrl: safeOrigin,
           organization: effectiveOrg,
           projectKey: effectiveKey,
-          encryptedToken: SonarQubeConnection.encryptToken(effectiveToken),
-          maskedToken: SonarQubeConnection.maskToken(effectiveToken),
+          encryptedToken: MqrBridgeConnection.encryptToken(effectiveToken),
+          maskedToken: MqrBridgeConnection.maskToken(effectiveToken),
           hasToken: true,
           tokenCreatedAt: nowIso,
           tokenValidityDaysPolicy: 90,
@@ -6547,8 +6547,8 @@ export async function createWinHoodApp(options?: {
         db.savedSonarProjects.unshift(newProfile);
       } else {
         if (token) {
-          existingProfile.encryptedToken = SonarQubeConnection.encryptToken(token);
-          existingProfile.maskedToken = SonarQubeConnection.maskToken(token);
+          existingProfile.encryptedToken = MqrBridgeConnection.encryptToken(token);
+          existingProfile.maskedToken = MqrBridgeConnection.maskToken(token);
           existingProfile.hasToken = true;
         }
         existingProfile.lastVerifiedAt = nowIso;
@@ -6820,7 +6820,7 @@ export async function createWinHoodApp(options?: {
   });
 
   const buildCompleteSonarPs1Script = (params: {
-    platform: 'SONARCLOUD' | 'SONARQUBE_SERVER';
+    platform: 'SONARCLOUD' | 'MQR_BRIDGE_SERVER';
     serverUrl: string;
     projectKey: string;
     organization: string;
@@ -6836,14 +6836,14 @@ export async function createWinHoodApp(options?: {
     try {
       safeOrigin = validateSonarServerOrigin(params.serverUrl, params.platform);
     } catch {
-      safeOrigin = params.platform === 'SONARQUBE_SERVER' ? 'http://localhost:9000' : 'https://sonarcloud.io';
+      safeOrigin = params.platform === 'MQR_BRIDGE_SERVER' ? 'http://localhost:9000' : 'https://sonarcloud.io';
     }
 
     const sanitizedSavedToken = (params.plainToken || '').replace(/["`$]/g, '');
 
     const ps1Lines = [
       `# ==============================================================================`,
-      `# WinHood Analyzer — Exportador Completo de Análise SonarCloud / SonarQube (.PS1)`,
+      `# WinHood Analyzer — Exportador Completo de Análise SonarCloud / MqrBridge (.PS1)`,
       `# Coleta Integral: Componente, Quality Gate, Métricas MQR, Issues, Rules,`,
       `#                  Components, Facets, Security Hotspots, Branches e Análises`,
       `# Projeto: ${safeProjectKey || 'N/A'} | Organização: ${safeOrg || 'N/A'}`,
@@ -6865,7 +6865,7 @@ export async function createWinHoodApp(options?: {
       `    $organization = (Read-Host "Informe a Organization do SonarCloud (sonar.organization)").Trim()`,
       `}`,
       `if ([string]::IsNullOrWhiteSpace($sonarToken)) {`,
-      `    $sonarToken = (Read-Host "Informe seu Bearer Token do SonarCloud/SonarQube (SONAR_TOKEN)").Trim()`,
+      `    $sonarToken = (Read-Host "Informe seu Bearer Token do SonarCloud/MqrBridge (SONAR_TOKEN)").Trim()`,
       `}`,
       `if ([string]::IsNullOrWhiteSpace($sonarToken) -or [string]::IsNullOrWhiteSpace($projectKey)) {`,
       `    Write-Error "Project Key e SONAR_TOKEN sao obrigatorios para exportar a analise completa."`,
@@ -7108,7 +7108,7 @@ export async function createWinHoodApp(options?: {
     }
 
     const plainToken = proj.encryptedToken
-      ? SonarQubeConnection.decryptToken(proj.encryptedToken)
+      ? MqrBridgeConnection.decryptToken(proj.encryptedToken)
       : null;
 
     const generated = buildCompleteSonarPs1Script({
@@ -7131,15 +7131,15 @@ export async function createWinHoodApp(options?: {
   app.post('/api/sonar/export-ps1-direct', (req, res) => {
     if (!requireWritePermission(res, req, 'sonar:config')) return;
     const { platform, serverUrl, projectKey, organization, token } = (req.body || {}) as {
-      platform?: 'SONARCLOUD' | 'SONARQUBE_SERVER';
+      platform?: 'SONARCLOUD' | 'MQR_BRIDGE_SERVER';
       serverUrl?: string;
       projectKey?: string;
       organization?: string;
       token?: string;
     };
 
-    const resolvedPlatform: 'SONARCLOUD' | 'SONARQUBE_SERVER' =
-      platform === 'SONARQUBE_SERVER' ? 'SONARQUBE_SERVER' : 'SONARCLOUD';
+    const resolvedPlatform: 'SONARCLOUD' | 'MQR_BRIDGE_SERVER' =
+      platform === 'MQR_BRIDGE_SERVER' ? 'MQR_BRIDGE_SERVER' : 'SONARCLOUD';
 
     const generated = buildCompleteSonarPs1Script({
       platform: resolvedPlatform,
@@ -7160,7 +7160,7 @@ export async function createWinHoodApp(options?: {
     return res.end(Buffer.from(generated.content, 'utf-8'));
   });
 
-  app.post('/api/sonarqube/probe', async (req, res) => {
+  app.post('/api/mqr-bridge/probe', async (req, res) => {
     if (!requireWritePermission(res, req, 'sonar:config')) return;
     const { instanceId, serverUrl, port, token, mode, organizationKey, name } = req.body as {
       instanceId?: string;
@@ -7176,7 +7176,7 @@ export async function createWinHoodApp(options?: {
     if (!inst) {
       inst = {
         id: instanceId || `sonar-${Date.now()}`,
-        name: name || 'Instância SonarQube Customizada',
+        name: name || 'Instância MqrBridge Customizada',
         mode: mode || 'REMOTE',
         serverUrl: serverUrl || '',
         port: port || 9000,
@@ -7209,11 +7209,11 @@ export async function createWinHoodApp(options?: {
     if (token !== undefined && token.trim().length > 0) {
       sonarService.storeEncryptedToken(inst.id, token.trim());
       inst.hasTokenConfigured = true;
-      inst.maskedToken = SonarQubeConnection.maskToken(token.trim());
+      inst.maskedToken = MqrBridgeConnection.maskToken(token.trim());
     }
 
     const effectiveToken = sonarService.getDecryptedToken(inst.id);
-    const probeRes = await SonarQubeConnection.probeSonarQube({
+    const probeRes = await MqrBridgeConnection.probeMqrBridge({
       serverUrl: inst.serverUrl,
       token: effectiveToken,
       mode: inst.mode,
@@ -7234,28 +7234,28 @@ export async function createWinHoodApp(options?: {
       probeRes.connectionState === 'READY' || probeRes.connectionState === 'CONNECTED'
         ? 'INFO'
         : 'WARN',
-      'SONARQUBE_PROBED',
-      `probeSonarQube(${inst.serverUrl}) -> Estado: ${probeRes.connectionState} (${probeRes.errorMessage || `v${probeRes.version} em ${probeRes.latencyMs}ms`}).`
+      'MQR_BRIDGE_PROBED',
+      `probeMqrBridge(${inst.serverUrl}) -> Estado: ${probeRes.connectionState} (${probeRes.errorMessage || `v${probeRes.version} em ${probeRes.latencyMs}ms`}).`
     );
 
     appendAuditLog(
       db,
-      'SONARQUBE_INSTANCE_PROBED',
+      'MQR_BRIDGE_INSTANCE_PROBED',
       'SONAR_INSTANCE',
       inst.id,
-      `Verificação probeSonarQube executada para "${inst.name}" (${inst.serverUrl}): estado=${inst.connectionState}.`
+      `Verificação probeMqrBridge executada para "${inst.name}" (${inst.serverUrl}): estado=${inst.connectionState}.`
     );
     saveDatabase(db);
 
     return res.json({ instance: inst, probeResult: probeRes });
   });
 
-  app.post('/api/sonarqube/disconnect', (req, res) => {
+  app.post('/api/mqr-bridge/disconnect', (req, res) => {
     if (!requireWritePermission(res, req, 'sonar:config')) return;
     const { instanceId } = req.body as { instanceId?: string };
     const inst = db.toolsDb.sonar_instances.find((i) => i.id === instanceId);
     if (!inst) {
-      return res.status(404).json({ error: 'Instância SonarQube não encontrada.' });
+      return res.status(404).json({ error: 'Instância MqrBridge não encontrada.' });
     }
     sonarService.storeEncryptedToken(inst.id, '');
     inst.hasTokenConfigured = false;
@@ -7278,7 +7278,7 @@ export async function createWinHoodApp(options?: {
     return res.json({ instance: inst });
   });
 
-  app.post('/api/sonarqube/lifecycle', (req, res) => {
+  app.post('/api/mqr-bridge/lifecycle', (req, res) => {
     if (!requireWritePermission(res, req, 'sonar:config')) return;
     const { action, mode, limits } = req.body as {
       action?: 'START_LOCAL' | 'STOP_LOCAL' | 'UPDATE_LIMITS';
@@ -7310,13 +7310,13 @@ export async function createWinHoodApp(options?: {
     });
   });
 
-  app.post('/api/sonarqube/refresh-versions', async (req, res) => {
+  app.post('/api/mqr-bridge/refresh-versions', async (req, res) => {
     if (!requireWritePermission(res, req, 'sonar:config')) return;
-    const versions = await SonarQubeVersionManager.discoverLatestOfficialVersions();
-    const distCheck = await SonarQubeInstallationManager.verifyOfficialDistributionOnline();
+    const versions = await MqrBridgeVersionManager.discoverLatestOfficialVersions();
+    const distCheck = await MqrBridgeInstallationManager.verifyOfficialDistributionOnline();
     db.toolsDb.sonar_versions = versions;
     db.toolsDb.sonar_installations = [
-      SonarQubeInstallationManager.buildInstallationRecord(versions[0]),
+      MqrBridgeInstallationManager.buildInstallationRecord(versions[0]),
     ];
 
     lifecycleManager.appendLog(
@@ -7334,7 +7334,7 @@ export async function createWinHoodApp(options?: {
     });
   });
 
-  app.post('/api/sonarqube/compare-ab', async (req, res) => {
+  app.post('/api/mqr-bridge/compare-ab', async (req, res) => {
     if (!requireWritePermission(res, req, 'sonar:config')) return;
     const { softwareAId, softwareBId } = req.body as {
       softwareAId?: string;
@@ -7348,7 +7348,7 @@ export async function createWinHoodApp(options?: {
 
     if (!swA || !swB) {
       return res.status(400).json({
-        error: 'É necessário ter no mínimo Software A e Software B cadastrados para executar a comparação padronizada A/B com SonarQube.',
+        error: 'É necessário ter no mínimo Software A e Software B cadastrados para executar a comparação padronizada A/B com MqrBridge.',
       });
     }
 
@@ -7372,24 +7372,24 @@ export async function createWinHoodApp(options?: {
 
       appendAuditLog(
         db,
-        'SONARQUBE_AB_COMPARISON_EXECUTED',
+        'MQR_BRIDGE_AB_COMPARISON_EXECUTED',
         'SONAR_COMPARISON',
         comparison.comparisonId,
-        `Comparação sequencial A/B com SonarQube v${comparison.sharedConditions.sonarVersion} concluída: ${swA.name} (QG: ${comparison.softwareA.qualityGate.displayLabel}) vs ${swB.name} (QG: ${comparison.softwareB.qualityGate.displayLabel}).`
+        `Comparação sequencial A/B com MqrBridge v${comparison.sharedConditions.sonarVersion} concluída: ${swA.name} (QG: ${comparison.softwareA.qualityGate.displayLabel}) vs ${swB.name} (QG: ${comparison.softwareB.qualityGate.displayLabel}).`
       );
       saveDatabase(db);
       return res.json({ comparison, toolsDb: db.toolsDb });
     } catch (err: any) {
-      const msg = err?.message || 'Erro durante a execução da comparação A/B do SonarQube.';
-      const isNotConnected = msg.includes('SONARQUBE_NOT_CONNECTED');
+      const msg = err?.message || 'Erro durante a execução da comparação A/B do MqrBridge.';
+      const isNotConnected = msg.includes('MQR_BRIDGE_NOT_CONNECTED');
       return res.status(isNotConnected ? 400 : 500).json({
-        error: isNotConnected ? 'SONARQUBE_NOT_CONNECTED' : 'SONARQUBE_AB_ERROR',
+        error: isNotConnected ? 'MQR_BRIDGE_NOT_CONNECTED' : 'MQR_BRIDGE_AB_ERROR',
         message: msg,
       });
     }
   });
 
-  app.post('/api/sonarqube/import-sarif', (req, res) => {
+  app.post('/api/mqr-bridge/import-sarif', (req, res) => {
     if (!requireWritePermission(res, req, 'sonar:config')) return;
     const { toolId, softwareId, customSarifFindings } = req.body as {
       toolId?: SarifExternalReportPayload['toolId'];
@@ -7470,7 +7470,7 @@ export async function createWinHoodApp(options?: {
     });
   });
 
-  app.post('/api/sonarqube/vscode-config', (req, res) => {
+  app.post('/api/mqr-bridge/vscode-config', (req, res) => {
     if (!requireWritePermission(res, req, 'sonar:config')) return;
     const { bindingMode, serverUrl, projectKey, developerConsent } = req.body as {
       bindingMode?: 'COMMUNITY_BUILD' | 'SERVER' | 'CLOUD' | 'NOT_BOUND';
@@ -7504,14 +7504,14 @@ export async function createWinHoodApp(options?: {
             },
           }
         : {
-            'sonarlint.connectedMode.connections.sonarqube': [
+            'sonarlint.connectedMode.connections.mqr-bridge': [
               {
-                connectionId: 'winhood-sonarqube-cb',
+                connectionId: 'winhood-mqr-bridge-cb',
                 serverUrl: url,
               },
             ],
             'sonarlint.connectedMode.project': {
-              connectionId: 'winhood-sonarqube-cb',
+              connectionId: 'winhood-mqr-bridge-cb',
               projectKey: pKey,
             },
           };
@@ -7575,7 +7575,7 @@ export async function createWinHoodApp(options?: {
     if (apiToken && apiToken.trim().length > 0) {
       gitarAdapter.getConnection().setToken(apiToken.trim());
       g.hasApiToken = true;
-      g.maskedToken = SonarQubeConnection.maskToken(apiToken.trim());
+      g.maskedToken = MqrBridgeConnection.maskToken(apiToken.trim());
     }
 
     const tokenToTest = gitarAdapter.getConnection().getToken();
@@ -7669,13 +7669,13 @@ export async function createWinHoodApp(options?: {
   });
 
   // SUÍTE DE 15 ETAPAS + 12 CENÁRIOS DE FALHA (Seção 14) — bloqueada fora do modo de teste
-  app.post('/api/sonarqube/run-integration-tests', async (req, res) => {
+  app.post('/api/mqr-bridge/run-integration-tests', async (req, res) => {
     if (!requireWritePermission(res, req, 'sonar:config')) return;
     if (!isTestRuntimeEnvironment()) {
       return res.status(403).json({
         error: 'CONTRACT_TEST_ONLY_IN_TEST_MODE',
         message:
-          'A suíte efêmera de testes de contrato SonarQube Web API só é permitida quando NODE_ENV=test ou WINHOOD_TEST_MODE=1.',
+          'A suíte efêmera de testes de contrato MqrBridge Web API só é permitida quando NODE_ENV=test ou WINHOOD_TEST_MODE=1.',
       });
     }
     const swA = db.softwares[0];
@@ -7705,10 +7705,10 @@ export async function createWinHoodApp(options?: {
 
     appendAuditLog(
       db,
-      'SONARQUBE_INTEGRATION_TESTS_EXECUTED',
+      'MQR_BRIDGE_INTEGRATION_TESTS_EXECUTED',
       'SONAR_TEST_SUITE',
       'suite-27-steps',
-      `Suíte de contrato SonarQube concluída (${testResults.length} etapas executadas).`,
+      `Suíte de contrato MqrBridge concluída (${testResults.length} etapas executadas).`,
       getRequestActor(req, res)
     );
     saveDatabase(db);
@@ -8304,7 +8304,7 @@ export async function createWinHoodApp(options?: {
       if (Array.isArray(db.savedSonarProjects)) {
         for (const proj of db.savedSonarProjects) {
           if (proj.encryptedToken) {
-            const reenc = SonarQubeConnection.reencryptToken(proj.encryptedToken, ctx);
+            const reenc = MqrBridgeConnection.reencryptToken(proj.encryptedToken, ctx);
             if (reenc) {
               proj.encryptedToken = reenc;
               reencryptedCount += 1;

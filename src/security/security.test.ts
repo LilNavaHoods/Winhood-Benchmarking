@@ -16,9 +16,9 @@ import {
   signEvidenceManifestHmacSha256,
   verifyEvidenceChainAndManifest,
 } from '../engine/evidenceProvenanceEngine';
-import { SonarQubeConnection } from '../integrations/sonarqube/SonarQubeConnection';
-import { SonarQubeApiClient } from '../integrations/sonarqube/SonarQubeApiClient';
-import { SonarScannerExecutor } from '../integrations/sonarqube/SonarScannerExecutor';
+import { MqrBridgeConnection } from '../integrations/mqr-bridge/SonarConnection';
+import { MqrBridgeApiClient } from '../integrations/mqr-bridge/SonarApiClient';
+import { SonarScannerExecutor } from '../integrations/mqr-bridge/SonarScannerExecutor';
 import { GitarApiClient } from '../integrations/gitar/GitarApiClient';
 import {
   enforceVerifiedQualityGateOnRun,
@@ -488,13 +488,13 @@ test('HTTP integration with enforceProductionAuth: auth gating, CSRF, RBAC, SSRF
       const attachedRun = getDb().runs.find((r) => r.id === runTestsJson.attachedToRunId);
       assert.ok(attachedRun && (attachedRun.executionRecords?.length ?? 0) >= 1);
 
-      // 7. /api/sonarqube/run-integration-tests returns 403 CONTRACT_TEST_ONLY_IN_TEST_MODE outside test mode
+      // 7. /api/mqr-bridge/run-integration-tests returns 403 CONTRACT_TEST_ONLY_IN_TEST_MODE outside test mode
       const savedNodeEnv = process.env.NODE_ENV;
       const savedTestMode = process.env.WINHOOD_TEST_MODE;
       process.env.NODE_ENV = 'production';
       delete process.env.WINHOOD_TEST_MODE;
       try {
-        const contractGuardRes = await fetch(`${baseUrl}/api/sonarqube/run-integration-tests`, {
+        const contractGuardRes = await fetch(`${baseUrl}/api/mqr-bridge/run-integration-tests`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -560,7 +560,7 @@ test('HTTP integration with enforceProductionAuth: auth gating, CSRF, RBAC, SSRF
       assert.ok(afterCipher);
       assert.notEqual(afterCipher, beforeCipher);
       assert.ok(afterCipher.startsWith(`${rotateAesJson.newKeyId}:`));
-      assert.equal(SonarQubeConnection.decryptToken(afterCipher), rawSonarToken);
+      assert.equal(MqrBridgeConnection.decryptToken(afterCipher), rawSonarToken);
 
       const rotateEdRes = await fetch(`${baseUrl}/api/security/keys/rotate`, {
         method: 'POST',
@@ -1327,8 +1327,8 @@ test('SonarScannerExecutor (typescript:S2245) generates CSPRNG UUID temp propert
   }
 });
 
-test('Outbound HTTP clients (SonarQubeConnection, SonarQubeApiClient, GitarApiClient) block SSRF metadata & private IPs', async () => {
-  const probeMetadata = await SonarQubeConnection.probeSonarQube({
+test('Outbound HTTP clients (MqrBridgeConnection, MqrBridgeApiClient, GitarApiClient) block SSRF metadata & private IPs', async () => {
+  const probeMetadata = await MqrBridgeConnection.probeMqrBridge({
     serverUrl: 'http://169.254.169.254/latest/meta-data',
     mode: 'DOCKER',
     timeoutMs: 1500,
@@ -1336,7 +1336,7 @@ test('Outbound HTTP clients (SonarQubeConnection, SonarQubeApiClient, GitarApiCl
   assert.equal(probeMetadata.httpReachable, false);
   assert.match(probeMetadata.errorMessage || '', /SSRF/i);
 
-  const sonarClient = new SonarQubeApiClient({
+  const sonarClient = new MqrBridgeApiClient({
     serverUrl: 'http://10.0.0.5:9000',
     timeoutMs: 1500,
   });

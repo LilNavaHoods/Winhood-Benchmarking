@@ -24,7 +24,7 @@ export interface HostResourceCheckResult {
   javaAvailable: boolean;
   javaVersion: string | null;
   vmMaxMapCount: number;
-  meetsSonarQubeLocalRequirements: boolean;
+  meetsMqrBridgeLocalRequirements: boolean;
   blockingReasons: string[];
   recommendations: string[];
 }
@@ -87,7 +87,7 @@ export interface HostHardwareBenchmarkResult {
 
 export class ToolResourceMonitor {
   /**
-   * Referência oficial da documentação SonarQube Community Build para instalações pequenas:
+   * Referência oficial da documentação MqrBridge Community Build para instalações pequenas:
    * - 4 GB de RAM (2 GB Elasticsearch + 1 GB Compute Engine + 1 GB Web Server)
    * - 2 núcleos de CPU
    * - 30 GB de armazenamento livre
@@ -174,7 +174,7 @@ export class ToolResourceMonitor {
       blockingReasons.push(
         `RAM livre insuficiente (${ramAvailableMb} MB disponíveis; mínimo exigido: ${ToolResourceMonitor.SONAR_MIN_RAM_MB} MB sem reduzir arbitrariamente a JVM).`
       );
-      recommendations.push('Utilize o Modo 2 (Servidor Remoto) ou SonarQube Cloud.');
+      recommendations.push('Utilize o Modo 2 (Servidor Remoto) ou MqrBridge Cloud.');
     }
 
     if (cpuCores < ToolResourceMonitor.SONAR_MIN_CPU_CORES) {
@@ -191,10 +191,10 @@ export class ToolResourceMonitor {
 
     if (!javaAvailable) {
       blockingReasons.push(
-        'Java Runtime (JDK 21+) não está instalado no container atual (Google AI Studio gVisor). O SonarQube Community Build 26.11.0 exige JDK 21 para inicializar Web Server, Compute Engine e Elasticsearch.'
+        'Java Runtime (JDK 21+) não está instalado no container atual (Google AI Studio gVisor). O MqrBridge Community Build 26.11.0 exige JDK 21 para inicializar Web Server, Compute Engine e Elasticsearch.'
       );
       recommendations.push(
-        'Execute o script de instalação gerado (scripts/install-sonarqube.ps1 ou scripts/install-sonarqube.sh) na sua máquina/servidor com JDK 21 ou conecte uma instância remota.'
+        'Execute o script de instalação gerado (scripts/install-external-scanner.ps1 ou scripts/install-external-scanner.sh) na sua máquina/servidor com JDK 21 ou conecte uma instância remota.'
       );
     }
 
@@ -203,7 +203,7 @@ export class ToolResourceMonitor {
         'Ambiente em execução sob kernel sandboxed gVisor (4.19.0-gvisor): não permite instalação de serviços persistentes de sistema operacional nem alteração de sysctl vm.max_map_count=524288 exigida pelo Elasticsearch.'
       );
       recommendations.push(
-        'Para uso no Google AI Studio, conecte uma instância remota do SonarQube Community Build ou SonarQube Cloud, ou execute localmente no host do usuário com os scripts oficiais gerados.'
+        'Para uso no Google AI Studio, conecte uma instância remota do MqrBridge Community Build ou MqrBridge Cloud, ou execute localmente no host do usuário com os scripts oficiais gerados.'
       );
     } else if (os.platform() === 'linux' && vmMaxMapCount < ToolResourceMonitor.SONAR_MIN_MAX_MAP_COUNT) {
       blockingReasons.push(
@@ -226,7 +226,7 @@ export class ToolResourceMonitor {
       javaAvailable,
       javaVersion,
       vmMaxMapCount,
-      meetsSonarQubeLocalRequirements: blockingReasons.length === 0,
+      meetsMqrBridgeLocalRequirements: blockingReasons.length === 0,
       blockingReasons,
       recommendations,
     };
@@ -643,7 +643,7 @@ export class ToolResourceMonitor {
       },
       uncollectedMetricsNotes: [
         'Memória exata da aba do navegador (window.performance.memory) depende de execução no cliente Chromium e não é coletada pelo processo Node.js do servidor.',
-        'Consumo de JVM do SonarQube Server (Elasticsearch + Compute Engine) é reportado como 0 MB no container atual pois o servidor não é iniciado sem necessidade ou sem JDK 21.',
+        'Consumo de JVM do MqrBridge Server (Elasticsearch + Compute Engine) é reportado como 0 MB no container atual pois o servidor não é iniciado sem necessidade ou sem JDK 21.',
       ],
     };
   }

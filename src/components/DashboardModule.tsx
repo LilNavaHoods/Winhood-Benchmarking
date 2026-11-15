@@ -136,7 +136,7 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
             className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold border border-[#31d6c4]/40 text-[#31d6c4] hover:bg-[#31d6c4]/10 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Download className="w-3.5 h-3.5" />
-            Exportar Relatório SonarCloud JSON
+            Exportar Relatório Nuvem MQR JSON
           </button>
           <button
             type="button"
@@ -608,12 +608,12 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                     </div>
                   )}
 
-                  {/* Separação Estrita: SonarQube Nativo vs WinHood Composto (Regra 9) */}
+                  {/* Separação Estrita: MqrBridge Nativo vs WinHood Composto (Regra 9) */}
                   {(sc.sonarNativeResults || sc.winhoodCalculatedResults) && (
                     <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-[11px]">
                       <div className="p-2.5 rounded border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-[#080b10] space-y-1">
                         <div className="flex items-center justify-between font-bold text-slate-800 dark:text-slate-200">
-                          <span>SonarQube Nativo</span>
+                          <span>MqrBridge Nativo</span>
                           <span
                             className={`font-mono text-[10px] px-1.5 py-0.5 rounded ${
                               sc.sonarNativeResults?.available
@@ -640,7 +640,7 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                         ) : (
                           <div className="text-slate-500 leading-snug">
                             {sc.sonarNativeResults?.note ||
-                              'Sem instância SonarQube real conectada — nunca substituído por mock.'}
+                              'Sem instância MqrBridge real conectada — nunca substituído por mock.'}
                           </div>
                         )}
                       </div>

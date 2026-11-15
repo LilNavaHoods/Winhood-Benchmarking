@@ -23,7 +23,7 @@ Todos os arquivos graváveis residem exclusivamente no perfil do usuário (nunca
 - `%APPDATA%\WinHood\security\` — Metadados de autenticação, sessões e bootstrap administrativo.
 - `%APPDATA%\WinHood\keys\` — Cofre de chaves criptográficas (protegido por DPAPI no Windows).
 - `%APPDATA%\WinHood\reports\` — Relatórios exportados (JSON, SARIF 2.1.0, HTML, Markdown, CSV).
-- `%APPDATA%\WinHood\sonar\` — Configurações e relatórios sincronizados do SonarCloud/SonarQube.
+- `%APPDATA%\WinHood\external_reports\` — Configurações e relatórios sincronizados de ferramentas que exportam SARIF 2.1.0.
 - `%APPDATA%\WinHood\cache\` — Cache imutável indexado por SHA-256.
 - `%APPDATA%\WinHood\logs\` — Logs operacionais estruturados.
 - `%LOCALAPPDATA%\WinHood\tools\` — Scanners opcionais baixados sob demanda.

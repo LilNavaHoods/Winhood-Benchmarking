@@ -3,7 +3,7 @@ import type {
   GitarIntegrationRecord,
   GitProviderType,
 } from '../../types/benchmark';
-import { SonarQubeConnection } from '../sonarqube/SonarQubeConnection';
+import { MqrBridgeConnection } from '../mqr-bridge/SonarConnection';
 
 /**
  * GitarConnection (Seção 9, 9.2 e 9.3)
@@ -18,12 +18,12 @@ export class GitarConnection {
       this.encryptedToken = null;
       return;
     }
-    this.encryptedToken = SonarQubeConnection.encryptToken(plainToken.trim());
+    this.encryptedToken = MqrBridgeConnection.encryptToken(plainToken.trim());
   }
 
   public getToken(): string | null {
     if (!this.encryptedToken) return null;
-    return SonarQubeConnection.decryptToken(this.encryptedToken);
+    return MqrBridgeConnection.decryptToken(this.encryptedToken);
   }
 
   public reencryptStoredToken(ctx: {
@@ -33,7 +33,7 @@ export class GitarConnection {
     newKeyBuffer: Buffer;
   }): boolean {
     if (!this.encryptedToken) return false;
-    const next = SonarQubeConnection.reencryptToken(this.encryptedToken, ctx);
+    const next = MqrBridgeConnection.reencryptToken(this.encryptedToken, ctx);
     if (!next) return false;
     this.encryptedToken = next;
     return true;

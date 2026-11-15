@@ -15,7 +15,7 @@ Toda métrica e indicador no WinHood preserva seu estado real desde a coleta at�
 O WinHood nunca trata diferentes tipos de cobertura como equivalentes:
 - **Cobertura de Ingestão (`filesReceived / filesDiscovered`)**: percentual de arquivos do repositório ingeridos.
 - **Cobertura de Análise Estática (`filesAnalyzed / eligibleFiles`)**: percentual de arquivos elegíveis submetidos ao parser AST.
-- **Cobertura de Testes (`coverage`, `line_coverage`, `branch_coverage`)**: obtida exclusivamente de relatórios reais de execução de testes (`CoverageReportParser.ts` ou SonarCloud `/api/measures/component`).
+- **Cobertura de Testes (`coverage`, `line_coverage`, `branch_coverage`)**: obtida exclusivamente de relatórios reais de execução de testes (`CoverageReportParser.ts` nos formatos abertos LCOV, Cobertura XML e JaCoCo XML).
 
 ## 3. Cadeia de Evidências e Assinatura Criptográfica
 Cada `BenchmarkRun` gera:

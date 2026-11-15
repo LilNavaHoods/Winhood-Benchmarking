@@ -1,0 +1,76 @@
+{
+  "name": "winhood-vscode",
+  "displayName": "WinHood Independent Audit & Quality Gate (MQR Mode)",
+  "description": "Independent software audit, SAST/Taint/Secrets/IaC inline diagnostics, deterministic Quick Fixes, and real-time Quality Gate status in MQR Mode.",
+  "version": "4.4.0",
+  "publisher": "winhood",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/winhood/winhood-vscode"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Linters", "Programming Languages", "Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "winhood.analyzeCurrentFile",
+        "title": "Winhood: Analisar arquivo atual"
+      },
+      {
+        "command": "winhood.analyzeWorkspace",
+        "title": "Winhood: Analisar workspace"
+      },
+      {
+        "command": "winhood.runAudit",
+        "title": "WinHood: Run Independent Audit & Evaluate Quality Gate"
+      }
+    ],
+    "configuration": {
+      "title": "WinHood Audit (Modo MQR)",
+      "properties": {
+        "winhood.apiBaseUrl": {
+          "type": "string",
+          "default": "http://localhost:3000",
+          "description": "URL da API WinHood (local ou remota)."
+        },
+        "winhood.apiToken": {
+          "type": "string",
+          "default": "",
+          "description": "Token Bearer de autenticação para servidores WinHood protegidos."
+        },
+        "winhood.analysisProfile": {
+          "type": "string",
+          "default": "mqr-strict",
+          "enum": ["mqr-strict", "mqr-standard", "zero-trust"],
+          "description": "Perfil de análise do Modo MQR (Modern Quality Regime)."
+        },
+        "winhood.qualityGateId": {
+          "type": "string",
+          "default": "winhood-standard-v2",
+          "description": "Identificador versionado do Quality Gate a aplicar."
+        },
+        "winhood.offlineCliFallback": {
+          "type": "boolean",
+          "default": true,
+          "description": "Executa automaticamente o CLI embarcado caso a API não esteja acessível."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "package:vsix": "npx @vscode/vsce package --out winhood-vscode-4.4.0.vsix",
+    "test": "npx tsx --test test/extension.integration.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/test-electron": "^2.4.1",
+    "typescript": "^5.7.0"
+  }
+}

@@ -1088,7 +1088,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                         className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0c1017] px-2.5 py-1.5 text-slate-900 dark:text-slate-100"
                       >
                         <option value="SECURITY_LEAD">
-                          SECURITY_LEAD — AppSec, SAST, SonarQube &amp; Benchmarks
+                          SECURITY_LEAD — AppSec, SAST, MqrBridge &amp; Benchmarks
                         </option>
                         <option value="QA_ENGINEER">
                           QA_ENGINEER — Qualidade, Testes &amp; Performance

@@ -1,0 +1,34 @@
+spec:
+  inputs:
+    gate:
+      default: "winhood-standard-v2"
+      description: "Quality Gate ID to enforce"
+    profile:
+      default: "mqr-strict"
+      description: "WinHood analysis profile (Modo MQR)"
+    fail_on:
+      default: "BLOCKED"
+      description: "Gate state that blocks the Merge Request"
+---
+winhood_audit_gate:
+  stage: test
+  image: node:22-alpine
+  allow_failure: false
+  script:
+    - npm ci --ignore-scripts
+    - npx tsx cli/winhood-cli.ts report --path . --gate "$[[ inputs.gate ]]" --profile "$[[ inputs.profile ]]" --format=sarif --deterministic --out winhood.sarif
+    - npx tsx cli/winhood-cli.ts report --path . --gate "$[[ inputs.gate ]]" --profile "$[[ inputs.profile ]]" --format=json --deterministic --out winhood-report.json
+    - npx tsx cli/winhood-cli.ts gate --path . --gate "$[[ inputs.gate ]]" --ci-exit-codes --deterministic > winhood-gate.json
+  artifacts:
+    when: always
+    paths:
+      - winhood.sarif
+      - winhood-report.json
+      - winhood-gate.json
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: always
+      allow_failure: false
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: always
+      allow_failure: false

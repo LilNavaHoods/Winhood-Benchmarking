@@ -20,5 +20,5 @@ Com `electron-builder.json`:
 O workflow executa automaticamente em `ubuntu-latest` e `windows-latest`:
 - `npm ci` (respeitando `package-lock.json`, sem `--no-save`).
 - `npm run lint` (`tsc --noEmit`).
-- `npm test` (suítes unitárias, segurança, SonarCloud Methodology e Windows Desktop Lifecycle).
+- `npm test` (suítes unitárias, segurança, Metodologia MQR e Windows Desktop Lifecycle).
 - `npm run build:desktop` e publicação do artefato `build-manifest.json`.

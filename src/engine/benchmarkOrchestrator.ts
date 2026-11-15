@@ -71,7 +71,7 @@ export const DEFAULT_BENCHMARK_PROFILES: BenchmarkProfileConfig[] = [
     selectedAdapters: [
       'opengrep-sast',
       'gitleaks-secrets',
-      'sonarqube-quality',
+      'mqr-bridge-quality',
       'syft-grype-sca',
       'archunit-cruiser',
       'sqlfluff-db',
@@ -155,7 +155,7 @@ export const DEFAULT_BENCHMARK_PROFILES: BenchmarkProfileConfig[] = [
     analyzeNewCodeOnly: false,
     referenceBranch: 'main',
     selectedAdapters: [
-      'sonarqube-quality',
+      'mqr-bridge-quality',
       'archunit-cruiser',
       'opengrep-sast',
       'junit-functional',
@@ -229,8 +229,8 @@ export function buildToolAdaptersCatalog(): ToolAdapterInfo[] {
       lastExitCode: 0,
     },
     {
-      id: 'sonarqube-quality',
-      name: 'SonarQube Server / Cloud & Native MQR Parity Engine',
+      id: 'mqr-bridge-quality',
+      name: 'MqrBridge Server / Cloud & Native MQR Parity Engine',
       vendor: 'SonarSource / WinHood Quality',
       version: probeSonarScanner.versionOutput || 'WINHOOD-SONAR-MQR-v3.0.0',
       category: 'CODE_QUALITY',
@@ -242,8 +242,8 @@ export function buildToolAdaptersCatalog(): ToolAdapterInfo[] {
       configured: true,
       signatureHash: computeSha256('winhood-sonar-mqr-3.0.0'),
       description: probeSonarScanner.detected
-        ? 'SonarScanner CLI detectado no host para submissão real à instância SonarQube conectada.'
-        : 'Cálculo estático nativo MQR ativo; conecte instância SonarQube Server/Cloud ou instale sonar-scanner para métricas remotas nativas.',
+        ? 'SonarScanner CLI detectado no host para submissão real à instância MqrBridge conectada.'
+        : 'Cálculo estático nativo MQR ativo; conecte instância MqrBridge Server/Cloud ou instale sonar-scanner para métricas remotas nativas.',
       supportedLanguages: ['TypeScript', 'JavaScript', 'Python', 'Java', 'C#', 'Go', 'Rust'],
       lastExecutionAt: nowIso,
       lastExitCode: 0,
@@ -914,7 +914,7 @@ export function executeBenchmarkRunOrchestration(params: {
       scaCorrelationsBySoftware[sw.id] = bundle.scaCorrelations;
     }
 
-    // Calculate deterministic scorecard with Penalty Caps, MQR Evaluation Reasons, and SonarQube Ratings
+    // Calculate deterministic scorecard with Penalty Caps, MQR Evaluation Reasons, and MqrBridge Ratings
     const scoreCard = calculateDeterministicScoreCard(
       {
         softwareId: sw.id,
@@ -1197,7 +1197,7 @@ export function enforceVerifiedQualityGateOnRun(run: BenchmarkRun): BenchmarkRun
 }
 
 /**
- * Recalculates all SoftwareScoreCards, SonarQube Ratings A–E, Quality Gate status, and
+ * Recalculates all SoftwareScoreCards, MqrBridge Ratings A–E, Quality Gate status, and
  * CategoryEvaluationReasons of an existing BenchmarkRun in real time when a finding's
  * validationStatus is updated in DevSecOps triage (VALIDATED | ACCEPTED | FALSE_POSITIVE_REVIEWED).
  */

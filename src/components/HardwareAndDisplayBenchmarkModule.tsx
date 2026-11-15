@@ -771,7 +771,7 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
 
     const suitability = [
       {
-        profile: 'Compilação Pesada & Análise SAST/SonarQube Docker',
+        profile: 'Compilação Pesada & Análise SAST/MqrBridge Docker',
         status: cpuScore >= 70 && memStorageScore >= 65 ? 'Ótimo' : 'Moderado',
         ready: cpuScore >= 70 && memStorageScore >= 65,
       },

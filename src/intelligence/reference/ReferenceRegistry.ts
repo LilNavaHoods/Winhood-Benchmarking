@@ -56,14 +56,14 @@ const REFERENCE_CATALOG_DEFAULTS: Array<{
   payloadSummary: Record<string, unknown>;
 }> = [
   {
-    sourceKey: 'SONARQUBE_SERVER',
-    sourceName: 'SonarQube Server (Community Build / Web API Baseline)',
+    sourceKey: 'MQR_BRIDGE_SERVER',
+    sourceName: 'MqrBridge Server (Community Build / Web API Baseline)',
     version: '25.x / Web API v1+v2',
-    originUrl: 'https://docs.sonarsource.com/sonarqube-server/',
+    originUrl: 'https://docs.sonarsource.com/mqr-bridge-server/',
     license: 'LGPL-3.0 / SonarSource Reference',
     ttlHours: 72,
     rulesIncluded: ['S2076', 'S3649', 'S1523', 'S2486', 'S5547', 'S6290', 'S1135', 'S3776'],
-    toolsReferenced: ['sonar-scanner-cli', 'sonarqube-api-v1', 'sonarqube-api-v2'],
+    toolsReferenced: ['sonar-scanner-cli', 'mqr-bridge-api-v1', 'mqr-bridge-api-v2'],
     environmentTag: 'local-or-remote-instance',
     payloadSummary: {
       ratingsModel: 'A-E (Reliability, Security, Maintainability)',
@@ -72,8 +72,8 @@ const REFERENCE_CATALOG_DEFAULTS: Array<{
     },
   },
   {
-    sourceKey: 'SONARQUBE_CLOUD',
-    sourceName: 'SonarQube Cloud (SonarCloud Reference Rules & Quality Profiles)',
+    sourceKey: 'MQR_BRIDGE_CLOUD',
+    sourceName: 'MqrBridge Cloud (SonarCloud Reference Rules & Quality Profiles)',
     version: '2026-cloud-baseline',
     originUrl: 'https://sonarcloud.io/api/rules/search',
     license: 'SonarSource Cloud API Metadata',

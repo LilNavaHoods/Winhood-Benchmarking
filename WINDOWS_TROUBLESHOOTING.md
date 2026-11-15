@@ -12,10 +12,10 @@
   - **Desenvolvimento Local**: `.winhood_data\security\admin_bootstrap_token.txt`
 - Copie o token contido nesse arquivo para criar a conta administrativa inicial na tela de Bootstrap.
 
-## 3. Falha ao Executar SonarScanner CLI no Windows (`.bat` / `.cmd`)
-- No Windows, o executável do SonarScanner é distribuído como `sonar-scanner.bat`.
-- O Node.js moderno bloqueia `spawn('sonar-scanner.bat', args, { shell: false })` com `EINVAL`.
-- O módulo `SonarScannerExecutor.ts` resolve isso através de `buildPlatformSafeSpawnSpec()`, invocando `cmd.exe /d /s /c ""C:\caminho\sonar-scanner.bat" "arg1" "arg2""` com `windowsVerbatimArguments: true`, `shell: false` e validação estrita contra metacaracteres (`&`, `|`, `;`, `` ` ``, `$`, `>`, `<`).
+## 3. Execução Segura de Scanners CLI no Windows (`.bat` / `.cmd`)
+- No Windows, executáveis de linha de comando distribuídos como scripts `.bat` ou `.cmd` exigem encapsulamento seguro.
+- O Node.js moderno bloqueia `spawn('scanner.bat', args, { shell: false })` com `EINVAL`.
+- O executor de sub-processos do WinHood resolve isso através de `buildPlatformSafeSpawnSpec()`, invocando `cmd.exe /d /s /c ""C:\caminho\scanner.bat" "arg1" "arg2""` com `windowsVerbatimArguments: true`, `shell: false` e validação estrita contra metacaracteres (`&`, `|`, `;`, `` ` ``, `$`, `>`, `<`).
 
 ## 4. Integridade do Banco de Dados e Recuperação Automática (`.bak`)
 - Caso o computador seja desligado abruptamente, `PersistentDatabaseManager` valida o checksum SHA-256 do arquivo `winhood_persistent_db.json` na inicialização.

@@ -49,7 +49,7 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
   // Project Form State
   const [editingProject, setEditingProject] = useState<Project | null>(null);
   const [projName, setProjName] = useState('');
-  const [projDomainTags, setProjDomainTags] = useState('devsecops, sonarqube-mqr, security, clean-code');
+  const [projDomainTags, setProjDomainTags] = useState('devsecops, mqr-strict, security, clean-code');
   const [projQualityGateId, setProjQualityGateId] = useState('qg-sonar-way-mqr');
   const [projObjective, setProjObjective] = useState('');
   const [projDescription, setProjDescription] = useState('');
@@ -104,7 +104,7 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: projName,
-          domainTags: parsedTags.length > 0 ? parsedTags : ['multi-category', 'sonarqube-mqr'],
+          domainTags: parsedTags.length > 0 ? parsedTags : ['multi-category', 'mqr-strict'],
           defaultQualityGateId: projQualityGateId,
           defaultQualityProfileIds: ['sonar-way-ts-mqr-2026', 'sonar-way-sql-mqr-2026'],
           objective: projObjective,
@@ -194,7 +194,7 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
           name: swName,
           vendor: swVendor,
           version: swVersion,
-          domainTags: parsedSwTags.length > 0 ? parsedSwTags : ['multi-category', 'sonarqube-mqr'],
+          domainTags: parsedSwTags.length > 0 ? parsedSwTags : ['multi-category', 'mqr-strict'],
           architecture: swArchitecture,
           operatingSystem: swOs,
           distributionModel: swDistribution,
@@ -390,7 +390,7 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
                 htmlFor="proj-qg"
                 className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1"
               >
-                Quality Gate Transversal (SonarQube MQR)
+                Quality Gate Transversal (Modo MQR (Modern Quality Regime))
               </label>
               <select
                 id="proj-qg"
@@ -398,7 +398,7 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
                 onChange={(e) => setProjQualityGateId(e.target.value)}
                 className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:border-[#31d6c4]"
               >
-                <option value="qg-sonar-way-mqr">Sonar way (MQR — Clean as You Code + Fudge Factor)</option>
+                <option value="qg-sonar-way-mqr">Perfil de Qualidade Estrita (Modo MQR — Clean as You Code + Fudge Factor)</option>
                 <option value="qg-zero-trust-strict">WinHood Zero-Trust Strict (Bloqueio CVSS &gt;= 7.0)</option>
               </select>
             </div>

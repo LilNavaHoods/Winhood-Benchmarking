@@ -7,17 +7,17 @@ import type {
   SonarIssueRecord,
 } from '../types/benchmark';
 import { enrichLegacyOrExternalFinding } from '../engine/scoringEngine';
-import { SonarQubeIntegrationService } from '../integrations/sonarqube/SonarQubeAdapter';
+import { MqrBridgeIntegrationService } from '../integrations/mqr-bridge/SonarAdapter';
 
 /**
  * SonarAnalysisWorker (Seção 11.8 e Seção 12)
- * Worker assíncrono controlado pelo backend para executar análises A/B do SonarQube
+ * Worker assíncrono controlado pelo backend para executar análises A/B do MqrBridge
  * fora do ciclo síncrono bloqueante, respeitando a fila de concorrência do ExternalToolLifecycleManager.
  */
 export class SonarAnalysisWorker {
-  private sonarService: SonarQubeIntegrationService;
+  private sonarService: MqrBridgeIntegrationService;
 
-  constructor(sonarService: SonarQubeIntegrationService) {
+  constructor(sonarService: MqrBridgeIntegrationService) {
     this.sonarService = sonarService;
   }
 
@@ -47,8 +47,8 @@ export class SonarAnalysisWorker {
       softwareId: issue.softwareId,
       softwareName: issue.softwareName,
       softwareVersion: '1.0.0',
-      toolId: issue.isExternalImportedRule ? 'external-sarif' : 'sonarqube-quality',
-      toolName: issue.externalOriginTool || 'SonarQube Server (MQR)',
+      toolId: issue.isExternalImportedRule ? 'external-sarif' : 'mqr-bridge-quality',
+      toolName: issue.externalOriginTool || 'MqrBridge Server (MQR)',
       toolVersion: issue.externalOriginVersion || '26.11.0.134175',
       category,
       originalRuleId: issue.originalRuleId || issue.ruleKey,

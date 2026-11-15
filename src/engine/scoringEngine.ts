@@ -218,7 +218,7 @@ export function classifyScoreScale(
 }
 
 /**
- * Enriches any legacy, fixture, or external SARIF/Sonar/Gitar finding with full SonarQube MQR
+ * Enriches any legacy, fixture, or external SARIF/Sonar/Gitar finding with full Modo MQR (Modern Quality Regime)
  * metadata (`cleanCodeAttribute`, `mqrImpacts`, `whyItIsAnIssue`, `evaluationImpactSummary`,
  * `remediationEffortMinutes`, `isNewCode`) so no downstream report or type check fails.
  */
@@ -978,7 +978,7 @@ export function calculateDeterministicScoreCard(
       severity: 'INFO',
       ruleId: 'metric.quality.clean-code-verified',
       title: 'Zero Bugs, Zero Code Smells e Complexidade Ciclomática Controlada (<= 5.0)',
-      whyExplanation: `O código-fonte passou por todas as regras estáticas do SonarQube MQR sem deduções (complexidade média ${m.avgCyclomaticComplexity.toFixed(1)}, duplicação ${m.duplicatedLinesPercent.toFixed(1)}%), preservando nota 5.00.`,
+      whyExplanation: `O código-fonte passou por todas as regras estáticas do Modo MQR (Modern Quality Regime) sem deduções (complexidade média ${m.avgCyclomaticComplexity.toFixed(1)}, duplicação ${m.duplicatedLinesPercent.toFixed(1)}%), preservando nota 5.00.`,
       remediationEffortMinutes: 0,
     });
   }
@@ -1554,7 +1554,7 @@ export function calculateDeterministicScoreCard(
     }
   }
 
-  // Step G: Official SonarQube Ratings (A-E) & Quality Gate Determination with Fudge Factor
+  // Step G: Official MqrBridge Ratings (A-E) & Quality Gate Determination with Fudge Factor
   let securityRating: 'A' | 'B' | 'C' | 'D' | 'E';
   let reliabilityRating: 'A' | 'B' | 'C' | 'D' | 'E';
 
@@ -1651,7 +1651,7 @@ export function calculateDeterministicScoreCard(
       failureReason:
         m.duplicatedLinesPercent > 5.0
           ? fudgeFactorApplied
-            ? `Fudge Factor SonarQube ativo (< 20 linhas novas): falha de duplicação (${m.duplicatedLinesPercent.toFixed(1)}%) suprimida.`
+            ? `Fudge Factor MqrBridge ativo (< 20 linhas novas): falha de duplicação (${m.duplicatedLinesPercent.toFixed(1)}%) suprimida.`
             : `Densidade de duplicação (${m.duplicatedLinesPercent.toFixed(1)}%) excede o limite de 5.0%.`
           : undefined,
     },
@@ -1677,11 +1677,11 @@ export function calculateDeterministicScoreCard(
             : 'PASSED',
       failureReason: !hasMeasuredCoverage
         ? fudgeFactorApplied
-          ? 'Fudge Factor SonarQube ativo (< 20 linhas novas): ausência de relatório de cobertura suprimida.'
+          ? 'Fudge Factor MqrBridge ativo (< 20 linhas novas): ausência de relatório de cobertura suprimida.'
           : 'Relatório real de cobertura de testes ausente (NOT_MEASURED) — condição obrigatória não avaliada.'
         : m.testCoveragePercent < 80.0
           ? fudgeFactorApplied
-            ? `Fudge Factor SonarQube ativo (< 20 linhas novas): falha de cobertura (${m.testCoveragePercent.toFixed(1)}%) suprimida.`
+            ? `Fudge Factor MqrBridge ativo (< 20 linhas novas): falha de cobertura (${m.testCoveragePercent.toFixed(1)}%) suprimida.`
             : `Cobertura de testes (${m.testCoveragePercent.toFixed(1)}%) abaixo do mínimo exigido pelo Quality Gate Sonar way (80.0%).`
           : undefined,
     },
@@ -2186,7 +2186,7 @@ export function calculateDeterministicScoreCard(
           metricKey: 'staticMetrics.technicalDebtRatioPercent',
           value: sqaleRatio,
           state: (isEligibleForScoring ? 'STATIC_DERIVED' : 'NOT_MEASURED') as MetricMeasurementState,
-          origin: 'SonarQube SQALE Debt Ratio Formula',
+          origin: 'MqrBridge SQALE Debt Ratio Formula',
           method: '(technicalDebtMinutes / (LOC * 30)) * 100',
           toolName: 'WinHood Deterministic Scoring Engine',
           toolVersion: ALGORITHM_VERSION,
@@ -2204,7 +2204,7 @@ export function calculateDeterministicScoreCard(
       securityRating: null,
       maintainabilityRating: null,
       qualityGateStatus: null,
-      note: 'Resultados nativos do SonarQube ainda não sincronizados de uma instância externa conectada.',
+      note: 'Resultados nativos do MqrBridge ainda não sincronizados de uma instância externa conectada.',
     },
     winhoodCalculatedResults: {
       compositeScore: isEligibleForScoring ? overallScore : null,

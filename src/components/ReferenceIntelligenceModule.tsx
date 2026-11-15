@@ -587,7 +587,7 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
               <div className="flex flex-wrap items-center gap-2">
                 <input
                   type="url"
-                  aria-label="URL SonarQube Server para sincronização"
+                  aria-label="URL MqrBridge Server para sincronização"
                   value={sonarSyncUrl}
                   onChange={(e) => setSonarSyncUrl(e.target.value)}
                   placeholder="http://localhost:9000"
@@ -705,7 +705,7 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
                 >
                   <option value="INDIVIDUAL">INDIVIDUAL (Auditoria Solo)</option>
                   <option value="AB_SOFTWARE">AB_SOFTWARE (Software A vs Software B)</option>
-                  <option value="VS_SONARQUBE">VS_SONARQUBE (WinHood vs SonarQube Nativo)</option>
+                  <option value="VS_MQR_BRIDGE">VS_MQR_BRIDGE (WinHood vs MqrBridge Nativo)</option>
                   <option value="VS_PUBLIC_REFERENCE">VS_PUBLIC_REFERENCE (Baseline Público)</option>
                   <option value="VS_INTERNAL_HISTORY">VS_INTERNAL_HISTORY (Regressão Histórica)</option>
                 </select>

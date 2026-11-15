@@ -273,3 +273,93 @@ test('PrDecorationAdapter calculates new findings delta cleanly', () => {
   assert.equal(dec.pullRequestOrMrId, 42);
   assert.ok(dec.markdownComment.includes('org/repo'));
 });
+
+test('winhood report --format=pdf|html|sarif|json generates all 4 formats with cryptographic PDF signature and E2E PR gate BLOCKED blocks merge', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { ReportExporter } = await import('../reports/ReportExporter');
+  const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'winhood-report-e2e-'));
+
+  try {
+    fs.writeFileSync(
+      path.join(tmpRepo, 'vuln.ts'),
+      'export function runUnsafe(userSql: string, db: any) { return db.query("SELECT * FROM accounts WHERE name=" + userSql); }\n',
+      'utf8'
+    );
+
+    for (const fmt of ['pdf', 'html', 'sarif', 'json'] as const) {
+      const outPath = path.join(tmpRepo, `out.${fmt}`);
+      const res = await runCli([
+        'report',
+        `--format=${fmt}`,
+        '--path',
+        tmpRepo,
+        '--deterministic',
+        '--out',
+        outPath,
+      ]);
+      assert.equal(res.exitCode, 0);
+      assert.equal(fs.existsSync(outPath), true, `Expected ${outPath} to be created`);
+
+      if (fmt === 'pdf') {
+        const pdfBuf = fs.readFileSync(outPath);
+        const verification = ReportExporter.verifyPdfIntegrity(pdfBuf);
+        assert.equal(verification.valid, true, 'CLI PDF report must have valid SHA-256 and HMAC signature');
+      } else if (fmt === 'html') {
+        const html = fs.readFileSync(outPath, 'utf8');
+        assert.ok(html.includes('id="winhood-provenance-footer"'));
+      } else if (fmt === 'sarif') {
+        const sarif = JSON.parse(fs.readFileSync(outPath, 'utf8'));
+        assert.equal(sarif.version, '2.1.0');
+      } else if (fmt === 'json') {
+        const j = JSON.parse(fs.readFileSync(outPath, 'utf8'));
+        assert.ok(j.provenanceFooter.hmacSignature);
+      }
+    }
+
+    // E2E PR simulation with gate BLOCKED: canonical exit code must be 2 and GitHub Action entrypoint must block merge
+    const ciBlocked = await runCli([
+      'gate',
+      '--path',
+      tmpRepo,
+      '--gate',
+      'winhood-standard-v2',
+      '--ci-exit-codes',
+      '--deterministic',
+    ]);
+    assert.equal(ciBlocked.exitCode, 2, 'Canonical CI exit code for BLOCKED gate must be 2');
+
+    const ghOutputFile = path.join(tmpRepo, 'gh_output.txt');
+    const ghSummaryFile = path.join(tmpRepo, 'gh_summary.md');
+    const sarifOutFile = path.join(tmpRepo, 'pr-audit.sarif');
+
+    const actionRun = spawnSync(
+      process.execPath,
+      [path.resolve(process.cwd(), 'integrations/github-action/entrypoint.mjs')],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          INPUT_PATH: tmpRepo,
+          INPUT_GATE: 'winhood-standard-v2',
+          INPUT_PROFILE: 'mqr-strict',
+          'INPUT_FAIL-ON': 'BLOCKED',
+          'INPUT_SARIF-OUTPUT': sarifOutFile,
+          'INPUT_ENFORCE-GATE': 'true',
+          GITHUB_EVENT_NAME: 'pull_request',
+          GITHUB_OUTPUT: ghOutputFile,
+          GITHUB_STEP_SUMMARY: ghSummaryFile,
+        },
+      }
+    );
+
+    assert.equal(actionRun.status, 2, 'GitHub Action must exit with non-zero code 2 to block PR merge when gate is BLOCKED');
+    const ghOutText = fs.readFileSync(ghOutputFile, 'utf8');
+    assert.ok(ghOutText.includes('decision=BLOCKED'));
+    const ghSumText = fs.readFileSync(ghSummaryFile, 'utf8');
+    assert.ok(ghSumText.includes('MERGE BLOCKED'));
+  } finally {
+    fs.rmSync(path.resolve(process.cwd(), 'winhood-pr-comment.md'), { force: true });
+    fs.rmSync(tmpRepo, { recursive: true, force: true });
+  }
+});
+

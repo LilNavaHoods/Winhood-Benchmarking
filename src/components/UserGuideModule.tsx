@@ -29,7 +29,7 @@ export type GuideChapterId =
   | 'quickstart'
   | 'benchmark-weights'
   | 'ab-case-study'
-  | 'sonarqube-guide'
+  | 'mqr-bridge-guide'
   | 'gitar-security-guide'
   | 'glossary-faq';
 
@@ -46,7 +46,7 @@ interface UserGuideModuleProps {
 
 interface GlossaryEntry {
   term: string;
-  category: 'Pontuação & Matemática' | 'Segurança & DevSecOps' | 'SonarQube & SARIF' | 'Gitar AI & CI' | 'Arquitetura & Performance';
+  category: 'Pontuação & Matemática' | 'Segurança & DevSecOps' | 'MqrBridge & SARIF' | 'Remediação Supervisionada & CI' | 'Arquitetura & Performance';
   simpleExplanation: string;
   practicalImpactAB: string;
 }
@@ -101,32 +101,32 @@ const GLOSSARY_ENTRIES: GlossaryEntry[] = [
       'Qualquer segredo hardcoded encontrado aciona imediatamente o Kill Switch de Segurança.',
   },
   {
-    term: 'Quality Gate (Portão de Qualidade SonarQube)',
-    category: 'SonarQube & SARIF',
+    term: 'Quality Gate (Portão de Qualidade MqrBridge)',
+    category: 'MqrBridge & SARIF',
     simpleExplanation:
-      'Conjunto de regras de aprovação do SonarQube (ex.: 0 novas vulnerabilidades, cobertura de testes ≥ 80%, duplicação de código ≤ 5%). Retorna status OK (Aprovado), WARN (Alerta) ou ERROR (Reprovado).',
+      'Conjunto de regras de aprovação do MqrBridge (ex.: 0 novas vulnerabilidades, cobertura de testes ≥ 80%, duplicação de código ≤ 5%). Retorna status OK (Aprovado), WARN (Alerta) ou ERROR (Reprovado).',
     practicalImpactAB:
-      'Na comparação A/B padronizada com SonarQube, ambos os softwares passam exatamente pelo mesmo Quality Gate na mesma instância.',
+      'Na comparação A/B padronizada com MqrBridge, ambos os softwares passam exatamente pelo mesmo Quality Gate na mesma instância.',
   },
   {
     term: 'SARIF v2.1.0 (Relatórios Externos Importados)',
-    category: 'SonarQube & SARIF',
+    category: 'MqrBridge & SARIF',
     simpleExplanation:
-      'Static Analysis Results Interchange Format — padrão internacional em JSON usado por ferramentas como Semgrep/OpenGrep, Gitleaks e Trivy para exportar seus achados para o SonarQube e para o WinHood Analyzer.',
+      'Static Analysis Results Interchange Format — padrão internacional em JSON usado por ferramentas como AST/Taint SARIF 2.1.0, Detector de Segredos SARIF e Analisador Container/IaC SARIF para exportar seus achados para o MqrBridge e para o WinHood Analyzer.',
     practicalImpactAB:
-      'O sistema classifica separadamente o que é nativo do SonarQube e o que foi importado via SARIF, evitando contar o mesmo problema duas vezes.',
+      'O sistema classifica separadamente o que é nativo do MqrBridge e o que foi importado via SARIF, evitando contar o mesmo problema duas vezes.',
   },
   {
-    term: 'Compute Engine (Tarefas CE do SonarQube)',
-    category: 'SonarQube & SARIF',
+    term: 'Compute Engine (Tarefas CE do MqrBridge)',
+    category: 'MqrBridge & SARIF',
     simpleExplanation:
-      'Fila interna de processamento do servidor SonarQube (/api/ce/task) que recebe o relatório enviado pelo SonarScanner e calcula as métricas e o Quality Gate.',
+      'Fila interna de processamento do servidor MqrBridge (/api/ce/task) que recebe o relatório enviado pelo SonarScanner e calcula as métricas e o Quality Gate.',
     practicalImpactAB:
       'O WinHood Analyzer monitora a tarefa CE até o status SUCCESS (ou captura falhas CANCELED/FAILED com diagnóstico detalhado).',
   },
   {
-    term: 'Gitar AI — Aprovação Humana em Branch Isolada',
-    category: 'Gitar AI & CI',
+    term: 'Remediação Supervisionada — Aprovação Humana em Branch Isolada',
+    category: 'Remediação Supervisionada & CI',
     simpleExplanation:
       'Integração na categoria AI CODE REVIEW & REMEDIATION que analisa Pull Requests e falhas de CI, propondo correções de código (diff Antes/Depois) exclusivamente em uma branch separada (gitar/remediation-isolated/*).',
     practicalImpactAB:
@@ -160,16 +160,16 @@ const FAQ_ENTRIES = [
     a: 'Use os botões "Upload" (para enviar uma pasta ou arquivos do seu computador) ou "GitHub" (para buscar qualquer repositório público do GitHub em tempo real) localizados no canto superior direito da barra de topo. Associe ambos ao mesmo Projeto e depois execute o Passo 2 (Wizard de Benchmark).',
   },
   {
-    q: '3. Por que o SonarQube Local aparece como "NOT_INSTALLED" neste ambiente em nuvem?',
-    a: 'Porque o container de preview roda sob kernel Linux gVisor sem Java 21 (JDK 21) e sem permissão de kernel para vm.max_map_count=524288 (exigido pelo Elasticsearch do SonarQube Server). Em vez de fingir que o servidor local está rodando, o sistema informa honestamente o status real, disponibiliza os scripts oficiais de instalação para sua máquina host (Windows/Linux) e permite executar a Comparação Padronizada A/B e os 27 Testes Reais de Contrato da Web API.',
+    q: '3. Por que o MqrBridge Local aparece como "NOT_INSTALLED" neste ambiente em nuvem?',
+    a: 'Porque o container de preview roda sob kernel Linux gVisor sem Java 21 (JDK 21) e sem permissão de kernel para vm.max_map_count=524288 (exigido pelo Elasticsearch do MqrBridge Server). Em vez de fingir que o servidor local está rodando, o sistema informa honestamente o status real, disponibiliza os scripts oficiais de instalação para sua máquina host (Windows/Linux) e permite executar a Comparação Padronizada A/B e os 27 Testes Reais de Contrato da Web API.',
   },
   {
-    q: '4. O Gitar AI pode alterar o código-fonte original dos softwares que estou avaliando?',
-    a: 'Não! Por design de segurança, o Gitar AI opera em modo somente-leitura sobre os repositórios avaliados. Qualquer sugestão de correção (patch) é gerada em uma branch isolada separada e fica retida no estado PENDING_HUMAN_APPROVAL até que você revise o diff Antes/Depois e aprove ou rejeite manualmente.',
+    q: '4. O Remediação Supervisionada pode alterar o código-fonte original dos softwares que estou avaliando?',
+    a: 'Não! Por design de segurança, o Remediação Supervisionada opera em modo somente-leitura sobre os repositórios avaliados. Qualquer sugestão de correção (patch) é gerada em uma branch isolada separada e fica retida no estado PENDING_HUMAN_APPROVAL até que você revise o diff Antes/Depois e aprove ou rejeite manualmente.',
   },
   {
-    q: '5. Como sei se um número na tela veio do SonarQube ou do próprio WinHood Benchmark Analyzer?',
-    a: 'Na aba "Ferramentas e Integrações -> Comparação Padronizada A/B", cada indicador possui uma etiqueta explícita de origem: SONARQUBE_NATIVE (métrica oficial retornada pela API do SonarQube), BENCHMARK_CALCULATED (nota composta calculada pelo motor matemático do WinHood) ou EXTERNAL_TEST_REPORT_IMPORTED (achado importado de relatório SARIF externo).',
+    q: '5. Como sei se um número na tela veio do MqrBridge ou do próprio WinHood Benchmark Analyzer?',
+    a: 'Na aba "Ferramentas e Integrações -> Comparação Padronizada A/B", cada indicador possui uma etiqueta explícita de origem: MQR_BRIDGE_NATIVE (métrica oficial retornada pela API do MqrBridge), BENCHMARK_CALCULATED (nota composta calculada pelo motor matemático do WinHood) ou EXTERNAL_TEST_REPORT_IMPORTED (achado importado de relatório SARIF externo).',
   },
 ];
 
@@ -194,13 +194,13 @@ O **WinHood Software Benchmark & Quality Analyzer** é uma plataforma de engenha
    - **Regra Matemática Obrigatória**: A soma dos pesos deve totalizar **exatamente 100%**.
 3. Verifique as **Condições de Equivalência de Ambiente** (CPU, Memória RAM, Sistema Operacional e concorrência) e clique em **Executar Benchmark Determinístico Real**.
 
-### Passo 3: Qualidade Contínua com SonarQube, SARIF e Gitar AI (\`Ferramentas e Integrações\`)
+### Passo 3: Qualidade Contínua com MqrBridge, SARIF e Remediação Supervisionada (\`Ferramentas e Integrações\`)
 - **4 Cartões Independentes**:
-  1. **SonarQube Community Build (Servidor Local)**: Gerencia instalação oficial v26.11.0.134175, validação SHA-256 e ciclo de vida sob demanda.
-  2. **SonarQube Servidor Remoto**: Conecta a qualquer instância corporativa via token Bearer criptografado em repouso (\`AES-256-GCM\`).
-  3. **SonarQube Cloud (SaaS)**: Integração com \`sonarcloud.io\` informando \`organization\` e \`projectKey\`.
-  4. **Gitar AI (\`AI CODE REVIEW & REMEDIATION\`)**: Importa revisões de Pull Requests e diagnósticos de falha de CI com sugestões de correção em branch isolada e aprovação humana obrigatória.
-- **Comparação Padronizada A/B com SonarQube**: Avalia Software A e Software B sequencialmente na mesma instância, com mesmo scanner (\`8.4.0.16527\`), mesmo perfil de qualidade (\`Sonar way\`) e mesmo Quality Gate.
+  1. **MqrBridge Community Build (Servidor Local)**: Gerencia instalação oficial v26.11.0.134175, validação SHA-256 e ciclo de vida sob demanda.
+  2. **MqrBridge Servidor Remoto**: Conecta a qualquer instância corporativa via token Bearer criptografado em repouso (\`AES-256-GCM\`).
+  3. **MqrBridge Cloud (SaaS)**: Integração com \`sonarcloud.io\` informando \`organization\` e \`projectKey\`.
+  4. **Remediação Supervisionada (\`AI CODE REVIEW & REMEDIATION\`)**: Importa revisões de Pull Requests e diagnósticos de falha de CI com sugestões de correção em branch isolada e aprovação humana obrigatória.
+- **Comparação Padronizada A/B com MqrBridge**: Avalia Software A e Software B sequencialmente na mesma instância, com mesmo scanner (\`8.4.0.16527\`), mesmo perfil de qualidade (\`Sonar way\`) e mesmo Quality Gate.
 - **Suíte de 27 Testes Reais de Integração**: Executa 15 etapas principais do pipeline ponta a ponta + 12 testes negativos de injeção de falhas (token inválido, HTTP 403, HTTP 404, tarefa CE cancelada, JSON corrompido, timeout, etc.).
 
 ### Passo 4: Auditar Segurança, Qualidade e Arquitetura (\`Suíte de Segurança\`, \`Qualidade & DevSecOps\`, \`Arquitetura, QA & Perf\`)
@@ -223,7 +223,7 @@ O **WinHood Software Benchmark & Quality Analyzer** é uma plataforma de engenha
 | **Segurança SAST & Criptografia** | Usa \`MD5\`, \`AES-128-ECB\`, \`Math.random()\` e concatenação SQL direta (\`SQL Injection\`) + \`execSync\` (\`RCE\`) | Usa \`AES-256-GCM\`, \`PBKDF2-SHA512\` (600.000 iterações) e queries parametrizadas seguras | **KeeSafe Open** protege o cofre; **VaultCore** permite invasão trivial |
 | **Segredos Expostos (Secrets)** | Possui chave mestra hardcoded no código (\`VC_***\`) | Zero segredos expostos no código-fonte | Aciona **Kill Switch** no VaultCore |
 | **Arquitetura & Modularidade** | Possui dependência circular e violação de camada (UI acessando SQL direto) | Camadas desacopladas, zero ciclos e trilha de auditoria imutável | **KeeSafe Open** tem manutenção limpa e previsível |
-| **Quality Gate SonarQube** | **ERROR (Reprovado)** — Security Rating E | **OK (Aprovado)** — Ratings A em Confiabilidade, Segurança e Manutenibilidade | **KeeSafe Open** passa no Quality Gate padronizado |
+| **Quality Gate MqrBridge** | **ERROR (Reprovado)** — Security Rating E | **OK (Aprovado)** — Ratings A em Confiabilidade, Segurança e Manutenibilidade | **KeeSafe Open** passa no Quality Gate padronizado |
 | **Nota Composta Final (0–5)** | **≤ 2.20 / 5.00** (Bloqueado por Travas Matemáticas / Kill Switches) | **> 4.50 / 5.00** (**Vencedor Técnico Validado**) | Recomendação executiva inequívoca para **KeeSafe Open** |
 `;
 
@@ -251,7 +251,7 @@ export const UserGuideModule: React.FC<UserGuideModuleProps> = ({
         'quickstart',
         'benchmark-weights',
         'ab-case-study',
-        'sonarqube-guide',
+        'mqr-bridge-guide',
         'gitar-security-guide',
         'glossary-faq',
       ].includes(initialChapterId)
@@ -289,16 +289,16 @@ export const UserGuideModule: React.FC<UserGuideModuleProps> = ({
       icon: Award,
     },
     {
-      id: 'sonarqube-guide',
+      id: 'mqr-bridge-guide',
       levelBadge: 'AVANÇADO',
-      title: '4. SonarQube, SonarScanner, Cloud & SARIF',
+      title: '4. MqrBridge, SonarScanner, Cloud & SARIF',
       subtitle: 'Instalação oficial, Web API, Quality Gate A/B e 27 testes reais',
       icon: Wrench,
     },
     {
       id: 'gitar-security-guide',
       levelBadge: 'AVANÇADO',
-      title: '5. Gitar AI & Suíte de Segurança (21 Adaptadores)',
+      title: '5. Remediação Supervisionada & Suíte de Segurança (21 Adaptadores)',
       subtitle: 'Revisão assistida em branch isolada e superfície de ataque',
       icon: ShieldAlert,
     },
@@ -369,7 +369,7 @@ export const UserGuideModule: React.FC<UserGuideModuleProps> = ({
                 Guia de Utilização &amp; Entendimento do WinHood Analyzer
               </h1>
               <p className="text-sm text-slate-600 dark:text-slate-400 max-w-3xl leading-relaxed">
-                Aprenda passo a passo como cadastrar softwares, configurar pesos matemáticos, interpretar travas de segurança (Kill Switches), operar o SonarQube / Gitar AI e emitir laudos técnicos comparativos A/B.
+                Aprenda passo a passo como cadastrar softwares, configurar pesos matemáticos, interpretar travas de segurança (Kill Switches), operar o MqrBridge / Remediação Supervisionada e emitir laudos técnicos comparativos A/B.
               </p>
             </div>
           </div>
@@ -630,10 +630,10 @@ export const UserGuideModule: React.FC<UserGuideModuleProps> = ({
                   },
                   {
                     num: 'PASSO 3',
-                    title: 'Ferramentas e Integrações (SonarQube, SARIF & Gitar AI)',
-                    desc: 'Execute a Comparação Padronizada A/B com SonarQube sob o mesmo Quality Gate, importe relatórios externos SARIF v2.1.0, valide patches do Gitar AI em branch isolada e rode a Suíte de 27 Testes de Integração.',
+                    title: 'Ferramentas e Integrações (MqrBridge, SARIF & Remediação Supervisionada)',
+                    desc: 'Execute a Comparação Padronizada A/B com MqrBridge sob o mesmo Quality Gate, importe relatórios externos SARIF v2.1.0, valide patches do Remediação Supervisionada em branch isolada e rode a Suíte de 27 Testes de Integração.',
                     nav: 'tools_integrations' as AppNavSection,
-                    btnLabel: 'Ir para Passo 3: SonarQube & Gitar AI',
+                    btnLabel: 'Ir para Passo 3: MqrBridge & Remediação Supervisionada',
                   },
                   {
                     num: 'PASSO 4',
@@ -941,7 +941,7 @@ export const UserGuideModule: React.FC<UserGuideModuleProps> = ({
                       • <strong>Arquitetura Limpa em Camadas</strong>: Zero dependências circulares, zero violações de camada e trilha de auditoria verificada (`auditLogger.ts`).
                     </li>
                     <li>
-                      • <strong>Aprovado no Quality Gate do SonarQube</strong>: Rating A (`1.0`) em Segurança, Confiabilidade e Manutenibilidade, com cobertura de testes ≥ 80%.
+                      • <strong>Aprovado no Quality Gate do MqrBridge</strong>: Rating A (`1.0`) em Segurança, Confiabilidade e Manutenibilidade, com cobertura de testes ≥ 80%.
                     </li>
                   </ul>
                 </div>
@@ -951,20 +951,20 @@ export const UserGuideModule: React.FC<UserGuideModuleProps> = ({
         </div>
       )}
 
-      {/* CHAPTER 4: SONARQUBE, SONARSCANNER & SARIF */}
-      {activeChapter === 'sonarqube-guide' && (
+      {/* CHAPTER 4: MQR_BRIDGE, SONARSCANNER & SARIF */}
+      {activeChapter === 'mqr-bridge-guide' && (
         <div className="space-y-6">
           <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-6 space-y-6">
             <div className="border-b border-slate-200 dark:border-slate-800 pb-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
               <div>
                 <span className="text-xs font-mono font-bold text-[#0e9f8e] dark:text-[#31d6c4]">
-                  CAPÍTULO 4 — NÍVEL AVANÇADO (SONARQUBE &amp; SARIF)
+                  CAPÍTULO 4 — NÍVEL AVANÇADO (MQR_BRIDGE &amp; SARIF)
                 </span>
                 <h2 className="text-xl font-bold text-slate-900 dark:text-slate-100 mt-1">
-                  Guia Operacional: SonarQube Community Build, SonarScanner, Cloud e SARIF
+                  Guia Operacional: MqrBridge Community Build, SonarScanner, Cloud e SARIF
                 </h2>
                 <p className="text-sm text-slate-600 dark:text-slate-300 mt-1 max-w-4xl leading-relaxed">
-                  Como configurar os 3 modos de operação do SonarQube, rodar os scripts oficiais de instalação com verificação SHA-256 e executar a Comparação Padronizada A/B.
+                  Como configurar os 3 modos de operação do MqrBridge, rodar os scripts oficiais de instalação com verificação SHA-256 e executar a Comparação Padronizada A/B.
                 </p>
               </div>
               <button
@@ -982,7 +982,7 @@ export const UserGuideModule: React.FC<UserGuideModuleProps> = ({
               <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-[#090d13] p-4 space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-bold text-[#0e9f8e] dark:text-[#31d6c4]">
-                    SonarQube Community Build (Oficial)
+                    MqrBridge Community Build (Oficial)
                   </span>
                   <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-500">
                     v26.11.0.134175
@@ -999,7 +999,7 @@ export const UserGuideModule: React.FC<UserGuideModuleProps> = ({
               <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-[#090d13] p-4 space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-bold text-indigo-500 dark:text-indigo-400">
-                    SonarScanner CLI (Oficial)
+                    Scanner CLI MQR (Oficial)
                   </span>
                   <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-400">
                     v8.4.0.16527
@@ -1030,7 +1030,7 @@ export const UserGuideModule: React.FC<UserGuideModuleProps> = ({
                       type="button"
                       onClick={() =>
                         handleCopyText(
-                          'bash scripts/install-sonarqube.sh --install-dir ./tools/sonarqube && bash scripts/verify-sonarqube.sh',
+                          'bash scripts/install-external-scanner.sh --install-dir ./tools/mqr-bridge && bash scripts/verify-external-scanner.sh',
                           'Comando Bash'
                         )
                       }
@@ -1041,7 +1041,7 @@ export const UserGuideModule: React.FC<UserGuideModuleProps> = ({
                     </button>
                   </div>
                   <pre className="text-[11px] font-mono overflow-x-auto text-slate-300">
-                    {`bash scripts/install-sonarqube.sh --install-dir ./tools/sonarqube\nbash scripts/verify-sonarqube.sh`}
+                    {`bash scripts/install-external-scanner.sh --install-dir ./tools/mqr-bridge\nbash scripts/verify-external-scanner.sh`}
                   </pre>
                 </div>
 
@@ -1055,7 +1055,7 @@ export const UserGuideModule: React.FC<UserGuideModuleProps> = ({
                       type="button"
                       onClick={() =>
                         handleCopyText(
-                          'powershell -ExecutionPolicy Bypass -File .\\scripts\\install-sonarqube.ps1',
+                          'powershell -ExecutionPolicy Bypass -File .\\scripts\\install-external-scanner.ps1',
                           'Comando PowerShell'
                         )
                       }
@@ -1066,7 +1066,7 @@ export const UserGuideModule: React.FC<UserGuideModuleProps> = ({
                     </button>
                   </div>
                   <pre className="text-[11px] font-mono overflow-x-auto text-slate-300">
-                    {`powershell -ExecutionPolicy Bypass -File .\\scripts\\install-sonarqube.ps1`}
+                    {`powershell -ExecutionPolicy Bypass -File .\\scripts\\install-external-scanner.ps1`}
                   </pre>
                 </div>
               </div>
@@ -1085,10 +1085,10 @@ export const UserGuideModule: React.FC<UserGuideModuleProps> = ({
                   CAPÍTULO 5 — NÍVEL AVANÇADO (GITAR AI &amp; SUÍTE DE SEGURANÇA)
                 </span>
                 <h2 className="text-xl font-bold text-slate-900 dark:text-slate-100 mt-1">
-                  Revisão Assistida com Gitar AI (Branch Isolada) &amp; Suíte de 21 Adaptadores
+                  Revisão Assistida com Remediação Supervisionada (Branch Isolada) &amp; Suíte de 21 Adaptadores
                 </h2>
                 <p className="text-sm text-slate-600 dark:text-slate-300 mt-1 max-w-4xl leading-relaxed">
-                  Entenda como o Gitar AI analisa Pull Requests e falhas de CI sem tocar nos arquivos originais e como inspecionar a Superfície de Ataque dos softwares.
+                  Entenda como o Remediação Supervisionada analisa Pull Requests e falhas de CI sem tocar nos arquivos originais e como inspecionar a Superfície de Ataque dos softwares.
                 </p>
               </div>
               <div className="flex items-center gap-2 shrink-0">
@@ -1097,7 +1097,7 @@ export const UserGuideModule: React.FC<UserGuideModuleProps> = ({
                   onClick={() => onNavigate('tools_integrations')}
                   className="px-3.5 py-2 rounded-lg text-xs font-semibold border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:border-[#31d6c4] transition-colors cursor-pointer"
                 >
-                  Abrir Gitar AI
+                  Abrir Remediação Supervisionada
                 </button>
                 <button
                   type="button"
@@ -1120,10 +1120,10 @@ export const UserGuideModule: React.FC<UserGuideModuleProps> = ({
                 </h3>
                 <ol className="space-y-2 text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
                   <li>
-                    <strong>1. Estado Inicial Honesto (`NOT_CONFIGURED`)</strong>: O Gitar AI jamais simula atividade sem configuração ou autorização explícita.
+                    <strong>1. Estado Inicial Honesto (`NOT_CONFIGURED`)</strong>: O Remediação Supervisionada jamais simula atividade sem configuração ou autorização explícita.
                   </li>
                   <li>
-                    <strong>2. Deduplicação contra SonarQube</strong>: Quando um achado de Pull Request coincide com uma issue já reportada pelo SonarQube no mesmo arquivo/linha, o `GitarReviewMapper` correlaciona ambos para evitar dupla contagem.
+                    <strong>2. Deduplicação contra MqrBridge</strong>: Quando um achado de Pull Request coincide com uma issue já reportada pelo MqrBridge no mesmo arquivo/linha, o `GitarReviewMapper` correlaciona ambos para evitar dupla contagem.
                   </li>
                   <li>
                     <strong>3. Patch em Branch Isolada (`gitar/remediation-isolated/*`)</strong>: O código-fonte original dos Softwares A e B permanece 100% intocado em modo somente-leitura.
@@ -1179,8 +1179,8 @@ export const UserGuideModule: React.FC<UserGuideModuleProps> = ({
                   'TODOS',
                   'Pontuação & Matemática',
                   'Segurança & DevSecOps',
-                  'SonarQube & SARIF',
-                  'Gitar AI & CI',
+                  'MqrBridge & SARIF',
+                  'Remediação Supervisionada & CI',
                   'Arquitetura & Performance',
                 ].map((cat) => (
                   <button

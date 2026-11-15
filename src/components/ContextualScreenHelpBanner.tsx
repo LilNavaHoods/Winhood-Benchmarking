@@ -140,25 +140,25 @@ const SCREEN_HELP_CATALOG: Record<Exclude<AppNavSection, 'user_guide'>, ScreenGu
   },
   sonar_hub: {
     stepBadge: 'SONAR HUB & DOCKER',
-    screenTitle: 'Como usar SonarQube Local via Docker, SonarCloud e Hardware Multi-Core',
+    screenTitle: 'Como usar MqrBridge Local via Docker, Nuvem MQR e Hardware Multi-Core',
     plainSummary:
-      'Guia oficial para executar o SonarQube via container Docker sem necessidade de rodar localmente no sistema, conectar ao SonarCloud na nuvem e configurar a aceleração por múltiplos núcleos de CPU para testes pesados.',
+      'Guia oficial para executar o MqrBridge via container Docker sem necessidade de rodar localmente no sistema, conectar ao Nuvem MQR na nuvem e configurar a aceleração por múltiplos núcleos de CPU para testes pesados.',
     howToSteps: [
-      '1. Na aba "Opção A: SonarQube Local", copie o comando oficial Docker e suba o container na porta 9000 com 1 clique.',
+      '1. Na aba "Opção A: MqrBridge Local", copie o comando oficial Docker e suba o container na porta 9000 com 1 clique.',
       '2. Acesse http://localhost:9000, faça login inicial com admin / admin e crie seu projeto para obter o token de acesso.',
-      '3. Na aba "Gerador SonarScanner", selecione sua stack (Node.js, Maven, Gradle, .NET) e copie o comando pronto para execução.',
+      '3. Na aba "Gerador Scanner CLI MQR", selecione sua stack (Node.js, Maven, Gradle, .NET) e copie o comando pronto para execução.',
     ],
     abInterpretationTip:
-      'Utilizar o Docker oficial isola o SonarQube em container descartável, permitindo atingir notas altas de Quality Gate sem sujar a máquina física com arquivos zip gigantes ou JDK 17 manual.',
-    guideChapterId: 'sonarqube-guide',
-    guideChapterLabel: 'SonarQube Docker & Cloud',
+      'Utilizar o Docker oficial isola o MqrBridge em container descartável, permitindo atingir notas altas de Quality Gate sem sujar a máquina física com arquivos zip gigantes ou JDK 17 manual.',
+    guideChapterId: 'mqr-bridge-guide',
+    guideChapterLabel: 'MqrBridge Docker & Cloud',
     glossaryTerms: [
       {
-        term: 'Docker Oficial SonarQube',
-        meaning: 'Container oficial (sonarqube:latest) que roda isoladamente na porta 9000 sem downloads manuais pesados no SO.',
+        term: 'Docker Oficial MqrBridge',
+        meaning: 'Container oficial (mqr-bridge:latest) que roda isoladamente na porta 9000 sem downloads manuais pesados no SO.',
       },
       {
-        term: 'SonarCloud',
+        term: 'Nuvem MQR',
         meaning: 'Plataforma oficial da Sonar em nuvem que analisa commits e pull requests diretamente via GitHub/GitLab sem usar recursos locais.',
       },
       {
@@ -169,29 +169,29 @@ const SCREEN_HELP_CATALOG: Record<Exclude<AppNavSection, 'user_guide'>, ScreenGu
   },
   tools_integrations: {
     stepBadge: 'PASSO 3 DA JORNADA',
-    screenTitle: 'Como usar SonarQube, SonarScanner, SARIF e Gitar AI',
+    screenTitle: 'Como usar MqrBridge, SonarScanner, SARIF e Remediação Supervisionada',
     plainSummary:
-      'Conecta o analisador ao ecossistema SonarQube (Servidor Local, Servidor Remoto ou SonarQube Cloud) e ao Gitar AI para revisão assistida de Pull Requests e falhas de CI com aprovação humana obrigatória.',
+      'Conecta o analisador ao ecossistema MqrBridge (Servidor Local, Servidor Remoto ou MqrBridge Cloud) e ao Remediação Supervisionada para revisão assistida de Pull Requests e falhas de CI com aprovação humana obrigatória.',
     howToSteps: [
-      '1. Na aba "Comparação Padronizada A/B (SonarQube)", clique em "Executar Comparação A/B Padronizada" para avaliar os Softwares A e B sob o mesmo Quality Gate.',
-      '2. Na aba "Gitar AI Code Review & CI", clique em "Executar Validação de Contrato Gitar AI" e aprove ou rejeite os patches propostos em branch isolada.',
+      '1. Na aba "Comparação Padronizada A/B (MqrBridge)", clique em "Executar Comparação A/B Padronizada" para avaliar os Softwares A e B sob o mesmo Quality Gate.',
+      '2. Na aba "Remediação Supervisionada & CI", clique em "Executar Validação de Contrato Remediação Supervisionada" e aprove ou rejeite os patches propostos em branch isolada.',
       '3. Na aba "Suíte de 27 Testes de Integração", execute a bateria real de 15 testes principais + 12 testes de injeção de falha.',
     ],
     abInterpretationTip:
-      'Esta tela separa claramente o que é "Métrica Nativa do SonarQube", o que é "Calculado pelo Benchmark Analyzer" e o que veio de "Relatório Externo SARIF Importado", evitando dupla contagem.',
-    guideChapterId: 'sonarqube-guide',
-    guideChapterLabel: 'SonarQube, SARIF & Gitar AI',
+      'Esta tela separa claramente o que é "Métrica Nativa do MqrBridge", o que é "Calculado pelo Benchmark Analyzer" e o que veio de "Relatório Externo SARIF Importado", evitando dupla contagem.',
+    guideChapterId: 'mqr-bridge-guide',
+    guideChapterLabel: 'MqrBridge, SARIF & Remediação Supervisionada',
     glossaryTerms: [
       {
         term: 'Quality Gate (OK / ERROR)',
-        meaning: 'Critério oficial do SonarQube que aprova (OK) ou reprova (ERROR) o código com base em vulnerabilidades, cobertura e duplicação.',
+        meaning: 'Critério oficial do MqrBridge que aprova (OK) ou reprova (ERROR) o código com base em vulnerabilidades, cobertura e duplicação.',
       },
       {
         term: 'SARIF v2.1.0',
-        meaning: 'Formato padrão internacional para importar achados de ferramentas externas (Semgrep, Gitleaks, Trivy) sem duplicar issues.',
+        meaning: 'Formato padrão internacional para importar achados de ferramentas externas (ferramentas que exportam SARIF 2.1.0) sem duplicar issues.',
       },
       {
-        term: 'Branch Isolada (Gitar AI)',
+        term: 'Branch Isolada (Remediação Supervisionada)',
         meaning: 'Patches sugeridos pela IA ficam isolados em branch separada e exigem aprovação humana, nunca alterando o código original.',
       },
     ],

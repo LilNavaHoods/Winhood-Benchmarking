@@ -1,27 +1,23 @@
-# EXTERNAL_TOOLS.md — Governança de Ferramentas Externas e Importação SARIF
+# EXTERNAL_TOOLS.md — Governança de Ingestão Externa via Padrões Abertos
 
-## 1. Documentação Oficial de Importação Externa do SonarQube
-- https://docs.sonarsource.com/sonarqube-community-build/analyzing-source-code/importing-external-issues/
-- https://docs.sonarsource.com/sonarqube-community-build/analyzing-source-code/importing-external-issues/importing-issues-from-sarif-reports
+## 1. Especificação de Padrões Abertos Suportados
+- **OASIS SARIF 2.1.0 (`Static Analysis Results Interchange Format`)**: Esquema canônico para intercâmbio de resultados de análise estática, fluxo de dados (`codeFlows`) e metadados de regras (`CWE`, `OWASP Top 10`, `CVSS`).
+- **OWASP CycloneDX 1.5 & Linux Foundation SPDX 2.3**: Formatos abertos para inventário de componentes e dependências de software (SBOM).
 
-## 2. Ferramentas Externas Compatíveis (`ExternalReportImportWorker`)
-O componente `src/workers/ExternalReportImportWorker.ts` suporta a importação de relatórios SARIF 2.1.0 e relatórios nativos para o SonarQube e para o Benchmark Analyzer:
+## 2. Categorias de Ferramentas que Exportam SARIF (`ExternalReportImportWorker`)
+O componente `src/workers/ExternalReportImportWorker.ts` suporta a ingestão de artefatos gerados por quaisquer **ferramentas que exportam SARIF 2.1.0** ou formatos abertos de cobertura:
 
-| Ferramenta | Formato | Propriedade SonarScanner | Preservação de Origem |
+| Categoria de Emissor | Formato Aberto | Propriedade de Ingestão | Preservação de Proveniência |
 | :--- | :--- | :--- | :--- |
-| **Semgrep / Opengrep** | SARIF 2.1.0 | `sonar.sarifReportPaths` | `isExternalImportedRule: true` |
-| **GitHub CodeQL** | SARIF 2.1.0 | `sonar.sarifReportPaths` | `isExternalImportedRule: true` |
-| **Gitleaks** | SARIF 2.1.0 | `sonar.sarifReportPaths` | `isExternalImportedRule: true` |
-| **Aqua Trivy** | SARIF 2.1.0 | `sonar.sarifReportPaths` | `isExternalImportedRule: true` |
-| **PyCQA Bandit** | SARIF / JSON | `sonar.python.bandit.reportPaths` | `isExternalImportedRule: true` |
-| **Astral Ruff** | SARIF / JSON | `sonar.python.ruff.reportPaths` | `isExternalImportedRule: true` |
-| **ESLint** | SARIF / JSON | `sonar.eslint.reportPaths` | `isExternalImportedRule: true` |
-| **SpotBugs** | XML Nativo | `sonar.java.spotbugs.reportPaths` | `isExternalImportedRule: true` |
-| **PMD** | SARIF / XML | `sonar.java.pmd.reportPaths` | `isExternalImportedRule: true` |
-| **Checkstyle** | SARIF / XML | `sonar.java.checkstyle.reportPaths` | `isExternalImportedRule: true` |
+| **Analisadores SAST e AST** | SARIF 2.1.0 | `winhood.sarifReportPaths` | `isExternalImportedRule: true` |
+| **Analisadores de Fluxo (Taint)** | SARIF 2.1.0 (`codeFlows`) | `winhood.sarifReportPaths` | `isExternalImportedRule: true` |
+| **Detectores de Segredos** | SARIF 2.1.0 | `winhood.sarifReportPaths` | `isExternalImportedRule: true` |
+| **Analisadores de Containers e IaC** | SARIF 2.1.0 | `winhood.sarifReportPaths` | `isExternalImportedRule: true` |
+| **Linters Estruturais Multi-Linguagem** | SARIF 2.1.0 / JSON | `winhood.sarifReportPaths` | `isExternalImportedRule: true` |
+| **Executores de Cobertura de Testes** | LCOV / Cobertura XML | `winhood.coverageReportPaths` | `sourceType: EXTERNAL_TEST_REPORT_IMPORTED` |
 
-## 3. Regra de Não-Confusão com Quality Profiles Nativos
-Achados importados de ferramentas externas possuem ciclo de vida distinto das regras nativas do SonarQube:
-- Não são gerenciados pelos Quality Profiles nativos do SonarQube;
+## 3. Regra de Não-Confusão com Perfis Nativos do WinHood
+Achados importados de ferramentas que exportam SARIF possuem ciclo de vida e rastreabilidade estritamente separados das regras nativas do WinHood:
+- Nunca são confundidos com métricas calculadas nativamente pelo motor do WinHood (`WINHOOD_NATIVE`);
 - Mantêm registrados no banco principal: `externalOriginTool`, `externalOriginVersion`, `originalRuleId`, `severity`, `confidence`, `filePath`, `lineNumber` e `evidenceSha256`;
-- São deduplicados determinísticamente para evitar inflar a contagem de vulnerabilidades ou code smells.
+- São deduplicados deterministicamente por chave canônica (`filePath + lineNumber + cwe + category`) preservando a cadeia de evidências.

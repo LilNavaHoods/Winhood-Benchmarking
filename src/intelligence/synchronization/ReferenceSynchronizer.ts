@@ -98,8 +98,8 @@ export class ReferenceSynchronizer {
       params?.sources && params.sources.length > 0
         ? params.sources
         : [
-            'SONARQUBE_SERVER',
-            'SONARQUBE_CLOUD',
+            'MQR_BRIDGE_SERVER',
+            'MQR_BRIDGE_CLOUD',
             'OWASP_BENCHMARK',
             'OSV_DEV',
             'NVD_NIST',
@@ -338,7 +338,7 @@ export class ReferenceSynchronizer {
           const sha256 = crypto.createHash('sha256').update(JSON.stringify(updatedBase), 'utf8').digest('hex');
           this.registry.saveSnapshot({ ...updatedBase, sha256 });
           liveFetchedSources.push(sourceKey);
-        } else if (sourceKey === 'SONARQUBE_CLOUD') {
+        } else if (sourceKey === 'MQR_BRIDGE_CLOUD') {
           const { json: scData, etag } = await fetchJsonWithHeaders(
             'https://sonarcloud.io/api/rules/search?ps=10&languages=ts',
             undefined,
@@ -362,7 +362,7 @@ export class ReferenceSynchronizer {
           const sha256 = crypto.createHash('sha256').update(JSON.stringify(updatedBase), 'utf8').digest('hex');
           this.registry.saveSnapshot({ ...updatedBase, sha256 });
           liveFetchedSources.push(sourceKey);
-        } else if (sourceKey === 'SONARQUBE_SERVER') {
+        } else if (sourceKey === 'MQR_BRIDGE_SERVER') {
           const baseServer = stripTrailingSlashes(params?.sonarServerUrl || 'http://127.0.0.1:9000');
           const headers: Record<string, string> = {};
           if (params?.sonarToken) {

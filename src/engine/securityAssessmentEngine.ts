@@ -39,8 +39,8 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
     supportedLanguages: string[];
   }> = [
     {
-      id: 'sonarqube-quality',
-      name: 'SonarQube Community Build (Bridge + AST)',
+      id: 'mqr-bridge-quality',
+      name: 'MqrBridge Community Build (Bridge + AST)',
       vendor: 'SonarSource / WinHood',
       version: '26.11.0',
       category: 'CODE_QUALITY',
@@ -51,11 +51,11 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
         const scanner = ToolAvailabilityService.checkBinaryInPath('sonar-scanner');
         return {
           detected: scanner.detected,
-          configured: Boolean(process.env.SONARQUBE_URL && process.env.SONAR_TOKEN),
+          configured: Boolean(process.env.MQR_BRIDGE_URL && process.env.SONAR_TOKEN),
           detectedVersion: scanner.versionOutput,
         };
       },
-      description: 'Integração real com instância SonarQube Server/Cloud e executável sonar-scanner.',
+      description: 'Integração real com instância MqrBridge Server/Cloud e executável sonar-scanner.',
       supportedLanguages: ['TypeScript', 'JavaScript', 'Python', 'Java', 'C#', 'SQL'],
     },
     {

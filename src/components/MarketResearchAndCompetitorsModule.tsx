@@ -453,7 +453,7 @@ export const MarketResearchAndCompetitorsModule: React.FC<
                 type="text"
                 value={purposeSearch}
                 onChange={(e) => setPurposeSearch(e.target.value)}
-                placeholder="Ex.: KDBX, AES-256-GCM, SAST, SonarQube, SQLite, Zero-Knowledge, OIDC..."
+                placeholder="Ex.: KDBX, AES-256-GCM, SAST, MqrBridge, SQLite, Zero-Knowledge, OIDC..."
                 className="flex-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:border-[#31d6c4]"
               />
               <button

@@ -1,0 +1,195 @@
+{
+  "schemaVersion": "winhood-audit-report/v4.4.0",
+  "runId": "cli-report-run",
+  "projectName": "gate",
+  "startedAt": "2026-11-14T00:00:00.000Z",
+  "completedAt": "2026-11-14T00:00:00.000Z",
+  "executiveSummary": "Auditoria independente Modo MQR concluída sobre 2 arquivo(s) elegíveis (1 apontamentos). Decisão do Quality Gate: APPROVED.",
+  "qualityGate": {
+    "gateId": "winhood-standard-v2",
+    "gateName": "WinHood Standard Engineering Gate",
+    "gateVersion": "2.1.0",
+    "gateHash": "3cd178dbbff657170f5a9a5d6c1cdf81f29a2de679ecaed3347d830eb29a166e",
+    "decision": "INCONCLUSIVE",
+    "cliExitCode": 2,
+    "evaluatedAt": "2026-11-15T13:40:12.529Z",
+    "conditionsMet": 3,
+    "conditionsFailed": 0,
+    "conditionsInconclusive": 2,
+    "conditions": [
+      {
+        "id": "cond-no-blocker",
+        "metricKey": "blocker_findings",
+        "label": "Achados BLOCKER",
+        "operator": "EQ",
+        "threshold": 0,
+        "actualValue": 0,
+        "passed": true,
+        "inconclusive": false,
+        "severityOnFail": "BLOCKER",
+        "reason": "Achados BLOCKER: 0 atende EQ 0."
+      },
+      {
+        "id": "cond-no-critical",
+        "metricKey": "critical_findings",
+        "label": "Achados CRITICAL",
+        "operator": "EQ",
+        "threshold": 0,
+        "actualValue": 0,
+        "passed": true,
+        "inconclusive": false,
+        "severityOnFail": "BLOCKER",
+        "reason": "Achados CRITICAL: 0 atende EQ 0."
+      },
+      {
+        "id": "cond-no-secrets",
+        "metricKey": "secrets_exposed",
+        "label": "Segredos Expostos",
+        "operator": "EQ",
+        "threshold": 0,
+        "actualValue": 0,
+        "passed": true,
+        "inconclusive": false,
+        "severityOnFail": "BLOCKER",
+        "reason": "Segredos Expostos: 0 atende EQ 0."
+      },
+      {
+        "id": "cond-min-coverage",
+        "metricKey": "scope_coverage_percent",
+        "label": "Cobertura de Escopo (%)",
+        "operator": "GTE",
+        "threshold": 50,
+        "actualValue": null,
+        "passed": false,
+        "inconclusive": true,
+        "severityOnFail": "RESERVATION",
+        "reason": "Métrica \"Cobertura de Escopo (%)\" não foi mensurada (NOT_MEASURED)."
+      },
+      {
+        "id": "cond-min-confidence",
+        "metricKey": "evidence_confidence_score",
+        "label": "Confiança Mínima da Evidência (1=LOW,2=MED,3=HIGH)",
+        "operator": "GTE",
+        "threshold": 2,
+        "actualValue": null,
+        "passed": false,
+        "inconclusive": true,
+        "severityOnFail": "RESERVATION",
+        "reason": "Métrica \"Confiança Mínima da Evidência (1=LOW,2=MED,3=HIGH)\" não foi mensurada (NOT_MEASURED)."
+      }
+    ],
+    "summary": "Gate \"WinHood Standard Engineering Gate\" v2.1.0 => INCONCLUSIVE (exit=2; 3/5 condições atendidas)."
+  },
+  "scoreCards": [],
+  "findingsCount": 1,
+  "findings": [
+    {
+      "id": "f-cli-run-cli-sw-0-69564ff4",
+      "runId": "cli-run",
+      "softwareId": "cli-sw",
+      "softwareName": "gate",
+      "softwareVersion": "1.0.0",
+      "toolId": "external-sarif",
+      "toolName": "WinHood Compiler AST Analyzer",
+      "toolVersion": "4.3.0",
+      "category": "CODE_QUALITY",
+      "originalRuleId": "ts:S4204",
+      "title": "Uso de tipo explícito \"any\" enfraquece segurança de tipos",
+      "description": "Uso de any desabilita verificação estática do compilador TypeScript na fronteira de dados.",
+      "severity": "LOW",
+      "confidence": "HIGH",
+      "cleanCodeAttribute": "CONSISTENT",
+      "mqrImpacts": [
+        {
+          "softwareQuality": "MAINTAINABILITY",
+          "benchmarkCategory": "code_quality",
+          "severity": "LOW",
+          "scoreDeduction": -0.08,
+          "rationale": "Code smell (ts:S4204) em QualityGateEngine.ts:640.",
+          "category": "code_quality",
+          "qualityAttribute": "MAINTAINABILITY"
+        }
+      ],
+      "isNewCode": true,
+      "filePath": "QualityGateEngine.ts",
+      "lineNumber": 640,
+      "endLineNumber": 640,
+      "columnStart": 1,
+      "columnEnd": 21,
+      "component": "QualityGateEngine.ts",
+      "snippet": "} catch (err: any) {",
+      "contextBefore": [
+        "            : `Webhook respondido com HTTP ${statusCode}.`,",
+        "      };"
+      ],
+      "contextAfter": [
+        "      return {",
+        "        delivered: false,"
+      ],
+      "whyItIsAnIssue": "O arquivo QualityGateEngine.ts (linha 640) contém o padrão [ts:S4204] no trecho `} catch (err: any) {`. Uso de any desabilita verificação estática do compilador TypeScript na fronteira de dados. Isso viola o atributo Clean Code CONSISTENT e reduz diretamente a pontuação das categorias afetadas (code_quality: -0.08 pts (MAINTAINABILITY/LOW)).",
+      "evaluationImpactSummary": "code_quality: -0.08 pts (MAINTAINABILITY/LOW)",
+      "executionFlows": [],
+      "compliantCodeExample": "// Correção recomendada (ts:S4204):\n// Substituir any por interface tipada ou unknown com type guard.",
+      "remediationEffortMinutes": 5,
+      "cwe": "CWE-710",
+      "remediation": "Substituir any por interface tipada ou unknown com type guard.",
+      "evidenceSha256": "cbf0bbdc0a339c8fa1aa87b26c87a40ba37c85f6a63f1b65e3bc126111707b20",
+      "validationStatus": "VALIDATED",
+      "collectedAt": "2026-11-14T00:00:00.000Z"
+    }
+  ],
+  "evidenceVerification": {
+    "valid": true,
+    "verificationState": "VERIFIED",
+    "verifiedAt": "2026-11-14T00:00:00.000Z",
+    "tamperedIndices": [],
+    "message": "Signed CLI Evidence Verified"
+  },
+  "signedManifest": {
+    "manifestId": "manifest-cli-report",
+    "runId": "cli-report-run",
+    "projectId": "cli-proj",
+    "algorithmVersion": "4.3.0",
+    "engineVersion": "4.3.0",
+    "ruleCatalogSha256": "76581955caed101b6654ca40441c53724bc334cb19e7aa67b654b4ccaa35ae9b",
+    "rulePackVersions": {
+      "core": "4.3.0"
+    },
+    "artifactHashes": {
+      "workspaceCodeSha256": "464f02e6cf12f68babc7195f1bad6fff624e652f885443d772fec083a61bf152",
+      "deterministicDigestSha256": "7b2a25b773975dfb9db37b9c7604bf2ec60631f3531c4dc8a6fccd5ab8371fcc",
+      "cyclonedxSbomSha256": "4d5502b33656eeee114803281e1ef31c5402daf675fd659c808ba95d8fc01a5f",
+      "spdxSbomSha256": "94e5191a26889ef7afef0da3f4ed711d517b86bf0db1fc15425b1dbbae34deb5",
+      "gateHashSha256": "3cd178dbbff657170f5a9a5d6c1cdf81f29a2de679ecaed3347d830eb29a166e"
+    },
+    "merkleOrChainRootSha256": "7b2a25b773975dfb9db37b9c7604bf2ec60631f3531c4dc8a6fccd5ab8371fcc",
+    "manifestPayloadSha256": "464f02e6cf12f68babc7195f1bad6fff624e652f885443d772fec083a61bf152",
+    "hmacSha256Signature": "464f02e6cf12f68babc7195f1bad6fff624e652f885443d772fec083a61bf152",
+    "signatureAlgorithm": "HMAC-SHA256",
+    "keyId": "winhood-cli-key-v4",
+    "signedAt": "2026-11-14T00:00:00.000Z",
+    "verificationState": "VERIFIED"
+  },
+  "provenanceFooter": {
+    "engineVersion": "4.3.0",
+    "ruleCatalogVersion": "4.3.0",
+    "ruleCatalogSha256": "76581955caed101b6654ca40441c53724bc334cb19e7aa67b654b4ccaa35ae9b",
+    "codeHashSha256": "464f02e6cf12f68babc7195f1bad6fff624e652f885443d772fec083a61bf152",
+    "artifactHashes": {
+      "findingsDigestSha256": "a36858a69b72e8a3ff2ac87bd04fc122ebc9caac9df4effb1f306356a77f3a30",
+      "gateDecisionSha256": "3cd178dbbff657170f5a9a5d6c1cdf81f29a2de679ecaed3347d830eb29a166e",
+      "workspaceCodeSha256": "464f02e6cf12f68babc7195f1bad6fff624e652f885443d772fec083a61bf152",
+      "deterministicDigestSha256": "7b2a25b773975dfb9db37b9c7604bf2ec60631f3531c4dc8a6fccd5ab8371fcc",
+      "cyclonedxSbomSha256": "4d5502b33656eeee114803281e1ef31c5402daf675fd659c808ba95d8fc01a5f",
+      "spdxSbomSha256": "94e5191a26889ef7afef0da3f4ed711d517b86bf0db1fc15425b1dbbae34deb5",
+      "gateHashSha256": "3cd178dbbff657170f5a9a5d6c1cdf81f29a2de679ecaed3347d830eb29a166e"
+    },
+    "appliedGateId": "winhood-standard-v2",
+    "appliedGateVersion": "2.1.0",
+    "appliedGateHashSha256": "3cd178dbbff657170f5a9a5d6c1cdf81f29a2de679ecaed3347d830eb29a166e",
+    "reportContentSha256": "e80def7f3ece7169f29bb193b15040c26aee52c1e7dd6a84a0148e138b50cb74",
+    "hmacAlgorithm": "HMAC-SHA256",
+    "hmacSignature": "e86c5895c766c315094764a99772d5575fe90bcf7b946b85e1f3aa59e407e413",
+    "generatedAt": "2026-11-14T00:00:00.000Z"
+  }
+}

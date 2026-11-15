@@ -35,9 +35,9 @@ export interface SarifExternalReportPayload {
 
 /**
  * ExternalReportImportWorker (Seção 7 e Seção 12)
- * Importa relatórios externos compatíveis (SARIF 2.1.0 / sensores nativos) para o SonarQube
+ * Importa relatórios externos compatíveis (SARIF 2.1.0 / sensores nativos) para o MqrBridge
  * e para o mecanismo nativo do Benchmark Analyzer usando enrichLegacyOrExternalFinding.
- * CRÍTICO: Nunca apresenta achados externos importados como regras próprias do SonarQube
+ * CRÍTICO: Nunca apresenta achados externos importados como regras próprias do MqrBridge
  * ou como integrantes automáticos dos Quality Profiles.
  */
 export class ExternalReportImportWorker {
@@ -161,7 +161,7 @@ export class ExternalReportImportWorker {
         lineNumber: item.lineNumber,
         message: item.message,
         effortMinutes: enrichedNormalized.remediationEffortMinutes,
-        remediationGuidance: `Achado importado via SARIF da ferramenta externa ${params.payload.toolName} (v${params.payload.toolVersion}). Não pertence ao Quality Profile nativo do SonarQube.`,
+        remediationGuidance: `Achado importado via SARIF da ferramenta externa ${params.payload.toolName} (v${params.payload.toolVersion}). Não pertence ao Quality Profile nativo do MqrBridge.`,
         evidenceSnippet: item.snippet,
         evidenceSha256,
       };

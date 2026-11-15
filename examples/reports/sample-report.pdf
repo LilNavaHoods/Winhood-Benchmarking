@@ -1,0 +1,277 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [5 0 R 7 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 3854 >>
+stream
+BT
+/F1 10 Tf
+42 752 Td
+/F2 14 Tf
+(WINHOOD INDEPENDENT SOFTWARE AUDIT & BENCHMARKING REPORT \(MQR MODE\)) Tj
+0 -15 Td
+/F1 10 Tf
+(Run ID: cli-report-run | Project: gate | Algorithm: 4.3.0) Tj
+0 -13 Td
+/F1 10 Tf
+(Started: 2026-11-14T00:00:00.000Z | Completed: 2026-11-14T00:00:00.000Z) Tj
+0 -13 Td
+/F1 10 Tf
+() Tj
+0 -13 Td
+/F2 12 Tf
+(1. QUALITY GATE DECISION & VERSIONING) Tj
+0 -15 Td
+/F1 10 Tf
+(------------------------------------------------------------------------------------) Tj
+0 -13 Td
+/F2 10 Tf
+(Gate: WinHood Standard Engineering Gate \(winhood-standard-v2 v2.1.0\)) Tj
+0 -13 Td
+/F1 10 Tf
+(Decision: INCONCLUSIVE | CLI Exit Code: 2) Tj
+0 -13 Td
+/F1 10 Tf
+(Gate Hash \(SHA-256\): 3cd178dbbff657170f5a9a5d6c1cdf81f29a2de679ecaed3347d830eb29a166e) Tj
+0 -13 Td
+/F1 10 Tf
+(  [PASS] Achados BLOCKER: actual=0 \(EQ 0\)) Tj
+0 -13 Td
+/F1 10 Tf
+(  [PASS] Achados CRITICAL: actual=0 \(EQ 0\)) Tj
+0 -13 Td
+/F1 10 Tf
+(  [PASS] Segredos Expostos: actual=0 \(EQ 0\)) Tj
+0 -13 Td
+/F1 10 Tf
+(  [INCONCLUSIVE] Cobertura de Escopo \(%\): actual=NOT_MEASURED \(GTE 50\)) Tj
+0 -13 Td
+/F1 10 Tf
+(  [INCONCLUSIVE] Confianca Minima da Evidencia \(1=LOW,2=MED,3=HIGH\): actual=NOT_MEASURED) Tj
+0 -13 Td
+/F1 10 Tf
+(\(GTE 2\)) Tj
+0 -13 Td
+/F1 10 Tf
+() Tj
+0 -13 Td
+/F2 12 Tf
+(2. EXECUTIVE SUMMARY & SCORECARDS) Tj
+0 -15 Td
+/F1 10 Tf
+(------------------------------------------------------------------------------------) Tj
+0 -13 Td
+/F1 10 Tf
+(Auditoria independente Modo MQR concluida sobre 2 arquivo\(s\) elegiveis \(1 apontamentos\).) Tj
+0 -13 Td
+/F1 10 Tf
+(Decisao do Quality Gate: APPROVED.) Tj
+0 -13 Td
+/F1 10 Tf
+() Tj
+0 -13 Td
+/F2 12 Tf
+(3. SIGNED EVIDENCE PROVENANCE & ARTIFACT HASHES) Tj
+0 -15 Td
+/F1 10 Tf
+(------------------------------------------------------------------------------------) Tj
+0 -13 Td
+/F1 10 Tf
+(Manifest ID: manifest-cli-report | Signature Algorithm: HMAC-SHA256) Tj
+0 -13 Td
+/F1 10 Tf
+(Verification State: VERIFIED | Valid: true) Tj
+0 -13 Td
+/F1 10 Tf
+(Engine Version: 4.3.0 | Rule Catalog SHA-256:) Tj
+0 -13 Td
+/F1 10 Tf
+(76581955caed101b6654ca40441c53724bc334cb19e7aa67b654b4ccaa35ae9b) Tj
+0 -13 Td
+/F1 10 Tf
+(Root Chain SHA-256: 7b2a25b773975dfb9db37b9c7604bf2ec60631f3531c4dc8a6fccd5ab8371fcc) Tj
+0 -13 Td
+/F1 10 Tf
+(Manifest Payload SHA-256:) Tj
+0 -13 Td
+/F1 10 Tf
+(464f02e6cf12f68babc7195f1bad6fff624e652f885443d772fec083a61bf152) Tj
+0 -13 Td
+/F1 10 Tf
+(  Artifact [workspaceCodeSha256]:) Tj
+0 -13 Td
+/F1 10 Tf
+(464f02e6cf12f68babc7195f1bad6fff624e652f885443d772fec083a61bf152) Tj
+0 -13 Td
+/F1 10 Tf
+(  Artifact [deterministicDigestSha256]:) Tj
+0 -13 Td
+/F1 10 Tf
+(7b2a25b773975dfb9db37b9c7604bf2ec60631f3531c4dc8a6fccd5ab8371fcc) Tj
+0 -13 Td
+/F1 10 Tf
+(  Artifact [cyclonedxSbomSha256]:) Tj
+0 -13 Td
+/F1 10 Tf
+(4d5502b33656eeee114803281e1ef31c5402daf675fd659c808ba95d8fc01a5f) Tj
+0 -13 Td
+/F1 10 Tf
+(  Artifact [spdxSbomSha256]:) Tj
+0 -13 Td
+/F1 10 Tf
+(94e5191a26889ef7afef0da3f4ed711d517b86bf0db1fc15425b1dbbae34deb5) Tj
+0 -13 Td
+/F1 10 Tf
+(  Artifact [gateHashSha256]:) Tj
+0 -13 Td
+/F1 10 Tf
+(3cd178dbbff657170f5a9a5d6c1cdf81f29a2de679ecaed3347d830eb29a166e) Tj
+0 -13 Td
+/F1 10 Tf
+() Tj
+0 -13 Td
+/F2 12 Tf
+(4. COMPLIANCE TRACEABILITY MATRIX \(NON-CERTIFICATION\)) Tj
+0 -15 Td
+/F1 10 Tf
+(------------------------------------------------------------------------------------) Tj
+0 -13 Td
+/F1 10 Tf
+(TRACEABILITY_ONLY_NOT_CERTIFICATION: Este mapeamento associa achados tecnicos aos) Tj
+0 -13 Td
+/F1 10 Tf
+(controles aplicaveis de OWASP Top 10, CWE Top 25, PCI DSS v4.0 e ISO/IEC 27001:2022) Tj
+0 -13 Td
+/F1 10 Tf
+(apenas para rastreabilidade de engenharia e auditoria. Nao representa nem substitui) Tj
+0 -13 Td
+/F1 10 Tf
+(certificacao ou auditoria formal.) Tj
+0 -13 Td
+/F2 10 Tf
+(Framework OWASP_TOP_10_2021: 0/9 controls with findings in analyzed scope) Tj
+0 -13 Td
+(WinHood Signed Audit Report - Page 1/2 | SHA256:e80def7f3ece7169) Tj
+ET
+endstream
+endobj
+7 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 8 0 R >>
+endobj
+8 0 obj
+<< /Length 2607 >>
+stream
+BT
+/F1 10 Tf
+42 752 Td
+/F2 10 Tf
+(Framework CWE_TOP_25: 0/9 controls with findings in analyzed scope) Tj
+0 -13 Td
+/F2 10 Tf
+(Framework PCI_DSS_V4: 0/4 controls with findings in analyzed scope) Tj
+0 -13 Td
+/F2 10 Tf
+(Framework ISO_27001_2022: 0/4 controls with findings in analyzed scope) Tj
+0 -13 Td
+/F1 10 Tf
+() Tj
+0 -13 Td
+/F2 12 Tf
+(5. FINDINGS SUMMARY \(TOP 30 BY SEVERITY\)) Tj
+0 -15 Td
+/F1 10 Tf
+(------------------------------------------------------------------------------------) Tj
+0 -13 Td
+/F1 10 Tf
+([LOW] ts:S4204 \(CWE-710\) - QualityGateEngine.ts:640 | Uso de tipo explicito "any") Tj
+0 -13 Td
+/F1 10 Tf
+(enfraquece seguranca de tipos) Tj
+0 -13 Td
+/F1 10 Tf
+() Tj
+0 -13 Td
+/F2 12 Tf
+(6. PROVENANCE FOOTER & CRYPTOGRAPHIC REPORT SIGNATURE) Tj
+0 -15 Td
+/F1 10 Tf
+(------------------------------------------------------------------------------------) Tj
+0 -13 Td
+/F2 10 Tf
+(Provenance-Engine-Version: 4.3.0) Tj
+0 -13 Td
+/F1 10 Tf
+(Provenance-RuleCatalog-Version: 4.3.0) Tj
+0 -13 Td
+/F1 10 Tf
+(Provenance-RuleCatalog-SHA256: 76581955caed101b6654ca40441c53724bc334cb19e7aa67b654b4ccaa35ae9b) Tj
+0 -13 Td
+/F1 10 Tf
+(Provenance-Code-SHA256: 464f02e6cf12f68babc7195f1bad6fff624e652f885443d772fec083a61bf152) Tj
+0 -13 Td
+/F1 10 Tf
+(Provenance-Applied-Gate: winhood-standard-v2 v2.1.0) Tj
+0 -13 Td
+/F1 10 Tf
+(Provenance-Gate-SHA256: 3cd178dbbff657170f5a9a5d6c1cdf81f29a2de679ecaed3347d830eb29a166e) Tj
+0 -13 Td
+/F1 10 Tf
+(Provenance-Artifact-findingsDigestSha256: a36858a69b72e8a3ff2ac87bd04fc122ebc9caac9df4effb1f306356a77f3a30) Tj
+0 -13 Td
+/F1 10 Tf
+(Provenance-Artifact-gateDecisionSha256: 3cd178dbbff657170f5a9a5d6c1cdf81f29a2de679ecaed3347d830eb29a166e) Tj
+0 -13 Td
+/F1 10 Tf
+(Provenance-Artifact-workspaceCodeSha256: 464f02e6cf12f68babc7195f1bad6fff624e652f885443d772fec083a61bf152) Tj
+0 -13 Td
+/F1 10 Tf
+(Provenance-Artifact-deterministicDigestSha256: 7b2a25b773975dfb9db37b9c7604bf2ec60631f3531c4dc8a6fccd5ab8371fcc) Tj
+0 -13 Td
+/F1 10 Tf
+(Provenance-Artifact-cyclonedxSbomSha256: 4d5502b33656eeee114803281e1ef31c5402daf675fd659c808ba95d8fc01a5f) Tj
+0 -13 Td
+/F1 10 Tf
+(Provenance-Artifact-spdxSbomSha256: 94e5191a26889ef7afef0da3f4ed711d517b86bf0db1fc15425b1dbbae34deb5) Tj
+0 -13 Td
+/F1 10 Tf
+(Provenance-Artifact-gateHashSha256: 3cd178dbbff657170f5a9a5d6c1cdf81f29a2de679ecaed3347d830eb29a166e) Tj
+0 -13 Td
+/F2 10 Tf
+(Report-SHA256: e80def7f3ece7169f29bb193b15040c26aee52c1e7dd6a84a0148e138b50cb74) Tj
+0 -13 Td
+/F2 10 Tf
+(Report-HMAC-SHA256: e86c5895c766c315094764a99772d5575fe90bcf7b946b85e1f3aa59e407e413) Tj
+0 -13 Td
+(WinHood Signed Audit Report - Page 2/2 | SHA256:e80def7f3ece7169) Tj
+ET
+endstream
+endobj
+xref
+0 9
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000121 00000 n 
+0000000191 00000 n 
+0000000266 00000 n 
+0000000402 00000 n 
+0000004308 00000 n 
+0000004444 00000 n 
+trailer
+<< /Size 9 /Root 1 0 R >>
+startxref
+7103
+%%EOF

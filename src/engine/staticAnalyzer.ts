@@ -1075,7 +1075,7 @@ export function executeRealStaticAnalysisOnSource(
         });
       }
 
-      // 3. Code Quality Rules (SonarQube / Ruff / ESLint Static Rules)
+      // 3. Code Quality Rules (MqrBridge / Ruff / ESLint Static Rules)
       const hasEmptyCatchHit = isBabelAst
         ? Boolean(lineAstRules?.has('ts:S2486'))
         : !isCommentLine && /catch\s*\([^)]*\)\s*\{\s*\}|except\s*:\s*pass/.test(trimmed);
@@ -1103,8 +1103,8 @@ export function executeRealStaticAnalysisOnSource(
           softwareId,
           softwareName,
           softwareVersion,
-          toolId: 'sonarqube-quality',
-          toolName: 'SonarQube Static Analyzer',
+          toolId: 'mqr-bridge-quality',
+          toolName: 'MqrBridge Static Analyzer',
           toolVersion: '10.7.0',
           category: 'CODE_QUALITY',
           originalRuleId: 'sonar.S2486.empty-catch-block',
@@ -1155,8 +1155,8 @@ export function executeRealStaticAnalysisOnSource(
           softwareId,
           softwareName,
           softwareVersion,
-          toolId: 'sonarqube-quality',
-          toolName: 'SonarQube Static Analyzer',
+          toolId: 'mqr-bridge-quality',
+          toolName: 'MqrBridge Static Analyzer',
           toolVersion: '10.7.0',
           category: 'CODE_QUALITY',
           originalRuleId: 'typescript.S4325.no-explicit-any',
@@ -1205,8 +1205,8 @@ export function executeRealStaticAnalysisOnSource(
           softwareId,
           softwareName,
           softwareVersion,
-          toolId: 'sonarqube-quality',
-          toolName: 'SonarQube Static Analyzer',
+          toolId: 'mqr-bridge-quality',
+          toolName: 'MqrBridge Static Analyzer',
           toolVersion: '10.7.0',
           category: 'CODE_QUALITY',
           originalRuleId: 'sonar.S1135.unfinished-todo',
@@ -1748,7 +1748,7 @@ export function executeRealStaticAnalysisOnSource(
   const adapterDefs = [
     { id: 'opengrep-sast', name: 'WinHood Native SAST (Opengrep/Semgrep Ruleset)', version: '4.0.0', format: 'SARIF_2_1_0' },
     { id: 'gitleaks-secrets', name: 'WinHood Native Secret Scanner (Gitleaks Ruleset)', version: '4.0.0', format: 'SARIF_2_1_0' },
-    { id: 'sonarqube-quality', name: 'WinHood Native Quality & Complexity Analyzer (Sonar MQR)', version: '4.0.0', format: 'SARIF_2_1_0' },
+    { id: 'mqr-bridge-quality', name: 'WinHood Native Quality & Complexity Analyzer (Sonar MQR)', version: '4.0.0', format: 'SARIF_2_1_0' },
     { id: 'syft-grype-sca', name: 'WinHood Native SCA & Manifest Inspector', version: '4.0.0', format: 'CYCLONEDX_1_5' },
     { id: 'archunit-cruiser', name: 'WinHood Native Architecture Graph Analyzer', version: '4.0.0', format: 'ARCH_GRAPH_JSON' },
     { id: 'sqlfluff-db', name: 'WinHood Native SQL & Schema Auditor', version: '4.0.0', format: 'SARIF_2_1_0' },

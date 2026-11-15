@@ -1,7 +1,7 @@
 {
-  "name": "react-example",
+  "name": "winhood-benchmarking",
   "private": true,
-  "version": "0.0.0",
+  "version": "4.4.0",
   "type": "module",
   "bin": {
     "winhood": "./cli/winhood-cli.ts"
@@ -18,13 +18,49 @@
     "preview": "vite preview",
     "clean": "rm -rf dist dist-desktop server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/engine/analyzer.test.ts src/analyzers/analyzers.test.ts src/analyzers/pluginsAndIac.test.ts src/gate/gateAndCompliance.test.ts src/cli/cliAndApi.test.ts src/intelligence/intelligence.test.ts src/security/security.test.ts src/integrations/sonarqube/sonarcloud.test.ts src/desktop/desktop.test.ts",
-    "test:coverage": "node --experimental-test-coverage --import tsx --test src/engine/analyzer.test.ts src/analyzers/analyzers.test.ts src/analyzers/pluginsAndIac.test.ts src/gate/gateAndCompliance.test.ts src/cli/cliAndApi.test.ts src/intelligence/intelligence.test.ts src/security/security.test.ts src/integrations/sonarqube/sonarcloud.test.ts src/desktop/desktop.test.ts",
-    "test:unit": "tsx --test src/engine/analyzer.test.ts src/analyzers/analyzers.test.ts src/analyzers/pluginsAndIac.test.ts src/gate/gateAndCompliance.test.ts src/cli/cliAndApi.test.ts src/intelligence/intelligence.test.ts src/integrations/sonarqube/sonarcloud.test.ts",
+    "test": "tsx --test src/engine/analyzer.test.ts src/analyzers/analyzers.test.ts src/analyzers/pluginsAndIac.test.ts src/gate/gateAndCompliance.test.ts src/cli/cliAndApi.test.ts src/intelligence/intelligence.test.ts src/security/security.test.ts src/integrations/mqr-bridge/mqrMethodology.test.ts src/desktop/desktop.test.ts",
+    "test:coverage": "node scripts/run-coverage-gate.mjs",
+    "test:unit": "tsx --test src/engine/analyzer.test.ts src/analyzers/analyzers.test.ts src/analyzers/pluginsAndIac.test.ts src/gate/gateAndCompliance.test.ts src/cli/cliAndApi.test.ts src/intelligence/intelligence.test.ts src/integrations/mqr-bridge/mqrMethodology.test.ts",
     "test:security": "tsx --test src/security/security.test.ts",
-    "test:sonarcloud": "tsx --test src/integrations/sonarqube/sonarcloud.test.ts",
+    "test:mqr": "tsx --test src/integrations/mqr-bridge/mqrMethodology.test.ts",
     "test:desktop": "tsx --test src/desktop/desktop.test.ts",
     "test:golden": "tsx --test src/intelligence/intelligence.test.ts"
+  },
+  "c8": {
+    "check-coverage": true,
+    "lines": 80,
+    "functions": 80,
+    "branches": 75,
+    "reporter": ["text", "html", "json-summary"],
+    "report-dir": "coverage",
+    "thresholds": {
+      "lines": 80,
+      "functions": 80,
+      "branches": 75,
+      "src/scoring/**": {
+        "lines": 95,
+        "functions": 95,
+        "branches": 95
+      },
+      "src/evidence/**": {
+        "lines": 95,
+        "functions": 95,
+        "branches": 95
+      },
+      "src/comparability/**": {
+        "lines": 95,
+        "functions": 95,
+        "branches": 95
+      }
+    }
+  },
+  "nyc": {
+    "check-coverage": true,
+    "lines": 80,
+    "functions": 80,
+    "branches": 75,
+    "reporter": ["text", "html", "json-summary"],
+    "report-dir": "coverage"
   },
   "dependencies": {
     "@babel/parser": "^8.1.2",

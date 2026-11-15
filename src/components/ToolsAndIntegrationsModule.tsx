@@ -64,7 +64,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
     javaAvailable: boolean;
     javaVersion: string | null;
     vmMaxMapCount: number;
-    meetsSonarQubeLocalRequirements: boolean;
+    meetsMqrBridgeLocalRequirements: boolean;
     blockingReasons: string[];
     recommendations: string[];
   } | null>(null);
@@ -85,14 +85,14 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
     sizeKb: number;
   }>({ entriesCount: 0, totalHits: 0, sizeKb: 0 });
 
-  // Form states for SonarQube Local & Remote
+  // Form states for MqrBridge Local & Remote
   const [localPort, setLocalPort] = useState<number>(9000);
   const [localToken, setLocalToken] = useState<string>('');
   const [remoteUrl, setRemoteUrl] = useState<string>('');
-  const [remoteName, setRemoteName] = useState<string>('SonarQube Community Build Remoto');
+  const [remoteName, setRemoteName] = useState<string>('MqrBridge Community Build Remoto');
   const [remoteToken, setRemoteToken] = useState<string>('');
 
-  // Form state for SonarQube Cloud
+  // Form state for MqrBridge Cloud
   const [cloudOrg, setCloudOrg] = useState<string>('');
   const [cloudToken, setCloudToken] = useState<string>('');
   const [cloudConsent, setCloudConsent] = useState<boolean>(false);
@@ -102,7 +102,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
   const [vscodeServerUrl, setVscodeServerUrl] = useState<string>('http://localhost:9000');
   const [vscodeConsent, setVscodeConsent] = useState<boolean>(false);
 
-  // Form state for Gitar AI
+  // Form state for Remediação Supervisionada
   const [gitarProvider, setGitarProvider] = useState<GitProviderType>('GITHUB');
   const [gitarApiUrl, setGitarApiUrl] = useState<string>('https://api.gitar.ai/v1');
   const [gitarToken, setGitarToken] = useState<string>('');
@@ -170,14 +170,14 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
   }) => {
     if (params.mode === 'CLOUD' && !cloudConsent) {
       onNotify(
-        'Para conectar ao SonarQube Cloud (SaaS externo), marque a autorização explícita de envio de metadados.',
+        'Para conectar ao MqrBridge Cloud (SaaS externo), marque a autorização explícita de envio de metadados.',
         'error'
       );
       return;
     }
     setBusyAction(`probe-${params.instanceId}`);
     try {
-      const res = await fetch('/api/sonarqube/probe', {
+      const res = await fetch('/api/mqr-bridge/probe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(params),
@@ -190,18 +190,18 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
       const st = data.instance?.connectionState;
       if (st === 'READY' || st === 'CONNECTED') {
         onNotify(
-          `Conexão verificada (${st}): SonarQube v${data.instance.version} respondeu com sucesso!`,
+          `Conexão verificada (${st}): MqrBridge v${data.instance.version} respondeu com sucesso!`,
           'success'
         );
       } else {
         onNotify(
-          `Estado verificado via probeSonarQube(): ${st} — ${data.instance?.lastErrorMessage || 'Servidor não respondeu como UP.'}`,
+          `Estado verificado via probeMqrBridge(): ${st} — ${data.instance?.lastErrorMessage || 'Servidor não respondeu como UP.'}`,
           'error'
         );
       }
       await fetchToolsData();
     } catch {
-      onNotify('Falha ao executar probeSonarQube().', 'error');
+      onNotify('Falha ao executar probeMqrBridge().', 'error');
     } finally {
       setBusyAction(null);
     }
@@ -210,7 +210,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
   const handleDisconnectInstance = async (instanceId: string) => {
     setBusyAction(`disc-${instanceId}`);
     try {
-      const res = await fetch('/api/sonarqube/disconnect', {
+      const res = await fetch('/api/mqr-bridge/disconnect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ instanceId }),
@@ -227,7 +227,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
   const handleLifecycleAction = async (action: 'START_LOCAL' | 'STOP_LOCAL' | 'UPDATE_LIMITS') => {
     setBusyAction(`life-${action}`);
     try {
-      const res = await fetch('/api/sonarqube/lifecycle', {
+      const res = await fetch('/api/mqr-bridge/lifecycle', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -260,7 +260,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
   const handleRefreshOfficialVersions = async () => {
     setBusyAction('refresh-versions');
     try {
-      const res = await fetch('/api/sonarqube/refresh-versions', { method: 'POST' });
+      const res = await fetch('/api/mqr-bridge/refresh-versions', { method: 'POST' });
       const data = await res.json();
       if (res.ok) {
         onNotify(
@@ -278,7 +278,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
   const handleConfigureVsCode = async () => {
     setBusyAction('vscode-cfg');
     try {
-      const res = await fetch('/api/sonarqube/vscode-config', {
+      const res = await fetch('/api/mqr-bridge/vscode-config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -323,13 +323,13 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
       });
       const data = await res.json();
       if (!res.ok) {
-        onNotify(data.error || 'Erro ao configurar Gitar AI.', 'error');
+        onNotify(data.error || 'Erro ao configurar Remediação Supervisionada.', 'error');
         return;
       }
       onNotify(
         data.health?.message ||
           data.gitarIntegration?.lastErrorMessage ||
-          'Estado do Gitar AI atualizado.',
+          'Estado do Remediação Supervisionada atualizado.',
         data.gitarIntegration?.connectionState === 'CONNECTED' ? 'success' : 'error'
       );
       await fetchToolsData();
@@ -348,7 +348,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
         return;
       }
       onNotify(
-        `Validação Gitar AI concluída: ${data.reviewsImported} revisões de PR em branch isolada e ${data.ciFailuresImported} falha(s) de CI importadas!`,
+        `Validação Remediação Supervisionada concluída: ${data.reviewsImported} revisões de PR em branch isolada e ${data.ciFailuresImported} falha(s) de CI importadas!`,
         'success'
       );
       await fetchToolsData();
@@ -384,7 +384,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
   const handleRunABComparison = async () => {
     setBusyAction('run-ab');
     try {
-      const res = await fetch('/api/sonarqube/compare-ab', {
+      const res = await fetch('/api/mqr-bridge/compare-ab', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -398,7 +398,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
         return;
       }
       onNotify(
-        'Comparação padronizada A/B com SonarQube Community Build concluída na fila controlada!',
+        'Comparação padronizada A/B com MqrBridge Community Build concluída na fila controlada!',
         'success'
       );
       await fetchToolsData();
@@ -411,7 +411,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
   const handleImportExternalSarif = async () => {
     setBusyAction('import-sarif');
     try {
-      const res = await fetch('/api/sonarqube/import-sarif', {
+      const res = await fetch('/api/mqr-bridge/import-sarif', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -434,7 +434,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
   const handleRun27IntegrationTests = async () => {
     setBusyAction('run-27-tests');
     try {
-      const res = await fetch('/api/sonarqube/run-integration-tests', {
+      const res = await fetch('/api/mqr-bridge/run-integration-tests', {
         method: 'POST',
       });
       const data = await res.json();
@@ -483,7 +483,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
       <div className="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
         <div>
           <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
-            Ferramentas e Integrações (SonarQube Community Build, Cloud, VS Code &amp; Gitar AI)
+            Ferramentas e Integrações (MqrBridge Community Build, Cloud, VS Code &amp; Remediação Supervisionada)
           </h1>
           <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
             Gerenciamento sob demanda, comparação padronizada A/B via Web API, revisão assistida de PRs em branch isolada e otimização de recursos.
@@ -518,11 +518,11 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
       <div className="flex flex-wrap items-center justify-between gap-3 p-4 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c]">
         <div className="text-xs text-slate-600 dark:text-slate-300 flex flex-wrap items-center gap-2 font-mono tabular-nums">
           <span>
-            SonarQube Oficial: v{latestVersion?.version || '26.11.0.134175'}
+            MqrBridge Oficial: v{latestVersion?.version || '26.11.0.134175'}
           </span>
           <span aria-hidden="true">·</span>
           <span>
-            SonarScanner CLI: v{scannerVersion?.version || '8.4.0.16527'}
+            Scanner CLI MQR: v{scannerVersion?.version || '8.4.0.16527'}
           </span>
           <span aria-hidden="true">·</span>
           <span>
@@ -545,7 +545,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
             <span>
               {busyAction === 'run-ab'
                 ? 'Executando Comparação A/B...'
-                : 'Executar Comparação A/B SonarQube'}
+                : 'Executar Comparação A/B MqrBridge'}
             </span>
           </button>
 
@@ -571,13 +571,13 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
       {subView === 'cards' && (
         <div className="space-y-6">
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* CARTÃO 1: SONARQUBE COMMUNITY BUILD (LOCAL & REMOTO) */}
+            {/* CARTÃO 1: MQR_BRIDGE COMMUNITY BUILD (LOCAL & REMOTO) */}
             <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-5 space-y-4">
               <div className="flex items-start justify-between gap-3 border-b border-slate-200 dark:border-slate-800 pb-3">
                 <div>
                   <h2 className="text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
                     <Server className="w-4 h-4 text-[#31d6c4]" />
-                    <span>01. SonarQube Community Build (Local &amp; Remoto)</span>
+                    <span>01. MqrBridge Community Build (Local &amp; Remoto)</span>
                   </h2>
                   <p className="text-xs text-slate-500 mt-0.5">
                     Fonte oficial: binaries.sonarsource.com · Sem uso de recursos pagos Developer/Enterprise.
@@ -616,7 +616,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
               </div>
 
               {/* Diagnóstico de Compatibilidade do Ambiente Google AI Studio (Seção 2.4) */}
-              {hostResources && !hostResources.meetsSonarQubeLocalRequirements && (
+              {hostResources && !hostResources.meetsMqrBridgeLocalRequirements && (
                 <div className="p-3 rounded border border-amber-500/30 bg-amber-500/10 text-xs space-y-1.5">
                   <div className="font-semibold text-amber-700 dark:text-amber-300 flex items-center gap-1.5">
                     <AlertTriangle className="w-4 h-4 shrink-0" />
@@ -776,14 +776,14 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
               </div>
             </div>
 
-            {/* CARTÃO 2: SONARQUBE CLOUD (Seção 8.2) */}
+            {/* CARTÃO 2: MQR_BRIDGE CLOUD (Seção 8.2) */}
             <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-5 space-y-4 flex flex-col justify-between">
               <div className="space-y-4">
                 <div className="flex items-start justify-between gap-3 border-b border-slate-200 dark:border-slate-800 pb-3">
                   <div>
                     <h2 className="text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
                       <Cloud className="w-4 h-4 text-[#31d6c4]" />
-                      <span>02. SonarQube Cloud (SaaS Opcional)</span>
+                      <span>02. MqrBridge Cloud (SaaS Opcional)</span>
                     </h2>
                     <p className="text-xs text-slate-500 mt-0.5">
                       Serviço em nuvem (https://sonarcloud.io) · Nenhum download local é realizado.
@@ -799,14 +799,14 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                     Política de Privacidade e Ambiente Externo (Seção 8.2):
                   </div>
                   <p>
-                    O SonarQube Cloud é uma plataforma SaaS externa. O código-fonte dos softwares A e B nunca é enviado para a nuvem sem autorização explícita do responsável.
+                    O MqrBridge Cloud é uma plataforma SaaS externa. O código-fonte dos softwares A e B nunca é enviado para a nuvem sem autorização explícita do responsável.
                   </p>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label htmlFor="sonar-cloud-org" className="block text-[11px] text-slate-500 mb-1">
-                      Organização SonarQube Cloud
+                      Organização MqrBridge Cloud
                     </label>
                     <input
                       id="sonar-cloud-org"
@@ -819,7 +819,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                   </div>
                   <div>
                     <label htmlFor="sonar-cloud-token" className="block text-[11px] text-slate-500 mb-1">
-                      Token SonarCloud (Bearer)
+                      Token Nuvem MQR (Bearer)
                     </label>
                     <input
                       id="sonar-cloud-token"
@@ -840,7 +840,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                     className="mt-0.5"
                   />
                   <span>
-                    Autorizo explicitamente a consulta e sincronização com a organização externa no SonarQube Cloud (https://sonarcloud.io).
+                    Autorizo explicitamente a consulta e sincronização com a organização externa no MqrBridge Cloud (https://sonarcloud.io).
                   </span>
                 </label>
               </div>
@@ -861,7 +861,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                     }
                     className="px-3.5 py-1.5 rounded text-xs font-semibold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] transition-colors cursor-pointer"
                   >
-                    Conectar SonarQube Cloud
+                    Conectar MqrBridge Cloud
                   </button>
                   <button
                     type="button"
@@ -879,14 +879,14 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
               </div>
             </div>
 
-            {/* CARTÃO 3: SONARQUBE FOR VS CODE (Seção 8.3) */}
+            {/* CARTÃO 3: MQR_BRIDGE FOR VS CODE (Seção 8.3) */}
             <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-5 space-y-4 flex flex-col justify-between">
               <div className="space-y-4">
                 <div className="flex items-start justify-between gap-3 border-b border-slate-200 dark:border-slate-800 pb-3">
                   <div>
                     <h2 className="text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
                       <Code2 className="w-4 h-4 text-[#31d6c4]" />
-                      <span>03. SonarQube for VS Code (Connected Mode)</span>
+                      <span>03. MqrBridge for VS Code (Connected Mode)</span>
                     </h2>
                     <p className="text-xs text-slate-500 mt-0.5">
                       Sincronização opcional de Quality Profiles e regras na IDE · Não é requisito para o backend.
@@ -914,9 +914,9 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                       }
                       className="w-full rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#080b10] px-2.5 py-1.5 text-xs font-mono"
                     >
-                      <option value="COMMUNITY_BUILD">SonarQube Community Build</option>
-                      <option value="SERVER">SonarQube Server</option>
-                      <option value="CLOUD">SonarQube Cloud</option>
+                      <option value="COMMUNITY_BUILD">MqrBridge Community Build</option>
+                      <option value="SERVER">MqrBridge Server</option>
+                      <option value="CLOUD">MqrBridge Cloud</option>
                     </select>
                   </div>
                   <div>
@@ -964,7 +964,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                   Gerar Binding Connected Mode
                 </button>
                 <span className="text-[11px] text-slate-500">
-                  Marketplace ID: SonarSource.sonarlint-vscode
+                  Marketplace ID: winhood.winhood-vscode
                 </span>
               </div>
             </div>
@@ -976,10 +976,10 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                   <div>
                     <h2 className="text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
                       <GitPullRequest className="w-4 h-4 text-[#31d6c4]" />
-                      <span>04. Gitar AI (Revisão de PRs &amp; Falhas de CI)</span>
+                      <span>04. Remediação Supervisionada (Revisão de PRs &amp; Falhas de CI)</span>
                     </h2>
                     <p className="text-xs text-slate-500 mt-0.5">
-                      Complemento de revisão e remediação em branch isolada · Não altera a nota nativa do SonarQube.
+                      Complemento de revisão e remediação em branch isolada · Não altera a nota nativa do MqrBridge.
                     </p>
                   </div>
                   <div className="font-mono text-xs font-bold text-amber-600 dark:text-amber-400">
@@ -1092,7 +1092,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                   SonarScannerManager — Catálogo Oficial de Scanners por Tecnologia (Seção 3)
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Seleção automática priorizando Maven, Gradle, .NET, NPM e Python, utilizando SonarScanner CLI para projetos sem scanner específico.
+                  Seleção automática priorizando Maven, Gradle, .NET, NPM e Python, utilizando Scanner CLI MQR para projetos sem scanner específico.
                 </p>
               </div>
             </div>
@@ -1151,7 +1151,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
           {!latestComparison ? (
             <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-8 text-center space-y-3">
               <p className="text-sm text-slate-600 dark:text-slate-400">
-                Nenhuma comparação padronizada A/B do SonarQube foi executada ainda nesta sessão.
+                Nenhuma comparação padronizada A/B do MqrBridge foi executada ainda nesta sessão.
               </p>
               <button
                 type="button"
@@ -1169,7 +1169,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                 <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 border-b border-slate-200 dark:border-slate-800 pb-3">
                   <div>
                     <h2 className="text-base font-bold text-slate-900 dark:text-slate-100">
-                      Comparação Padronizada A/B com SonarQube Community Build (Seção 10)
+                      Comparação Padronizada A/B com MqrBridge Community Build (Seção 10)
                     </h2>
                     <p className="text-xs text-slate-500 mt-0.5">
                       Ambos analisados sequencialmente na mesma instância, mesmo perfil de qualidade e mesmo Quality Gate.
@@ -1217,7 +1217,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                   </div>
                 </div>
 
-                {/* Tabela Comparativa distinguindo Indicadores Nativos do SonarQube vs Calculados pelo Benchmark Analyzer */}
+                {/* Tabela Comparativa distinguindo Indicadores Nativos do MqrBridge vs Calculados pelo Benchmark Analyzer */}
                 <div className="overflow-x-auto pt-2">
                   <table className="w-full text-left border-collapse text-xs font-mono tabular-nums">
                     <thead>
@@ -1236,8 +1236,8 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                             {row.label}
                           </td>
                           <td className="py-2.5 px-3 text-[11px] text-slate-500">
-                            {row.sourceType === 'SONARQUBE_NATIVE'
-                              ? 'Nativo SonarQube Web API'
+                            {row.sourceType === 'MQR_BRIDGE_NATIVE'
+                              ? 'Nativo MqrBridge Web API'
                               : row.sourceType === 'EXTERNAL_TEST_REPORT_IMPORTED'
                                 ? 'Relatório de Teste Importado (LCOV/JUnit)'
                                 : 'Calculado pelo Benchmark Analyzer'}
@@ -1272,7 +1272,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                   Importação de Relatórios Externos (SARIF 2.1.0 &amp; Sensores) com Preservação de Origem (Seção 7)
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Importa achados de Semgrep, CodeQL, Gitleaks, Trivy, Bandit, Ruff, ESLint, SpotBugs, PMD e Checkstyle sem confundi-los com regras nativas dos Quality Profiles do SonarQube.
+                  Importa achados de Analisador SARIF, CodeQL, Detector de Segredos SARIF, Analisador Container/IaC SARIF, Bandit, Ruff, ESLint, SpotBugs, PMD e Checkstyle sem confundi-los com regras nativas dos Quality Profiles do MqrBridge.
                 </p>
               </div>
 
@@ -1362,7 +1362,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
       )}
 
       {/* ===================================================================== */}
-      {/* SUB-VIEW 3: AI CODE REVIEW & REMEDIATION (Seção 9.4 — Gitar AI)       */}
+      {/* SUB-VIEW 3: AI CODE REVIEW & REMEDIATION (Seção 9.4 — Remediação Supervisionada)       */}
       {/* ===================================================================== */}
       {subView === 'ai_remediation' && (
         <div className="space-y-6">
@@ -1370,10 +1370,10 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
             <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 border-b border-slate-200 dark:border-slate-800 pb-3">
               <div>
                 <h2 className="text-base font-bold text-slate-900 dark:text-slate-100">
-                  AI CODE REVIEW &amp; REMEDIATION — Gitar AI &amp; Separação Metodológica (Seção 9.4)
+                  AI CODE REVIEW &amp; REMEDIATION — Remediação Supervisionada &amp; Separação Metodológica (Seção 9.4)
                 </h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Apresenta separadamente achados do SonarQube, achados de outros scanners e revisões/patches do Gitar AI em branch isolada com aprovação humana obrigatória.
+                  Apresenta separadamente achados do MqrBridge, achados de outros scanners e revisões/patches do Remediação Supervisionada em branch isolada com aprovação humana obrigatória.
                 </p>
               </div>
               <button
@@ -1389,7 +1389,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
             <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3 text-xs font-mono tabular-nums">
               {[
                 {
-                  label: '1. SonarQube Nativo',
+                  label: '1. MqrBridge Nativo',
                   val: (toolsDb?.sonar_issues || []).filter((i) => !i.isExternalImportedRule)
                     .length,
                 },
@@ -1448,7 +1448,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
             {/* Lista de Revisões de PR e Diffs Antes/Depois em Branch Isolada */}
             {(toolsDb?.gitar_reviews || []).length === 0 ? (
               <div className="p-6 rounded border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10] text-center text-xs text-slate-500">
-                Estado atual: {gitar?.connectionState || 'NOT_CONFIGURED'}. Nenhuma revisão do Gitar AI foi simulada. Clique em &ldquo;Importar Revisões de PR &amp; CI (Seção 15)&rdquo; para executar o teste autorizado de contrato em branch isolada.
+                Estado atual: {gitar?.connectionState || 'NOT_CONFIGURED'}. Nenhuma revisão do Remediação Supervisionada foi simulada. Clique em &ldquo;Importar Revisões de PR &amp; CI (Seção 15)&rdquo; para executar o teste autorizado de contrato em branch isolada.
               </div>
             ) : (
               <div className="space-y-4">
@@ -1477,7 +1477,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
 
                     {rev.deduplicatedWithSonarIssueKey && (
                       <div className="text-[11px] font-mono text-amber-600 dark:text-amber-400">
-                        Deduplicado com issue nativa do SonarQube ({rev.deduplicatedWithSonarIssueKey}) — Não contabilizado em duplicidade.
+                        Deduplicado com issue nativa do MqrBridge ({rev.deduplicatedWithSonarIssueKey}) — Não contabilizado em duplicidade.
                       </div>
                     )}
 
@@ -1545,12 +1545,12 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
         <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-5 space-y-4">
           <div className="p-3 rounded-lg border border-amber-500/30 bg-amber-500/10 text-xs text-amber-600 dark:text-amber-300">
             <strong>Modo Harness de Contrato (isContractTestInstance):</strong>{' '}
-            A execução dos 27 cenários de falha/contrato do SonarQube é bloqueada em produção (<code className="font-mono">HTTP 403 CONTRACT_TEST_ONLY_IN_TEST_MODE</code>) e liberada exclusivamente em ambiente <code className="font-mono">TEST</code> / <code className="font-mono">NODE_ENV=test</code>.
+            A execução dos 27 cenários de falha/contrato do MqrBridge é bloqueada em produção (<code className="font-mono">HTTP 403 CONTRACT_TEST_ONLY_IN_TEST_MODE</code>) e liberada exclusivamente em ambiente <code className="font-mono">TEST</code> / <code className="font-mono">NODE_ENV=test</code>.
           </div>
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 border-b border-slate-200 dark:border-slate-800 pb-3">
             <div>
               <h2 className="text-base font-bold text-slate-900 dark:text-slate-100">
-                Suíte de Testes de Contrato &amp; Injeção de Falhas SonarQube (Seção 14)
+                Suíte de Testes de Contrato &amp; Injeção de Falhas MqrBridge (Seção 14)
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
                 Valida as 15 etapas do fluxo completo e os 12 cenários obrigatórios de erro (Token inválido, Servidor indisponível, Versão incompatível, Timeout, etc.) em modo TEST.
@@ -1629,7 +1629,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                 Relatório de Otimização de Recursos — Antes vs Depois (Seção 11 &amp; Seção 16)
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Separação estrita entre o consumo do aplicativo principal e o consumo do SonarQube / Scanners externos.
+                Separação estrita entre o consumo do aplicativo principal e o consumo do MqrBridge / Scanners externos.
               </p>
             </div>
 
@@ -1691,7 +1691,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                       {optReport.afterOptimization.backendMemoryRssMb} MB / {optReport.afterOptimization.backendHeapUsedMb} MB
                     </td>
                     <td className="py-2.5 pl-3 font-sans text-slate-600 dark:text-slate-400">
-                      Isolado do SonarQube (0 MB JVM quando em repouso)
+                      Isolado do MqrBridge (0 MB JVM quando em repouso)
                     </td>
                   </tr>
                   <tr>
@@ -1718,7 +1718,7 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
                 <div>
                   <label htmlFor="lifecycle-max-concurrency" className="block text-[11px] text-slate-500 mb-1">
-                    Concorrência Máxima de Análises SonarQube
+                    Concorrência Máxima de Análises MqrBridge
                   </label>
                   <input
                     id="lifecycle-max-concurrency"

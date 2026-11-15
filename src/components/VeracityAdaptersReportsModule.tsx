@@ -1128,7 +1128,7 @@ export const VeracityAdaptersReportsModule: React.FC<
                 disabled={!latestRun || exportingFormat !== null}
                 onClick={() => handleDownloadReport('sarif')}
                 className="w-full inline-flex items-center justify-between px-4 py-2.5 rounded-lg text-xs font-semibold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] disabled:opacity-50 cursor-pointer"
-                title="Exportar no formato canônico oficial SARIF 2.1.0 (SonarQube MQR, Semgrep Taint e GitHub CodeQL)"
+                title="Exportar no formato canônico oficial SARIF 2.1.0 (Modo MQR, Taint CodeFlows e ferramentas que exportam SARIF 2.1.0)"
               >
                 <span>
                   {exportingFormat === 'sarif'
@@ -1369,7 +1369,7 @@ export const VeracityAdaptersReportsModule: React.FC<
                           </span>
                         </div>
 
-                        {/* SonarQube Quality Gate & Ratings Banner */}
+                        {/* MqrBridge Quality Gate & Ratings Banner */}
                         <div className="p-2.5 rounded bg-white dark:bg-[#0c1017] border border-slate-200 dark:border-slate-800 font-mono text-[11px] space-y-1">
                           <div className="flex items-center justify-between">
                             <span className="text-slate-500">Quality Gate (Sonar way + Fudge Factor):</span>

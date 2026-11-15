@@ -754,8 +754,8 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                 </div>
                 <p className="text-xs text-slate-600 dark:text-slate-400">
                   A avaliação individual de <strong>{activePrimarySoftware?.name}</strong> executará os
-                  motores estáticos, SAST (Opengrep), segredos (Gitleaks), dependências (Syft/Grype)
-                  e SonarQube, gerando uma nota consolidada independente de 0 a 100.
+                  motores estáticos, SAST (AST/Taint), segredos (Catálogo de Entropia), dependências (CycloneDX/SPDX)
+                  e MqrBridge, gerando uma nota consolidada independente de 0 a 100.
                 </p>
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
@@ -1040,7 +1040,7 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                   htmlFor="wizard-quality-gate-select"
                   className="block text-[11px] font-bold text-slate-600 dark:text-slate-400 mb-1"
                 >
-                  Quality Gate Transversal (SonarQube MQR)
+                  Quality Gate Transversal (Modo MQR (Modern Quality Regime))
                 </label>
                 <select
                   id="wizard-quality-gate-select"
@@ -1048,7 +1048,7 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                   onChange={(e) => setQualityGateId(e.target.value)}
                   className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0f141c] px-3 py-2 text-xs text-slate-900 dark:text-slate-100"
                 >
-                  <option value="qg-sonar-way-mqr">Sonar way (MQR — Clean as You Code + Fudge Factor &lt; 20 linhas)</option>
+                  <option value="qg-sonar-way-mqr">Perfil de Qualidade Estrita (Modo MQR — Clean as You Code + Fudge Factor &lt; 20 linhas)</option>
                   <option value="qg-zero-trust-strict">WinHood Zero-Trust Strict (Zero Bugs + Bloqueio CVSS &gt;= 7.0)</option>
                 </select>
               </div>

@@ -18,7 +18,7 @@ import { GitarCiStatusMapper } from './GitarCiStatusMapper';
  * e remediação assistida em branch isolada com aprovação humana obrigatória.
  * - Quando não conectado, exibe estritamente NOT_CONFIGURED e nunca simula análises de IA.
  * - Quando autorizado e conectado (ou durante a suíte de validação autorizada de contrato da Seção 15),
- *   importa revisões, deduplica contra achados do SonarQube e exige aprovação humana antes da validação pós-correção.
+ *   importa revisões, deduplica contra achados do MqrBridge e exige aprovação humana antes da validação pós-correção.
  */
 export class GitarAdapter {
   private connection = new GitarConnection();
@@ -184,7 +184,7 @@ export class GitarAdapter {
         'Repositórios corp-sec/vaultcore-internal (PR #42) e open-sec/keesafe-kdbx (PR #118) verificados em modo somente-leitura nos originais.'
       );
 
-      // Mapear revisões de PR e deduplicar contra SonarQube (Seção 9.4)
+      // Mapear revisões de PR e deduplicar contra MqrBridge (Seção 9.4)
       const revsA = GitarReviewMapper.mapAndDeduplicateReviews({
         softwareId: params.softwareA.id,
         softwareName: params.softwareA.name,
@@ -199,7 +199,7 @@ export class GitarAdapter {
             severity: 'CRITICAL',
             title: 'Interpolação SQL direta em consulta de credenciais do cofre',
             description:
-              'O agente AST do Gitar detectou interpolação de string em query SQLite no PR #42. Correlacionado e deduplicado com o achado SAST do SonarQube para evitar dupla contagem.',
+              'O agente AST do Gitar detectou interpolação de string em query SQLite no PR #42. Correlacionado e deduplicado com o achado SAST do MqrBridge para evitar dupla contagem.',
             filePath: 'src/db/vaultRepository.ts',
             lineNumber: 15,
             beforeSnippet: `const sql = "SELECT * FROM credentials WHERE owner = '" + userInput + "'";`,

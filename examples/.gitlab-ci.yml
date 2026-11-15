@@ -1,0 +1,9 @@
+include:
+  - local: 'templates/winhood.gitlab-ci.yml'
+    inputs:
+      gate: 'winhood-standard-v2'
+      profile: 'mqr-strict'
+      fail_on: 'BLOCKED'
+
+stages:
+  - test

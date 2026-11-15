@@ -347,8 +347,8 @@ test('calculateDeterministicScoreCard enforces Penalty Caps, populates all 12 ca
   assert.ok(envCheck.reasons.length >= 3);
 });
 
-test('Official SonarQube A-E Ratings, Fudge Factor, and Real-Time DevSecOps Triage Recalculation', () => {
-  // 1. Official SonarQube Severity-to-Rating mapping
+test('Official MqrBridge A-E Ratings, Fudge Factor, and Real-Time DevSecOps Triage Recalculation', () => {
+  // 1. Official MqrBridge Severity-to-Rating mapping
   assert.equal(computeSonarSeverityRating([]), 'A');
   assert.equal(computeSonarSeverityRating(['LOW', 'INFO']), 'A');
   assert.equal(computeSonarSeverityRating(['MEDIUM']), 'B');
@@ -356,7 +356,7 @@ test('Official SonarQube A-E Ratings, Fudge Factor, and Real-Time DevSecOps Tria
   assert.equal(computeSonarSeverityRating(['CRITICAL', 'HIGH']), 'D');
   assert.equal(computeSonarSeverityRating(['BLOCKER', 'CRITICAL']), 'E');
 
-  // 2. Official SonarQube Technical Debt Ratio to Maintainability Rating
+  // 2. Official MqrBridge Technical Debt Ratio to Maintainability Rating
   const rA = computeSonarMaintainabilityRating(30, 1000); // 30m / (1000 * 3.2 = 3200m) < 5% -> A
   assert.equal(rA, 'A');
   const rE = computeSonarMaintainabilityRating(2000, 1000); // 2000m / 3200m = 62.5% > 50% -> E
@@ -577,18 +577,18 @@ test('executeSecurityAssessmentSuite generates attack surfaces, attack paths, an
   assert.ok(metricsA.overallSecurityMaturityScore < metricsB.overallSecurityMaturityScore);
 });
 
-test('SonarQubeIntegrationService executes full 27-step real integration suite (15 core + 12 fault-injection tests) and A/B comparison without leaking tokens', async () => {
+test('MqrBridgeIntegrationService executes full 27-step real integration suite (15 core + 12 fault-injection tests) and A/B comparison without leaking tokens', async () => {
   const os = await import('node:os');
   const path = await import('node:path');
-  const { SonarQubeIntegrationService } = await import('../integrations/sonarqube/SonarQubeAdapter');
+  const { MqrBridgeIntegrationService } = await import('../integrations/mqr-bridge/SonarAdapter');
   const { ExternalToolLifecycleManager } = await import('../services/tools/ExternalToolLifecycleManager');
   const { ToolCacheManager } = await import('../services/tools/ToolCacheManager');
 
   const tmpDir = path.join(os.tmpdir(), 'winhood-test-sonar');
   const lifecycle = new ExternalToolLifecycleManager();
   const cache = new ToolCacheManager(tmpDir);
-  const service = new SonarQubeIntegrationService(lifecycle, cache);
-  const toolsDb = SonarQubeIntegrationService.createInitialToolsDatabaseState(tmpDir);
+  const service = new MqrBridgeIntegrationService(lifecycle, cache);
+  const toolsDb = MqrBridgeIntegrationService.createInitialToolsDatabaseState(tmpDir);
 
   const softwareA: Software = {
     id: 'sw-vaultcore-legacy',
@@ -649,10 +649,10 @@ test('GitarAdapter runs authorized contract validation and enforces human approv
   const os = await import('node:os');
   const path = await import('node:path');
   const { GitarAdapter } = await import('../integrations/gitar/GitarAdapter');
-  const { SonarQubeIntegrationService } = await import('../integrations/sonarqube/SonarQubeAdapter');
+  const { MqrBridgeIntegrationService } = await import('../integrations/mqr-bridge/SonarAdapter');
 
   const tmpDir = path.join(os.tmpdir(), 'winhood-test-gitar');
-  const toolsDb = SonarQubeIntegrationService.createInitialToolsDatabaseState(tmpDir);
+  const toolsDb = MqrBridgeIntegrationService.createInitialToolsDatabaseState(tmpDir);
   const gitar = new GitarAdapter();
 
   const softwareA: Software = {
@@ -1434,19 +1434,19 @@ test('Scenario 28: ToolResourceMonitor.runHostHardwareBenchmark executes determi
   assert.equal(hwResult.verificationSha256.length, 64);
 });
 
-test('Scenario 29: SonarQubeConnection AES-256-GCM Token Encryption & MarketCompetitorDiscoveryEngine 16 Categories + 6-Axis Similarity', async () => {
-  const { SonarQubeConnection } = await import('../integrations/sonarqube/SonarQubeConnection');
+test('Scenario 29: MqrBridgeConnection AES-256-GCM Token Encryption & MarketCompetitorDiscoveryEngine 16 Categories + 6-Axis Similarity', async () => {
+  const { MqrBridgeConnection } = await import('../integrations/mqr-bridge/SonarConnection');
   const { MarketCompetitorDiscoveryEngine } = await import('./marketCompetitorDiscoveryEngine');
 
   const sampleToken = 'squ_9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b';
-  const encrypted = SonarQubeConnection.encryptToken(sampleToken);
+  const encrypted = MqrBridgeConnection.encryptToken(sampleToken);
   assert.ok(encrypted.includes(':'), 'Encrypted token must contain IV:Tag:Ciphertext');
   assert.notEqual(encrypted, sampleToken);
 
-  const decrypted = SonarQubeConnection.decryptToken(encrypted);
+  const decrypted = MqrBridgeConnection.decryptToken(encrypted);
   assert.equal(decrypted, sampleToken);
 
-  const masked = SonarQubeConnection.maskToken(sampleToken);
+  const masked = MqrBridgeConnection.maskToken(sampleToken);
   assert.equal(masked, 'squ_••••••••1a0b');
 
   const categories = MarketCompetitorDiscoveryEngine.getAvailableCategories();

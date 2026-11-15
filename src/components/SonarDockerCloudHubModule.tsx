@@ -111,7 +111,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
     maskedToken: string | null;
   } | null>(null);
 
-  // SonarQube Docker state
+  // MqrBridge Docker state
   const [dockerStatus, setDockerStatus] = useState<SonarDockerStatus | null>(null);
   const [testingDocker, setTestingDocker] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -122,7 +122,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
   const [hostUrl, setHostUrl] = useState('');
   const [token, setToken] = useState('');
 
-  // SonarCloud state
+  // Nuvem MQR state
   const [cloudOrg, setCloudOrg] = useState('');
   const [cloudToken, setCloudToken] = useState('');
   const [testingCloud, setTestingCloud] = useState(false);
@@ -145,7 +145,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
   const [loadingSavedProjects, setLoadingSavedProjects] = useState(false);
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
   const [profName, setProfName] = useState('');
-  const [profPlatform, setProfPlatform] = useState<'SONARCLOUD' | 'SONARQUBE_SERVER'>(
+  const [profPlatform, setProfPlatform] = useState<'SONARCLOUD' | 'MQR_BRIDGE_SERVER'>(
     'SONARCLOUD'
   );
   const [profServerUrl, setProfServerUrl] = useState('');
@@ -233,7 +233,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
 
   const handleSaveSonarProjectProfile = async () => {
     if (!profProjectKey.trim()) {
-      onNotify('Informe o Project Key do projeto no SonarCloud/SonarQube.', 'error');
+      onNotify('Informe o Project Key do projeto no Nuvem MQR / Servidor MQR.', 'error');
       return;
     }
     setSavingProfile(true);
@@ -327,7 +327,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
     if (!proj.hasToken && !(editingProfileId === proj.id && profToken.trim())) {
       handleSelectProfileForEdit(proj);
       onNotify(
-        `Insira e salve seu Bearer Token do SonarCloud para o projeto "${proj.projectKey}" antes de baixar o relatório JSON.`,
+        `Insira e salve seu Bearer Token do Nuvem MQR para o projeto "${proj.projectKey}" antes de baixar o relatório JSON.`,
         'error'
       );
       return;
@@ -354,7 +354,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
       const downloadUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = downloadUrl;
-      a.download = `sonarcloud-report-${safeKey}.json`;
+      a.download = `winhood-mqr-report-${safeKey}.json`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -365,11 +365,11 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
         onRefreshRun();
       }
       onNotify(
-        `Relatório sonarcloud-report-${safeKey}.json baixado e achados sincronizados com o painel!`,
+        `Relatório winhood-mqr-report-${safeKey}.json baixado e achados sincronizados com o painel!`,
         'success'
       );
     } catch {
-      onNotify('Erro de rede ao baixar relatório JSON do SonarCloud.', 'error');
+      onNotify('Erro de rede ao baixar relatório JSON do Nuvem MQR.', 'error');
     } finally {
       setExportingJsonId(null);
     }
@@ -381,7 +381,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
     const targetToken = profToken.trim() || undefined;
 
     if (!targetToken && !vaultStatus?.hasToken) {
-      onNotify('Informe o seu Bearer Token do SonarCloud para realizar a extração 1-Clique.', 'error');
+      onNotify('Informe o seu Bearer Token do Nuvem MQR para realizar a extração 1-Clique.', 'error');
       return;
     }
 
@@ -399,7 +399,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
 
       const data = await res.json();
       if (!res.ok) {
-        onNotify(data.error || 'Falha ao extrair dados do SonarCloud.', 'error');
+        onNotify(data.error || 'Falha ao extrair dados do Nuvem MQR.', 'error');
         return;
       }
 
@@ -410,7 +410,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
       const downloadUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = downloadUrl;
-      a.download = `sonarcloud-report-${safeKey}.json`;
+      a.download = `winhood-mqr-report-${safeKey}.json`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -430,7 +430,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
         'success'
       );
     } catch {
-      onNotify('Erro de conexão ao realizar a extração do SonarCloud.', 'error');
+      onNotify('Erro de conexão ao realizar a extração do Nuvem MQR.', 'error');
     } finally {
       setIsExtractingDirect(false);
     }
@@ -451,13 +451,13 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
       const downloadUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = downloadUrl;
-      a.download = `sonarcloud-${safeKey}.ps1`;
+      a.download = `winhood-mqr-${safeKey}.ps1`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(downloadUrl);
       onNotify(
-        `Script PowerShell completo sonarcloud-${safeKey}.ps1 baixado (coleta Quality Gate, Métricas, Hotspots e Issues)!`,
+        `Script PowerShell completo winhood-mqr-${safeKey}.ps1 baixado (coleta Quality Gate, Métricas, Hotspots e Issues)!`,
         'success'
       );
     } catch {
@@ -497,13 +497,13 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
       const downloadUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = downloadUrl;
-      a.download = `sonarcloud-${safeKey}.ps1`;
+      a.download = `winhood-mqr-${safeKey}.ps1`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(downloadUrl);
       onNotify(
-        `Script PowerShell completo sonarcloud-${safeKey}.ps1 baixado!`,
+        `Script PowerShell completo winhood-mqr-${safeKey}.ps1 baixado!`,
         'success'
       );
     } catch {
@@ -631,16 +631,16 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
       });
       const data = await res.json();
       if (data.httpReachable) {
-        onNotify(`SonarQube Docker conectado com sucesso! Latência: ${data.latencyMs}ms.`, 'success');
+        onNotify(`MqrBridge Docker conectado com sucesso! Latência: ${data.latencyMs}ms.`, 'success');
       } else {
         onNotify(
-          data.errorMessage || 'SonarQube Docker não respondeu. Certifique-se de que o container está em execução.',
+          data.errorMessage || 'MqrBridge Docker não respondeu. Certifique-se de que o container está em execução.',
           'error'
         );
       }
       void checkDockerStatus();
     } catch {
-      onNotify('Falha na comunicação de rede com o SonarQube.', 'error');
+      onNotify('Falha na comunicação de rede com o MqrBridge.', 'error');
     } finally {
       setTestingDocker(false);
     }
@@ -648,7 +648,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
 
   const testCloudConnection = async () => {
     if (!cloudToken.trim()) {
-      onNotify('Informe o token do SonarCloud para testar a conexão.', 'error');
+      onNotify('Informe o token do Nuvem MQR para testar a conexão.', 'error');
       return;
     }
     setTestingCloud(true);
@@ -664,14 +664,14 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
       });
       const data = await res.json();
       if (data.httpReachable && data.authenticated) {
-        setCloudResult({ ok: true, message: 'Autenticado com sucesso na API do SonarCloud!' });
-        onNotify('Conexão com SonarCloud validada com sucesso!', 'success');
+        setCloudResult({ ok: true, message: 'Autenticado com sucesso na API do Nuvem MQR!' });
+        onNotify('Conexão com Nuvem MQR validada com sucesso!', 'success');
       } else {
         setCloudResult({
           ok: false,
-          message: data.errorMessage || 'Falha ao autenticar no SonarCloud. Verifique seu token e organização.',
+          message: data.errorMessage || 'Falha ao autenticar no Nuvem MQR. Verifique seu token e organização.',
         });
-        onNotify('Falha ao autenticar no SonarCloud.', 'error');
+        onNotify('Falha ao autenticar no Nuvem MQR.', 'error');
       }
     } catch {
       setCloudResult({ ok: false, message: 'Erro de rede ao conectar com sonarcloud.io' });
@@ -734,7 +734,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
 
   const commandsMap = {
     nodejs: {
-      install: 'npm install -D sonarqube-scanner',
+      install: 'npm install -D mqr-bridge-scanner',
       run: `npx sonar-scanner -Dsonar.projectKey=${cleanKey} -Dsonar.host.url=${cleanHost} -Dsonar.login=${cleanToken}`,
       desc: 'Para projetos Node.js / TypeScript: instala o scanner e executa a análise local enviando os relatórios.',
     },
@@ -761,7 +761,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
   };
 
   const dockerCommand =
-    'docker run -d --name sonarqube -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true -p 9000:9000 sonarqube:latest';
+    'docker run -d --name mqr-bridge -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true -p 9000:9000 mqr-bridge:latest';
 
   return (
     <div className="space-y-6">
@@ -775,11 +775,11 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
               Sonar Hub Oficial & Motor Windows Multi-Core
             </div>
             <h1 className="text-2xl font-bold text-white tracking-tight">
-              SonarQube Local (Docker) vs SonarCloud (Nuvem)
+              MqrBridge Local (Docker) vs Nuvem MQR (Nuvem)
             </h1>
             <p className="text-sm text-slate-400 max-w-3xl leading-relaxed">
-              Execute a análise de código do SonarQube via container oficial Docker sem necessidade de baixar zips pesados
-              na máquina física, conecte ao SonarCloud na nuvem e utilize o poder multithread dos núcleos do seu processador.
+              Execute a análise de código do MqrBridge via container oficial Docker sem necessidade de baixar zips pesados
+              na máquina física, conecte ao Nuvem MQR na nuvem e utilize o poder multithread dos núcleos do seu processador.
             </p>
           </div>
 
@@ -816,7 +816,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
             }`}
           >
             <Server className="w-4 h-4" />
-            Opção A: SonarQube Local (Docker)
+            Opção A: MqrBridge Local (Docker)
           </button>
           <button
             onClick={() => setActiveTab('cloud')}
@@ -827,7 +827,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
             }`}
           >
             <Cloud className="w-4 h-4" />
-            Opção B: SonarCloud (Nuvem)
+            Opção B: Nuvem MQR (Nuvem)
           </button>
           <button
             onClick={() => setActiveTab('scanner')}
@@ -838,7 +838,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
             }`}
           >
             <Terminal className="w-4 h-4" />
-            Gerador SonarScanner CLI
+            Gerador Scanner CLI MQR
           </button>
           <button
             type="button"
@@ -855,20 +855,20 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
         </div>
       </div>
 
-      {/* ESPECIFICAÇÃO 2: Meus Projetos SonarQube / SonarCloud — Download 1-Clique de Relatório JSON & Monitor de Validade de Token */}
+      {/* ESPECIFICAÇÃO 2: Meus Projetos Servidor MQR / Nuvem MQR — Download 1-Clique de Relatório JSON & Monitor de Validade de Token */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-6">
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 border-b border-slate-800 pb-4">
           <div className="space-y-1">
             <div className="flex flex-wrap items-center gap-2">
               <span className="px-2.5 py-0.5 rounded text-[11px] font-mono font-bold bg-[#31d6c4]/15 text-[#31d6c4] border border-[#31d6c4]/30">
-                EXPORTADOR DIRETO SONARCLOUD / SONARQUBE
+                EXPORTADOR DIRETO NUVEM MQR / SERVIDOR MQR
               </span>
               <span className="px-2.5 py-0.5 rounded text-[11px] font-mono bg-slate-800 text-slate-300">
                 Análise Completa: Quality Gate · Métricas MQR · Hotspots · Issues Paginadas
               </span>
             </div>
             <h2 className="text-lg font-bold text-white">
-              Meus Projetos SonarQube / SonarCloud — Download 1-Clique de Relatório JSON
+              Meus Projetos Servidor MQR / Nuvem MQR — Download 1-Clique de Relatório JSON
             </h2>
             <p className="text-xs text-slate-400">
               Cadastre seus projetos (`Project Key`, `Organization`, `Bearer Token`) para baixar relatórios JSON completos (Quality Gate, 39 Métricas, Security Hotspots, Componentes, Regras e Issues paginadas) ou gerar o script `.PS1` integral.
@@ -905,7 +905,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
             <div className="flex items-center gap-2.5">
               <span className="w-2 h-2 rounded-full bg-[#31d6c4]" />
               <span className="text-xs font-bold text-white">
-                Guia Rápido: Onde encontrar Token, Organization e Project Key no SonarCloud?
+                Guia Rápido: Onde encontrar Token, Organization e Project Key no Nuvem MQR?
               </span>
             </div>
             <span className="text-xs font-mono text-[#31d6c4]">
@@ -920,7 +920,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
                   <span>1. Bearer Token</span>
                 </div>
                 <p className="text-slate-400 leading-relaxed text-[11px]">
-                  No SonarCloud (<a href="https://sonarcloud.io" target="_blank" rel="noreferrer" className="text-[#31d6c4] hover:underline">sonarcloud.io</a>), clique no seu <strong>avatar no canto superior direito</strong> → <strong>My Account</strong> → aba <strong>Security</strong> → em <em>Generate Tokens</em>, insira um nome (ex.: <code className="text-white">winhood-cli</code>) e clique em <strong>Generate</strong>.
+                  No Nuvem MQR (<a href="https://sonarcloud.io" target="_blank" rel="noreferrer" className="text-[#31d6c4] hover:underline">sonarcloud.io</a>), clique no seu <strong>avatar no canto superior direito</strong> → <strong>My Account</strong> → aba <strong>Security</strong> → em <em>Generate Tokens</em>, insira um nome (ex.: <code className="text-white">winhood-cli</code>) e clique em <strong>Generate</strong>.
                 </p>
               </div>
 
@@ -938,7 +938,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
                   <span>3. Project Key</span>
                 </div>
                 <p className="text-slate-400 leading-relaxed text-[11px]">
-                  Abra seu projeto no SonarCloud → menu lateral inferior esquerdo <strong>Information</strong> → copie o campo <strong>Project Key</strong> exato (ex.: <code className="text-white">LilNavaHoods_Winhood-Benchmarking</code>).
+                  Abra seu projeto no Nuvem MQR → menu lateral inferior esquerdo <strong>Information</strong> → copie o campo <strong>Project Key</strong> exato (ex.: <code className="text-white">LilNavaHoods_Winhood-Benchmarking</code>).
                 </p>
               </div>
             </div>
@@ -952,7 +952,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
               <KeyRound className="w-4 h-4 text-[#31d6c4]" />
               {editingProfileId
                 ? `Configurar / Atualizar Projeto Selecionado (${profProjectKey || 'Projeto'})`
-                : 'Extração 1-Clique & Configuração do SonarCloud'}
+                : 'Extração 1-Clique & Configuração do Nuvem MQR'}
             </span>
             <div className="flex items-center gap-3">
               {vaultStatus?.hasToken && (
@@ -1030,13 +1030,13 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
                   id="sonar-prof-platform"
                   value={profPlatform}
                   onChange={(e) => {
-                    const nextPlat = e.target.value as 'SONARCLOUD' | 'SONARQUBE_SERVER';
+                    const nextPlat = e.target.value as 'SONARCLOUD' | 'MQR_BRIDGE_SERVER';
                     setProfPlatform(nextPlat);
                   }}
                   className="rounded-lg border border-slate-800 bg-slate-900 px-2.5 py-2 text-xs text-white focus:outline-none focus:border-[#31d6c4]"
                 >
-                  <option value="SONARCLOUD">SonarCloud</option>
-                  <option value="SONARQUBE_SERVER">SonarQube Server</option>
+                  <option value="SONARCLOUD">Nuvem MQR</option>
+                  <option value="MQR_BRIDGE_SERVER">MqrBridge Server</option>
                 </select>
                 <input
                   id="sonar-prof-url"
@@ -1067,7 +1067,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
                   type={showProfToken ? 'text' : 'password'}
                   value={profToken}
                   onChange={(e) => setProfToken(e.target.value)}
-                  placeholder="Cole seu token do SonarCloud/SonarQube..."
+                  placeholder="Cole seu token do Nuvem MQR / Servidor MQR..."
                   className="w-full rounded-lg border border-slate-800 bg-slate-900 pl-3 pr-9 py-2 text-xs font-mono text-white focus:outline-none focus:border-[#31d6c4]"
                 />
                 <button
@@ -1130,7 +1130,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
 
           <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
             <span className="text-[11px] text-slate-400">
-              Preencha os campos para baixar o JSON completo do SonarCloud ou salvar o projeto com segurança no cofre criptografado.
+              Preencha os campos para baixar o JSON completo do Nuvem MQR ou salvar o projeto com segurança no cofre criptografado.
             </span>
             <div className="flex flex-wrap items-center gap-2">
               <button
@@ -1164,7 +1164,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
           ) : savedSonarProjects.length === 0 ? (
             <div className="col-span-full rounded-xl border border-dashed border-slate-800 bg-slate-950/40 p-6 text-center space-y-1.5">
               <div className="text-xs font-semibold text-slate-300">
-                Nenhum projeto SonarCloud / SonarQube cadastrado no momento
+                Nenhum projeto Nuvem MQR / MqrBridge cadastrado no momento
               </div>
               <p className="text-xs text-slate-400">
                 Preencha os campos em branco acima com seu <code className="text-slate-200 font-mono">Project Key</code>, <code className="text-slate-200 font-mono">Organization</code> e <code className="text-slate-200 font-mono">Bearer Token</code> e clique em <strong className="text-slate-200">Salvar Perfil de Projeto</strong>.
@@ -1341,10 +1341,10 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
                 </span>
               </div>
               <h2 className="text-lg font-bold text-white">
-                Governança &amp; Rastreabilidade Metodológica SonarCloud vs WinHood
+                Governança &amp; Rastreabilidade Metodológica Nuvem MQR vs WinHood
               </h2>
               <p className="text-xs text-slate-400">
-                Separação estrita entre métricas oficiais retornadas pela Web API do SonarCloud (`SONARCLOUD_OFFICIAL_API`), métricas ausentes (`NOT_MEASURED`) e pontuações calculadas pelo motor nativo do WinHood (`WINHOOD_CALCULATED`).
+                Separação estrita entre métricas oficiais retornadas pela Web API do Nuvem MQR (`SONARCLOUD_OFFICIAL_API`), métricas ausentes (`NOT_MEASURED`) e pontuações calculadas pelo motor nativo do WinHood (`WINHOOD_CALCULATED`).
               </p>
             </div>
             <button
@@ -1358,7 +1358,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
             </button>
           </div>
 
-          {/* 1. Separação Estrita: SonarCloud Nativo vs WinHood Calculado */}
+          {/* 1. Separação Estrita: Nuvem MQR Nativo vs WinHood Calculado */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 space-y-3">
               <div className="flex items-center justify-between">
@@ -1370,7 +1370,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
                 </span>
               </div>
               <div className="text-sm font-bold text-white">
-                Ratings Oficiais Nativos do SonarCloud (Escala A–E)
+                Ratings Oficiais Nativos do Nuvem MQR (Escala A–E)
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono">
                 <div className="p-2.5 rounded bg-slate-900 border border-slate-800">
@@ -1468,7 +1468,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
 
             {methodologySummary.qualityGate.conditions.length === 0 ? (
               <div className="text-xs font-mono text-slate-400 p-3 rounded border border-slate-800 bg-slate-900/40">
-                Nenhuma condição individual retornada pela API do SonarCloud (`status: {methodologySummary.qualityGate.status}`).
+                Nenhuma condição individual retornada pela API do Nuvem MQR (`status: {methodologySummary.qualityGate.status}`).
               </div>
             ) : (
               <div className="overflow-x-auto">
@@ -1648,7 +1648,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
         </div>
       )}
 
-      {/* TAB 1: SonarQube Local (Docker) */}
+      {/* TAB 1: MqrBridge Local (Docker) */}
       {activeTab === 'docker' && (
         <div className="space-y-6">
           {/* Automatic Backend Control Card (Zero-Configuration & Auto Docker) */}
@@ -1660,11 +1660,11 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
                   Automação Total: O Backend cuida de tudo para você
                 </div>
                 <h2 className="text-lg font-bold text-white tracking-tight">
-                  Servidor SonarQube & Motor de Análise em 1 Clique
+                  Servidor MqrBridge & Motor de Análise em 1 Clique
                 </h2>
                 <p className="text-xs text-slate-400 max-w-2xl leading-relaxed">
                   Você não precisa abrir terminais, baixar zips pesados nem saber comandos do Docker.
-                  O backend gerencia o container do SonarQube automaticamente ou ativa o motor nativo local de alta performance
+                  O backend gerencia o container do MqrBridge automaticamente ou ativa o motor nativo local de alta performance
                   sem que você precise se preocupar com infraestrutura.
                 </p>
                 <div className="flex items-center gap-2 pt-1 text-xs text-slate-400">
@@ -1683,7 +1683,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
                     <Play className="w-4 h-4 fill-current" />
                     {startingDocker
                       ? 'Iniciando Container pelo Backend...'
-                      : 'Iniciar SonarQube Automaticamente (1 Clique)'}
+                      : 'Iniciar MqrBridge Automaticamente (1 Clique)'}
                   </button>
                 ) : (
                   <button
@@ -1691,7 +1691,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
                     disabled={stoppingDocker}
                     className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-xs font-bold bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 border border-rose-500/30 transition-colors cursor-pointer disabled:opacity-50"
                   >
-                    {stoppingDocker ? 'Pausando...' : 'Pausar Container SonarQube'}
+                    {stoppingDocker ? 'Pausando...' : 'Pausar Container MqrBridge'}
                   </button>
                 )}
 
@@ -1718,7 +1718,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
                 />
                 <div>
                   <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                    Status do SonarQube em http://localhost:9000
+                    Status do MqrBridge em http://localhost:9000
                     <span className="text-xs text-slate-400 font-normal">
                       · {dockerStatus?.isReachable ? 'ONLINE (Pronto)' : 'OFFLINE (Aguardando container)'}
                     </span>
@@ -1726,7 +1726,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
                   <p className="text-xs text-slate-400 mt-0.5">
                     {dockerStatus?.isReachable
                       ? `Conexão estabelecida com sucesso. Versão do Sonar: ${dockerStatus.version || 'Detectada'}. Latência: ${dockerStatus.latencyMs}ms.`
-                      : 'O container SonarQube não está ativo no momento. Clique no botão acima para iniciar automaticamente.'}
+                      : 'O container MqrBridge não está ativo no momento. Clique no botão acima para iniciar automaticamente.'}
                   </p>
                 </div>
               </div>
@@ -1759,10 +1759,10 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
               <span className="flex items-center justify-center w-6 h-6 rounded-full bg-[#31d6c4] text-slate-950 text-xs font-black">
                 1
               </span>
-              Suba o container oficial do SonarQube no seu terminal
+              Suba o container oficial do MqrBridge no seu terminal
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              A forma mais rápida e limpa de rodar o servidor local do SonarQube sem sujar o sistema operacional com
+              A forma mais rápida e limpa de rodar o servidor local do MqrBridge sem sujar o sistema operacional com
               instalações pesadas de JDK ou arquivos zip de centenas de megabytes é através do Docker:
             </p>
 
@@ -1808,7 +1808,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
                 >
                   http://localhost:9000
                 </a>
-                . O SonarQube leva cerca de 20 a 40 segundos para inicializar os serviços internos na primeira vez.
+                . O MqrBridge leva cerca de 20 a 40 segundos para inicializar os serviços internos na primeira vez.
               </p>
             </div>
 
@@ -1841,17 +1841,17 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
         </div>
       )}
 
-      {/* TAB 2: SonarCloud (Nuvem) */}
+      {/* TAB 2: Nuvem MQR (Nuvem) */}
       {activeTab === 'cloud' && (
         <div className="space-y-6">
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4">
             <div className="flex items-center gap-2 text-base font-bold text-white">
               <Cloud className="w-5 h-5 text-[#31d6c4]" />
-              Opção B: SonarCloud (100% em Nuvem - Sem Instalação Local)
+              Opção B: Nuvem MQR (100% em Nuvem - Sem Instalação Local)
             </div>
             <p className="text-xs text-slate-400 leading-relaxed max-w-3xl">
               Se você não quiser instalar nem rodar o Docker na sua máquina, utilize a versão oficial na nuvem
-              (SonarCloud), ideal para integração contínua (CI/CD) direta com repositórios GitHub, GitLab e Bitbucket.
+              (Nuvem MQR), ideal para integração contínua (CI/CD) direta com repositórios GitHub, GitLab e Bitbucket.
             </p>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
@@ -1881,15 +1881,15 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
                   Análise Automática
                 </div>
                 <p className="text-xs text-slate-400">
-                  O SonarCloud ativará a análise automática a cada novo commit e pull request sem necessidade de servidor local.
+                  O Nuvem MQR ativará a análise automática a cada novo commit e pull request sem necessidade de servidor local.
                 </p>
               </div>
             </div>
           </div>
 
-          {/* Test SonarCloud Token Form */}
+          {/* Test Nuvem MQR Token Form */}
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4">
-            <h3 className="text-sm font-bold text-white">Vincular e Validar Credenciais do SonarCloud</h3>
+            <h3 className="text-sm font-bold text-white">Vincular e Validar Credenciais do Nuvem MQR</h3>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
                 <label
@@ -1913,14 +1913,14 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
                   htmlFor="hub-cloud-token"
                   className="block text-xs font-medium text-slate-400 mb-1.5"
                 >
-                  Token de Acesso SonarCloud
+                  Token de Acesso Nuvem MQR
                 </label>
                 <input
                   id="hub-cloud-token"
                   type="password"
                   value={cloudToken}
                   onChange={(e) => setCloudToken(e.target.value)}
-                  placeholder="Insira seu token gerado no SonarCloud My Account > Security"
+                  placeholder="Insira seu token gerado no Nuvem MQR My Account > Security"
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3.5 py-2 text-xs text-white focus:outline-none focus:border-[#31d6c4] font-mono"
                 />
               </div>
@@ -1933,7 +1933,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
                 className="inline-flex items-center gap-2 px-4 py-2 text-xs font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] rounded-lg transition-colors cursor-pointer disabled:opacity-50"
               >
                 <ShieldCheck className="w-4 h-4" />
-                {testingCloud ? 'Validando no SonarCloud...' : 'Testar Conexão SonarCloud'}
+                {testingCloud ? 'Validando no Nuvem MQR...' : 'Testar Conexão Nuvem MQR'}
               </button>
 
               {cloudResult && (
@@ -1962,7 +1962,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
                   Como Rodar a Análise na sua Aplicação
                 </h2>
                 <p className="text-xs text-slate-400 mt-1">
-                  Envie os dados do seu código local para o servidor SonarQube gerando o comando correspondente à stack do seu projeto.
+                  Envie os dados do seu código local para o servidor MqrBridge gerando o comando correspondente à stack do seu projeto.
                 </p>
               </div>
 

@@ -723,8 +723,8 @@ export const FindingsAndDevSecOpsModule: React.FC<FindingsAndDevSecOpsModuleProp
             >
               <option value="ALL">Todas as Ferramentas</option>
               <option value="opengrep-sast">Opengrep SAST Engine</option>
-              <option value="gitleaks-secrets">Gitleaks Secret Scanner</option>
-              <option value="sonarqube-quality">SonarQube Static Analyzer</option>
+              <option value="gitleaks-secrets">Detector de Segredos SARIF Secret Scanner</option>
+              <option value="mqr-bridge-quality">MqrBridge Static Analyzer</option>
               <option value="syft-grype-sca">Syft SBOM &amp; Grype SCA</option>
               <option value="archunit-cruiser">Dependency Cruiser &amp; ArchUnit</option>
               <option value="sqlfluff-db">SQLFluff &amp; Schema Auditor</option>

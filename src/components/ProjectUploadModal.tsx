@@ -54,7 +54,7 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
 
   // Form Fields
   const [projectName, setProjectName] = useState('');
-  const [domainTagsInput, setDomainTagsInput] = useState('devsecops, sonarqube-mqr, security, clean-code');
+  const [domainTagsInput, setDomainTagsInput] = useState('devsecops, mqr-strict, security, clean-code');
   const [qualityGateId, setQualityGateId] = useState('qg-sonar-way-mqr');
   const [evaluateAll12Categories, setEvaluateAll12Categories] = useState(true);
   const [objective, setObjective] = useState('');
@@ -180,7 +180,7 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: projectName.trim(),
-          domainTags: parsedDomainTags.length > 0 ? parsedDomainTags : ['multi-category', 'sonarqube-mqr'],
+          domainTags: parsedDomainTags.length > 0 ? parsedDomainTags : ['multi-category', 'mqr-strict'],
           defaultQualityGateId: qualityGateId,
           defaultQualityProfileIds: ['sonar-way-ts-mqr-2026', 'sonar-way-sql-mqr-2026'],
           objective: objective.trim(),
@@ -223,7 +223,7 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
             </div>
             <div>
               <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">
-                Upload &amp; Ingestão Multi-Categoria (SonarQube MQR)
+                Upload &amp; Ingestão Multi-Categoria (Modo MQR (Modern Quality Regime))
               </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400">
                 Importe código-fonte local ou pastas para avaliação transversal nas 12 categorias sem bloqueio a uma categoria única.
@@ -396,7 +396,7 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
                 htmlFor="upload-quality-gate"
                 className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1"
               >
-                Quality Gate Transversal (SonarQube MQR)
+                Quality Gate Transversal (Modo MQR (Modern Quality Regime))
               </label>
               <select
                 id="upload-quality-gate"
@@ -404,7 +404,7 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
                 onChange={(e) => setQualityGateId(e.target.value)}
                 className="w-full px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121824] text-slate-900 dark:text-slate-100 text-xs focus:outline-none focus:border-[#31d6c4]"
               >
-                <option value="qg-sonar-way-mqr">Sonar way (MQR — Clean as You Code + Fudge Factor)</option>
+                <option value="qg-sonar-way-mqr">Perfil de Qualidade Estrita (Modo MQR — Clean as You Code + Fudge Factor)</option>
                 <option value="qg-zero-trust-strict">WinHood Zero-Trust Strict (Bloqueio CVSS &gt;= 7.0)</option>
               </select>
             </div>
