@@ -566,26 +566,56 @@ export default function App() {
 
   const handleSeedRealWorkspace = async () => {
     try {
-      const res = await fetch('/api/system/seed-real-workspace', { method: 'POST' });
-      const data = await res.json();
+      const res = await fetch('/api/system/seed-real-workspace', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: 'ui_one_click' }),
+      });
+      const text = await res.text();
+      let data: Record<string, any> = {};
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        data = {};
+      }
       if (!res.ok) {
-        notify(data.message || data.error || 'Acesso negado.', 'error');
+        notify(
+          data.message || data.error || `Falha ao inicializar exemplo A/B (HTTP ${res.status}).`,
+          'error'
+        );
         return;
       }
       notify(
-        'Repositórios reais (VaultCore Internal v2.4.0 vs KeeSafe Open v2.56.0) ingeridos e analisados!',
+        data.message ||
+          'Repositórios reais (VaultCore Internal v2.5.0 vs KeeSafe Open v2.56.0) ingeridos, cifrados em AES-256-GCM e analisados!',
         'success'
       );
       await fetchAllBackendState();
-    } catch {
-      notify('Erro ao inicializar workspace real.', 'error');
+      setActiveNav('dashboard');
+    } catch (err: any) {
+      notify(
+        err?.message
+          ? `Erro ao inicializar workspace real: ${err.message}`
+          : 'Erro ao inicializar workspace real.',
+        'error'
+      );
     }
   };
 
   const handleResetEmptyWorkspace = async () => {
     try {
-      const res = await fetch('/api/system/reset-empty', { method: 'POST' });
-      const data = await res.json();
+      const res = await fetch('/api/system/reset-empty', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: 'ui_reset' }),
+      });
+      const text = await res.text();
+      let data: Record<string, any> = {};
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        data = {};
+      }
       if (!res.ok) {
         notify(data.message || data.error || 'Acesso negado.', 'error');
         return;

@@ -188,8 +188,56 @@ export const IacAnalyzerPlugin: AnalyzerPlugin = {
 
       // 4. GitHub Actions Workflow
       if (/\.github\/workflows\/.*\.(yml|yaml)$/i.test(filePath)) {
+        const jobsLineIdx = lines.findIndex((l) => /^jobs:\s*$/i.test(l));
         lines.forEach((line, idx) => {
           const lineNo = idx + 1;
+          // githubactions:S8233 - workflow-level write permissions before jobs:
+          if (
+            (jobsLineIdx === -1 || idx < jobsLineIdx) &&
+            /^\s+(?:security-events|pull-requests|packages|id-token|Statuses|checks|deployments|issues|discussions|actions):\s*write\b/i.test(
+              line
+            )
+          ) {
+            candidates.push({
+              ruleId: 'githubactions:S8233',
+              title: 'Permissão write declarada no nível raiz do workflow GitHub Actions',
+              description:
+                'Permissões de escrita (write) no topo do workflow concedem escopo elevado a todos os jobs; mova para o job específico.',
+              category: 'IAC',
+              severity: 'HIGH',
+              cwe: 'CWE-250',
+              filePath,
+              lineNumber: lineNo,
+              endLineNumber: lineNo,
+              snippet: line.trim(),
+              remediation:
+                'Manter apenas contents: read no topo do workflow e declarar permissões write dentro do job específico.',
+              detectionMethod: 'STATIC_PATTERN',
+              confidence: 'HIGH',
+              effortMinutes: 10,
+            });
+          }
+          // githubactions:S8543 - npx without pinned version in workflow
+          if (/\bnpx\s+(?!--yes\s+[^\s@]+@\d)[^\s@]+(?:\s|$)/.test(line) && !line.trim().startsWith('#')) {
+            candidates.push({
+              ruleId: 'githubactions:S8543',
+              title: 'Execução de pacote via npx sem versão fixada em workflow CI/CD',
+              description:
+                'Invocar npx sem versão exata ou sem usar ./node_modules/.bin expõe a pipeline a releases não verificadas.',
+              category: 'IAC',
+              severity: 'HIGH',
+              cwe: 'CWE-829',
+              filePath,
+              lineNumber: lineNo,
+              endLineNumber: lineNo,
+              snippet: line.trim(),
+              remediation:
+                'Utilizar o binário local ./node_modules/.bin/<tool> instalado via npm ci ou fixar versão exata pacote@x.y.z.',
+              detectionMethod: 'STATIC_PATTERN',
+              confidence: 'HIGH',
+              effortMinutes: 10,
+            });
+          }
           if (/write-all/i.test(line)) {
             candidates.push({
               ruleId: 'iac:GHA-001',

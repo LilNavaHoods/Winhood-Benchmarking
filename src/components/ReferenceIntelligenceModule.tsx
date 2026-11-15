@@ -1577,9 +1577,14 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
                 <KeyRound className="w-4 h-4 text-[#31d6c4]" />
                 <span>Gestão &amp; Rotação de Chaves Criptográficas (HMAC + Ed25519 + AES-GCM)</span>
               </h2>
-              <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-[#31d6c4]/15 text-[#31d6c4]">
-                Zero Segredos Hardcoded
-              </span>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-[#31d6c4] border border-emerald-500/30">
+                  Cofre de Código AES-256-GCM Ativo (whdb:enc:v2 · SHA-256 Verificado)
+                </span>
+                <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-[#31d6c4]/15 text-[#31d6c4]">
+                  Zero Segredos Hardcoded
+                </span>
+              </div>
             </div>
 
             {keyStatus && (

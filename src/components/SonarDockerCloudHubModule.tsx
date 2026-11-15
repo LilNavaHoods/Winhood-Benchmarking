@@ -2308,6 +2308,61 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
           </div>
         </div>
       )}
+
+      {/* Comparative Parity & Technical Differentiators Matrix: WinHood v4.5 vs. SonarCloud (MQR) */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-sm font-bold text-white">
+            <ShieldCheck className="w-4 h-4 text-[#31d6c4]" />
+            Matriz Comparativa de Capacidades Reais: WinHood Engine v4.5 vs. SonarCloud (MQR)
+          </div>
+          <span className="text-[11px] font-mono px-2.5 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
+            15 Sinks Taint · AST/CFG · SBOM CycloneDX 1.5 · Hash-Chain SHA-256
+          </span>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs border-collapse">
+            <thead>
+              <tr className="border-b border-slate-800 text-slate-400 uppercase tracking-wider text-[10px]">
+                <th className="py-2 pr-4">Dimensão de Engenharia</th>
+                <th className="py-2 px-4">SonarCloud (MQR)</th>
+                <th className="py-2 pl-4 text-[#31d6c4]">WinHood Native Engine v4.5</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/60 text-slate-300">
+              <tr>
+                <td className="py-2.5 pr-4 font-medium text-white">SAST & Taint Analysis Interprocedural</td>
+                <td className="py-2.5 px-4">Taint comercial em planos pagos</td>
+                <td className="py-2.5 pl-4 text-emerald-300">
+                  15 Sinks OWASP/CWE (SQLi, CMDi, Path, XSS, SSRF, NoSQLi, LDAPi, XPathi, XXE, Deserialization, Open Redirect, SSTI, Prototype Pollution, Logi)
+                </td>
+              </tr>
+              <tr>
+                <td className="py-2.5 pr-4 font-medium text-white">AST, CFG & Clean Code Rules</td>
+                <td className="py-2.5 px-4">Regras S2871, S3923, S8786, S8233, S8543</td>
+                <td className="py-2.5 pl-4 text-emerald-300">
+                  Paridade nativa Babel AST + GitHub Actions IaC (S8233/S8543) + CPD Karp-Rabin
+                </td>
+              </tr>
+              <tr>
+                <td className="py-2.5 pr-4 font-medium text-white">SCA, SBOM & Licenças SPDX</td>
+                <td className="py-2.5 px-4">Não gera SBOM CycloneDX/SPDX nativo</td>
+                <td className="py-2.5 pl-4 text-emerald-300">
+                  CycloneDX 1.5 + SPDX 2.3 assinados + correlação OSV/NVD/EPSS/CISA KEV
+                </td>
+              </tr>
+              <tr>
+                <td className="py-2.5 pr-4 font-medium text-white">Cifragem em Repouso & Rastreabilidade Forense</td>
+                <td className="py-2.5 px-4">Armazenamento SaaS externo sem hash-chain local</td>
+                <td className="py-2.5 pl-4 text-emerald-300">
+                  Cofre local AES-256-GCM (whdb:enc:v2) + Cadeia Merkle SHA-256 + Manifesto HMAC
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 };
+

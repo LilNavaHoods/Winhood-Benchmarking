@@ -71,6 +71,7 @@ export const PERMISSIONS_MATRIX: Record<RbacRole, ReadonlySet<RbacPermission>> =
     'security:ops',
     'sonar:config',
     'targets:manage',
+    'system:reset',
   ]),
   QA_ENGINEER: new Set<RbacPermission>([
     'read:all',
@@ -1244,19 +1245,22 @@ export class AuthService {
       throw new Error('EMAIL_ALREADY_EXISTS: Este e-mail já está cadastrado na plataforma.');
     }
 
+    const isFirstUser = this.db.users.length === 0;
     const requestedRole: RbacRole = params.role || 'SECURITY_LEAD';
-    if (requestedRole === 'ADMIN') {
+    if (!isFirstUser && requestedRole === 'ADMIN') {
       throw new Error(
         'ROLE_ELEVATION_BLOCKED: O perfil ADMIN exige provisionamento via Bootstrap ou atribuição por um Administrador existente.'
       );
     }
-    const allowedSelfRoles: ReadonlyArray<RbacRole> = ['SECURITY_LEAD', 'QA_ENGINEER', 'AUDITOR'];
+    const allowedSelfRoles: ReadonlyArray<RbacRole> = isFirstUser
+      ? ['ADMIN', 'SECURITY_LEAD', 'QA_ENGINEER', 'AUDITOR']
+      : ['SECURITY_LEAD', 'QA_ENGINEER', 'AUDITOR'];
     if (!allowedSelfRoles.includes(requestedRole)) {
       throw new Error('INVALID_ROLE: Perfil de acesso selecionado é inválido.');
     }
+    const assignedRole: RbacRole = isFirstUser ? 'ADMIN' : requestedRole;
 
     const now = new Date().toISOString();
-    const isFirstUser = this.db.users.length === 0;
     const totpSecret = params.enableMfa ? base32Encode(crypto.randomBytes(20)) : null;
     const recoveryGen = totpSecret ? generateRecoveryCodesSet(8) : null;
 
@@ -1264,7 +1268,7 @@ export class AuthService {
       id: `usr-${crypto.randomUUID().slice(0, 8)}`,
       name: cleanName,
       email: cleanEmail,
-      role: requestedRole,
+      role: assignedRole,
       passwordHash: hashPassword(cleanPassword),
       mfaEnabled: Boolean(params.enableMfa),
       totpSecretBase32: totpSecret ? this.encryptSecretAtRest(totpSecret) : null,

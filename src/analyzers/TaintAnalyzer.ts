@@ -1,13 +1,22 @@
 import type { CodeExecutionFlowStep } from '../types/benchmark';
 import type { AstFunctionNode, AstIssueCandidate, AstParseResult } from './types';
 
-type TaintSinkType =
+export type TaintSinkType =
   | 'SQL_INJECTION'
   | 'COMMAND_INJECTION'
   | 'CODE_INJECTION'
   | 'PATH_TRAVERSAL'
   | 'XSS'
-  | 'SSRF';
+  | 'SSRF'
+  | 'NOSQL_INJECTION'
+  | 'LDAP_INJECTION'
+  | 'XPATH_INJECTION'
+  | 'XXE'
+  | 'INSECURE_DESERIALIZATION'
+  | 'OPEN_REDIRECT'
+  | 'SSTI'
+  | 'PROTOTYPE_POLLUTION'
+  | 'LOG_INJECTION';
 
 interface TaintedVarState {
   originFile: string;
@@ -22,7 +31,7 @@ interface TaintedVarState {
 const SOURCE_PARAM_HINT =
   /(input|query|filter|path|target|cmd|command|url|uri|webhook|endpoint|req|request|body|param|user|title|name|payload|raw|sql|expr|file|html|tpl|data)/i;
 
-const SINK_RULES: Array<{
+export const SINK_RULES: Array<{
   calleePattern: RegExp;
   ruleId: string;
   title: string;
@@ -40,7 +49,7 @@ const SINK_RULES: Array<{
     remediation: 'Substituir por execFile/spawn com shell: false e allowlist de argumentos.',
   },
   {
-    calleePattern: /^(eval|Function|execfile|compile)$/i,
+    calleePattern: /^(eval|Function|execfile|compile|runInNewContext|runInThisContext)$/i,
     ruleId: 'taint:S1523',
     title: 'Fluxo Taint até avaliação dinâmica de código (CWE-95)',
     cwe: 'CWE-95',
@@ -83,6 +92,78 @@ const SINK_RULES: Array<{
     sinkType: 'SSRF',
     remediation: 'Validar URLs via SsrfGuard/allowlist de domínios bloqueando loopback, link-local e faixas privadas RFC1918.',
   },
+  {
+    calleePattern: /^(?:\$where|findByRawQuery|aggregateRaw)$|^(?:collection|db)\.(?:find|findOne|updateMany|deleteMany)$/i,
+    ruleId: 'taint:S5147',
+    title: 'Fluxo Taint até consulta NoSQL sem tipagem estrita (NoSQL Injection CWE-943)',
+    cwe: 'CWE-943',
+    sinkType: 'NOSQL_INJECTION',
+    remediation: 'Converter parâmetros para string/primitivo escalar e proibir operadores $where/$ne/$gt vindos do cliente.',
+  },
+  {
+    calleePattern: /^(?:ldapSearch|searchLdap)$|^(?:ldapClient|dirContext)\.(?:search|bind)$/i,
+    ruleId: 'taint:S2078',
+    title: 'Fluxo Taint até filtro de diretório LDAP (LDAP Injection CWE-90)',
+    cwe: 'CWE-90',
+    sinkType: 'LDAP_INJECTION',
+    remediation: 'Escapar caracteres especiais RFC 4515 (*, (, ), \\, NUL) antes de montar filtros LDAP.',
+  },
+  {
+    calleePattern: /^(?:xpathEvaluate|selectNodes|selectSingleNode)$|^xpath\.(?:select|evaluate)$/i,
+    ruleId: 'taint:S2091',
+    title: 'Fluxo Taint até expressão XPath (XPath Injection CWE-643)',
+    cwe: 'CWE-643',
+    sinkType: 'XPATH_INJECTION',
+    remediation: 'Utilizar XPath parametrizado (XPathVariableResolver) em vez de interpolação.',
+  },
+  {
+    calleePattern: /^(?:parseXml|parseXmlString|fromstring|SAXParser)$|^etree\.(?:fromstring|parse)$/i,
+    ruleId: 'taint:S2755',
+    title: 'Fluxo Taint até parser XML susceptível a Entidades Externas (XXE CWE-611)',
+    cwe: 'CWE-611',
+    sinkType: 'XXE',
+    remediation: 'Desabilitar DTDs externos e resolve_entities no parser XML.',
+  },
+  {
+    calleePattern: /^(?:unserialize|deserialize|loads|yamlLoad)$|^(?:pickle|marshal|yaml|ObjectInputStream)\.(?:loads|load|readObject)$/i,
+    ruleId: 'taint:S5135',
+    title: 'Fluxo Taint até desserialização insegura de objetos (CWE-502)',
+    cwe: 'CWE-502',
+    sinkType: 'INSECURE_DESERIALIZATION',
+    remediation: 'Substituir por JSON.parse com validação de schema ou yaml.safe_load.',
+  },
+  {
+    calleePattern: /^(?:redirect|sendRedirect)$|^res\.redirect$/i,
+    ruleId: 'taint:S5146',
+    title: 'Fluxo Taint até redirecionamento HTTP aberto (Open Redirect CWE-601)',
+    cwe: 'CWE-601',
+    sinkType: 'OPEN_REDIRECT',
+    remediation: 'Validar o destino de redirecionamento contra uma lista estrita de caminhos relativos internos.',
+  },
+  {
+    calleePattern: /^(?:compileTemplate|renderTemplateString|ejsRender|pugRender|handlebarsCompile)$/i,
+    ruleId: 'taint:S5334',
+    title: 'Fluxo Taint até compilação de template no servidor (SSTI CWE-1336)',
+    cwe: 'CWE-1336',
+    sinkType: 'SSTI',
+    remediation: 'Passar dados de usuário apenas como contexto de variáveis para templates estáticos pré-compilados.',
+  },
+  {
+    calleePattern: /^(?:deepMerge|mergeObjects|assignDeep|defaultsDeep)$/i,
+    ruleId: 'taint:S5148',
+    title: 'Fluxo Taint até fusão recursiva de objetos (Prototype Pollution CWE-1321)',
+    cwe: 'CWE-1321',
+    sinkType: 'PROTOTYPE_POLLUTION',
+    remediation: 'Bloquear chaves __proto__, constructor e prototype e usar Object.create(null).',
+  },
+  {
+    calleePattern: /^(?:auditLogRaw|writeRawLog)$/i,
+    ruleId: 'taint:S5145',
+    title: 'Fluxo Taint até gravação de log sem neutralização de CRLF (Log Injection CWE-117)',
+    cwe: 'CWE-117',
+    sinkType: 'LOG_INJECTION',
+    remediation: 'Remover quebras de linha (\\r, \\n) e caracteres de controle antes de registrar entradas externas.',
+  },
 ];
 
 function matchesSinkRule(
@@ -95,25 +176,43 @@ function matchesSinkRule(
   return false;
 }
 
+const ALL_TAINT_SINKS: TaintSinkType[] = [
+  'SQL_INJECTION',
+  'COMMAND_INJECTION',
+  'CODE_INJECTION',
+  'PATH_TRAVERSAL',
+  'XSS',
+  'SSRF',
+  'NOSQL_INJECTION',
+  'LDAP_INJECTION',
+  'XPATH_INJECTION',
+  'XXE',
+  'INSECURE_DESERIALIZATION',
+  'OPEN_REDIRECT',
+  'SSTI',
+  'PROTOTYPE_POLLUTION',
+  'LOG_INJECTION',
+];
+
 function getSanitizedSinksForContext(
   ctx: NonNullable<AstFunctionNode['variableBindings'][number]['sanitizerContext']> | undefined
 ): TaintSinkType[] {
   switch (ctx) {
     case 'NUMERIC':
-      return ['SQL_INJECTION', 'COMMAND_INJECTION', 'CODE_INJECTION', 'PATH_TRAVERSAL', 'XSS', 'SSRF'];
+      return ALL_TAINT_SINKS;
     case 'SQL_PREPARED':
-      return ['SQL_INJECTION'];
+      return ['SQL_INJECTION', 'NOSQL_INJECTION'];
     case 'HTML_ESCAPE':
-      return ['XSS'];
+      return ['XSS', 'SSTI', 'LOG_INJECTION'];
     case 'PATH_BASENAME':
       return ['PATH_TRAVERSAL'];
     case 'URL_ENCODE':
       // encodeURIComponent ONLY encodes URL query components; it MUST NOT clear SQL/CMD/CODE/PATH/SSRF taint!
-      return [];
+      return ['OPEN_REDIRECT', 'LOG_INJECTION'];
     case 'CRYPTO_KDF':
-      return ['SQL_INJECTION', 'XSS'];
+      return ['SQL_INJECTION', 'XSS', 'NOSQL_INJECTION'];
     case 'GENERIC_SCHEMA':
-      return ['SQL_INJECTION', 'COMMAND_INJECTION', 'PATH_TRAVERSAL', 'XSS', 'SSRF'];
+      return ALL_TAINT_SINKS;
     default:
       return [];
   }

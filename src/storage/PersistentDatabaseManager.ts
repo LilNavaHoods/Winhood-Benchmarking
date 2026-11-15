@@ -1,6 +1,8 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
+import { KeyManagementService } from '../security/KeyManagementService';
 
 export interface PersistentReadOutcome<T> {
   data: T | null;
@@ -8,6 +10,20 @@ export interface PersistentReadOutcome<T> {
   storageKind: 'ATOMIC_CHECKSUMMED_JSON_STORE';
   integrityStatus: 'VERIFIED' | 'RECOVERED_FROM_BACKUP' | 'MISSING' | 'CORRUPTED';
   errorMessage?: string;
+}
+
+export interface StorageEncryptionInspectionReport {
+  encryptedAtRest: boolean;
+  algorithm: 'AES-256-GCM + ZLIB-DEFLATE';
+  envelopeVersion: 'whdb:enc:v2';
+  activeKeyId: string;
+  keyStorageMode: string;
+  totalSoftwareCount: number;
+  encryptedSoftwareCount: number;
+  plaintextFilesExposedOnDisk: number;
+  sha256SidecarVerified: boolean;
+  databaseSha256: string | null;
+  verifiedAt: string;
 }
 
 function sha256Hex(raw: string): string {
@@ -27,13 +43,141 @@ function fsyncAndRename(tmpPath: string, targetPath: string): void {
 /**
  * PersistentDatabaseManager
  * Persistência atômica (temp + fsync + rename), checksum SHA-256 sidecar,
- * backup automático (.bak) e fila sequencial de escrita para winhood_db.json / tools_db.json.
+ * cifragem autenticada em repouso (AES-256-GCM + DEFLATE) dos mapas de código-fonte,
+ * backup automático (.bak) e fila sequencial de escrita para winhood_persistent_db.json.
  */
 export class PersistentDatabaseManager {
-  public static readonly SCHEMA_VERSION = 4;
+  public static readonly SCHEMA_VERSION = 5;
   public static readonly STORAGE_KIND = 'ATOMIC_CHECKSUMMED_JSON_STORE' as const;
+  public static readonly ENVELOPE_PREFIX = 'whdb:enc:v2:';
 
   private readonly pendingQueues = new Map<string, Promise<void>>();
+
+  /**
+   * Comprime com DEFLATE e cifra um mapa de arquivos-fonte com AES-256-GCM autenticado.
+   * Formato do envelope: whdb:enc:v2:<keyId>:<ivHex>:<authTagHex>:<cipherBase64>
+   */
+  public static encryptSourceFilesMap(filesMap: Record<string, string> | undefined | null): string {
+    const safeMap = filesMap && typeof filesMap === 'object' ? filesMap : {};
+    const rawJson = JSON.stringify(safeMap);
+    const compressed = zlib.deflateSync(Buffer.from(rawJson, 'utf8'));
+    const { keyId, keyBuffer } = KeyManagementService.getActiveVaultAesKey();
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', keyBuffer, iv);
+    const encrypted = Buffer.concat([cipher.update(compressed), cipher.final()]);
+    const authTag = cipher.getAuthTag();
+    return `${PersistentDatabaseManager.ENVELOPE_PREFIX}${keyId}:${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted.toString('base64')}`;
+  }
+
+  /**
+   * Decifra um envelope whdb:enc:v2:... (ou preserva objetos legados em claro durante migração).
+   */
+  public static decryptSourceFilesMap(
+    envelopeOrMap: string | Record<string, string> | undefined | null
+  ): Record<string, string> {
+    if (!envelopeOrMap) return {};
+    if (typeof envelopeOrMap === 'object' && !Array.isArray(envelopeOrMap)) {
+      return envelopeOrMap;
+    }
+    if (typeof envelopeOrMap !== 'string') return {};
+    if (!envelopeOrMap.startsWith(PersistentDatabaseManager.ENVELOPE_PREFIX)) {
+      try {
+        const parsed = JSON.parse(envelopeOrMap);
+        return parsed && typeof parsed === 'object' ? parsed : {};
+      } catch {
+        return {};
+      }
+    }
+
+    const parts = envelopeOrMap.slice(PersistentDatabaseManager.ENVELOPE_PREFIX.length).split(':');
+    if (parts.length !== 4) {
+      return {};
+    }
+    const [keyId, ivHex, authTagHex, cipherBase64] = parts;
+    const keyBuffer =
+      KeyManagementService.getVaultKeyBufferByKeyId(keyId) ||
+      KeyManagementService.getActiveVaultAesKey().keyBuffer;
+
+    try {
+      const iv = Buffer.from(ivHex, 'hex');
+      const authTag = Buffer.from(authTagHex, 'hex');
+      const ciphertext = Buffer.from(cipherBase64, 'base64');
+      const decipher = crypto.createDecipheriv('aes-256-gcm', keyBuffer, iv);
+      decipher.setAuthTag(authTag);
+      const compressed = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+      const inflated = zlib.inflateSync(compressed).toString('utf8');
+      const parsed = JSON.parse(inflated);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  private static preparePayloadForDisk<T>(data: T): T {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      return data;
+    }
+    const record = data as Record<string, any>;
+    if (!Array.isArray(record.softwares)) {
+      return {
+        schemaVersion: record.schemaVersion || PersistentDatabaseManager.SCHEMA_VERSION,
+        storageKind: PersistentDatabaseManager.STORAGE_KIND,
+        ...record,
+      } as unknown as T;
+    }
+
+    const { keyId } = KeyManagementService.getActiveVaultAesKey();
+    const encryptedSoftwares = record.softwares.map((sw: any) => {
+      if (!sw || typeof sw !== 'object') return sw;
+      const inMemoryFiles: Record<string, string> =
+        sw.sourceFilesContent && typeof sw.sourceFilesContent === 'object'
+          ? sw.sourceFilesContent
+          : typeof sw.encryptedSourceFilesEnvelope === 'string'
+            ? PersistentDatabaseManager.decryptSourceFilesMap(sw.encryptedSourceFilesEnvelope)
+            : {};
+      const envelope = PersistentDatabaseManager.encryptSourceFilesMap(inMemoryFiles);
+      return {
+        ...sw,
+        sourceFilesContent: {},
+        encryptedSourceFilesEnvelope: envelope,
+        sourceFilesEncryptedAtRest: true,
+        sourceFilesEncryptionKeyId: keyId,
+      };
+    });
+
+    return {
+      schemaVersion: record.schemaVersion || PersistentDatabaseManager.SCHEMA_VERSION,
+      storageKind: PersistentDatabaseManager.STORAGE_KIND,
+      ...record,
+      softwares: encryptedSoftwares,
+    } as unknown as T;
+  }
+
+  private static hydratePayloadFromDisk<T>(parsed: T): T {
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return parsed;
+    }
+    const record = parsed as Record<string, any>;
+    if (!Array.isArray(record.softwares)) {
+      return parsed;
+    }
+
+    for (const sw of record.softwares) {
+      if (!sw || typeof sw !== 'object') continue;
+      if (typeof sw.encryptedSourceFilesEnvelope === 'string' && sw.encryptedSourceFilesEnvelope) {
+        sw.sourceFilesContent = PersistentDatabaseManager.decryptSourceFilesMap(
+          sw.encryptedSourceFilesEnvelope
+        );
+      } else if (typeof sw.sourceFilesContent === 'string') {
+        sw.sourceFilesContent = PersistentDatabaseManager.decryptSourceFilesMap(
+          sw.sourceFilesContent
+        );
+      } else if (!sw.sourceFilesContent || typeof sw.sourceFilesContent !== 'object') {
+        sw.sourceFilesContent = {};
+      }
+    }
+    return parsed;
+  }
 
   public writeAtomicChecksummed<T>(targetPath: string, data: T): { sha256: string } {
     const dir = path.dirname(targetPath);
@@ -41,15 +185,7 @@ export class PersistentDatabaseManager {
       fs.mkdirSync(dir, { recursive: true });
     }
 
-    const wrapped =
-      data && typeof data === 'object' && !Array.isArray(data)
-        ? {
-            schemaVersion: (data as any).schemaVersion || PersistentDatabaseManager.SCHEMA_VERSION,
-            storageKind: PersistentDatabaseManager.STORAGE_KIND,
-            ...data,
-          }
-        : data;
-
+    const wrapped = PersistentDatabaseManager.preparePayloadForDisk(data);
     const serialized = JSON.stringify(wrapped, null, 2);
     const checksum = sha256Hex(serialized);
     const checksumPath = `${targetPath}.sha256`;
@@ -103,7 +239,7 @@ export class PersistentDatabaseManager {
           throw new Error(`Checksum SHA-256 divergente em ${path.basename(targetPath)}`);
         }
       }
-      return JSON.parse(raw) as T;
+      return PersistentDatabaseManager.hydratePayloadFromDisk(JSON.parse(raw) as T);
     };
 
     if (!fs.existsSync(targetPath) && !fs.existsSync(backupPath)) {
@@ -130,7 +266,9 @@ export class PersistentDatabaseManager {
       if (fs.existsSync(backupPath)) {
         try {
           const bakRaw = fs.readFileSync(backupPath, 'utf8');
-          const bakParsed = JSON.parse(bakRaw) as T;
+          const bakParsed = PersistentDatabaseManager.hydratePayloadFromDisk(
+            JSON.parse(bakRaw) as T
+          );
           this.writeAtomicChecksummed(targetPath, bakParsed);
           return {
             data: bakParsed,
@@ -165,4 +303,80 @@ export class PersistentDatabaseManager {
       integrityStatus: 'MISSING',
     };
   }
+
+  public inspectEncryptionAtRest(targetPath: string): StorageEncryptionInspectionReport {
+    const { keyId } = KeyManagementService.getActiveVaultAesKey();
+    const kmsStatus = KeyManagementService.getStatus();
+    const storageMode = kmsStatus.dpapiSupported ? 'WINDOWS_DPAPI_KEYSTORE' : kmsStatus.keyOrigin;
+    const checksumPath = `${targetPath}.sha256`;
+
+    if (!fs.existsSync(targetPath)) {
+      return {
+        encryptedAtRest: true,
+        algorithm: 'AES-256-GCM + ZLIB-DEFLATE',
+        envelopeVersion: 'whdb:enc:v2',
+        activeKeyId: keyId,
+        keyStorageMode: storageMode,
+        totalSoftwareCount: 0,
+        encryptedSoftwareCount: 0,
+        plaintextFilesExposedOnDisk: 0,
+        sha256SidecarVerified: false,
+        databaseSha256: null,
+        verifiedAt: new Date().toISOString(),
+      };
+    }
+
+    try {
+      const raw = fs.readFileSync(targetPath, 'utf8');
+      const actualSha = sha256Hex(raw);
+      const expectedSha = fs.existsSync(checksumPath)
+        ? fs.readFileSync(checksumPath, 'utf8').trim()
+        : '';
+      const parsed = JSON.parse(raw) as Record<string, any>;
+      const softwares: any[] = Array.isArray(parsed.softwares) ? parsed.softwares : [];
+      let encryptedCount = 0;
+      let plaintextExposed = 0;
+
+      for (const sw of softwares) {
+        if (
+          typeof sw?.encryptedSourceFilesEnvelope === 'string' &&
+          sw.encryptedSourceFilesEnvelope.startsWith(PersistentDatabaseManager.ENVELOPE_PREFIX)
+        ) {
+          encryptedCount += 1;
+        }
+        if (sw?.sourceFilesContent && typeof sw.sourceFilesContent === 'object') {
+          plaintextExposed += Object.keys(sw.sourceFilesContent).length;
+        }
+      }
+
+      return {
+        encryptedAtRest: plaintextExposed === 0 && encryptedCount === softwares.length,
+        algorithm: 'AES-256-GCM + ZLIB-DEFLATE',
+        envelopeVersion: 'whdb:enc:v2',
+        activeKeyId: keyId,
+        keyStorageMode: storageMode,
+        totalSoftwareCount: softwares.length,
+        encryptedSoftwareCount: encryptedCount,
+        plaintextFilesExposedOnDisk: plaintextExposed,
+        sha256SidecarVerified: Boolean(expectedSha && expectedSha === actualSha),
+        databaseSha256: actualSha,
+        verifiedAt: new Date().toISOString(),
+      };
+    } catch {
+      return {
+        encryptedAtRest: false,
+        algorithm: 'AES-256-GCM + ZLIB-DEFLATE',
+        envelopeVersion: 'whdb:enc:v2',
+        activeKeyId: keyId,
+        keyStorageMode: storageMode,
+        totalSoftwareCount: 0,
+        encryptedSoftwareCount: 0,
+        plaintextFilesExposedOnDisk: 0,
+        sha256SidecarVerified: false,
+        databaseSha256: null,
+        verifiedAt: new Date().toISOString(),
+      };
+    }
+  }
 }
+

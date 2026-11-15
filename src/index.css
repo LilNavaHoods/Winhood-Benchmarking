@@ -8,7 +8,37 @@
   --bg-shell-dark: #080b10;
   --bg-panel-dark: #0f141c;
   --border-graphite: rgba(148, 163, 184, 0.14);
+  --hairline-plate: #ffffff;
   font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.dark {
+  --hairline-plate: #0f141c;
+}
+
+@keyframes whFadeSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.wh-fade-in {
+  animation: whFadeSlideUp 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.wh-card-interactive {
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.wh-card-interactive:hover {
+  transform: translateY(-1px);
+  border-color: rgba(49, 214, 196, 0.45);
+  box-shadow: 0 8px 24px -8px rgba(49, 214, 196, 0.14);
 }
 
 .font-mono,

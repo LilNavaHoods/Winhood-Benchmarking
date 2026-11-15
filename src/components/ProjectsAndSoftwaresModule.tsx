@@ -302,20 +302,76 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
     }
   };
 
+  const [storageEncStatus, setStorageEncStatus] = useState<{
+    encryptedAtRest: boolean;
+    algorithm: string;
+    envelopeVersion: string;
+    activeKeyId: string;
+    keyStorageMode: string;
+    totalSoftwareCount: number;
+    encryptedSoftwareCount: number;
+    plaintextFilesExposedOnDisk: number;
+    sha256SidecarVerified: boolean;
+    databaseSha256: string | null;
+    verifiedAt: string;
+  } | null>(null);
+  const [verifyingStorageEnc, setVerifyingStorageEnc] = useState(false);
+
+  const handleVerifyStorageEncryption = async () => {
+    setVerifyingStorageEnc(true);
+    try {
+      const res = await fetch('/api/security/storage-encryption-status');
+      if (res.ok) {
+        const data = await res.json();
+        setStorageEncStatus(data);
+        onNotify(
+          `Cofre em repouso verificado: ${data.encryptedSoftwareCount}/${data.totalSoftwareCount} softwares cifrados com ${data.algorithm} (${data.envelopeVersion}) · 0 arquivos em claro no JSON.`,
+          'success'
+        );
+      } else {
+        onNotify('Não foi possível consultar o status de cifragem em repouso.', 'error');
+      }
+    } catch {
+      onNotify('Erro ao verificar cifragem em repouso.', 'error');
+    } finally {
+      setVerifyingStorageEnc(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Module Header & Sub-Tabs */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
-            Projetos, Softwares &amp; Ingestão de Artefatos (SHA-256)
-          </h1>
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
+              Projetos, Softwares &amp; Ingestão de Artefatos (SHA-256)
+            </h1>
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[11px] font-mono font-bold bg-emerald-500/15 text-emerald-700 dark:text-[#31d6c4] border border-emerald-500/30">
+              <ShieldCheck className="w-3.5 h-3.5" />
+              Cofre de Código AES-256-GCM Ativo (whdb:enc:v2 · SHA-256 Verificado)
+            </span>
+          </div>
           <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
-            Gerenciamento completo de projetos com UUID, cadastro de múltiplos softwares e inventário técnico em área isolada.
+            Gerenciamento completo de projetos com UUID, cadastro de múltiplos softwares e código-fonte comprimido + cifrado em repouso.
           </p>
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={handleVerifyStorageEncryption}
+            disabled={verifyingStorageEnc}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500/10 text-emerald-700 dark:text-[#31d6c4] border border-emerald-500/40 hover:bg-emerald-500/20 transition-colors cursor-pointer disabled:opacity-50"
+          >
+            <ShieldCheck className="w-3.5 h-3.5" />
+            <span>
+              {verifyingStorageEnc
+                ? 'Auditando Cofre...'
+                : 'Verificar Cifragem em Repouso dos Projetos'}
+            </span>
+          </button>
+
           {onOpenUpload && (
             <button
               type="button"
@@ -364,6 +420,29 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
           </div>
         </div>
       </div>
+
+      {storageEncStatus && (
+        <div className="p-3.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 text-xs font-mono flex flex-wrap items-center justify-between gap-3">
+          <div className="space-y-0.5">
+            <div className="font-bold text-emerald-700 dark:text-[#31d6c4]">
+              ✓ AUDITORIA DE CIFRAGEM EM REPOUSO ({storageEncStatus.algorithm} · {storageEncStatus.envelopeVersion})
+            </div>
+            <div className="text-slate-600 dark:text-slate-300">
+              Key ID Ativa: <strong>{storageEncStatus.activeKeyId}</strong> ({storageEncStatus.keyStorageMode}) · Softwares Cifrados:{' '}
+              <strong>
+                {storageEncStatus.encryptedSoftwareCount}/{storageEncStatus.totalSoftwareCount}
+              </strong>{' '}
+              · Arquivos em texto claro no banco JSON: <strong>{storageEncStatus.plaintextFilesExposedOnDisk}</strong> · Sidecar SHA-256:{' '}
+              <strong>{storageEncStatus.sha256SidecarVerified ? 'VERIFICADO' : 'PENDENTE'}</strong>
+            </div>
+          </div>
+          {storageEncStatus.databaseSha256 && (
+            <span className="px-2 py-1 rounded bg-white/80 dark:bg-[#080b10] text-[11px] text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-800">
+              DB SHA-256: {storageEncStatus.databaseSha256.slice(0, 16)}...
+            </span>
+          )}
+        </div>
+      )}
 
       {subTab === 'projects' ? (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

@@ -1,61 +1,204 @@
 import React, { useEffect, useRef, useState } from 'react';
 
 export type HairlineFigureType =
-  | 'lockers'
-  | 'vault'
   | 'padlock'
+  | 'vault'
+  | 'lockers'
+  | 'phosphor'
+  | 'terrain'
+  | 'exploded'
+  | 'turntable'
+  | 'stack'
   | 'router'
+  | 'sieve'
+  | 'terminal'
+  | 'loupe'
   | 'layers'
   | 'gauge';
 
-interface HairlineAnimatedFigureProps {
+export interface HairlineAnimatedFigureProps {
   type: HairlineFigureType;
   size?: number;
   className?: string;
   color?: string;
+  accentColor?: string;
   cycleDurationMs?: number;
   pauseDurationMs?: number;
   title?: string;
 }
 
-const CATEGORY_DEFAULT_COLORS: Record<HairlineFigureType, { stroke: string; glow: string; bg: string }> = {
+const COS30 = 0.8660254;
+const SIN30 = 0.5;
+
+const CATEGORY_DEFAULT_COLORS: Record<string, { stroke: string; glow: string; bg: string }> = {
   lockers: {
-    stroke: '#3b82f6', // Azul Índigo / Storage & DB
+    stroke: '#3b82f6',
     glow: 'rgba(59, 130, 246, 0.25)',
     bg: 'rgba(59, 130, 246, 0.08)',
   },
   vault: {
-    stroke: '#10b981', // Esmeralda / Segurança Geral & DevSecOps
+    stroke: '#10b981',
     glow: 'rgba(16, 185, 129, 0.25)',
     bg: 'rgba(16, 185, 129, 0.08)',
   },
   padlock: {
-    stroke: '#f59e0b', // Âmbar / IAM, Senhas & Segredos
+    stroke: '#f59e0b',
     glow: 'rgba(245, 158, 11, 0.25)',
     bg: 'rgba(245, 158, 11, 0.08)',
   },
   router: {
-    stroke: '#06b6d4', // Ciano / Rede, APIs & TLS
+    stroke: '#06b6d4',
     glow: 'rgba(6, 182, 212, 0.25)',
     bg: 'rgba(6, 182, 212, 0.08)',
   },
-  layers: {
-    stroke: '#8b5cf6', // Púrpura / Código & Arquitetura
+  exploded: {
+    stroke: '#8b5cf6',
     glow: 'rgba(139, 92, 246, 0.25)',
     bg: 'rgba(139, 92, 246, 0.08)',
   },
-  gauge: {
-    stroke: '#f43f5e', // Rubi / Performance & Hardware
+  layers: {
+    stroke: '#8b5cf6',
+    glow: 'rgba(139, 92, 246, 0.25)',
+    bg: 'rgba(139, 92, 246, 0.08)',
+  },
+  turntable: {
+    stroke: '#f43f5e',
     glow: 'rgba(244, 63, 94, 0.25)',
     bg: 'rgba(244, 63, 94, 0.08)',
+  },
+  gauge: {
+    stroke: '#f43f5e',
+    glow: 'rgba(244, 63, 94, 0.25)',
+    bg: 'rgba(244, 63, 94, 0.08)',
+  },
+  phosphor: {
+    stroke: '#31d6c4',
+    glow: 'rgba(49, 214, 196, 0.25)',
+    bg: 'rgba(49, 214, 196, 0.08)',
+  },
+  terrain: {
+    stroke: '#14b8a6',
+    glow: 'rgba(20, 184, 166, 0.25)',
+    bg: 'rgba(20, 184, 166, 0.08)',
+  },
+  stack: {
+    stroke: '#6366f1',
+    glow: 'rgba(99, 102, 241, 0.25)',
+    bg: 'rgba(99, 102, 241, 0.08)',
+  },
+  sieve: {
+    stroke: '#eab308',
+    glow: 'rgba(234, 179, 8, 0.25)',
+    bg: 'rgba(234, 179, 8, 0.08)',
+  },
+  terminal: {
+    stroke: '#31d6c4',
+    glow: 'rgba(49, 214, 196, 0.25)',
+    bg: 'rgba(49, 214, 196, 0.08)',
+  },
+  loupe: {
+    stroke: '#0ea5e9',
+    glow: 'rgba(14, 165, 233, 0.25)',
+    bg: 'rgba(14, 165, 233, 0.08)',
   },
 };
 
 /**
- * HairlineAnimatedFigure
- * Componente vetorial minimalista com traços finos (strokeWidth 1.25 a 1.5).
- * Executa 1 ciclo de animação, aguarda exatamente 2 segundos (2000ms) de repouso,
- * e reinicia o ciclo de forma determinística e acelerada por GPU.
+ * Projeção isométrica real a 30° (COS30 = 0.8660254, SIN30 = 0.5).
+ */
+export function isoProject(
+  x: number,
+  y: number,
+  z: number,
+  cx = 60,
+  cy = 60
+): { sx: number; sy: number } {
+  return {
+    sx: Number((cx + (x - y) * COS30).toFixed(2)),
+    sy: Number((cy + (x + y) * SIN30 - z).toFixed(2)),
+  };
+}
+
+function isoPolygonPoints(
+  pts: Array<[number, number, number]>,
+  cx = 60,
+  cy = 60
+): string {
+  return pts
+    .map(([x, y, z]) => {
+      const p = isoProject(x, y, z, cx, cy);
+      return `${p.sx},${p.sy}`;
+    })
+    .join(' ');
+}
+
+/**
+ * Curva cinética Action-Then-Pause com pausa explícita de 2000ms entre ciclos.
+ */
+export function computeActionThenPauseWave(
+  elapsedMs: number,
+  activeDurationMs = 2600,
+  pauseDurationMs = 2000
+): number {
+  const totalCycle = activeDurationMs + pauseDurationMs;
+  const phaseTime = ((elapsedMs % totalCycle) + totalCycle) % totalCycle;
+  if (phaseTime >= activeDurationMs) {
+    return 0;
+  }
+  const normalized = phaseTime / activeDurationMs;
+  return 0.5 * (1 - Math.cos(normalized * Math.PI * 2));
+}
+
+function computeLinearSweepWithPause(
+  elapsedMs: number,
+  activeDurationMs = 2600,
+  pauseDurationMs = 2000
+): number {
+  const totalCycle = activeDurationMs + pauseDurationMs;
+  const phaseTime = ((elapsedMs % totalCycle) + totalCycle) % totalCycle;
+  if (phaseTime >= activeDurationMs) {
+    return 1;
+  }
+  const t = phaseTime / activeDurationMs;
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+type TickSubscriber = (elapsedMs: number) => void;
+const activeSubscribers = new Set<TickSubscriber>();
+let globalRafId: number | null = null;
+let startTimestamp: number | null = null;
+
+function stepGlobalClock(now: number) {
+  if (startTimestamp === null) startTimestamp = now;
+  const elapsed = now - startTimestamp;
+  for (const sub of activeSubscribers) {
+    sub(elapsed);
+  }
+  if (activeSubscribers.size > 0) {
+    globalRafId = window.requestAnimationFrame(stepGlobalClock);
+  } else {
+    globalRafId = null;
+  }
+}
+
+function subscribeClock(cb: TickSubscriber): () => void {
+  activeSubscribers.add(cb);
+  if (globalRafId === null && typeof window !== 'undefined') {
+    globalRafId = window.requestAnimationFrame(stepGlobalClock);
+  }
+  return () => {
+    activeSubscribers.delete(cb);
+    if (activeSubscribers.size === 0 && globalRafId !== null && typeof window !== 'undefined') {
+      window.cancelAnimationFrame(globalRafId);
+      globalRafId = null;
+    }
+  };
+}
+
+/**
+ * HairlineAnimatedFigure — Ilustrações técnicas vetoriais isométricas a 30°
+ * com oclusão geométrica real (chapas opacas --hairline-plate), traço fino (strokeWidth="1.25")
+ * e cadência Action-Then-Pause com repouso estrito de 2000ms.
  */
 export const HairlineAnimatedFigure: React.FC<HairlineAnimatedFigureProps> = React.memo(
   ({
@@ -63,382 +206,506 @@ export const HairlineAnimatedFigure: React.FC<HairlineAnimatedFigureProps> = Rea
     size = 48,
     className = '',
     color,
-    cycleDurationMs = 2400,
+    accentColor,
+    cycleDurationMs = 2600,
     pauseDurationMs = 2000,
     title,
   }) => {
-    const [phase, setPhase] = useState<'animating' | 'paused'>('animating');
-    const [cycleCount, setCycleCount] = useState<number>(0);
-    const containerRef = useRef<HTMLDivElement>(null);
+    const canonicalType =
+      type === 'layers' ? 'exploded' : type === 'gauge' ? 'turntable' : type;
+
+    const colorConfig =
+      CATEGORY_DEFAULT_COLORS[type] ||
+      CATEGORY_DEFAULT_COLORS[canonicalType] ||
+      CATEGORY_DEFAULT_COLORS.vault;
+    const activeStroke = color || accentColor || colorConfig.stroke;
+
+    const containerRef = useRef<HTMLDivElement | null>(null);
     const [isVisible, setIsVisible] = useState(true);
+    const [elapsedMs, setElapsedMs] = useState(0);
 
-    const colorConfig = CATEGORY_DEFAULT_COLORS[type] || CATEGORY_DEFAULT_COLORS.vault;
-    const activeStroke = color || colorConfig.stroke;
-
-    // IntersectionObserver para pausar animações fora da viewport e garantir 60/120fps fluidos
     useEffect(() => {
-      const node = containerRef.current;
-      if (!node || typeof IntersectionObserver === 'undefined') return;
-
-      const observer = new IntersectionObserver(
+      const el = containerRef.current;
+      if (!el || typeof IntersectionObserver === 'undefined') return;
+      const obs = new IntersectionObserver(
         (entries) => {
           const entry = entries[0];
-          setIsVisible(entry?.isIntersecting ?? true);
+          if (entry) setIsVisible(entry.isIntersecting);
         },
-        { threshold: 0.1 }
+        { threshold: 0.05 }
       );
-      observer.observe(node);
-      return () => observer.disconnect();
+      obs.observe(el);
+      return () => obs.disconnect();
     }, []);
 
-    // Controle de ciclo + pausa de exatamente 2000ms
     useEffect(() => {
       if (!isVisible) return;
+      return subscribeClock((ms) => {
+        setElapsedMs(ms);
+      });
+    }, [isVisible]);
 
-      let timer: NodeJS.Timeout;
-      if (phase === 'animating') {
-        timer = setTimeout(() => {
-          setPhase('paused');
-        }, cycleDurationMs);
-      } else {
-        timer = setTimeout(() => {
-          setPhase('animating');
-          setCycleCount((c) => c + 1);
-        }, pauseDurationMs);
-      }
+    const wave = computeActionThenPauseWave(elapsedMs, cycleDurationMs, pauseDurationMs);
+    const sweep = computeLinearSweepWithPause(elapsedMs, cycleDurationMs, pauseDurationMs);
+    const isPaused =
+      ((elapsedMs % (cycleDurationMs + pauseDurationMs)) +
+        (cycleDurationMs + pauseDurationMs)) %
+        (cycleDurationMs + pauseDurationMs) >=
+      cycleDurationMs;
 
-      return () => clearTimeout(timer);
-    }, [phase, isVisible, cycleDurationMs, pauseDurationMs]);
-
-    const isAnim = phase === 'animating' && isVisible;
-
-    // Renderizadores vetoriais Hairline
-    const renderContent = () => {
-      switch (type) {
-        case 'lockers':
-          return (
-            <svg
-              viewBox="0 0 48 48"
-              fill="none"
-              stroke={activeStroke}
-              strokeWidth="1.35"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="w-full h-full"
-              style={{ willChange: 'transform, opacity' }}
-            >
-              {/* Armário Externo */}
-              <rect x="8" y="6" width="32" height="36" rx="2" strokeDasharray={isAnim ? '136' : 'none'} />
-              {/* Gaveta Superior */}
-              <line x1="8" y1="18" x2="40" y2="18" />
-              <rect
-                x="18"
-                y="11"
-                width="12"
-                height="3"
-                rx="1"
-                className={isAnim ? 'transition-transform duration-700 ease-out' : ''}
-                style={{
-                  transform: isAnim ? 'translateX(3px)' : 'translateX(0)',
-                  transition: 'transform 800ms cubic-bezier(0.16, 1, 0.3, 1)',
-                }}
-              />
-              <circle cx="12" cy="12" r="1" fill={activeStroke} />
-
-              {/* Gaveta Central */}
-              <line x1="8" y1="30" x2="40" y2="30" />
-              <rect
-                x="18"
-                y="23"
-                width="12"
-                height="3"
-                rx="1"
-                style={{
-                  transform: isAnim ? 'translateX(-3px)' : 'translateX(0)',
-                  transition: 'transform 800ms cubic-bezier(0.16, 1, 0.3, 1) 200ms',
-                }}
-              />
-              <circle cx="12" cy="24" r="1" fill={activeStroke} />
-
-              {/* Gaveta Inferior */}
-              <rect
-                x="18"
-                y="35"
-                width="12"
-                height="3"
-                rx="1"
-                style={{
-                  transform: isAnim ? 'translateX(2px)' : 'translateX(0)',
-                  transition: 'transform 800ms cubic-bezier(0.16, 1, 0.3, 1) 400ms',
-                }}
-              />
-              <circle cx="12" cy="36" r="1" fill={activeStroke} />
-
-              {/* Pés do Rack */}
-              <line x1="12" y1="42" x2="12" y2="45" />
-              <line x1="36" y1="42" x2="36" y2="45" />
-            </svg>
-          );
-
-        case 'vault':
-          return (
-            <svg
-              viewBox="0 0 48 48"
-              fill="none"
-              stroke={activeStroke}
-              strokeWidth="1.35"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="w-full h-full"
-              style={{ willChange: 'transform, opacity' }}
-            >
-              {/* Moldura Externa do Cofre */}
-              <rect x="6" y="6" width="36" height="36" rx="4" />
-              <circle cx="10" cy="10" r="1" fill={activeStroke} />
-              <circle cx="38" cy="10" r="1" fill={activeStroke} />
-              <circle cx="10" cy="38" r="1" fill={activeStroke} />
-              <circle cx="38" cy="38" r="1" fill={activeStroke} />
-
-              {/* Engrenagem / Roda Rotativa do Segredo */}
-              <g
-                style={{
-                  transformOrigin: '24px 24px',
-                  transform: isAnim ? 'rotate(180deg)' : 'rotate(0deg)',
-                  transition: 'transform 1400ms cubic-bezier(0.34, 1.56, 0.64, 1)',
-                }}
-              >
-                <circle cx="24" cy="24" r="12" strokeDasharray="2 3" />
-                <circle cx="24" cy="24" r="5" />
-                <line x1="24" y1="12" x2="24" y2="15" />
-                <line x1="24" y1="33" x2="24" y2="36" />
-                <line x1="12" y1="24" x2="15" y2="24" />
-                <line x1="33" y1="24" x2="36" y2="24" />
-              </g>
-
-              {/* Ferrolhos Retráteis */}
-              <line
-                x1="42"
-                y1="18"
-                x2={isAnim ? '38' : '45'}
-                y2="18"
-                strokeWidth="2"
-                style={{ transition: 'all 600ms ease' }}
-              />
-              <line
-                x1="42"
-                y1="30"
-                x2={isAnim ? '38' : '45'}
-                y2="30"
-                strokeWidth="2"
-                style={{ transition: 'all 600ms ease 100ms' }}
-              />
-            </svg>
-          );
-
-        case 'padlock':
-          return (
-            <svg
-              viewBox="0 0 48 48"
-              fill="none"
-              stroke={activeStroke}
-              strokeWidth="1.35"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="w-full h-full"
-              style={{ willChange: 'transform, opacity' }}
-            >
-              {/* Arco do Cadeado que abre e trava */}
-              <path
-                d="M16 20V14C16 9.58 19.58 6 24 6C28.42 6 32 9.58 32 14V20"
-                style={{
-                  transformOrigin: '16px 20px',
-                  transform: isAnim ? 'translateY(-4px) rotate(-8deg)' : 'translateY(0) rotate(0)',
-                  transition: 'transform 800ms cubic-bezier(0.16, 1, 0.3, 1)',
-                }}
-              />
-              {/* Corpo do Cadeado */}
-              <rect x="10" y="20" width="28" height="22" rx="3" />
-              {/* Orifício da Chave com rotação sutil */}
-              <circle cx="24" cy="29" r="2.5" />
-              <path
-                d="M24 31.5V36"
-                strokeWidth="1.75"
-                style={{
-                  transformOrigin: '24px 29px',
-                  transform: isAnim ? 'rotate(45deg)' : 'rotate(0deg)',
-                  transition: 'transform 700ms ease-in-out 400ms',
-                }}
-              />
-              {/* Linhas de blindagem */}
-              <line x1="14" y1="24" x2="16" y2="24" />
-              <line x1="32" y1="24" x2="34" y2="24" />
-            </svg>
-          );
-
-        case 'router':
-          return (
-            <svg
-              viewBox="0 0 48 48"
-              fill="none"
-              stroke={activeStroke}
-              strokeWidth="1.35"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="w-full h-full"
-              style={{ willChange: 'transform, opacity' }}
-            >
-              {/* Ondas Concéntricas de Sinal */}
-              <path
-                d="M17 12C21.4 8 26.6 8 31 12"
-                style={{
-                  opacity: isAnim ? 1 : 0.3,
-                  transform: isAnim ? 'scale(1.08)' : 'scale(1)',
-                  transformOrigin: '24px 18px',
-                  transition: 'all 600ms ease-out',
-                }}
-              />
-              <path
-                d="M12 7C19.2 1.5 28.8 1.5 36 7"
-                style={{
-                  opacity: isAnim ? 1 : 0.2,
-                  transform: isAnim ? 'scale(1.12)' : 'scale(1)',
-                  transformOrigin: '24px 18px',
-                  transition: 'all 800ms ease-out 200ms',
-                }}
-              />
-
-              {/* Antenas */}
-              <line x1="15" y1="24" x2="15" y2="16" />
-              <circle cx="15" cy="16" r="1.5" fill={activeStroke} />
-              <line x1="33" y1="24" x2="33" y2="16" />
-              <circle cx="33" cy="16" r="1.5" fill={activeStroke} />
-
-              {/* Corpo do Roteador */}
-              <rect x="8" y="24" width="32" height="15" rx="2" />
-              {/* Portas e LEDs piscantes */}
-              <line x1="12" y1="31.5" x2="16" y2="31.5" />
-              <circle
-                cx="21"
-                cy="31.5"
-                r="1.25"
-                fill={isAnim ? activeStroke : 'transparent'}
-                style={{ transition: 'fill 300ms ease' }}
-              />
-              <circle
-                cx="25"
-                cy="31.5"
-                r="1.25"
-                fill={isAnim ? activeStroke : 'transparent'}
-                style={{ transition: 'fill 300ms ease 200ms' }}
-              />
-              <circle
-                cx="29"
-                cy="31.5"
-                r="1.25"
-                fill={isAnim ? activeStroke : 'transparent'}
-                style={{ transition: 'fill 300ms ease 400ms' }}
-              />
-              <line x1="33" y1="31.5" x2="36" y2="31.5" />
-            </svg>
-          );
-
-        case 'layers':
-          return (
-            <svg
-              viewBox="0 0 48 48"
-              fill="none"
-              stroke={activeStroke}
-              strokeWidth="1.35"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="w-full h-full"
-              style={{ willChange: 'transform, opacity' }}
-            >
-              {/* Camada Superior (Prisma) */}
-              <path
-                d="M24 6L6 15L24 24L42 15L24 6Z"
-                style={{
-                  transform: isAnim ? 'translateY(-3px)' : 'translateY(0)',
-                  transition: 'transform 800ms cubic-bezier(0.16, 1, 0.3, 1)',
-                }}
-              />
-              {/* Camada Intermediária */}
-              <path
-                d="M6 23L24 32L42 23"
-                style={{
-                  transform: 'translateY(0)',
-                  opacity: isAnim ? 1 : 0.7,
-                  transition: 'all 600ms ease 150ms',
-                }}
-              />
-              {/* Camada Inferior */}
-              <path
-                d="M6 31L24 40L42 31"
-                style={{
-                  transform: isAnim ? 'translateY(3px)' : 'translateY(0)',
-                  transition: 'transform 800ms cubic-bezier(0.16, 1, 0.3, 1) 300ms',
-                }}
-              />
-            </svg>
-          );
-
-        case 'gauge':
-          return (
-            <svg
-              viewBox="0 0 48 48"
-              fill="none"
-              stroke={activeStroke}
-              strokeWidth="1.35"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="w-full h-full"
-              style={{ willChange: 'transform, opacity' }}
-            >
-              {/* Arco Principal */}
-              <path d="M10 34C7.5 28 8.5 21 13 16C19 10 29 10 35 16C39.5 21 40.5 28 38 34" />
-              {/* Marcadores */}
-              <line x1="12" y1="28" x2="15" y2="27" />
-              <line x1="17" y1="18" x2="19" y2="20" />
-              <line x1="24" y1="14" x2="24" y2="17" />
-              <line x1="31" y1="18" x2="29" y2="20" />
-              <line x1="36" y1="28" x2="33" y2="27" />
-
-              {/* Ponteiro Rotativo de Telemetria */}
-              <g
-                style={{
-                  transformOrigin: '24px 30px',
-                  transform: isAnim ? 'rotate(55deg)' : 'rotate(-45deg)',
-                  transition: 'transform 1000ms cubic-bezier(0.34, 1.56, 0.64, 1)',
-                }}
-              >
-                <circle cx="24" cy="30" r="3" fill={activeStroke} />
-                <line x1="24" y1="30" x2="31" y2="17" strokeWidth="1.75" />
-              </g>
-              <line x1="14" y1="38" x2="34" y2="38" strokeDasharray="2 3" />
-            </svg>
-          );
-
-        default:
-          return null;
-      }
+    const renderIsoPrismPlate = (
+      halfSize: number,
+      zHeight: number,
+      thickness: number,
+      isAccent = false,
+      cx = 60,
+      cy = 64
+    ) => {
+      const s = halfSize;
+      const zTop = zHeight;
+      const zBot = zHeight - thickness;
+      const topPts = isoPolygonPoints(
+        [
+          [-s, -s, zTop],
+          [s, -s, zTop],
+          [s, s, zTop],
+          [-s, s, zTop],
+        ],
+        cx,
+        cy
+      );
+      const leftPts = isoPolygonPoints(
+        [
+          [-s, s, zTop],
+          [s, s, zTop],
+          [s, s, zBot],
+          [-s, s, zBot],
+        ],
+        cx,
+        cy
+      );
+      const rightPts = isoPolygonPoints(
+        [
+          [s, -s, zTop],
+          [s, s, zTop],
+          [s, s, zBot],
+          [s, -s, zBot],
+        ],
+        cx,
+        cy
+      );
+      return (
+        <g
+          stroke={isAccent ? activeStroke : 'currentColor'}
+          strokeWidth="1.25"
+          strokeLinejoin="round"
+        >
+          <polygon points={leftPts} fill="var(--hairline-plate, #0f141c)" />
+          <polygon points={rightPts} fill="var(--hairline-plate, #0f141c)" />
+          <polygon points={topPts} fill="var(--hairline-plate, #0f141c)" />
+        </g>
+      );
     };
 
     return (
       <div
         ref={containerRef}
-        className={`relative inline-flex items-center justify-center rounded-xl p-2 transition-all duration-300 ${className}`}
+        title={title}
         style={{
           width: size,
           height: size,
           backgroundColor: colorConfig.bg,
-          boxShadow: isAnim ? `0 0 16px ${colorConfig.glow}` : 'none',
+          boxShadow: isPaused ? 'none' : `0 0 14px -3px ${colorConfig.glow}`,
         }}
-        title={title || `Figura Técnica: ${type}`}
+        className={`relative inline-flex items-center justify-center rounded-xl border border-slate-200/70 dark:border-slate-800/80 transition-shadow duration-300 select-none shrink-0 text-slate-600 dark:text-slate-300 ${className}`}
       >
-        {renderContent()}
+        <svg
+          width={Math.round(size * 0.88)}
+          height={Math.round(size * 0.88)}
+          viewBox="0 0 120 120"
+          fill="none"
+          aria-hidden="true"
+        >
+          {/* Grade técnica sutil de fundo */}
+          <g stroke="currentColor" strokeOpacity="0.14" strokeWidth="1">
+            <line x1="12" y1="60" x2="108" y2="60" strokeDasharray="2 3" />
+            <line x1="60" y1="12" x2="60" y2="108" strokeDasharray="2 3" />
+            <circle cx="60" cy="60" r="46" strokeOpacity="0.1" />
+          </g>
+
+          {canonicalType === 'padlock' && (() => {
+            const shackleLift = wave * 9;
+            const pinOffsets = [wave * 4, (1 - wave) * 3.5, wave * 5];
+            return (
+              <g strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round">
+                <g transform={`translate(0, ${(-shackleLift).toFixed(2)})`}>
+                  <path
+                    d="M 44 50 L 44 33 A 16 14 0 0 1 76 33 L 76 50"
+                    stroke={activeStroke}
+                    strokeWidth="1.5"
+                  />
+                  <path
+                    d="M 48 50 L 48 34 A 12 10 0 0 1 72 34 L 72 50"
+                    stroke="currentColor"
+                  />
+                </g>
+                {renderIsoPrismPlate(22, 8, 22, false, 60, 74)}
+                {[0, 1, 2].map((idx) => {
+                  const x = 52 + idx * 8;
+                  const yTop = 62 - pinOffsets[idx];
+                  return (
+                    <g key={idx}>
+                      <line x1={x} y1={yTop} x2={x} y2={76} stroke={activeStroke} />
+                      <circle
+                        cx={x}
+                        cy={yTop}
+                        r="1.8"
+                        fill="var(--hairline-plate, #0f141c)"
+                        stroke={activeStroke}
+                      />
+                    </g>
+                  );
+                })}
+              </g>
+            );
+          })()}
+
+          {canonicalType === 'vault' && (() => {
+            const wheelDeg = sweep * 120;
+            const boltExtend = wave * 7;
+            return (
+              <g strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round">
+                <rect
+                  x="24"
+                  y="22"
+                  width="72"
+                  height="76"
+                  rx="6"
+                  fill="var(--hairline-plate, #0f141c)"
+                  stroke="currentColor"
+                />
+                <line
+                  x1={18 - boltExtend}
+                  y1="42"
+                  x2="28"
+                  y2="42"
+                  stroke={activeStroke}
+                  strokeWidth="2"
+                />
+                <line
+                  x1={18 - boltExtend}
+                  y1="78"
+                  x2="28"
+                  y2="78"
+                  stroke={activeStroke}
+                  strokeWidth="2"
+                />
+                <line
+                  x1="92"
+                  y1="42"
+                  x2={102 + boltExtend}
+                  y2="42"
+                  stroke={activeStroke}
+                  strokeWidth="2"
+                />
+                <line
+                  x1="92"
+                  y1="78"
+                  x2={102 + boltExtend}
+                  y2="78"
+                  stroke={activeStroke}
+                  strokeWidth="2"
+                />
+                <circle
+                  cx="60"
+                  cy="60"
+                  r="24"
+                  fill="var(--hairline-plate, #0f141c)"
+                  stroke="currentColor"
+                />
+                <circle cx="60" cy="60" r="18" stroke={activeStroke} strokeDasharray="3 3" />
+                <g transform={`rotate(${wheelDeg.toFixed(1)} 60 60)`} stroke={activeStroke}>
+                  <line x1="60" y1="43" x2="60" y2="77" />
+                  <line x1="45" y1="51" x2="75" y2="69" />
+                  <line x1="75" y1="51" x2="45" y2="69" />
+                  <circle
+                    cx="60"
+                    cy="60"
+                    r="5"
+                    fill="var(--hairline-plate, #0f141c)"
+                    stroke={activeStroke}
+                  />
+                </g>
+              </g>
+            );
+          })()}
+
+          {canonicalType === 'lockers' && (() => {
+            const drawerPull = wave * 11;
+            return (
+              <g strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round">
+                {renderIsoPrismPlate(22, -12, 10, false, 60, 62)}
+                <g
+                  transform={`translate(${(drawerPull * COS30).toFixed(2)}, ${(
+                    drawerPull * SIN30
+                  ).toFixed(2)})`}
+                >
+                  {renderIsoPrismPlate(22, 2, 10, true, 60, 62)}
+                </g>
+                {renderIsoPrismPlate(22, 16, 10, false, 60, 62)}
+              </g>
+            );
+          })()}
+
+          {canonicalType === 'phosphor' && (() => {
+            const radarDeg = sweep * 360;
+            return (
+              <g strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round">
+                <circle
+                  cx="60"
+                  cy="60"
+                  r="36"
+                  fill="var(--hairline-plate, #0f141c)"
+                  stroke="currentColor"
+                />
+                <circle cx="60" cy="60" r="24" stroke="currentColor" strokeOpacity="0.45" />
+                <circle cx="60" cy="60" r="12" stroke="currentColor" strokeOpacity="0.35" />
+                <path
+                  d={`M 28 60 Q 44 ${(42 + wave * 16).toFixed(1)} 60 60 T 92 60`}
+                  stroke={activeStroke}
+                  strokeWidth="1.4"
+                />
+                <g transform={`rotate(${radarDeg.toFixed(1)} 60 60)`}>
+                  <line x1="60" y1="60" x2="60" y2="25" stroke={activeStroke} strokeWidth="1.5" />
+                  <circle cx="60" cy="36" r="2.2" fill={activeStroke} />
+                </g>
+                <circle
+                  cx="60"
+                  cy="60"
+                  r="3"
+                  fill="var(--hairline-plate, #0f141c)"
+                  stroke={activeStroke}
+                />
+              </g>
+            );
+          })()}
+
+          {canonicalType === 'terrain' && (() => {
+            const scanShift = (wave - 0.5) * 18;
+            return (
+              <g strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round">
+                {[-18, -9, 0, 9, 18].map((yOff, idx) => {
+                  const pts: string[] = [];
+                  for (let x = -22; x <= 22; x += 4) {
+                    const dist = Math.hypot(x - scanShift * 0.4, yOff);
+                    const z = Math.max(0, 16 - dist * 0.65) * (0.65 + 0.35 * wave);
+                    const p = isoProject(x, yOff, z, 60, 68);
+                    pts.push(`${p.sx},${p.sy}`);
+                  }
+                  return (
+                    <polyline
+                      key={idx}
+                      points={pts.join(' ')}
+                      fill="none"
+                      stroke={idx === 2 ? activeStroke : 'currentColor'}
+                      strokeWidth={idx === 2 ? '1.5' : '1.1'}
+                    />
+                  );
+                })}
+              </g>
+            );
+          })()}
+
+          {canonicalType === 'exploded' && (() => {
+            const spread = wave * 11;
+            return (
+              <g strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round">
+                <line
+                  x1="60"
+                  y1="16"
+                  x2="60"
+                  y2="104"
+                  stroke={activeStroke}
+                  strokeDasharray="2 3"
+                />
+                {renderIsoPrismPlate(22, -14 - spread, 5, false, 60, 64)}
+                {renderIsoPrismPlate(22, 2, 5, true, 60, 64)}
+                {renderIsoPrismPlate(22, 18 + spread, 5, false, 60, 64)}
+              </g>
+            );
+          })()}
+
+          {canonicalType === 'turntable' && (() => {
+            const needleAngle = -55 + wave * 110;
+            const ringSpin = sweep * 180;
+            return (
+              <g strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round">
+                <circle
+                  cx="60"
+                  cy="64"
+                  r="34"
+                  fill="var(--hairline-plate, #0f141c)"
+                  stroke="currentColor"
+                />
+                <g transform={`rotate(${ringSpin.toFixed(1)} 60 64)`}>
+                  <circle
+                    cx="60"
+                    cy="64"
+                    r="26"
+                    stroke={activeStroke}
+                    strokeDasharray="6 4"
+                  />
+                </g>
+                <path d="M 34 64 A 26 26 0 0 1 86 64" stroke="currentColor" />
+                <g transform={`rotate(${needleAngle.toFixed(1)} 60 64)`}>
+                  <line x1="60" y1="64" x2="60" y2="36" stroke={activeStroke} strokeWidth="1.6" />
+                  <circle cx="60" cy="36" r="2" fill={activeStroke} />
+                </g>
+                <circle
+                  cx="60"
+                  cy="64"
+                  r="4"
+                  fill="var(--hairline-plate, #0f141c)"
+                  stroke={activeStroke}
+                />
+              </g>
+            );
+          })()}
+
+          {canonicalType === 'stack' && (() => {
+            const liftTop = wave * 10;
+            const liftMid = wave * 5;
+            return (
+              <g strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round">
+                {renderIsoPrismPlate(24, -14, 7, false, 60, 66)}
+                {renderIsoPrismPlate(20, 0 + liftMid, 7, false, 60, 66)}
+                {renderIsoPrismPlate(16, 14 + liftTop, 7, true, 60, 66)}
+              </g>
+            );
+          })()}
+
+          {canonicalType === 'router' && (() => {
+            const packetPos = sweep;
+            const hub = isoProject(0, 0, 6, 60, 62);
+            const nodes = [
+              isoProject(-24, -16, 0, 60, 62),
+              isoProject(24, -16, 0, 60, 62),
+              isoProject(-22, 20, 0, 60, 62),
+              isoProject(22, 20, 0, 60, 62),
+            ];
+            return (
+              <g strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round">
+                {nodes.map((n, idx) => {
+                  const px = hub.sx + (n.sx - hub.sx) * packetPos;
+                  const py = hub.sy + (n.sy - hub.sy) * packetPos;
+                  return (
+                    <g key={idx}>
+                      <line x1={hub.sx} y1={hub.sy} x2={n.sx} y2={n.sy} stroke="currentColor" />
+                      <circle
+                        cx={n.sx}
+                        cy={n.sy}
+                        r="4.5"
+                        fill="var(--hairline-plate, #0f141c)"
+                        stroke="currentColor"
+                      />
+                      <circle
+                        cx={px}
+                        cy={py}
+                        r="2.3"
+                        fill={activeStroke}
+                        stroke="var(--hairline-plate, #0f141c)"
+                      />
+                    </g>
+                  );
+                })}
+                {renderIsoPrismPlate(11, 10, 6, true, 60, 62)}
+              </g>
+            );
+          })()}
+
+          {canonicalType === 'sieve' && (() => {
+            const dropZ = 22 - sweep * 38;
+            return (
+              <g strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round">
+                {renderIsoPrismPlate(22, -10, 3, false, 60, 64)}
+                {renderIsoPrismPlate(22, 10, 3, true, 60, 64)}
+                {[-10, 0, 10].map((xOff, i) => {
+                  const p = isoProject(xOff, (i - 1) * 8, dropZ + i * 3, 60, 64);
+                  return (
+                    <circle
+                      key={i}
+                      cx={p.sx}
+                      cy={p.sy}
+                      r="2.4"
+                      fill="var(--hairline-plate, #0f141c)"
+                      stroke={activeStroke}
+                    />
+                  );
+                })}
+              </g>
+            );
+          })()}
+
+          {canonicalType === 'terminal' && (() => {
+            const scanY = 38 + wave * 42;
+            return (
+              <g strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round">
+                <rect
+                  x="20"
+                  y="24"
+                  width="80"
+                  height="72"
+                  rx="6"
+                  fill="var(--hairline-plate, #0f141c)"
+                  stroke="currentColor"
+                />
+                <line x1="20" y1="36" x2="100" y2="36" stroke="currentColor" />
+                <circle cx="28" cy="30" r="1.5" fill={activeStroke} />
+                <circle cx="34" cy="30" r="1.5" fill="currentColor" />
+                <circle cx="40" cy="30" r="1.5" fill="currentColor" />
+                <line x1="28" y1="46" x2="62" y2="46" stroke={activeStroke} />
+                <line x1="34" y1="56" x2="84" y2="56" stroke="currentColor" />
+                <line x1="34" y1="66" x2="74" y2="66" stroke="currentColor" />
+                <line x1="28" y1="76" x2="54" y2="76" stroke={activeStroke} />
+                <line x1="28" y1="86" x2="78" y2="86" stroke="currentColor" />
+                <line
+                  x1="23"
+                  y1={scanY.toFixed(1)}
+                  x2="97"
+                  y2={scanY.toFixed(1)}
+                  stroke={activeStroke}
+                  strokeDasharray="3 2"
+                />
+              </g>
+            );
+          })()}
+
+          {canonicalType === 'loupe' && (() => {
+            const lensX = 54 + (wave - 0.5) * 16;
+            const lensY = 54 + Math.sin(wave * Math.PI) * 8;
+            return (
+              <g strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round">
+                {renderIsoPrismPlate(24, -4, 5, false, 60, 68)}
+                <g transform={`translate(${(lensX - 60).toFixed(2)}, ${(lensY - 56).toFixed(2)})`}>
+                  <circle
+                    cx="60"
+                    cy="52"
+                    r="16"
+                    fill="var(--hairline-plate, #0f141c)"
+                    fillOpacity="0.88"
+                    stroke={activeStroke}
+                    strokeWidth="1.5"
+                  />
+                  <line x1="54" y1="52" x2="66" y2="52" stroke={activeStroke} />
+                  <line x1="60" y1="46" x2="60" y2="58" stroke={activeStroke} />
+                  <line x1="71" y1="63" x2="84" y2="76" stroke={activeStroke} strokeWidth="2" />
+                </g>
+              </g>
+            );
+          })()}
+        </svg>
       </div>
     );
   }
 );
-
-HairlineAnimatedFigure.displayName = 'HairlineAnimatedFigure';
+export default HairlineAnimatedFigure;

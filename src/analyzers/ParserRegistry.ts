@@ -907,6 +907,136 @@ export class ParserRegistry {
           }
         }
 
+        // typescript:S2871 - Array.prototype.sort() invoked without compareFn
+        if (
+          (node.type === 'CallExpression' || node.type === 'OptionalCallExpression') &&
+          node.callee?.type === 'MemberExpression' &&
+          getCalleeText(node.callee.property) === 'sort' &&
+          Array.isArray(node.arguments) &&
+          node.arguments.length === 0 &&
+          !isNoSonarLine(getLine(node))
+        ) {
+          const lineNo = getLine(node);
+          issues.push({
+            ruleId: 'typescript:S2871',
+            title: 'Chamada a Array.prototype.sort() sem função de comparação explícita',
+            description:
+              'Array.prototype.sort() sem compareFn converte elementos em UTF-16 e ordena lexicograficamente.',
+            category: 'CODE_QUALITY',
+            severity: 'MEDIUM',
+            cwe: 'CWE-682',
+            filePath,
+            lineNumber: lineNo,
+            endLineNumber: lineNo,
+            snippet: getSnippet(lineNo),
+            remediation: 'Fornecer função de comparação explícita, ex.: .sort((a, b) => a - b) ou localeCompare.',
+            detectionMethod: 'AST_ANALYSIS',
+            confidence: 'HIGH',
+            effortMinutes: 10,
+          });
+        }
+
+        // typescript:S3923 & typescript:S2583 - Identical branches & Constant condition
+        if ((node.type === 'IfStatement' || node.type === 'ConditionalExpression') && !isNoSonarLine(getLine(node))) {
+          const lineNo = getLine(node);
+          if (node.test?.type === 'BooleanLiteral') {
+            issues.push({
+              ruleId: 'typescript:S2583',
+              title: 'Condição constante sempre avaliada como verdadeira ou falsa (Dead Store / CFG)',
+              description:
+                'Expressão condicional literal booleana torna uma ramificação de controle inalcançável.',
+              category: 'CODE_QUALITY',
+              severity: 'HIGH',
+              cwe: 'CWE-570',
+              filePath,
+              lineNumber: lineNo,
+              endLineNumber: lineNo,
+              snippet: getSnippet(lineNo),
+              remediation: 'Revisar expressão booleana ou remover ramificação morta.',
+              detectionMethod: 'AST_ANALYSIS',
+              confidence: 'HIGH',
+              effortMinutes: 15,
+            });
+          }
+          if (node.consequent && node.alternate) {
+            const consTxt = getSourceText(node.consequent).trim();
+            const altTxt = getSourceText(node.alternate).trim();
+            if (consTxt.length > 0 && consTxt === altTxt) {
+              issues.push({
+                ruleId: 'typescript:S3923',
+                title: 'Ramificações condicionais retornam ou executam blocos idênticos',
+                description:
+                  'Todas as ramificações de if/else ou operador ternário possuem exatamente a mesma implementação.',
+                category: 'CODE_QUALITY',
+                severity: 'HIGH',
+                cwe: 'CWE-561',
+                filePath,
+                lineNumber: lineNo,
+                endLineNumber: lineNo,
+                snippet: getSnippet(lineNo),
+                remediation: 'Diferenciar a lógica das ramificações ou remover a estrutura condicional redundante.',
+                detectionMethod: 'AST_ANALYSIS',
+                confidence: 'HIGH',
+                effortMinutes: 15,
+              });
+            }
+          }
+        }
+
+        // typescript:S8786 - RegExp literal with super-linear backtracking (nested quantifiers)
+        if (node.type === 'RegExpLiteral' && typeof node.pattern === 'string' && !isNoSonarLine(getLine(node))) {
+          if (/\([^()]*[+*][^()]*\)[+*]/.test(node.pattern)) {
+            const lineNo = getLine(node);
+            issues.push({
+              ruleId: 'typescript:S8786',
+              title: 'Expressão regular vulnerável a ReDoS ou com quantificador redundante',
+              description:
+                'Padrão RegExp contém repetição aninhada com backtracking exponencial (ReDoS).',
+              category: 'SAST',
+              severity: 'HIGH',
+              cwe: 'CWE-1333',
+              filePath,
+              lineNumber: lineNo,
+              endLineNumber: lineNo,
+              snippet: getSnippet(lineNo),
+              remediation: 'Reescrever RegExp eliminando quantificadores aninhados ambíguos.',
+              detectionMethod: 'AST_ANALYSIS',
+              confidence: 'HIGH',
+              effortMinutes: 20,
+            });
+          }
+        }
+
+        // typescript:S2310 - Loop counter modified inside ForStatement body
+        if (node.type === 'ForStatement' && node.init?.type === 'VariableDeclaration' && node.body && !isNoSonarLine(getLine(node))) {
+          const decl = node.init.declarations?.[0];
+          const counterName = decl?.id?.type === 'Identifier' ? decl.id.name : null;
+          if (counterName) {
+            const bodyText = getSourceText(node.body);
+            const mutRegex = new RegExp(`\\b${counterName}\\s*(?:\\+\\+|--|[+\\-*]=|=(?!=))`);
+            if (mutRegex.test(bodyText)) {
+              const lineNo = getLine(node);
+              issues.push({
+                ruleId: 'typescript:S2310',
+                title: `Contador de laço (${counterName}) modificado diretamente no corpo da iteração`,
+                description:
+                  'Alterar a variável de controle do for fora da cláusula de atualização dificulta a análise de terminação.',
+                category: 'CODE_QUALITY',
+                severity: 'MEDIUM',
+                cwe: 'CWE-834',
+                filePath,
+                lineNumber: lineNo,
+                endLineNumber: lineNo,
+                snippet: getSnippet(lineNo),
+                remediation: 'Atualizar o contador apenas na cláusula de incremento do for ou usar while.',
+                detectionMethod: 'AST_ANALYSIS',
+                confidence: 'HIGH',
+                effortMinutes: 15,
+              });
+            }
+          }
+        }
+
         const nextNesting =
           node.type === 'IfStatement' ||
           node.type === 'ForStatement' ||

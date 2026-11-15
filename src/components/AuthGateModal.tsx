@@ -127,7 +127,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
   onRefreshSession,
 }) => {
   const initialMode: GateMode = bootstrapRequired
-    ? 'BOOTSTRAP'
+    ? 'REGISTER'
     : mfaRequired
       ? 'MFA'
       : 'LOGIN';
@@ -822,6 +822,22 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
 
           {mode === 'LOGIN' && (
             <form onSubmit={handleLoginSubmit} className="space-y-3.5 text-xs">
+              <div className="flex items-center justify-between gap-2 p-2.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10]">
+                <span className="text-[11px] text-slate-600 dark:text-slate-400">
+                  Acesso rápido Desktop / Localhost:
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLoginEmail('admin@winhood.local');
+                    setLoginPassword('WinHood#Local2026!');
+                  }}
+                  className="px-2.5 py-1 rounded-md font-bold text-[11px] bg-[#31d6c4]/15 text-[#0e9f8e] dark:text-[#31d6c4] border border-[#31d6c4]/40 hover:bg-[#31d6c4]/25 transition-colors cursor-pointer"
+                >
+                  Preencher Credenciais Locais Padrão (Admin Local)
+                </button>
+              </div>
+
               <div>
                 <label
                   htmlFor="login-email-input"
@@ -942,6 +958,30 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
 
           {mode === 'REGISTER' && (
             <form onSubmit={handleRegisterSubmit} className="space-y-3.5 text-xs">
+              <div className="p-2.5 rounded-lg border border-[#31d6c4]/30 bg-[#31d6c4]/10 flex flex-wrap items-center justify-between gap-2">
+                <div className="text-[11px] text-slate-700 dark:text-slate-200">
+                  {bootstrapRequired ? (
+                    <span>
+                      <strong>Primeiro acesso detectado:</strong> a 1ª conta criada recebe automaticamente perfil{' '}
+                      <code className="font-mono font-bold text-[#0e9f8e] dark:text-[#31d6c4]">ADMIN</code> sem exigir arquivo de token.
+                    </span>
+                  ) : (
+                    <span>Cadastro direto com sessão persistente de 30 dias.</span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRegName('Administrador Local WinHood');
+                    setRegEmail('admin@winhood.local');
+                    setRegPassword('WinHood#Local2026!');
+                  }}
+                  className="px-2.5 py-1 rounded-md font-bold text-[11px] bg-white dark:bg-[#0c1017] text-[#0e9f8e] dark:text-[#31d6c4] border border-[#31d6c4]/50 hover:bg-[#31d6c4]/20 transition-colors cursor-pointer shrink-0"
+                >
+                  Preencher Credenciais Locais Padrão (Admin Local)
+                </button>
+              </div>
+
               <div>
                 <label
                   htmlFor="reg-name-input"

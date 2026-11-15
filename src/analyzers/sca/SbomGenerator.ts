@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { KeyManagementService } from '../../security/KeyManagementService';
 import type {
   SbomComponentRecord,
@@ -6,6 +8,106 @@ import type {
   SbomSignatureRecord,
   Software,
 } from '../../types/benchmark';
+
+export const KNOWN_OSS_PACKAGE_LICENSES: Readonly<Record<string, string>> = {
+  react: 'MIT',
+  'react-dom': 'MIT',
+  express: 'MIT',
+  vite: 'MIT',
+  '@vitejs/plugin-react': 'MIT',
+  'lucide-react': 'ISC',
+  tailwindcss: 'MIT',
+  '@tailwindcss/vite': 'MIT',
+  typescript: 'Apache-2.0',
+  '@babel/parser': 'MIT',
+  esbuild: 'MIT',
+  dotenv: 'BSD-2-Clause',
+  qrcode: 'MIT',
+  motion: 'MIT',
+  tsx: 'MIT',
+  autoprefixer: 'MIT',
+  '@google/genai': 'Apache-2.0',
+  lodash: 'MIT',
+  axios: 'MIT',
+  jsonwebtoken: 'MIT',
+  semver: 'ISC',
+  minimist: 'MIT',
+  ws: 'MIT',
+  pg: 'MIT',
+  redis: 'MIT',
+  argon2: 'MIT',
+  bcrypt: 'MIT',
+  zod: 'MIT',
+  helmet: 'MIT',
+  cors: 'MIT',
+  uuid: 'MIT',
+  chalk: 'MIT',
+  commander: 'MIT',
+  vitest: 'MIT',
+  playwright: 'Apache-2.0',
+  electron: 'MIT',
+  'electron-builder': 'MIT',
+  postcss: 'MIT',
+  eslint: 'MIT',
+  prettier: 'MIT',
+  django: 'BSD-3-Clause',
+  flask: 'BSD-3-Clause',
+  fastapi: 'MIT',
+  requests: 'Apache-2.0',
+  cryptography: 'Apache-2.0',
+  pydantic: 'MIT',
+  sqlalchemy: 'MIT',
+  pytest: 'MIT',
+};
+
+const nodeModulesLicenseCache = new Map<string, string>();
+
+export function resolvePackageSpdxLicense(
+  pkgName: string,
+  explicitLicense?: string,
+  rootManifestLicense?: string
+): string {
+  const cleanExplicit = (explicitLicense || '').trim();
+  if (cleanExplicit && cleanExplicit !== 'UNKNOWN' && cleanExplicit !== 'NOASSERTION') {
+    return cleanExplicit;
+  }
+  const normalizedName = pkgName.trim();
+  const lowerName = normalizedName.toLowerCase();
+  if (KNOWN_OSS_PACKAGE_LICENSES[normalizedName]) {
+    return KNOWN_OSS_PACKAGE_LICENSES[normalizedName]!;
+  }
+  if (KNOWN_OSS_PACKAGE_LICENSES[lowerName]) {
+    return KNOWN_OSS_PACKAGE_LICENSES[lowerName]!;
+  }
+  if (normalizedName.startsWith('@types/')) {
+    return 'MIT';
+  }
+  const cached = nodeModulesLicenseCache.get(normalizedName);
+  if (cached) return cached;
+  try {
+    const nmPkgPath = path.resolve(process.cwd(), 'node_modules', normalizedName, 'package.json');
+    if (fs.existsSync(nmPkgPath)) {
+      const parsed = JSON.parse(fs.readFileSync(nmPkgPath, 'utf8'));
+      const lic =
+        typeof parsed?.license === 'string'
+          ? parsed.license.trim()
+          : typeof parsed?.license?.type === 'string'
+            ? parsed.license.type.trim()
+            : '';
+      if (lic) {
+        nodeModulesLicenseCache.set(normalizedName, lic);
+        return lic;
+      }
+    }
+  } catch {
+    // Ignore local node_modules read failures
+  }
+  const cleanRoot = (rootManifestLicense || '').trim();
+  if (cleanRoot && cleanRoot !== 'UNKNOWN' && cleanRoot !== 'NOASSERTION') {
+    return cleanRoot;
+  }
+  return 'NOASSERTION';
+}
 
 function deterministicUuidFromSeed(seed: string): string {
   const hex = crypto.createHash('sha256').update(seed, 'utf8').digest('hex').slice(0, 32);
@@ -316,7 +418,7 @@ export class SbomGenerator {
               version: ver,
               purl: `pkg:npm/${name.replace('@', '%40')}@${ver}`,
               ecosystem: 'npm',
-              license: rootLicense !== 'UNKNOWN' ? rootLicense : 'NOASSERTION',
+              license: resolvePackageSpdxLicense(name, undefined, rootLicense),
               dependencyScope: 'DIRECT',
               manifestFile: filePath,
               sha256: computeComponentDigest('npm', name, ver, manifestDigest),
@@ -338,14 +440,19 @@ export class SbomGenerator {
               if (!pkgPath || pkgPath === '') continue;
               const name = pkgPath.replace(/^.*node_modules\//, '');
               const ver = String(meta?.version || '0.0.0');
-              const license = typeof meta?.license === 'string' ? meta.license : 'UNKNOWN';
+              const license = resolvePackageSpdxLicense(
+                name,
+                typeof meta?.license === 'string' ? meta.license : undefined
+              );
               const scope = directNpmNames.has(name) ? 'DIRECT' : 'TRANSITIVE';
               const existingIdx = components.findIndex(
                 (c) => c.ecosystem === 'npm' && c.name === name && c.version === ver
               );
               const computedSha = computeComponentDigest('npm', name, ver, manifestDigest, meta?.integrity);
               if (existingIdx >= 0) {
-                if (license !== 'UNKNOWN') components[existingIdx]!.license = license;
+                if (license !== 'UNKNOWN' && license !== 'NOASSERTION') {
+                  components[existingIdx]!.license = license;
+                }
                 components[existingIdx]!.sha256 = computedSha;
                 continue;
               }
