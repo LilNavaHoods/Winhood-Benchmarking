@@ -316,7 +316,7 @@ export class SbomGenerator {
               version: ver,
               purl: `pkg:npm/${name.replace('@', '%40')}@${ver}`,
               ecosystem: 'npm',
-              license: rootLicense === 'UNKNOWN' ? 'UNKNOWN' : 'UNKNOWN',
+              license: rootLicense !== 'UNKNOWN' ? rootLicense : 'NOASSERTION',
               dependencyScope: 'DIRECT',
               manifestFile: filePath,
               sha256: computeComponentDigest('npm', name, ver, manifestDigest),

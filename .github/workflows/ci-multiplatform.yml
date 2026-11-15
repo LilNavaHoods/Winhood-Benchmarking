@@ -8,13 +8,15 @@ on:
 
 permissions:
   contents: read
-  security-events: write
-  pull-requests: write
 
 jobs:
   linux-validation:
     name: Linux Fullstack, Independent Positioning, Coverage Gate & Self-Audit Dogfooding
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      pull-requests: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -55,8 +57,8 @@ jobs:
 
       - name: Verify bit-for-bit determinism across repeated CLI runs
         run: |
-          OUT1=$(npx tsx cli/winhood-cli.ts analyze --path ./src/analyzers --deterministic --name WinHoodAnalyzers)
-          OUT2=$(npx tsx cli/winhood-cli.ts analyze --path ./src/analyzers --deterministic --name WinHoodAnalyzers)
+          OUT1=$(./node_modules/.bin/tsx cli/winhood-cli.ts analyze --path ./src/analyzers --deterministic --name WinHoodAnalyzers)
+          OUT2=$(./node_modules/.bin/tsx cli/winhood-cli.ts analyze --path ./src/analyzers --deterministic --name WinHoodAnalyzers)
           if [ "$OUT1" != "$OUT2" ]; then
             echo "ERROR: Bit-for-bit determinism check failed!"
             exit 1
@@ -74,7 +76,7 @@ jobs:
           sarif-output: "winhood-self-audit.sarif"
 
       - name: Dogfooding 2 — Run WinHood VS Code Extension against WinHood repository
-        run: npx tsx --test packages/vscode-extension/test/extension.integration.test.ts
+        run: ./node_modules/.bin/tsx --test packages/vscode-extension/test/extension.integration.test.ts
 
       - name: Build frontend and desktop bundles
         run: npm run build:desktop

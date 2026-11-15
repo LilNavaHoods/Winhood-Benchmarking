@@ -173,7 +173,7 @@ export class SecretScanner {
   ): AstIssueCandidate[] {
     const issues: AstIssueCandidate[] = [];
     const seen = new Set<string>();
-    const sortedPaths = Object.keys(filesMap).sort();
+    const sortedPaths = Object.keys(filesMap).sort((a, b) => a.localeCompare(b));
 
     for (const filePath of sortedPaths) {
       const content = filesMap[filePath] || '';
@@ -194,7 +194,7 @@ export class SecretScanner {
           while ((match = regex.exec(line)) !== null) {
             const captured = match[1] || match[0] || '';
             if (!captured || FALSE_POSITIVE_VALUE_REGEX.test(captured)) continue;
-            if (/^env\.|process\.env|os\.environ|\$\{[A-Z0-9_]+\}/i.test(captured)) continue;
+            if (/(?:^env\.|process\.env|os\.environ|\$\{[A-Z0-9_]+\})/i.test(captured)) continue;
 
             const entropy = computeShannonEntropy(captured);
             if (entropy < pat.minShannonEntropy) continue;

@@ -799,6 +799,8 @@ export const FindingsAndDevSecOpsModule: React.FC<FindingsAndDevSecOpsModuleProp
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2 border-t border-slate-200 dark:border-slate-800">
             {whatIfProjections.perSoftware.map((proj) => {
               const deltaOverall = Number((proj.projectedOverall - proj.currentOverall).toFixed(2));
+              const currentPct = Math.max(4, Math.min(100, (proj.currentOverall / 5) * 100));
+              const projectedPct = Math.max(4, Math.min(100, (proj.projectedOverall / 5) * 100));
               return (
                 <div
                   key={proj.softwareId}
@@ -849,11 +851,175 @@ export const FindingsAndDevSecOpsModule: React.FC<FindingsAndDevSecOpsModuleProp
                       </div>
                     </div>
                   </div>
+                  {/* Barra de Impacto What-If: Nota Atual vs Nota Projetada Pós-Correção */}
+                  <div className="pt-1 space-y-1">
+                    <div className="flex items-center justify-between text-[10px] text-slate-500">
+                      <span>Nota Atual ({proj.currentOverall.toFixed(2)}) vs Pós-Correção ({proj.projectedOverall.toFixed(2)})</span>
+                      <span className="text-[#31d6c4]">ROI: +{deltaOverall.toFixed(2)} pts</span>
+                    </div>
+                    <div className="h-2.5 w-full rounded-full bg-slate-200 dark:bg-slate-800 relative overflow-hidden">
+                      <div
+                        className="absolute inset-y-0 left-0 bg-[#31d6c4]/40 rounded-full"
+                        style={{ width: `${projectedPct}%` }}
+                      />
+                      <div
+                        className="absolute inset-y-0 left-0 bg-[#31d6c4] rounded-full"
+                        style={{ width: `${currentPct}%` }}
+                      />
+                    </div>
+                  </div>
                 </div>
               );
             })}
           </div>
         )}
+
+        {/* Gráfico 3 — Donut de Severidades + Barra de Impacto do Simulador What-If (Part 6.4) */}
+        {(() => {
+          const sevCounts = {
+            BLOCKER: filteredFindings.filter((f) => f.severity === 'BLOCKER').length,
+            CRITICAL: filteredFindings.filter((f) => f.severity === 'CRITICAL').length,
+            HIGH: filteredFindings.filter((f) => f.severity === 'HIGH').length,
+            MEDIUM: filteredFindings.filter((f) => f.severity === 'MEDIUM').length,
+            LOW: filteredFindings.filter((f) => f.severity === 'LOW' || f.severity === 'INFO').length,
+          };
+          const totalSev = Math.max(
+            1,
+            sevCounts.BLOCKER + sevCounts.CRITICAL + sevCounts.HIGH + sevCounts.MEDIUM + sevCounts.LOW
+          );
+          const segments = [
+            { key: 'BLOCKER', label: 'Blocker', count: sevCounts.BLOCKER, color: '#e11d48' },
+            { key: 'CRITICAL', label: 'Crítico', count: sevCounts.CRITICAL, color: '#f43f5e' },
+            { key: 'HIGH', label: 'Alto', count: sevCounts.HIGH, color: '#f97316' },
+            { key: 'MEDIUM', label: 'Médio', count: sevCounts.MEDIUM, color: '#f59e0b' },
+            { key: 'LOW', label: 'Baixo', count: sevCounts.LOW, color: '#0ea5e9' },
+          ];
+          const r = 42;
+          const c = 2 * Math.PI * r;
+          let accRatio = 0;
+          const totalEstimatedMin = filteredFindings.reduce(
+            (acc, f) => acc + (f.remediationEffortMinutes || 15),
+            0
+          );
+
+          return (
+            <div className="pt-3 border-t border-slate-200 dark:border-slate-800 grid grid-cols-1 lg:grid-cols-12 gap-4 items-center">
+              <div className="lg:col-span-5 flex items-center gap-4">
+                <svg
+                  viewBox="0 0 110 110"
+                  className="w-24 h-24 shrink-0"
+                  aria-label="Donut de Severidades dos Achados"
+                >
+                  <circle
+                    cx="55"
+                    cy="55"
+                    r={r}
+                    fill="none"
+                    stroke="currentColor"
+                    className="text-slate-200 dark:text-slate-800"
+                    strokeWidth="12"
+                  />
+                  {segments.map((seg) => {
+                    if (seg.count <= 0) return null;
+                    const ratio = seg.count / totalSev;
+                    const dash = ratio * c;
+                    const offset = -accRatio * c;
+                    accRatio += ratio;
+                    return (
+                      <circle
+                        key={seg.key}
+                        cx="55"
+                        cy="55"
+                        r={r}
+                        fill="none"
+                        stroke={seg.color}
+                        strokeWidth="12"
+                        strokeDasharray={`${dash} ${c - dash}`}
+                        strokeDashoffset={offset}
+                        transform="rotate(-90 55 55)"
+                      />
+                    );
+                  })}
+                  <text
+                    x="55"
+                    y="53"
+                    textAnchor="middle"
+                    className="fill-slate-900 dark:fill-slate-100 font-mono text-sm font-bold"
+                  >
+                    {filteredFindings.length}
+                  </text>
+                  <text
+                    x="55"
+                    y="66"
+                    textAnchor="middle"
+                    className="fill-slate-500 font-mono text-[8px]"
+                  >
+                    achados
+                  </text>
+                </svg>
+
+                <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] font-mono">
+                  {segments.map((seg) => (
+                    <div key={seg.key} className="flex items-center gap-1.5">
+                      <span
+                        className="w-2.5 h-2.5 rounded-sm inline-block shrink-0"
+                        style={{ backgroundColor: seg.color }}
+                      />
+                      <span className="text-slate-600 dark:text-slate-300">
+                        {seg.label}: <strong>{seg.count}</strong>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="lg:col-span-7 space-y-2 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-[11px]">
+                  <span className="font-sans font-bold text-slate-800 dark:text-slate-200">
+                    Impacto de Remediação (Nota Atual vs. Projeção Pós-Fix)
+                  </span>
+                  <span className="text-slate-500">
+                    Esforço Total do Filtro: <strong>{(totalEstimatedMin / 60).toFixed(1)}h</strong> ({totalEstimatedMin} min)
+                  </span>
+                </div>
+                <div className="space-y-1.5">
+                  {latestRun.scoreCards.map((sc) => {
+                    const simProj = whatIfProjections?.perSoftware.find(
+                      (p) => p.softwareId === sc.softwareId
+                    );
+                    const cur = sc.groupedScores.overallScore;
+                    const proj = simProj ? simProj.projectedOverall : Math.min(5, Number((cur + 0.45).toFixed(2)));
+                    const curPct = Math.max(4, Math.min(100, (cur / 5) * 100));
+                    const projPct = Math.max(4, Math.min(100, (proj / 5) * 100));
+                    return (
+                      <div key={sc.softwareId} className="space-y-0.5 font-mono text-[11px]">
+                        <div className="flex items-center justify-between">
+                          <span className="font-sans font-semibold text-slate-700 dark:text-slate-300">
+                            {sc.softwareName}
+                          </span>
+                          <span>
+                            Atual: <strong>{cur.toFixed(2)}</strong> → Pós-Fix:{' '}
+                            <strong className="text-[#31d6c4]">{proj.toFixed(2)} / 5.00</strong>
+                          </span>
+                        </div>
+                        <div className="h-2 w-full rounded-full bg-slate-200 dark:bg-slate-800 relative overflow-hidden">
+                          <div
+                            className="absolute inset-y-0 left-0 bg-[#31d6c4]/35 rounded-full"
+                            style={{ width: `${projPct}%` }}
+                          />
+                          <div
+                            className="absolute inset-y-0 left-0 bg-[#31d6c4] rounded-full"
+                            style={{ width: `${curPct}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
       </div>
 
       {/* Findings Table + Evidence Detail Split */}

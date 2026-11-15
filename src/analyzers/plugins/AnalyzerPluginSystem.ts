@@ -142,10 +142,11 @@ export const IacAnalyzerPlugin: AnalyzerPlugin = {
 
       // 3. Dockerfile
       if (base === 'dockerfile' || lower.endsWith('.dockerfile')) {
-        const hasUserDirective = /^\s*USER\s+(?!root\b|0\b)\S+/im.test(content);
+        const hasUserDirective = /^\s{0,16}USER\s+(?!root\b|0\b)\S+/im.test(content);
         lines.forEach((line, idx) => {
           const lineNo = idx + 1;
-          if (/^\s*FROM\s+[^\s:]+(?::latest)?\s*$/i.test(line)) {
+          const trimmedLine = line.trim();
+          if (/^FROM\s+[a-zA-Z0-9._/-]{1,120}(?::latest)?$/i.test(trimmedLine)) {
             candidates.push({
               ruleId: 'iac:DOCKER-001',
               title: 'Dockerfile utiliza imagem base sem versão fixada (:latest ou sem tag)',

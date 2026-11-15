@@ -48,20 +48,22 @@ export interface GateStatusBarStyle {
   tooltip: string;
 }
 
+const SAFE_SQL_CONCAT_QUICKFIX_REGEX = /["'`]SELECT\s[^+;\r\n]{1,200}\+\s{0,10}([a-zA-Z0-9_$.]{1,80})["'`]?/i;
+
 const DEFAULT_REMEDIATIONS: Record<string, { cwe: string; owasp: string; remediation: string; quickFixReplacement?: (lineText: string) => string | null }> = {
   'javascript:S2077': {
     cwe: 'CWE-89',
     owasp: 'A03:2021-Injection',
     remediation: 'Substitua concatenação de strings SQL por consultas parametrizadas ($1, ?).',
     quickFixReplacement: (line) =>
-      line.replace(/["'`]SELECT\s+.*?\+\s*([a-zA-Z0-9_$.]+)["'`]?/i, '"SELECT * FROM records WHERE id = $1", [$1]'),
+      line.replace(SAFE_SQL_CONCAT_QUICKFIX_REGEX, '"SELECT * FROM records WHERE id = $1", [$1]'),
   },
   'typescript:S2077': {
     cwe: 'CWE-89',
     owasp: 'A03:2021-Injection',
     remediation: 'Utilize prepared statements / parâmetros posicionais ($1) em vez de interpolação direta.',
     quickFixReplacement: (line) =>
-      line.replace(/["'`]SELECT\s+.*?\+\s*([a-zA-Z0-9_$.]+)["'`]?/i, '"SELECT * FROM records WHERE id = $1", [$1]'),
+      line.replace(SAFE_SQL_CONCAT_QUICKFIX_REGEX, '"SELECT * FROM records WHERE id = $1", [$1]'),
   },
   'javascript:S1523': {
     cwe: 'CWE-95',

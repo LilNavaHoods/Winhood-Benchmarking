@@ -395,7 +395,7 @@ export class ScaCorrelator {
             installedVersion: comp.version,
             ecosystem: comp.ecosystem,
             dependencyScope: comp.dependencyScope,
-            license: comp.license !== 'UNKNOWN' ? comp.license : adv.licenseHint,
+            license: comp.license !== 'UNKNOWN' && comp.license !== 'NOASSERTION' ? comp.license : adv.licenseHint,
             cveId: adv.cveId,
             ghsaId: adv.ghsaId,
             cweIds: adv.cweIds,
@@ -487,6 +487,7 @@ export class ScaCorrelator {
     for (const comp of sbom.components) {
       const lic = (comp.license || 'UNKNOWN').trim();
       const licUpper = lic.toUpperCase();
+      const isUnasserted = licUpper === 'UNKNOWN' || licUpper === 'NOASSERTION';
       let reason: LicensePolicyViolation['reason'] | null = null;
       let severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' = 'MEDIUM';
 
@@ -496,10 +497,10 @@ export class ScaCorrelator {
       } else if (restrictedUpper.has(licUpper)) {
         reason = 'RESTRICTED_COPYLEFT';
         severity = 'HIGH';
-      } else if (licUpper === 'UNKNOWN' && policy.failOnUnknownLicense) {
+      } else if (isUnasserted && policy.failOnUnknownLicense) {
         reason = 'UNKNOWN_LICENSE';
         severity = 'MEDIUM';
-      } else if (allowedUpper.size > 0 && licUpper !== 'UNKNOWN' && !allowedUpper.has(licUpper)) {
+      } else if (allowedUpper.size > 0 && !isUnasserted && !allowedUpper.has(licUpper)) {
         reason = 'NOT_IN_ALLOWLIST';
         severity = 'HIGH';
       }

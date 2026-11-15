@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   CheckCircle2,
   Code,
@@ -76,6 +76,41 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
   const [swCustomFileContent, setSwCustomFileContent] = useState(
     `import crypto from 'node:crypto';\n\nexport function deriveKeySafe(secret: string, salt: Buffer): Buffer {\n  return crypto.pbkdf2Sync(secret, salt, 600000, 32, 'sha512');\n}\n`
   );
+  const [uploadedSoftwareFilesMap, setUploadedSoftwareFilesMap] = useState<Record<string, string>>({});
+  const [skippedSwFilesCount, setSkippedSwFilesCount] = useState<number>(0);
+  const swFilesInputRef = useRef<HTMLInputElement>(null);
+  const swFolderInputRef = useRef<HTMLInputElement>(null);
+
+  const handleLoadSoftwareLocalFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const IGNORED_RE = /(^|\/)(node_modules|\.git|dist|dist-desktop|build|coverage|\.next|out|target|vendor)(\/|$)/i;
+    const BIN_EXT_RE = /\.(png|jpe?g|gif|webp|ico|bmp|pdf|exe|dll|so|dylib|bin|dat|db|sqlite|woff2?|ttf|eot|mp3|mp4|zip|tar|gz|7z|rar)$/i;
+    const nextMap: Record<string, string> = { ...uploadedSoftwareFilesMap };
+    let skipped = 0;
+
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      if (!f) continue;
+      const rawRel = (f as any).webkitRelativePath || f.name;
+      const cleanRel = String(rawRel).replace(/\\/g, '/').replace(/^\/+/, '');
+      if (!cleanRel || IGNORED_RE.test(cleanRel) || BIN_EXT_RE.test(cleanRel) || f.size > 2 * 1024 * 1024) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        const text = await f.text();
+        if (text.includes('\0')) {
+          skipped += 1;
+          continue;
+        }
+        nextMap[cleanRel] = text;
+      } catch {
+        skipped += 1;
+      }
+    }
+    setUploadedSoftwareFilesMap(nextMap);
+    if (skipped > 0) setSkippedSwFilesCount((prev) => prev + skipped);
+  };
 
   // Selected Software for Inventory / Source Code Modal Inspection
   const [inspectedSoftware, setInspectedSoftware] = useState<Software | null>(null);
@@ -165,20 +200,25 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
     }
 
     try {
-      const customFilesMap: Record<string, string> = {
-        'package.json': JSON.stringify(
-          {
-            name: swName.toLowerCase().replace(/\s+/g, '-'),
-            version: swVersion,
-            dependencies: { argon2: '0.41.1' },
-          },
-          null,
-          2
-        ),
-        'README.md': `# ${swName} v${swVersion}\n${swDescription || 'Documentação técnica verificada.'}`,
-      };
-      if (swCustomFileName.trim() && swCustomFileContent.trim()) {
-        customFilesMap[swCustomFileName.trim()] = swCustomFileContent;
+      let customFilesMap: Record<string, string> = {};
+      if (Object.keys(uploadedSoftwareFilesMap).length > 0) {
+        customFilesMap = { ...uploadedSoftwareFilesMap };
+      } else {
+        customFilesMap = {
+          'package.json': JSON.stringify(
+            {
+              name: swName.toLowerCase().replace(/\s+/g, '-'),
+              version: swVersion,
+              private: true,
+            },
+            null,
+            2
+          ),
+          'README.md': `# ${swName} v${swVersion}\n${swDescription || 'Documentação técnica verificada.'}`,
+        };
+        if (swCustomFileName.trim() && swCustomFileContent.trim()) {
+          customFilesMap[swCustomFileName.trim()] = swCustomFileContent;
+        }
       }
 
       const parsedSwTags = swDomainTags
@@ -220,6 +260,8 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
       setSwName('');
       setSwVendor('');
       setSwDescription('');
+      setUploadedSoftwareFilesMap({});
+      setSkippedSwFilesCount(0);
       await onRefresh();
     } catch {
       onNotify('Erro ao cadastrar software.', 'error');
@@ -760,27 +802,83 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
               </div>
             </div>
 
-            <div>
+            <div className="space-y-2">
               <label
                 htmlFor="sw-file-path"
-                className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1"
+                className="block text-xs font-semibold text-slate-700 dark:text-slate-300"
               >
-                Arquivo de Código-Fonte Autorizado para Ingestão Inicial
+                Artefatos de Código-Fonte para Ingestão Inicial
               </label>
-              <input
-                id="sw-file-path"
-                type="text"
-                value={swCustomFileName}
-                onChange={(e) => setSwCustomFileName(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-1.5 text-xs font-mono text-slate-900 dark:text-slate-100 mb-1.5"
-              />
-              <textarea
-                rows={4}
-                aria-label="Conteúdo do código-fonte para ingestão"
-                value={swCustomFileContent}
-                onChange={(e) => setSwCustomFileContent(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 text-xs font-mono text-slate-900 dark:text-slate-100"
-              />
+
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  ref={swFilesInputRef}
+                  type="file"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => handleLoadSoftwareLocalFiles(e.target.files)}
+                />
+                <input
+                  ref={swFolderInputRef}
+                  type="file"
+                  // @ts-expect-error webkitdirectory supported in Chromium/Firefox
+                  webkitdirectory=""
+                  directory=""
+                  multiple
+                  className="hidden"
+                  onChange={(e) => handleLoadSoftwareLocalFiles(e.target.files)}
+                />
+                <button
+                  type="button"
+                  onClick={() => swFilesInputRef.current?.click()}
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-800 dark:text-slate-200 text-[11px] font-semibold hover:bg-slate-300 dark:hover:bg-slate-700 transition-colors cursor-pointer"
+                >
+                  Selecionar Arquivos do Computador
+                </button>
+                <button
+                  type="button"
+                  onClick={() => swFolderInputRef.current?.click()}
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-800 dark:text-slate-200 text-[11px] font-semibold hover:bg-slate-300 dark:hover:bg-slate-700 transition-colors cursor-pointer"
+                >
+                  Selecionar Pasta do Computador
+                </button>
+                {Object.keys(uploadedSoftwareFilesMap).length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setUploadedSoftwareFilesMap({});
+                      setSkippedSwFilesCount(0);
+                    }}
+                    className="px-2 py-1 rounded text-[11px] text-rose-500 hover:bg-rose-500/10 cursor-pointer"
+                  >
+                    Limpar ({Object.keys(uploadedSoftwareFilesMap).length} arqs)
+                  </button>
+                )}
+              </div>
+
+              {Object.keys(uploadedSoftwareFilesMap).length > 0 ? (
+                <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-2.5 text-[11px] text-emerald-700 dark:text-emerald-300 font-mono">
+                  {Object.keys(uploadedSoftwareFilesMap).length} arquivo(s) reais carregados do computador
+                  {skippedSwFilesCount > 0 ? ` (${skippedSwFilesCount} ignorados)` : ''}. O código enviado será ingerido sem dependências fictícias.
+                </div>
+              ) : (
+                <>
+                  <input
+                    id="sw-file-path"
+                    type="text"
+                    value={swCustomFileName}
+                    onChange={(e) => setSwCustomFileName(e.target.value)}
+                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-1.5 text-xs font-mono text-slate-900 dark:text-slate-100 mb-1.5"
+                  />
+                  <textarea
+                    rows={4}
+                    aria-label="Conteúdo do código-fonte para ingestão"
+                    value={swCustomFileContent}
+                    onChange={(e) => setSwCustomFileContent(e.target.value)}
+                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 text-xs font-mono text-slate-900 dark:text-slate-100"
+                  />
+                </>
+              )}
             </div>
 
             <button

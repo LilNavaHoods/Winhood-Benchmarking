@@ -43,6 +43,7 @@ import {
   buildPreAnalysisSummary,
   evaluateSoftwareComparability,
 } from '../engine/methodologyCatalogEngine';
+import { MARKET_CATEGORIES } from '../engine/marketCompetitorDiscoveryEngine';
 
 interface BenchmarkWizardModuleProps {
   projects: Project[];
@@ -80,6 +81,9 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
   const [selectedCandidate, setSelectedCandidate] = useState<MarketCompetitorCandidate | null>(null);
   const [candidateApproved, setCandidateApproved] = useState<boolean>(false);
   const [approvedCompetitorSoftwareId, setApprovedCompetitorSoftwareId] = useState<string>('');
+  const [ideaSearchQuery, setIdeaSearchQuery] = useState<string>('');
+  const [ideaCategoryFilter, setIdeaCategoryFilter] = useState<string>('');
+  const [includeGithubLive, setIncludeGithubLive] = useState<boolean>(true);
 
   // Profile, Enabled Categories, Not Applicable Categories, Quality Gate & Weights
   const [selectedProfileId, setSelectedProfileId] = useState<string>(
@@ -121,6 +125,24 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
   }, [selectedProjectId, projectSoftwares, primarySoftwareId]);
 
   const activePrimarySoftware = softwares.find((s) => s.id === primarySoftwareId);
+  const activeProject = projects.find((p) => p.id === (selectedProjectId || activePrimarySoftware?.projectId));
+
+  useEffect(() => {
+    if (activePrimarySoftware || activeProject) {
+      const autoIdea = [
+        activeProject?.objective,
+        activeProject?.description,
+        activePrimarySoftware?.description,
+        (activeProject?.domainTags || []).join(', '),
+        (activePrimarySoftware?.domainTags || []).join(', '),
+      ]
+        .filter(Boolean)
+        .join(' — ');
+      if (autoIdea) {
+        setIdeaSearchQuery(autoIdea);
+      }
+    }
+  }, [activePrimarySoftware?.id, activeProject?.id]);
 
   // Trigger Competitor Discovery when entering step 3 in Mode C
   useEffect(() => {
@@ -132,14 +154,30 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
   const handleDiscoverCompetitors = async () => {
     setDiscovering(true);
     try {
+      const effectivePurpose =
+        ideaSearchQuery.trim() ||
+        [
+          activeProject?.objective,
+          activeProject?.description,
+          activePrimarySoftware?.description,
+          activePrimarySoftware?.name,
+        ]
+          .filter(Boolean)
+          .join(' ');
       const res = await fetch('/api/market/discover', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          projectId: selectedProjectId || activePrimarySoftware?.projectId,
           softwareId: activePrimarySoftware?.id,
-          category: activePrimarySoftware?.inventory?.category,
-          purpose: activePrimarySoftware?.name,
-          targetFeatures: activePrimarySoftware?.inventory?.frameworks || [],
+          category: ideaCategoryFilter || activePrimarySoftware?.category || activeProject?.category,
+          purpose: effectivePurpose,
+          targetFeatures: [
+            ...(activePrimarySoftware?.domainTags || []),
+            ...(activeProject?.domainTags || []),
+            ...(activePrimarySoftware?.inventory?.frameworks || []),
+          ],
+          includeGithubLive,
         }),
       });
       if (res.ok) {
@@ -842,39 +880,101 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
             {/* MODALIDADE C: DESCOBERTA E APROVAÇÃO DE CONCORRENTE DE MERCADO (Seção 1.3 e 14) */}
             {assessmentMode === 'MARKET_COMPETITOR' && (
               <div className="space-y-4">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
                       <Search className="w-4 h-4 text-amber-400" />
-                      <span>Descoberta de Concorrente de Mercado Inteligente</span>
+                      <span>Descoberta de Concorrente de Mercado por Ideia &amp; Propósito</span>
                     </h3>
                     <p className="text-xs text-slate-500 mt-0.5">
-                      Calculado com base em 6 eixos de similaridade ponderada. Requer aprovação humana explícita.
+                      Motor semântico em 6 eixos ponderados (Catálogo de 37+ softwares reais + GitHub Live Search). Requer aprovação humana explícita.
                     </p>
                   </div>
                   <button
                     type="button"
                     onClick={handleDiscoverCompetitors}
                     disabled={discovering}
-                    className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-bold text-slate-700 dark:text-slate-300 hover:border-amber-400"
+                    className="px-3.5 py-1.5 rounded-lg bg-amber-400/15 border border-amber-400/50 text-xs font-bold text-amber-300 hover:bg-amber-400/25 cursor-pointer"
                   >
-                    {discovering ? 'Pesquisando...' : 'Re-analisar Similaridade'}
+                    {discovering ? 'Pesquisando...' : 'Pesquisar Concorrentes por Ideia'}
                   </button>
+                </div>
+
+                {/* Painel de Ideia / Propósito / Categoria / GitHub Live */}
+                <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10] space-y-3">
+                  <div>
+                    <label
+                      htmlFor="wizard-idea-search-query"
+                      className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300 mb-1"
+                    >
+                      Ideia, Propósito Funcional ou Palavras-Chave do Projeto (Editável)
+                    </label>
+                    <input
+                      id="wizard-idea-search-query"
+                      type="text"
+                      value={ideaSearchQuery}
+                      onChange={(e) => setIdeaSearchQuery(e.target.value)}
+                      placeholder="Ex: abertura de chamados helpdesk ITSM, leitor de mangá CBZ EPUB, treino academia fitness, cofre de senhas KDBX..."
+                      className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121824] text-slate-900 dark:text-slate-100 text-xs focus:outline-none focus:border-amber-400"
+                    />
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-center">
+                    <div>
+                      <label
+                        htmlFor="wizard-idea-category-filter"
+                        className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1"
+                      >
+                        Domínio / Categoria de Mercado (Opcional — Busca transversal em todas as 16 categorias)
+                      </label>
+                      <select
+                        id="wizard-idea-category-filter"
+                        value={ideaCategoryFilter}
+                        onChange={(e) => setIdeaCategoryFilter(e.target.value)}
+                        className="w-full px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121824] text-slate-900 dark:text-slate-100 text-xs"
+                      >
+                        <option value="">Todas as 16 Categorias (Descoberta Semântica Automática)</option>
+                        {MARKET_CATEGORIES.map((cat) => (
+                          <option key={cat} value={cat}>
+                            {cat}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="pt-3 md:pt-5">
+                      <label className="inline-flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={includeGithubLive}
+                          onChange={(e) => setIncludeGithubLive(e.target.checked)}
+                          className="rounded accent-amber-400"
+                        />
+                        <span>Incluir busca ao vivo no GitHub para projetos open-source similares</span>
+                      </label>
+                    </div>
+                  </div>
                 </div>
 
                 {discovering ? (
                   <div className="p-8 text-center text-xs text-slate-500">
-                    Consultando catálogo de inteligência de mercado e calculando similaridade ponderada...
+                    Consultando catálogo de inteligência de mercado e calculando similaridade semântica ponderada...
                   </div>
                 ) : marketCandidates.length === 0 ? (
                   <div className="p-6 rounded-lg border border-slate-200 dark:border-slate-800 text-center text-xs text-slate-500">
-                    Nenhum concorrente catalogado diretamente para esta categoria técnica.
+                    Nenhum concorrente encontrado. Descreva a ideia ou propósito funcional acima e clique em Pesquisar.
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     {marketCandidates.map((cand) => {
                       const isSelected = selectedCandidate?.id === cand.id;
                       const isApproved = candidateApproved && isSelected;
+                      const axes = [
+                        { label: 'Propósito (30%)', val: cand.similarityBreakdown.purposeMatch },
+                        { label: 'Funcionalidades (25%)', val: cand.similarityBreakdown.featuresMatch },
+                        { label: 'Público (15%)', val: cand.similarityBreakdown.audienceMatch },
+                        { label: 'Plataforma (10%)', val: cand.similarityBreakdown.platformMatch },
+                        { label: 'Distribuição (10%)', val: cand.similarityBreakdown.distributionMatch },
+                        { label: 'Integrações (10%)', val: cand.similarityBreakdown.integrationsMatch },
+                      ];
                       return (
                         <div
                           key={cand.id}
@@ -886,7 +986,7 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                         >
                           <div className="flex items-start justify-between">
                             <div>
-                              <div className="flex items-center gap-2">
+                              <div className="flex items-center gap-2 flex-wrap">
                                 <span className="text-sm font-bold text-slate-900 dark:text-slate-100">
                                   {cand.name}
                                 </span>
@@ -900,7 +1000,9 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                                   {cand.openSource ? 'OPEN-SOURCE' : 'CLOSED-SOURCE'}
                                 </span>
                               </div>
-                              <div className="text-[11px] text-slate-500">{cand.vendor} · Categoria: {cand.category}</div>
+                              <div className="text-[11px] text-slate-500">
+                                {cand.vendor} · Categoria: {cand.category}
+                              </div>
                             </div>
                             <div className="text-right">
                               <div className="text-base font-bold font-mono text-amber-400">
@@ -910,25 +1012,40 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                             </div>
                           </div>
 
-                          {/* Similarity Breakdown (Seção 14.2) */}
-                          <div className="mt-3 grid grid-cols-3 gap-1.5 text-[10px] font-mono bg-white dark:bg-[#080b10] p-2 rounded-lg border border-slate-200 dark:border-slate-800">
-                            <div>Propósito (30%): <strong className="text-slate-700 dark:text-slate-200">{cand.similarityBreakdown.purposeMatch}%</strong></div>
-                            <div>Funcionalidades (25%): <strong className="text-slate-700 dark:text-slate-200">{cand.similarityBreakdown.featuresMatch}%</strong></div>
-                            <div>Público (15%): <strong className="text-slate-700 dark:text-slate-200">{cand.similarityBreakdown.audienceMatch}%</strong></div>
-                            <div>Plataforma (10%): <strong className="text-slate-700 dark:text-slate-200">{cand.similarityBreakdown.platformMatch}%</strong></div>
-                            <div>Distribuição (10%): <strong className="text-slate-700 dark:text-slate-200">{cand.similarityBreakdown.distributionMatch}%</strong></div>
-                            <div>Integrações (10%): <strong className="text-slate-700 dark:text-slate-200">{cand.similarityBreakdown.integrationsMatch}%</strong></div>
+                          {/* Match Reason Summary */}
+                          {(cand.matchReasonSummary || cand.matchReasons?.[0]) && (
+                            <div className="mt-2.5 px-2.5 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-[11px] text-amber-700 dark:text-amber-300">
+                              {cand.matchReasonSummary || cand.matchReasons[0]}
+                            </div>
+                          )}
+
+                          {/* Similarity Breakdown com Barras Visuais (Seção 14.2) */}
+                          <div className="mt-3 grid grid-cols-2 sm:grid-cols-3 gap-2 text-[10px] font-mono bg-white dark:bg-[#080b10] p-2.5 rounded-lg border border-slate-200 dark:border-slate-800">
+                            {axes.map((ax) => (
+                              <div key={ax.label} className="space-y-1">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-slate-500 truncate">{ax.label}</span>
+                                  <strong className="text-slate-700 dark:text-slate-200">{ax.val}%</strong>
+                                </div>
+                                <div className="w-full h-1.5 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                                  <div
+                                    className="h-full rounded-full bg-amber-400"
+                                    style={{ width: `${Math.min(100, Math.max(0, ax.val))}%` }}
+                                  />
+                                </div>
+                              </div>
+                            ))}
                           </div>
 
                           <p className="text-[11px] text-slate-600 dark:text-slate-400 mt-2.5">
                             {cand.description}
                           </p>
 
-                          <div className="mt-3 pt-3 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between">
+                          <div className="mt-3 pt-3 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
                             <span className="text-[10px] text-slate-500">
                               {cand.analysisScope === 'FULL_SOURCE'
-                                ? 'Varredura completa de código fonte'
-                                : 'Análise de manifesto, API e specs públicas'}
+                                ? 'Varredura de código e arquitetura real do concorrente'
+                                : 'Análise de manifesto, API e especificações públicas'}
                             </span>
                             {isApproved ? (
                               <span className="inline-flex items-center gap-1 text-xs font-bold text-emerald-400">
@@ -942,7 +1059,7 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                                   setSelectedCandidate(cand);
                                   void handleApproveCompetitor(cand);
                                 }}
-                                className="px-3 py-1.5 rounded-lg bg-amber-400 text-slate-950 text-xs font-bold hover:bg-amber-300 cursor-pointer"
+                                className="px-3 py-1.5 rounded-lg bg-amber-400 text-slate-950 text-xs font-bold hover:bg-amber-300 cursor-pointer shrink-0"
                               >
                                 Homologar e Aprovar Concorrente
                               </button>

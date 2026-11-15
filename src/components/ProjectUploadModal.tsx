@@ -36,6 +36,24 @@ const PROJECT_CATEGORIES = [
   'Engenharia de Software & Segurança',
 ];
 
+const IGNORED_UPLOAD_DIRS = /(^|\/)(node_modules|\.git|dist|dist-desktop|build|coverage|\.next|\.nuxt|\.cache|\.vscode|\.idea|out|target|bin|obj|vendor|__pycache__)(\/|$)/i;
+const BINARY_FILE_EXTENSIONS = /\.(png|jpe?g|gif|webp|ico|bmp|tiff|pdf|exe|dll|so|dylib|bin|dat|db|sqlite|sqlite3|woff2?|ttf|eot|otf|mp3|mp4|wav|avi|mov|mkv|pyc|class|jar|war|ear|o|a|lib|pdb|vsix|dmg|iso|tar|gz|7z|rar)$/i;
+
+function isIgnoredOrBinaryPath(relPath: string): boolean {
+  const normalized = relPath.replace(/\\/g, '/').replace(/^\/+/, '');
+  return IGNORED_UPLOAD_DIRS.test(normalized) || BINARY_FILE_EXTENSIONS.test(normalized);
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
 interface ProjectUploadModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -55,7 +73,7 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
   // Form Fields
   const [projectName, setProjectName] = useState('');
   const [domainTagsInput, setDomainTagsInput] = useState('devsecops, mqr-strict, security, clean-code');
-  const [qualityGateId, setQualityGateId] = useState('qg-sonar-way-mqr');
+  const [qualityGateId, setQualityGateId] = useState('winhood-standard-v2');
   const [evaluateAll12Categories, setEvaluateAll12Categories] = useState(true);
   const [objective, setObjective] = useState('');
   const [description, setDescription] = useState('');
@@ -65,39 +83,89 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
 
   // Loaded Files Map: { relativePath: content }
   const [filesMap, setFilesMap] = useState<Record<string, string>>({});
+  const [skippedCount, setSkippedCount] = useState<number>(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
 
   if (!isOpen) return null;
 
-  const processFileList = async (files: FileList | File[]) => {
+  const processFileList = async (files: FileList | File[], customRelativePaths?: Map<File, string>) => {
     const newFiles: Record<string, string> = { ...filesMap };
     let suggestedProjectName = projectName;
+    let newlySkipped = 0;
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      // Skip very large binary files (> 5MB)
-      if (file.size > 5 * 1024 * 1024) continue;
+      if (!file) continue;
 
-      const path = (file as any).webkitRelativePath || file.name;
+      const rawPath = customRelativePaths?.get(file) || (file as any).webkitRelativePath || file.name;
+      const cleanPath = String(rawPath).replace(/\\/g, '/').replace(/^\/+/, '');
+      if (!cleanPath) continue;
 
-      if (!suggestedProjectName && path.includes('/')) {
-        suggestedProjectName = path.split('/')[0];
+      if (!suggestedProjectName && cleanPath.includes('/')) {
+        suggestedProjectName = cleanPath.split('/')[0] || '';
+      }
+
+      // 1. Handle .zip archive extraction via backend
+      if (cleanPath.toLowerCase().endsWith('.zip')) {
+        if (file.size > 35 * 1024 * 1024) {
+          newlySkipped += 1;
+          continue;
+        }
+        try {
+          const buf = await file.arrayBuffer();
+          const zipBase64 = arrayBufferToBase64(buf);
+          const zipRes = await fetch('/api/projects/extract-zip', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ zipBase64 }),
+          });
+          if (zipRes.ok) {
+            const zipData = await zipRes.json();
+            if (zipData.filesMap && typeof zipData.filesMap === 'object') {
+              Object.assign(newFiles, zipData.filesMap);
+            }
+            if (typeof zipData.skippedCount === 'number') {
+              newlySkipped += zipData.skippedCount;
+            }
+            if (!suggestedProjectName) {
+              suggestedProjectName = file.name.replace(/\.zip$/i, '');
+            }
+          } else {
+            newlySkipped += 1;
+          }
+        } catch {
+          newlySkipped += 1;
+        }
+        continue;
+      }
+
+      // 2. Skip ignored directories, binary extensions, or files > 2MB
+      if (isIgnoredOrBinaryPath(cleanPath) || file.size > 2 * 1024 * 1024) {
+        newlySkipped += 1;
+        continue;
       }
 
       try {
         const text = await file.text();
-        newFiles[path] = text;
+        if (text.includes('\0')) {
+          newlySkipped += 1;
+          continue;
+        }
+        newFiles[cleanPath] = text;
       } catch {
-        // If not plain text, ignore
+        newlySkipped += 1;
       }
     }
 
     setFilesMap(newFiles);
+    if (newlySkipped > 0) {
+      setSkippedCount((prev) => prev + newlySkipped);
+    }
     if (!projectName && suggestedProjectName) {
       setProjectName(suggestedProjectName);
       if (!softwareName) setSoftwareName(suggestedProjectName);
-    } else if (!projectName && files.length > 0) {
+    } else if (!projectName && files.length > 0 && files[0]) {
       const baseName = files[0].name.replace(/\.[^/.]+$/, '');
       setProjectName(baseName);
       if (!softwareName) setSoftwareName(baseName);
@@ -113,9 +181,76 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
     setIsDragging(false);
   };
 
+  const traverseFileTreeEntry = async (
+    entry: any,
+    parentPath: string,
+    collectedFiles: File[],
+    relativeMap: Map<File, string>
+  ): Promise<void> => {
+    if (!entry) return;
+    const currentPath = parentPath ? `${parentPath}/${entry.name}` : entry.name;
+    if (entry.isFile) {
+      await new Promise<void>((resolve) => {
+        entry.file(
+          (file: File) => {
+            collectedFiles.push(file);
+            relativeMap.set(file, currentPath);
+            resolve();
+          },
+          () => resolve()
+        );
+      });
+    } else if (entry.isDirectory) {
+      if (IGNORED_UPLOAD_DIRS.test(`${currentPath}/`)) {
+        setSkippedCount((prev) => prev + 1);
+        return;
+      }
+      const dirReader = entry.createReader();
+      const readAllEntries = async (): Promise<any[]> => {
+        const all: any[] = [];
+        while (true) {
+          const batch: any[] = await new Promise((resolve) => {
+            dirReader.readEntries(
+              (entries: any[]) => resolve(entries || []),
+              () => resolve([])
+            );
+          });
+          if (!batch || batch.length === 0) break;
+          all.push(...batch);
+        }
+        return all;
+      };
+      const children = await readAllEntries();
+      for (const child of children) {
+        await traverseFileTreeEntry(child, currentPath, collectedFiles, relativeMap);
+      }
+    }
+  };
+
   const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
+
+    if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
+      const entries: any[] = [];
+      for (let i = 0; i < e.dataTransfer.items.length; i++) {
+        const item = e.dataTransfer.items[i];
+        const entry = item && typeof (item as any).webkitGetAsEntry === 'function' ? (item as any).webkitGetAsEntry() : null;
+        if (entry) entries.push(entry);
+      }
+      if (entries.length > 0) {
+        const collectedFiles: File[] = [];
+        const relativeMap = new Map<File, string>();
+        for (const entry of entries) {
+          await traverseFileTreeEntry(entry, '', collectedFiles, relativeMap);
+        }
+        if (collectedFiles.length > 0) {
+          await processFileList(collectedFiles, relativeMap);
+          return;
+        }
+      }
+    }
+
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       await processFileList(e.dataTransfer.files);
     }
@@ -182,7 +317,7 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
           name: projectName.trim(),
           domainTags: parsedDomainTags.length > 0 ? parsedDomainTags : ['multi-category', 'mqr-strict'],
           defaultQualityGateId: qualityGateId,
-          defaultQualityProfileIds: ['sonar-way-ts-mqr-2026', 'sonar-way-sql-mqr-2026'],
+          defaultQualityProfileIds: ['mqr-strict'],
           objective: objective.trim(),
           description: description.trim(),
           softwareName: (softwareName || projectName).trim(),
@@ -226,7 +361,7 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
                 Upload &amp; Ingestão Multi-Categoria (Modo MQR (Modern Quality Regime))
               </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                Importe código-fonte local ou pastas para avaliação transversal nas 12 categorias sem bloqueio a uma categoria única.
+                Importe código-fonte local, pastas ou arquivos .zip para avaliação transversal nas 12 categorias.
               </p>
             </div>
           </div>
@@ -247,7 +382,7 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
               htmlFor="upload-project-files-input"
               className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-2"
             >
-              Arquivos de Código-Fonte ou Diretório do Projeto
+              Arquivos de Código-Fonte, Pacote .ZIP ou Diretório do Projeto
             </label>
             <div
               role="button"
@@ -290,13 +425,13 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
 
               <FolderArchive className="w-8 h-8 mx-auto mb-2 text-[#31d6c4]" />
               <p className="font-semibold text-slate-800 dark:text-slate-200 mb-1">
-                Arraste arquivos ou pastas de código aqui
+                Arraste arquivos, pacotes .zip ou pastas de código aqui
               </p>
               <p className="text-[11px] text-slate-500 mb-3">
-                Suporta TypeScript, JavaScript, Python, C#, Go, Java, SQL, JSON e Markdown.
+                Suporta TypeScript, JavaScript, Python, C#, Go, Java, Rust, SQL, JSON, Markdown e arquivos .ZIP (ignora automaticamente node_modules e binários).
               </p>
 
-              <div className="flex items-center justify-center gap-2">
+              <div className="flex items-center justify-center gap-2 flex-wrap">
                 <button
                   type="button"
                   onClick={(e) => {
@@ -305,7 +440,7 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
                   }}
                   className="px-3 py-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-800 dark:text-slate-200 text-xs font-medium hover:bg-slate-300 dark:hover:bg-slate-700 transition-colors cursor-pointer"
                 >
-                  Selecionar Arquivos
+                  Selecionar Arquivos / .ZIP
                 </button>
                 <button
                   type="button"
@@ -332,42 +467,46 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
           </div>
 
           {/* Files Inventory Preview */}
-          {totalFiles > 0 && (
+          {(totalFiles > 0 || skippedCount > 0) && (
             <div className="rounded-xl border border-slate-200 dark:border-slate-800 p-3 bg-slate-50 dark:bg-[#080b10] space-y-2">
-              <div className="flex items-center justify-between text-xs font-semibold">
+              <div className="flex items-center justify-between text-xs font-semibold flex-wrap gap-2">
                 <span className="text-slate-700 dark:text-slate-300">
-                  Inventário de Arquivos Carregados ({totalFiles} arquivos · {totalLoc} linhas de código)
+                  {totalFiles} arquivos de código carregados ({totalLoc} LOC) • {skippedCount} arquivos ignorados automaticamente (node_modules, binários ou imagens)
                 </span>
-                <span className="font-mono text-[10px] text-slate-500">
-                  SHA-256: {packageHash.slice(0, 16)}...
-                </span>
+                {totalFiles > 0 && (
+                  <span className="font-mono text-[10px] text-slate-500">
+                    SHA-256: {packageHash.slice(0, 16)}...
+                  </span>
+                )}
               </div>
-              <div className="max-h-36 overflow-y-auto space-y-1 pr-1 font-mono text-[11px]">
-                {Object.keys(filesMap).map((path) => (
-                  <div
-                    key={path}
-                    className="flex items-center justify-between py-1 px-2 rounded bg-white dark:bg-[#121824] border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300"
-                  >
-                    <div className="flex items-center gap-2 truncate">
-                      <FileCode2 className="w-3.5 h-3.5 text-[#31d6c4] shrink-0" />
-                      <span className="truncate">{path}</span>
+              {totalFiles > 0 && (
+                <div className="max-h-36 overflow-y-auto space-y-1 pr-1 font-mono text-[11px]">
+                  {Object.keys(filesMap).map((path) => (
+                    <div
+                      key={path}
+                      className="flex items-center justify-between py-1 px-2 rounded bg-white dark:bg-[#121824] border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300"
+                    >
+                      <div className="flex items-center gap-2 truncate">
+                        <FileCode2 className="w-3.5 h-3.5 text-[#31d6c4] shrink-0" />
+                        <span className="truncate">{path}</span>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className="text-[10px] text-slate-500">
+                          {filesMap[path].split(/\r?\n/).length} LOC
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveFile(path)}
+                          className="p-1 text-slate-400 hover:text-rose-400 cursor-pointer"
+                          title="Remover arquivo"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      <span className="text-[10px] text-slate-500">
-                        {filesMap[path].split(/\r?\n/).length} LOC
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveFile(path)}
-                        className="p-1 text-slate-400 hover:text-rose-400 cursor-pointer"
-                        title="Remover arquivo"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -404,6 +543,7 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
                 onChange={(e) => setQualityGateId(e.target.value)}
                 className="w-full px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#121824] text-slate-900 dark:text-slate-100 text-xs focus:outline-none focus:border-[#31d6c4]"
               >
+                <option value="winhood-standard-v2">WinHood Standard v2 (Modo MQR Oficial)</option>
                 <option value="qg-sonar-way-mqr">Perfil de Qualidade Estrita (Modo MQR — Clean as You Code + Fudge Factor)</option>
                 <option value="qg-zero-trust-strict">WinHood Zero-Trust Strict (Bloqueio CVSS &gt;= 7.0)</option>
               </select>

@@ -182,6 +182,7 @@ export default function App() {
       avgQuality: number | null;
     };
     latestRun: BenchmarkRun | null;
+    recentRuns?: BenchmarkRun[];
     historicalRuns: Array<{
       id: string;
       projectName: string;
@@ -611,36 +612,16 @@ export default function App() {
     }>;
   }> = [
     {
-      groupLabel: 'Visão Geral & Preparação',
+      groupLabel: 'VISÃO GERAL & ACERVO',
       items: [
         { id: 'dashboard', label: 'Dashboard Central', icon: LayoutDashboard },
         { id: 'projects', stepBadge: '1', label: 'Projetos & Softwares', icon: FolderGit2 },
         { id: 'wizard', stepBadge: '2', label: 'Nova Avaliação (Wizard)', icon: Sliders },
-        { id: 'market_discovery', label: 'Pesquisa de Mercado & Concorrentes', icon: Sparkles },
       ],
     },
     {
-      groupLabel: 'Qualidade, Segurança & IA',
+      groupLabel: 'AVALIAÇÃO & BENCHMARK',
       items: [
-        {
-          id: 'sonar_hub',
-          stepBadge: '3A',
-          label: 'Sonar Hub: Docker & Cloud',
-          icon: Server,
-        },
-        {
-          id: 'tools_integrations',
-          stepBadge: '3B',
-          label: 'Ferramentas e Integrações',
-          icon: Wrench,
-        },
-        {
-          id: 'security_suite',
-          stepBadge: '4A',
-          label: 'Suíte de Segurança & Resiliência',
-          icon: Crosshair,
-        },
-        { id: 'findings', stepBadge: '4B', label: 'Qualidade & DevSecOps', icon: ShieldAlert },
         { id: 'arch_qa_perf', stepBadge: '4C', label: 'Arquitetura, QA & Perf', icon: Cpu },
         {
           id: 'hardware_benchmark',
@@ -648,15 +629,40 @@ export default function App() {
           label: 'Hardware, GPU & Monitores',
           icon: Monitor,
         },
+        { id: 'market_discovery', label: 'Pesquisa de Mercado & Concorrentes', icon: Sparkles },
       ],
     },
     {
-      groupLabel: 'Auditoria, Laudos & Manual',
+      groupLabel: 'ENGENHARIA & SEGURANÇA',
       items: [
-        { id: 'veracity', stepBadge: '5', label: 'Veracidade & Adaptadores', icon: ShieldCheck },
+        { id: 'findings', stepBadge: '4B', label: 'Qualidade & DevSecOps', icon: ShieldAlert },
+        {
+          id: 'security_suite',
+          stepBadge: '4A',
+          label: 'Suíte de Segurança & Resiliência',
+          icon: Crosshair,
+        },
+        {
+          id: 'sonar_hub',
+          stepBadge: '3A',
+          label: 'Sonar Hub: Docker & Cloud',
+          icon: Server,
+        },
+      ],
+    },
+    {
+      groupLabel: 'INTELIGÊNCIA & GOVERNANÇA',
+      items: [
         { id: 'reference_intelligence', stepBadge: '5B', label: 'Inteligência & Golden', icon: Database },
         { id: 'governance', stepBadge: '5C', label: 'Governança, Gates & Portfólio', icon: Scale },
+        { id: 'veracity', stepBadge: '5', label: 'Veracidade & Adaptadores', icon: ShieldCheck },
         { id: 'reports', stepBadge: '6', label: 'Relatórios & Auditoria', icon: FileText },
+        {
+          id: 'tools_integrations',
+          stepBadge: '3B',
+          label: 'Ferramentas e Integrações',
+          icon: Wrench,
+        },
         { id: 'user_guide', label: 'Guia de Utilização', icon: BookOpen },
       ],
     },
@@ -1113,7 +1119,13 @@ export default function App() {
 
             {activeNav === 'hardware_benchmark' && (
               <HardwareAndDisplayBenchmarkModule
-                runs={dashboardData?.latestRun ? [dashboardData.latestRun] : []}
+                runs={
+                  dashboardData?.recentRuns?.length
+                    ? dashboardData.recentRuns
+                    : dashboardData?.latestRun
+                      ? [dashboardData.latestRun]
+                      : []
+                }
                 selectedRunId={dashboardData?.latestRun?.id}
                 onRefreshData={() => {
                   void fetchAllBackendState();

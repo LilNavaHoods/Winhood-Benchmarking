@@ -159,6 +159,33 @@ export function validateSourceUploadSecurity(
   };
 }
 
+export function sanitizeUploadedFilesMap(rawFilesMap: Record<string, string>): {
+  sanitizedMap: Record<string, string>;
+  skippedFiles: Array<{ path: string; reason: string }>;
+} {
+  const sanitizedMap: Record<string, string> = {};
+  const skippedFiles: Array<{ path: string; reason: string }> = [];
+  for (const [rawPath, content] of Object.entries(rawFilesMap || {})) {
+    const cleanPath = rawPath.replace(/\\/g, '/').replace(/^\/+/, '').trim();
+    if (!cleanPath) continue;
+    if (/(^|\/)(node_modules|\.git|dist|dist-desktop|build|coverage|\.next|out|target|vendor)(\/|$)/i.test(cleanPath)) {
+      skippedFiles.push({ path: rawPath, reason: 'IGNORED_DIRECTORY' });
+      continue;
+    }
+    if (typeof content !== 'string' || content.includes('\0')) {
+      skippedFiles.push({ path: rawPath, reason: 'BINARY_CONTENT_SKIPPED' });
+      continue;
+    }
+    if (Buffer.byteLength(content, 'utf8') > 2 * 1024 * 1024) {
+      skippedFiles.push({ path: rawPath, reason: 'FILE_TOO_LARGE_SKIPPED' });
+      continue;
+    }
+    sanitizedMap[cleanPath] = content;
+  }
+  return { sanitizedMap, skippedFiles };
+}
+
+
 export function buildTechnicalInventory(
   filesMap: Record<string, string>,
   isolatedStoragePath: string

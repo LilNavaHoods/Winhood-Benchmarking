@@ -771,6 +771,8 @@ export interface MarketCompetitorCandidate {
     integrationsMatch: number;
   };
   matchReasons: string[];
+  matchReasonSummary?: string;
+  computedMatchScore?: number;
   equivalentFeatures: string[];
   distinctFeatures: string[];
   featuresIdentified?: string[];

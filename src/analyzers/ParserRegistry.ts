@@ -1528,7 +1528,9 @@ export class ParserRegistry {
       return { isSanitized: false };
     };
 
+    let skipUntilIdx = -1;
     for (let idx = 0; idx < tokens.length; idx++) {
+      if (idx <= skipUntilIdx) continue;
       const tok = tokens[idx]!;
       if (tok.type === 'COMMENT') continue;
 
@@ -1638,7 +1640,7 @@ export class ParserRegistry {
           functions.push(fnNode);
           currentFn = fnNode;
           currentFnBraceDepth = nesting + 1;
-          idx = Math.max(idx, closeIdx);
+          skipUntilIdx = Math.max(idx, closeIdx);
           continue;
         }
       }
@@ -1674,7 +1676,7 @@ export class ParserRegistry {
           functions.push(fnNode);
           currentFn = fnNode;
           currentFnBraceDepth = nesting + 1;
-          idx = closeIdx;
+          skipUntilIdx = closeIdx;
           continue;
         }
       }

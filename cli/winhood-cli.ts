@@ -398,11 +398,21 @@ export async function runCli(argv: string[]): Promise<CliResult> {
 }
 
 // Execute when invoked directly as CLI entrypoint
-const isMain = process.argv[1] && (process.argv[1].endsWith('winhood-cli.ts') || process.argv[1].endsWith('winhood-cli.mjs'));
+const isMain =
+  process.argv[1] &&
+  (process.argv[1].endsWith('winhood-cli.ts') ||
+    process.argv[1].endsWith('winhood-cli.js') ||
+    process.argv[1].endsWith('winhood-cli.mjs'));
 if (isMain) {
-  runCli(process.argv.slice(2)).then((res) => {
-    if (res.stdout) process.stdout.write(`${res.stdout}\n`);
-    if (res.stderr) process.stderr.write(`${res.stderr}\n`);
-    process.exit(res.exitCode);
-  });
+  void runCli(process.argv.slice(2))
+    .then((res) => {
+      if (res.stdout) process.stdout.write(`${res.stdout}\n`);
+      if (res.stderr) process.stderr.write(`${res.stderr}\n`);
+      process.exit(res.exitCode);
+    })
+    .catch((err) => {
+      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+      process.exit(3);
+    });
 }
+

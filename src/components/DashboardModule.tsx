@@ -35,6 +35,229 @@ export const CATEGORY_LABELS: Record<BenchmarkCategoryKey, string> = {
   documentation: 'Documentação',
 };
 
+export const SemicircularHealthGaugeSvg: React.FC<{
+  score: number | null;
+  softwareName: string;
+  qualityGateStatus?: string;
+  classificationLabel?: string;
+}> = ({ score, softwareName, qualityGateStatus = 'PASSED', classificationLabel = 'Avaliado' }) => {
+  const clamped = score === null ? 0 : Math.max(0, Math.min(5, score));
+  const ratio = clamped / 5;
+  const radius = 72;
+  const circumference = Math.PI * radius;
+  const strokeDashoffset = circumference * (1 - ratio);
+  const strokeColor =
+    score === null
+      ? '#64748b'
+      : clamped >= 4.0
+        ? '#10b981'
+        : clamped >= 3.0
+          ? '#f59e0b'
+          : '#f43f5e';
+
+  return (
+    <div className="flex flex-col items-center justify-between p-4 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-[#080b10]">
+      <div className="w-full flex items-center justify-between text-xs mb-1">
+        <span className="font-bold text-slate-900 dark:text-slate-100 truncate">{softwareName}</span>
+        <span
+          className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold ${
+            qualityGateStatus === 'PASSED' || qualityGateStatus === 'APPROVED' || qualityGateStatus === 'APROVADO'
+              ? 'bg-emerald-500/15 text-emerald-500 border border-emerald-500/30'
+              : qualityGateStatus === 'WARN'
+                ? 'bg-amber-500/15 text-amber-500 border border-amber-500/30'
+                : 'bg-rose-500/15 text-rose-500 border border-rose-500/30'
+          }`}
+        >
+          QG: {qualityGateStatus}
+        </span>
+      </div>
+
+      <svg viewBox="0 0 200 118" className="w-48 h-28 overflow-visible" aria-label={`Índice Global ${softwareName}`}>
+        {/* Track Background */}
+        <path
+          d="M 28 96 A 72 72 0 0 1 172 96"
+          fill="none"
+          stroke="currentColor"
+          className="text-slate-200 dark:text-slate-800"
+          strokeWidth="14"
+          strokeLinecap="round"
+        />
+        {/* Zonas de Referência sutis (0-3.0 Rose, 3.0-4.0 Amber, 4.0-5.0 Emerald) */}
+        <path
+          d="M 28 96 A 72 72 0 0 1 172 96"
+          fill="none"
+          stroke={strokeColor}
+          strokeWidth="14"
+          strokeLinecap="round"
+          strokeDasharray={circumference}
+          strokeDashoffset={strokeDashoffset}
+        />
+        <text
+          x="100"
+          y="80"
+          textAnchor="middle"
+          className="fill-slate-900 dark:fill-slate-100 font-mono text-2xl font-bold"
+        >
+          {score !== null ? clamped.toFixed(2) : 'N/A'}
+        </text>
+        <text
+          x="100"
+          y="98"
+          textAnchor="middle"
+          className="fill-slate-500 dark:fill-slate-400 font-mono text-[10px]"
+        >
+          escala 0.00 – 5.00
+        </text>
+        <text x="24" y="113" textAnchor="middle" className="fill-rose-500 font-mono text-[9px]">
+          0.0
+        </text>
+        <text x="100" y="16" textAnchor="middle" className="fill-amber-500 font-mono text-[9px]">
+          3.0
+        </text>
+        <text x="176" y="113" textAnchor="middle" className="fill-emerald-500 font-mono text-[9px]">
+          5.0
+        </text>
+      </svg>
+
+      <div className="text-[11px] font-medium text-slate-600 dark:text-slate-300 mt-1">
+        Classificação: <strong style={{ color: strokeColor }}>{classificationLabel}</strong>
+      </div>
+    </div>
+  );
+};
+
+export const TwelvePillarRadarSvg: React.FC<{ run: BenchmarkRun }> = ({ run }) => {
+  const categories = Object.keys(CATEGORY_LABELS) as BenchmarkCategoryKey[];
+  const cx = 160;
+  const cy = 150;
+  const maxR = 102;
+  const levels = [1, 2, 3, 4, 5];
+
+  const pointFor = (idx: number, val: number) => {
+    const angle = (Math.PI * 2 * idx) / categories.length - Math.PI / 2;
+    const r = (Math.max(0, Math.min(5, val)) / 5) * maxR;
+    return {
+      x: cx + r * Math.cos(angle),
+      y: cy + r * Math.sin(angle),
+      labelX: cx + (maxR + 24) * Math.cos(angle),
+      labelY: cy + (maxR + 18) * Math.sin(angle),
+    };
+  };
+
+  const buildPolygonPoints = (scIndex: number) => {
+    const sc = run.scoreCards[scIndex];
+    if (!sc) return '';
+    return categories
+      .map((cat, idx) => {
+        const raw = sc.categoryScores[cat];
+        const val = raw === null || raw === undefined ? 0 : raw;
+        const pt = pointFor(idx, val);
+        return `${pt.x.toFixed(1)},${pt.y.toFixed(1)}`;
+      })
+      .join(' ');
+  };
+
+  const sw0 = run.scoreCards[0];
+  const sw1 = run.scoreCards[1];
+
+  return (
+    <div className="flex flex-col items-center">
+      <svg
+        viewBox="0 0 320 300"
+        className="w-full max-w-[340px] h-auto overflow-visible"
+        aria-label="Radar Comparativo dos 12 Pilares"
+      >
+        {/* Polígonos concêntricos de nível 1..5 */}
+        {levels.map((lvl) => {
+          const pts = categories
+            .map((_, idx) => {
+              const pt = pointFor(idx, lvl);
+              return `${pt.x.toFixed(1)},${pt.y.toFixed(1)}`;
+            })
+            .join(' ');
+          return (
+            <polygon
+              key={lvl}
+              points={pts}
+              fill="none"
+              stroke="currentColor"
+              className="text-slate-200 dark:text-slate-800"
+              strokeWidth="1"
+            />
+          );
+        })}
+
+        {/* Eixos radiais */}
+        {categories.map((cat, idx) => {
+          const outer = pointFor(idx, 5);
+          const shortLabel = CATEGORY_LABELS[cat].split(' ')[0];
+          return (
+            <g key={cat}>
+              <line
+                x1={cx}
+                y1={cy}
+                x2={outer.x}
+                y2={outer.y}
+                stroke="currentColor"
+                className="text-slate-200 dark:text-slate-800"
+                strokeWidth="1"
+              />
+              <text
+                x={outer.labelX}
+                y={outer.labelY}
+                textAnchor="middle"
+                dominantBaseline="middle"
+                className="fill-slate-600 dark:fill-slate-400 font-mono text-[8.5px]"
+              >
+                {shortLabel}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* Polígono Software B (secundário #a855f7) */}
+        {sw1 && (
+          <polygon
+            points={buildPolygonPoints(1)}
+            fill="rgba(168, 85, 247, 0.18)"
+            stroke="#a855f7"
+            strokeWidth="2"
+          />
+        )}
+
+        {/* Polígono Software A (primário #31d6c4) */}
+        {sw0 && (
+          <polygon
+            points={buildPolygonPoints(0)}
+            fill="rgba(49, 214, 196, 0.22)"
+            stroke="#31d6c4"
+            strokeWidth="2.2"
+          />
+        )}
+      </svg>
+
+      <div className="flex flex-wrap items-center justify-center gap-4 text-xs font-mono mt-1">
+        {sw0 && (
+          <span className="inline-flex items-center gap-1.5 text-slate-800 dark:text-slate-200">
+            <span className="w-3 h-3 rounded-sm bg-[#31d6c4] inline-block" />
+            <span>
+              {sw0.softwareName} ({sw0.groupedScores.overallScore.toFixed(2)})
+            </span>
+          </span>
+        )}
+        {sw1 && (
+          <span className="inline-flex items-center gap-1.5 text-slate-800 dark:text-slate-200">
+            <span className="w-3 h-3 rounded-sm bg-[#a855f7] inline-block" />
+            <span>
+              {sw1.softwareName} ({sw1.groupedScores.overallScore.toFixed(2)})
+            </span>
+          </span>
+        )}
+      </div>
+    </div>
+  );
+};
+
 interface DashboardData {
   hasEvaluations: boolean;
   kpis: {
@@ -114,6 +337,53 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
 
   const latestRun = data?.latestRun || null;
 
+  const handleExportMqrCloudJson = async () => {
+    const filename = `winhood-mqr-report-${latestRun?.id || 'workspace'}.json`;
+    if (latestRun) {
+      try {
+        const res = await window.fetch(
+          `/api/reports/${encodeURIComponent(latestRun.id)}/export?format=json&type=COMPARATIVE_FULL`,
+          { credentials: 'include' }
+        );
+        if (res.ok) {
+          const text = await res.text();
+          if (text.trim().startsWith('{')) {
+            const blob = new Blob([text], { type: 'application/json;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 4000);
+            return;
+          }
+        }
+      } catch {
+        // Fallback para serialização determinística local
+      }
+    }
+    const payload = {
+      schemaVersion: 'WINHOOD-MQR-CLOUD-REPORT-v2.0',
+      exportedAt: new Date().toISOString(),
+      hasEvaluations: Boolean(data?.hasEvaluations),
+      kpis,
+      latestRun,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json;charset=utf-8',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  };
+
   return (
     <div className="space-y-8">
       {/* Header Toolbar */}
@@ -132,11 +402,19 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
         <div className="flex flex-wrap items-center gap-2.5">
           <button
             type="button"
-            onClick={() => onNavigate('sonar_hub')}
+            onClick={() => void handleExportMqrCloudJson()}
             className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold border border-[#31d6c4]/40 text-[#31d6c4] hover:bg-[#31d6c4]/10 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Download className="w-3.5 h-3.5" />
             Exportar Relatório Nuvem MQR JSON
+          </button>
+          <button
+            type="button"
+            onClick={() => onNavigate('sonar_hub')}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800/60 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Code2 className="w-3.5 h-3.5 text-[#31d6c4]" />
+            Configurar Hub MQR
           </button>
           <button
             type="button"
@@ -177,8 +455,8 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
         </div>
       </div>
 
-      {/* 10 Real Backend KPIs Grid (Frente 2.4: p-5 + tabular-nums + xl:grid-cols-5) */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-4">
+      {/* 10 Real Backend KPIs Grid (Part 6.2: grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-5 gap-4) */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-5 gap-4">
         <div className="rounded-lg border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-5">
           <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
             <span>Total de Projetos</span>
@@ -311,6 +589,25 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
           <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
             Trilha append-only imutável
           </div>
+        </div>
+      </div>
+
+      {/* Glossário Rápido Amigável de Siglas Técnicas (Part 6.3) */}
+      <div className="rounded-lg border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-3.5 text-xs">
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 text-slate-600 dark:text-slate-400">
+          <span className="font-bold text-slate-900 dark:text-slate-100">Legenda Rápida:</span>
+          <span>
+            <strong className="font-mono text-[#31d6c4]">MQR</strong>: Multi-Quality Rule (avalia Segurança, Confiabilidade e Manutenibilidade simultaneamente)
+          </span>
+          <span>
+            <strong className="font-mono text-[#31d6c4]">Taint Analysis</strong>: Rastreamento do dado não confiável da entrada (Source) até o comando crítico (Sink)
+          </span>
+          <span>
+            <strong className="font-mono text-[#31d6c4]">CV ≤ 5%</strong>: Coeficiente de Variação máximo para estabilidade estatística de benchmark
+          </span>
+          <span>
+            <strong className="font-mono text-[#31d6c4]">EPSS / KEV</strong>: Probabilidade de exploração real em 30 dias (FIRST.org) e catálogo de falhas exploradas (CISA)
+          </span>
         </div>
       </div>
 
@@ -461,6 +758,51 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
               </div>
             </div>
           )}
+
+          {/* Gráficos Executivos SVG Nativos (Part 6.4: Semicircular Health Gauge + Radar 12 Pilares) */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            <div className="lg:col-span-7 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-5 space-y-4">
+              <div>
+                <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">
+                  Índice Global de Qualidade &amp; Segurança (Gauge 0.00 – 5.00)
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Zonas de decisão técnica: Crítico (&lt; 3.00), Atenção (3.00–3.99) e Excelente (≥ 4.00) com status do Quality Gate.
+                </p>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {latestRun.scoreCards.map((sc) => (
+                  <SemicircularHealthGaugeSvg
+                    key={sc.softwareId}
+                    score={
+                      sc.separatedIndicators && sc.separatedIndicators.technicalScore === null
+                        ? null
+                        : sc.groupedScores.overallScore
+                    }
+                    softwareName={`${sc.softwareName} (v${sc.softwareVersion})`}
+                    qualityGateStatus={
+                      sc.qualityGate?.status ||
+                      sc.separatedIndicators?.qualityGateDecision ||
+                      'PASSED'
+                    }
+                    classificationLabel={sc.classificationLabel}
+                  />
+                ))}
+              </div>
+            </div>
+
+            <div className="lg:col-span-5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-5 flex flex-col justify-between">
+              <div>
+                <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">
+                  Radar Comparativo dos 12 Pilares (MQR)
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Sobreposição direta entre os softwares avaliados nas 12 dimensões técnicas.
+                </p>
+              </div>
+              <TwelvePillarRadarSvg run={latestRun} />
+            </div>
+          </div>
 
           {/* 1. Comparação Direta de Pontuação Entre Softwares, 5 Indicadores Separados & Travas Matemáticas */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

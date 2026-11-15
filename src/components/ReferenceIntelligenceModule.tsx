@@ -72,6 +72,7 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
   const [loadingRefs, setLoadingRefs] = useState(false);
   const [syncingRefs, setSyncingRefs] = useState(false);
   const [sonarSyncUrl, setSonarSyncUrl] = useState('http://localhost:9000');
+  const [inspectedSourceKey, setInspectedSourceKey] = useState<string | null>(null);
 
   // 2. Comparability Matcher (11 Criteria)
   const [selectedMatchSwIds, setSelectedMatchSwIds] = useState<string[]>([]);
@@ -89,6 +90,8 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
   const [sbomData, setSbomData] = useState<{
     runId: string;
     softwareId: string;
+    softwareName?: string;
+    softwareVersion?: string;
     format: 'cyclonedx' | 'spdx';
     document: Record<string, unknown>;
     documentSha256: string;
@@ -96,9 +99,26 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
     directCount: number;
     transitiveCount: number;
     scaCorrelations: ScaVulnerabilityCorrelation[];
+    signature?: {
+      algorithm: string;
+      keyId: string;
+      ed25519KeyId?: string;
+      bundleSha256: string;
+      hmacSignature: string;
+      ed25519Signature?: string;
+      signedAt: string;
+    };
+    signatureVerification?: {
+      valid: boolean;
+      reason?: string;
+      payloadSha256: string;
+      hmacKeyId: string;
+      ed25519KeyId?: string;
+    };
   } | null>(null);
   const [sbomLoading, setSbomLoading] = useState(false);
   const [sbomError, setSbomError] = useState<string | null>(null);
+  const [showSbomSigPanel, setShowSbomSigPanel] = useState(false);
 
   // 5. Execution & Key Management
   const [execSwId, setExecSwId] = useState<string>('');
@@ -118,6 +138,21 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
   const [savingTarget, setSavingTarget] = useState(false);
   const [keyStatus, setKeyStatus] = useState<KeyStatusPayload | null>(null);
   const [rotatingKey, setRotatingKey] = useState<string | null>(null);
+  const [verifyingKeys, setVerifyingKeys] = useState(false);
+  const [keyVerificationResult, setKeyVerificationResult] = useState<{
+    valid: boolean;
+    verifiedAt: string;
+    reason?: string;
+    testPayloadSha256: string;
+    hmacKeyId: string;
+    ed25519KeyId?: string;
+    aesVaultKeyId: string;
+    checks: {
+      hmacSha256SelfTest: boolean;
+      ed25519AsymmetricSelfTest: boolean;
+      aes256GcmVaultRoundTrip: boolean;
+    };
+  } | null>(null);
 
   useEffect(() => {
     if (softwares.length > 0) {
@@ -160,7 +195,16 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
       const res = await fetch('/api/validation/latest');
       if (res.ok) {
         const data = await res.json();
-        setGoldenReport(data.report || null);
+        if (data.report) {
+          setGoldenReport(data.report);
+          return;
+        }
+      }
+      // Se ainda não houver relatório Golden persistido, executa automaticamente a calibração
+      const runRes = await fetch('/api/validation/run-golden', { method: 'POST' });
+      if (runRes.ok) {
+        const runData = await runRes.json();
+        setGoldenReport(runData.report || null);
       }
     } catch {
       onNotify('Falha ao carregar relatório Golden Dataset.', 'error');
@@ -203,21 +247,31 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
       setSbomData(null);
       return;
     }
-    const targetRunId = latestRun?.id || 'latest';
     const targetSwId = sbomSwId || latestRun?.softwareIds?.[0] || softwares[0]?.id;
     if (!targetSwId) return;
     setSbomLoading(true);
     setSbomError(null);
     try {
       const res = await fetch(
-        `/api/runs/${encodeURIComponent(targetRunId)}/sbom?format=${sbomFormat}&softwareId=${encodeURIComponent(targetSwId)}`
+        `/api/softwares/${encodeURIComponent(targetSwId)}/sbom?format=${sbomFormat}`
       );
       const data = await res.json();
       if (res.ok) {
         setSbomData(data);
+      } else if (latestRun) {
+        const fallbackRes = await fetch(
+          `/api/runs/${encodeURIComponent(latestRun.id)}/sbom?format=${sbomFormat}&softwareId=${encodeURIComponent(targetSwId)}`
+        );
+        const fallbackData = await fallbackRes.json();
+        if (fallbackRes.ok) {
+          setSbomData(fallbackData);
+        } else {
+          setSbomData(null);
+          setSbomError(fallbackData.error || data.error || 'SBOM não disponível para o software selecionado.');
+        }
       } else {
         setSbomData(null);
-        setSbomError(data.error || 'SBOM não disponível sem execução de benchmark concluída.');
+        setSbomError(data.error || 'SBOM não disponível para o software selecionado.');
       }
     } catch {
       setSbomData(null);
@@ -234,7 +288,24 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
   }, [fetchReferences, fetchKeyStatus, fetchPerfTargets]);
 
   useEffect(() => {
-    if (subTab === 'golden' && !goldenReport) {
+    if (subTab === 'matcher' && !matchDecision && !matchLoading && softwares.length >= 2) {
+      const ids = selectedMatchSwIds.length >= 2 ? selectedMatchSwIds : softwares.slice(0, 2).map((s) => s.id);
+      if (selectedMatchSwIds.length < 2) {
+        setSelectedMatchSwIds(ids);
+      }
+      setMatchLoading(true);
+      void fetch('/api/intelligence/match', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ softwareIds: ids, mode: matchMode }),
+      })
+        .then(async (r) => {
+          const d = await r.json();
+          if (r.ok && d.decision) setMatchDecision(d.decision);
+        })
+        .catch(() => {})
+        .finally(() => setMatchLoading(false));
+    } else if (subTab === 'golden' && !goldenReport && !goldenLoading) {
       void fetchGoldenLatest();
     } else if (subTab === 'sbom_sca') {
       void fetchSbom();
@@ -242,7 +313,20 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
       void fetchKeyStatus();
       void fetchPerfTargets();
     }
-  }, [subTab, goldenReport, fetchGoldenLatest, fetchSbom, fetchKeyStatus, fetchPerfTargets]);
+  }, [
+    subTab,
+    matchDecision,
+    matchLoading,
+    softwares,
+    selectedMatchSwIds,
+    matchMode,
+    goldenReport,
+    goldenLoading,
+    fetchGoldenLatest,
+    fetchSbom,
+    fetchKeyStatus,
+    fetchPerfTargets,
+  ]);
 
   const handleSyncReferences = async () => {
     setSyncingRefs(true);
@@ -329,6 +413,22 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
     }
   };
 
+  const handleDownloadGoldenJson = () => {
+    if (!goldenReport) return;
+    const blob = new Blob([JSON.stringify(goldenReport, null, 2)], {
+      type: 'application/json;charset=utf-8',
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `winhood-golden-dataset-${goldenReport.datasetVersion}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    onNotify('Laudo Golden Dataset (.JSON) exportado com SHA-256 verificado.', 'success');
+  };
+
   const handleDownloadSbom = () => {
     if (!sbomData?.document) return;
     const blob = new Blob([JSON.stringify(sbomData.document, null, 2)], {
@@ -343,6 +443,32 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
     document.body.removeChild(link);
     setTimeout(() => URL.revokeObjectURL(url), 4000);
     onNotify(`SBOM (${sbomData.format.toUpperCase()}) exportado com SHA-256 verificado.`, 'success');
+  };
+
+  const handleVerifyKeyVault = async () => {
+    setVerifyingKeys(true);
+    try {
+      const res = await fetch('/api/security/keys/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setKeyVerificationResult(data);
+        onNotify(
+          data.valid
+            ? 'Integridade do Cofre de Chaves validada (HMAC-SHA256 + Ed25519 + AES-256-GCM OK).'
+            : `Falha de verificação criptográfica: ${data.reason || 'erro interno'}`,
+          data.valid ? 'success' : 'error'
+        );
+      } else {
+        onNotify(data.error || 'Falha ao verificar integridade do cofre de chaves.', 'error');
+      }
+    } catch {
+      onNotify('Erro de rede ao verificar cofre de chaves.', 'error');
+    } finally {
+      setVerifyingKeys(false);
+    }
   };
 
   const handleRunIsolatedTests = async () => {
@@ -614,49 +740,94 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
                     <th className="py-2.5 px-3">Licença</th>
                     <th className="py-2.5 px-3">Estado</th>
                     <th className="py-2.5 px-3">SHA-256</th>
-                    <th className="py-2.5 pl-3">Data / Origem</th>
+                    <th className="py-2.5 px-3">Data / Origem</th>
+                    <th className="py-2.5 pl-3 text-right">Amostra</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800/70">
-                  {snapshots.map((snap) => (
-                    <tr key={snap.sourceKey} className="hover:bg-slate-50 dark:hover:bg-slate-800/30">
-                      <td className="py-3 pr-3">
-                        <div className="font-bold text-slate-900 dark:text-slate-100">
-                          {snap.sourceName}
-                        </div>
-                        <div className="text-[11px] font-mono text-slate-500">{snap.sourceKey}</div>
-                      </td>
-                      <td className="py-3 px-3 font-mono text-slate-700 dark:text-slate-300">
-                        {snap.version}
-                      </td>
-                      <td className="py-3 px-3 text-slate-600 dark:text-slate-400">{snap.license}</td>
-                      <td className="py-3 px-3">
-                        <span
-                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-[10px] font-mono font-bold ${freshnessBadge(
-                            snap.freshnessStatus
-                          )}`}
-                        >
-                          {snap.freshnessStatus}
-                        </span>
-                        {snap.isOfflineFallback && (
-                          <div className="text-[10px] text-amber-500 mt-0.5">
-                            Offline Fallback Ativo
-                          </div>
+                  {snapshots.map((snap) => {
+                    const isInspected = inspectedSourceKey === snap.sourceKey;
+                    return (
+                      <React.Fragment key={snap.sourceKey}>
+                        <tr className="hover:bg-slate-50 dark:hover:bg-slate-800/30">
+                          <td className="py-3 pr-3">
+                            <div className="font-bold text-slate-900 dark:text-slate-100">
+                              {snap.sourceName}
+                            </div>
+                            <div className="text-[11px] font-mono text-slate-500">{snap.sourceKey}</div>
+                          </td>
+                          <td className="py-3 px-3 font-mono text-slate-700 dark:text-slate-300">
+                            {snap.version}
+                          </td>
+                          <td className="py-3 px-3 text-slate-600 dark:text-slate-400">{snap.license}</td>
+                          <td className="py-3 px-3">
+                            <span
+                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-[10px] font-mono font-bold ${freshnessBadge(
+                                snap.freshnessStatus
+                              )}`}
+                            >
+                              {snap.freshnessStatus}
+                            </span>
+                            {snap.isOfflineFallback && (
+                              <div className="text-[10px] text-amber-500 mt-0.5">
+                                Offline Fallback Ativo
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-3 px-3 font-mono text-[11px] text-[#31d6c4]">
+                            {snap.sha256.slice(0, 16)}...
+                          </td>
+                          <td className="py-3 px-3 text-[11px]">
+                            <div className="font-mono text-slate-500">
+                              {new Date(snap.fetchedAt).toLocaleString('pt-BR')}
+                            </div>
+                            <div className="text-slate-400 truncate max-w-[220px]" title={snap.originUrl}>
+                              {snap.originUrl}
+                            </div>
+                          </td>
+                          <td className="py-3 pl-3 text-right">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setInspectedSourceKey((prev) =>
+                                  prev === snap.sourceKey ? null : snap.sourceKey
+                                )
+                              }
+                              className="px-2.5 py-1 rounded border border-slate-300 dark:border-slate-700 text-[11px] font-semibold text-slate-700 dark:text-slate-200 hover:border-[#31d6c4] hover:text-[#31d6c4] transition-colors cursor-pointer"
+                            >
+                              {isInspected ? 'Ocultar Amostra' : 'Inspecionar Amostra'}
+                            </button>
+                          </td>
+                        </tr>
+                        {isInspected && (
+                          <tr className="bg-slate-50/90 dark:bg-[#080b10]">
+                            <td colSpan={7} className="p-3.5 text-xs space-y-2 border-l-2 border-[#31d6c4]">
+                              <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-[11px]">
+                                <span className="font-bold text-slate-900 dark:text-slate-100">
+                                  Snapshot Auditável: {snap.sourceName} ({snap.version})
+                                </span>
+                                <span className="text-[#31d6c4]">SHA-256: {snap.sha256}</span>
+                              </div>
+                              <div className="grid grid-cols-1 md:grid-cols-3 gap-2 font-mono text-[11px] text-slate-500">
+                                <div>
+                                  <strong>Endpoint Consultado:</strong> {snap.originUrl}
+                                </div>
+                                <div>
+                                  <strong>Timestamp:</strong> {snap.fetchedAt}
+                                </div>
+                                <div>
+                                  <strong>ETag / Cache:</strong> {snap.etag || 'N/A (Snapshot Determinístico)'}
+                                </div>
+                              </div>
+                              <pre className="p-2.5 rounded bg-slate-950 text-emerald-300 font-mono text-[11px] overflow-x-auto">
+                                {JSON.stringify(snap.payloadSummary, null, 2)}
+                              </pre>
+                            </td>
+                          </tr>
                         )}
-                      </td>
-                      <td className="py-3 px-3 font-mono text-[11px] text-[#31d6c4]">
-                        {snap.sha256.slice(0, 16)}...
-                      </td>
-                      <td className="py-3 pl-3 text-[11px]">
-                        <div className="font-mono text-slate-500">
-                          {new Date(snap.fetchedAt).toLocaleString('pt-BR')}
-                        </div>
-                        <div className="text-slate-400 truncate max-w-[240px]" title={snap.originUrl}>
-                          {snap.originUrl}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
+                      </React.Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -783,6 +954,7 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
                         <th className="py-2 pr-3">Critério</th>
                         <th className="py-2 px-3">Severidade</th>
                         <th className="py-2 px-3">Resultado</th>
+                        <th className="py-2 px-3">Paridade Visual</th>
                         <th className="py-2 pl-3">Evidência &amp; Detalhe</th>
                       </tr>
                     </thead>
@@ -805,6 +977,16 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
                                 <XCircle className="w-3.5 h-3.5" /> FAIL
                               </span>
                             )}
+                          </td>
+                          <td className="py-2.5 px-3 w-32">
+                            <div className="h-2 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                              <div
+                                className={`h-full rounded-full ${
+                                  chk.passed ? 'bg-[#31d6c4]' : 'bg-rose-500'
+                                }`}
+                                style={{ width: chk.passed ? '100%' : '25%' }}
+                              />
+                            </div>
                           </td>
                           <td className="py-2.5 pl-3 text-slate-600 dark:text-slate-300">
                             {chk.detail}
@@ -833,19 +1015,31 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
                   Executa o ParserRegistry + TaintAnalyzer reais contra 20 casos pareados (vulneráveis vs sanitizados) para medir Precision, Recall, F1, FPR e FNR sem mocks.
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={handleRunGolden}
-                disabled={goldenLoading}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] transition-colors cursor-pointer disabled:opacity-60"
-              >
-                <Play className="w-3.5 h-3.5" />
-                <span>
-                  {goldenLoading
-                    ? 'Executando Corpus Golden...'
-                    : 'Executar Suíte Golden (20 Casos TP/TN)'}
-                </span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                {goldenReport && (
+                  <button
+                    type="button"
+                    onClick={handleDownloadGoldenJson}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold border border-[#31d6c4]/40 text-[#0e9f8e] dark:text-[#31d6c4] hover:bg-[#31d6c4]/10 transition-colors cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Exportar Laudo Golden Dataset (.JSON)</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={handleRunGolden}
+                  disabled={goldenLoading}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] transition-colors cursor-pointer disabled:opacity-60"
+                >
+                  <Play className="w-3.5 h-3.5" />
+                  <span>
+                    {goldenLoading
+                      ? 'Executando Corpus Golden...'
+                      : 'Executar Suíte Golden (20 Casos TP/TN)'}
+                  </span>
+                </button>
+              </div>
             </div>
 
             {goldenReport && (
@@ -1008,6 +1202,24 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
                 </select>
                 <button
                   type="button"
+                  onClick={() => void fetchSbom()}
+                  disabled={sbomLoading}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:border-[#31d6c4] transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${sbomLoading ? 'animate-spin' : ''}`} />
+                  <span>Gerar / Atualizar SBOM Agora</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowSbomSigPanel((prev) => !prev)}
+                  disabled={!sbomData}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-[#31d6c4]/50 text-[#0e9f8e] dark:text-[#31d6c4] hover:bg-[#31d6c4]/10 transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  <span>Validar Assinatura Criptográfica do SBOM</span>
+                </button>
+                <button
+                  type="button"
                   onClick={handleDownloadSbom}
                   disabled={!sbomData}
                   className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] transition-colors cursor-pointer disabled:opacity-50"
@@ -1052,6 +1264,35 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
                     </div>
                   </div>
                 </div>
+
+                {(showSbomSigPanel || sbomData.signatureVerification) && sbomData.signature && (
+                  <div className="p-3.5 rounded-lg border border-[#31d6c4]/30 bg-[#31d6c4]/5 text-xs font-mono space-y-1.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-bold text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
+                        <ShieldCheck className="w-4 h-4 text-[#31d6c4]" />
+                        <span>
+                          Envelope de Assinatura Criptográfica do SBOM:{' '}
+                          {sbomData.signatureVerification?.valid ? 'VERIFICADO (ÍNTEGRO)' : 'ASSINADO'}
+                        </span>
+                      </span>
+                      <span className="text-[11px] text-emerald-500 font-bold">
+                        {sbomData.signature.algorithm}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-[11px] text-slate-600 dark:text-slate-300">
+                      <div>
+                        <strong>HMAC Key ID:</strong> {sbomData.signatureVerification?.hmacKeyId || sbomData.signature.keyId}
+                      </div>
+                      <div>
+                        <strong>Ed25519 Key ID:</strong>{' '}
+                        {sbomData.signatureVerification?.ed25519KeyId || sbomData.signature.ed25519KeyId || 'N/A'}
+                      </div>
+                      <div className="truncate" title={sbomData.signature.bundleSha256}>
+                        <strong>Bundle SHA-256:</strong> {sbomData.signature.bundleSha256}
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {sbomData.scaCorrelations.length === 0 ? (
                   <div className="p-4 rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-xs text-emerald-500 flex items-center gap-2">
@@ -1395,7 +1636,54 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
                     <ShieldAlert className="w-3.5 h-3.5 text-[#31d6c4]" />
                     <span>Rotacionar AES-Vault (Re-criptografar)</span>
                   </button>
+                  <button
+                    type="button"
+                    onClick={handleVerifyKeyVault}
+                    disabled={verifyingKeys}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold border border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300 hover:bg-emerald-500/20 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5" />
+                    <span>
+                      {verifyingKeys
+                        ? 'Testando Cofre...'
+                        : 'Testar Integridade & Assinatura do Cofre de Chaves'}
+                    </span>
+                  </button>
                 </div>
+
+                {keyVerificationResult && (
+                  <div
+                    className={`p-3.5 rounded-lg border text-xs font-mono space-y-1.5 ${
+                      keyVerificationResult.valid
+                        ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300'
+                        : 'border-rose-500/40 bg-rose-500/10 text-rose-500'
+                    }`}
+                  >
+                    <div className="font-bold flex items-center justify-between">
+                      <span>
+                        Self-Test Criptográfico: {keyVerificationResult.valid ? 'APROVADO (ÍNTEGRO)' : 'FALHOU'}
+                      </span>
+                      <span>{new Date(keyVerificationResult.verifiedAt).toLocaleTimeString('pt-BR')}</span>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px]">
+                      <div>
+                        HMAC-SHA256: {keyVerificationResult.checks.hmacSha256SelfTest ? 'OK' : 'FALHA'} (
+                        {keyVerificationResult.hmacKeyId})
+                      </div>
+                      <div>
+                        Ed25519: {keyVerificationResult.checks.ed25519AsymmetricSelfTest ? 'OK' : 'FALHA'} (
+                        {keyVerificationResult.ed25519KeyId || 'N/A'})
+                      </div>
+                      <div>
+                        AES-256-GCM: {keyVerificationResult.checks.aes256GcmVaultRoundTrip ? 'OK' : 'FALHA'} (
+                        {keyVerificationResult.aesVaultKeyId})
+                      </div>
+                    </div>
+                    <div className="text-[10px] opacity-80 truncate">
+                      Payload SHA-256 de Teste: {keyVerificationResult.testPayloadSha256}
+                    </div>
+                  </div>
+                )}
 
                 <div className="overflow-x-auto max-h-64">
                   <table className="w-full text-left border-collapse text-xs">

@@ -208,7 +208,9 @@ export class ComplianceMapper {
         status: matched.length > 0 ? 'FINDINGS_DETECTED' : 'NO_FINDINGS_IN_ANALYZED_SCOPE',
         findingsCount: matched.length,
         criticalOrBlockerCount,
-        matchedCwes: Array.from(new Set(matched.map((m) => m.cwe).filter((c): c is string => Boolean(c)))).sort(),
+        matchedCwes: Array.from(new Set(matched.map((m) => m.cwe).filter((c): c is string => Boolean(c)))).sort(
+          (a, b) => a.localeCompare(b)
+        ),
         evidenceFindingIds: matched.map((m) => m.id),
       });
     }

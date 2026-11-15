@@ -53,9 +53,10 @@ async function runDesktopBuild() {
   });
 
   console.log('[WinHood Desktop Build] 4/4 Bundling Electron preload bridge (dist-desktop/electron-preload.cjs)...');
+  const preloadOutfile = path.join(distDesktopDir, 'electron-preload.cjs');
   await build({
     entryPoints: [path.join(rootDir, 'electron-preload.ts')],
-    outfile: path.join(distDesktopDir, 'electron-preload.cjs'),
+    outfile: preloadOutfile,
     bundle: true,
     platform: 'node',
     target: 'node22',
@@ -63,6 +64,14 @@ async function runDesktopBuild() {
     external: ['electron'],
     sourcemap: false,
   });
+  const preloadRaw = fs.readFileSync(preloadOutfile, 'utf8');
+  const preloadSanitized = preloadRaw.replace(
+    /0 && \(module\.exports = \{([\s\S]*?)\}\);/g,
+    'if (typeof module !== "undefined" && module.exports) {\n  module.exports = {$1};\n}'
+  );
+  if (preloadSanitized !== preloadRaw) {
+    fs.writeFileSync(preloadOutfile, preloadSanitized, 'utf8');
+  }
 
   const requiredFiles = [
     path.join(distFrontendDir, 'index.html'),

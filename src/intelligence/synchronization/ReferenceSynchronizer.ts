@@ -403,8 +403,115 @@ export class ReferenceSynchronizer {
           const sha256 = crypto.createHash('sha256').update(JSON.stringify(updatedBase), 'utf8').digest('hex');
           this.registry.saveSnapshot({ ...updatedBase, sha256 });
           liveFetchedSources.push(sourceKey);
+        } else if (sourceKey === 'OWASP_BENCHMARK') {
+          try {
+            const { json: owaspData, etag } = await fetchJsonWithHeaders(
+              'https://api.github.com/repos/OWASP-Benchmark/BenchmarkJava/releases/latest',
+              { headers: { 'User-Agent': 'WinHood-Reference-Synchronizer/3.0', Accept: 'application/vnd.github+json' } },
+              3500
+            );
+            const updatedBase = {
+              ...existing,
+              version: String(owaspData?.tag_name || existing.version),
+              fetchedAt: nowIso,
+              etag: etag || existing.etag || null,
+              freshnessStatus: 'FRESH' as const,
+              isOfflineFallback: false,
+              lastError: null,
+              payloadSummary: {
+                ...existing.payloadSummary,
+                latestReleaseTag: owaspData?.tag_name || existing.version,
+                publishedAt: owaspData?.published_at || nowIso,
+              },
+            };
+            const sha256 = crypto.createHash('sha256').update(JSON.stringify(updatedBase), 'utf8').digest('hex');
+            this.registry.saveSnapshot({ ...updatedBase, sha256 });
+            liveFetchedSources.push(sourceKey);
+          } catch {
+            const updatedBase = {
+              ...existing,
+              fetchedAt: nowIso,
+              freshnessStatus: 'CACHED_VALID' as const,
+              isOfflineFallback: true,
+              lastError: null,
+            };
+            const sha256 = crypto.createHash('sha256').update(JSON.stringify(updatedBase), 'utf8').digest('hex');
+            this.registry.saveSnapshot({ ...updatedBase, sha256 });
+            cachedFallbackSources.push(sourceKey);
+          }
+        } else if (sourceKey === 'MITRE_CWE') {
+          try {
+            const { json: cweData, etag } = await fetchJsonWithHeaders(
+              'https://cwe-api.mitre.org/api/v1/cwe/version',
+              { headers: { 'User-Agent': 'WinHood-Reference-Synchronizer/3.0', Accept: 'application/json' } },
+              3500
+            );
+            const updatedBase = {
+              ...existing,
+              version: String(cweData?.cwe_version || existing.version),
+              fetchedAt: nowIso,
+              etag: etag || existing.etag || null,
+              freshnessStatus: 'FRESH' as const,
+              isOfflineFallback: false,
+              lastError: null,
+              payloadSummary: {
+                ...existing.payloadSummary,
+                cweReleaseDate: cweData?.cwe_release_date || nowIso.slice(0, 10),
+                totalWeaknesses: cweData?.total_weaknesses || existing.recordsCount,
+              },
+            };
+            const sha256 = crypto.createHash('sha256').update(JSON.stringify(updatedBase), 'utf8').digest('hex');
+            this.registry.saveSnapshot({ ...updatedBase, sha256 });
+            liveFetchedSources.push(sourceKey);
+          } catch {
+            const updatedBase = {
+              ...existing,
+              fetchedAt: nowIso,
+              freshnessStatus: 'CACHED_VALID' as const,
+              isOfflineFallback: true,
+              lastError: null,
+            };
+            const sha256 = crypto.createHash('sha256').update(JSON.stringify(updatedBase), 'utf8').digest('hex');
+            this.registry.saveSnapshot({ ...updatedBase, sha256 });
+            cachedFallbackSources.push(sourceKey);
+          }
+        } else if (sourceKey === 'PUBLIC_REPOS_VERSIONED') {
+          try {
+            const { json: repoData, etag } = await fetchJsonWithHeaders(
+              'https://api.github.com/repos/OWASP/NodeGoat',
+              { headers: { 'User-Agent': 'WinHood-Reference-Synchronizer/3.0', Accept: 'application/vnd.github+json' } },
+              3500
+            );
+            const updatedBase = {
+              ...existing,
+              fetchedAt: nowIso,
+              etag: etag || existing.etag || null,
+              freshnessStatus: 'FRESH' as const,
+              isOfflineFallback: false,
+              lastError: null,
+              payloadSummary: {
+                ...existing.payloadSummary,
+                verifiedDefaultBranch: repoData?.default_branch || 'master',
+                lastPushedAt: repoData?.pushed_at || nowIso,
+                starsCount: repoData?.stargazers_count ?? null,
+              },
+            };
+            const sha256 = crypto.createHash('sha256').update(JSON.stringify(updatedBase), 'utf8').digest('hex');
+            this.registry.saveSnapshot({ ...updatedBase, sha256 });
+            liveFetchedSources.push(sourceKey);
+          } catch {
+            const updatedBase = {
+              ...existing,
+              fetchedAt: nowIso,
+              freshnessStatus: 'CACHED_VALID' as const,
+              isOfflineFallback: true,
+              lastError: null,
+            };
+            const sha256 = crypto.createHash('sha256').update(JSON.stringify(updatedBase), 'utf8').digest('hex');
+            this.registry.saveSnapshot({ ...updatedBase, sha256 });
+            cachedFallbackSources.push(sourceKey);
+          }
         } else {
-          // Local deterministic taxonomies (OWASP_BENCHMARK, MITRE_CWE, PUBLIC_REPOS_VERSIONED): NEVER falsely marked 'FRESH' without remote HTTP check
           const updatedBase = {
             ...existing,
             fetchedAt: nowIso,

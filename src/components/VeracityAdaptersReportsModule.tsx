@@ -27,7 +27,7 @@ import type {
   ToolAdapterInfo,
   VisualReportCategoryKey,
 } from '../types/benchmark';
-import { CATEGORY_LABELS } from './DashboardModule';
+import { CATEGORY_LABELS, TwelvePillarRadarSvg } from './DashboardModule';
 import { ALL_BENCHMARK_CATEGORIES } from '../engine/scoringEngine';
 import { HairlineAnimatedFigure, type HairlineFigureType } from './HairlineAnimatedFigure';
 
@@ -1265,6 +1265,21 @@ export const VeracityAdaptersReportsModule: React.FC<
                     <p className="text-xs text-slate-600 dark:text-slate-300 mt-1">
                       {latestRun.executiveSummary}
                     </p>
+                  </div>
+
+                  {/* Radar Comparativo dos 12 Pilares integrado ao Relatório Comparativo */}
+                  <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-[#080b10] flex flex-col md:flex-row items-center justify-between gap-4">
+                    <div className="space-y-1.5 max-w-md">
+                      <div className="text-xs font-bold text-slate-900 dark:text-slate-100">
+                        Radar Comparativo dos 12 Pilares Técnicos (0.00 – 5.00)
+                      </div>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                        Visualização vetorial da paridade e diferencial competitivo entre os softwares avaliados no escopo deste relatório.
+                      </p>
+                    </div>
+                    <div className="w-full max-w-[300px]">
+                      <TwelvePillarRadarSvg run={latestRun} />
+                    </div>
                   </div>
 
                   {/* Seletor Visual de Inspeção Individual por Categoria com Figuras Hairline (Seção 8) */}

@@ -53,6 +53,9 @@ try {
 } catch {
 }
 // Annotate the CommonJS export names for ESM import in node:
-0 && (module.exports = {
-  createWinHoodPreloadBridge
-});
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    createWinHoodPreloadBridge
+  };
+}
+
