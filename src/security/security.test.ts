@@ -6,7 +6,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
-import { AuthService, generateTotpCode, isValidEmailAddress } from './AuthService';
+import { AuthService, generateTotpCode, isValidEmailAddress, validateQuickPin } from './AuthService';
 import { KeyManagementService } from './KeyManagementService';
 import { SsrfGuard } from '../execution/SsrfGuard';
 import { buildMinimalSandboxEnv, SandboxExecutor } from '../execution/SandboxExecutor';
@@ -1056,7 +1056,7 @@ test('TOTP AES-256-GCM at-rest encryption, preAuthToken 2-step flow, replay prot
   });
 });
 
-test('Hybrid session: public /api/auth/register is blocked with 403 BOOTSTRAP_REQUIRED before bootstrap; after bootstrap, register + /api/auth/me + Bearer/X-WinHood-Session + logout work deterministically', async () => {
+test('Hybrid session: first user registered at /api/auth/register receives ADMIN and completes bootstrap; 2nd user is blocked from ADMIN elevation; /api/auth/me + Bearer/X-WinHood-Session + logout work deterministically', async () => {
   await withIsolatedKeystoreEnv(async (tmpDir) => {
     const { app, authService } = await createWinHoodApp({
       dataDir: tmpDir,
@@ -1080,39 +1080,28 @@ test('Hybrid session: public /api/auth/register is blocked with 403 BOOTSTRAP_RE
       assert.equal(unauthMeJson.code, 'SESSION_INVALID');
       assert.equal(unauthMeJson.authenticated, false);
 
-      // 1. Public registration before bootstrap must be blocked with 403 BOOTSTRAP_REQUIRED
-      const blockedRegRes = await fetch(`${baseUrl}/api/auth/register`, {
+      // 1. First user registered directly via /api/auth/register automatically receives ADMIN and completes bootstrap
+      const firstRegRes = await fetch(`${baseUrl}/api/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          name: 'Blocked Pre-Bootstrap User',
-          email: 'blocked.prebootstrap@winhood.local',
-          password: 'BlockedStrongPassword!2026',
+          name: 'First Local Admin User',
+          email: 'first.admin@winhood.local',
+          password: 'FirstAdminStrongPassword!2026',
           role: 'SECURITY_LEAD',
         }),
       });
-      assert.equal(blockedRegRes.status, 403);
-      const blockedRegJson = (await blockedRegRes.json()) as { code: string; error: string };
-      assert.equal(blockedRegJson.code, 'BOOTSTRAP_REQUIRED');
-      assert.equal(authService.isBootstrapRequired(), true);
-
-      // 2. Complete initial administrative bootstrap with CSPRNG token
-      const bootstrapToken = readBootstrapTokenFromFile(bootMeta.bootstrapTokenFilePath);
-      const bootRes = await fetch(`${baseUrl}/api/auth/bootstrap-admin`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          bootstrapToken,
-          name: 'Initial Platform Admin',
-          email: 'root.admin@winhood.local',
-          password: 'RootAdminStrongPassword!2026',
-        }),
-      });
-      assert.equal(bootRes.status, 201);
+      assert.equal(firstRegRes.status, 201);
+      const firstRegJson = (await firstRegRes.json()) as {
+        authenticated: boolean;
+        user: { email: string; role: string };
+      };
+      assert.equal(firstRegJson.authenticated, true);
+      assert.equal(firstRegJson.user.role, 'ADMIN');
       assert.equal(authService.isBootstrapRequired(), false);
       assert.equal(fs.existsSync(bootMeta.bootstrapTokenFilePath), false);
 
-      // 3a. Public registration attempting to self-assign ADMIN role is blocked with 403 ROLE_ELEVATION_BLOCKED
+      // 2. Second user attempting to self-assign ADMIN role is blocked with 403 ROLE_ELEVATION_BLOCKED
       const elevationRes = await fetch(`${baseUrl}/api/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1673,7 +1662,516 @@ test('SandboxExecutor.runSandboxedNodeTest updates recoveryVerified to true and 
   assert.equal(result.isolationState, 'RECOVERY_VERIFIED');
 });
 
+test('Quick PIN (6-8 digits) rejects weak PINs (123456, 111111) and supports PIN registration, login, brute-force lockout, and CSRF-protected PIN setup', async () => {
+  // 1. Direct unit validation of PIN policy
+  assert.throws(() => validateQuickPin('123456'), /WEAK_PIN/);
+  assert.throws(() => validateQuickPin('654321'), /WEAK_PIN/);
+  assert.throws(() => validateQuickPin('111111'), /WEAK_PIN/);
+  assert.throws(() => validateQuickPin('00000000'), /WEAK_PIN/);
+  assert.throws(() => validateQuickPin('12345'), /INVALID_PIN/);
+  assert.throws(() => validateQuickPin('123456789'), /INVALID_PIN/);
+  assert.equal(validateQuickPin('482917'), '482917');
+  assert.equal(validateQuickPin('90418273'), '90418273');
 
+  await withIsolatedKeystoreEnv(async (tmpDir) => {
+    const { app, authService } = await createWinHoodApp({
+      dataDir: tmpDir,
+      enforceProductionAuth: true,
+    });
 
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      // 2. Weak PIN rejected on /api/auth/register
+      for (const weakPin of ['123456', '111111', '654321']) {
+        const weakRes = await fetch(`${baseUrl}/api/auth/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: 'Weak PIN User',
+            email: 'weak.pin@winhood.local',
+            pin: weakPin,
+          }),
+        });
+        assert.equal(weakRes.status, 400);
+        const weakJson = (await weakRes.json()) as { code: string };
+        assert.equal(weakJson.code, 'WEAK_PIN');
+      }
+
+      // 3. Valid PIN-only registration for 1st user promotes to ADMIN and completes bootstrap
+      const regRes = await fetch(`${baseUrl}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'PIN Admin User',
+          email: 'pin.admin@winhood.local',
+          pin: '482917',
+        }),
+      });
+      assert.equal(regRes.status, 201);
+      const regJson = (await regRes.json()) as {
+        authenticated: boolean;
+        sessionId: string;
+        csrfToken: string;
+        user: { email: string; role: string; pinEnabled?: boolean };
+      };
+      assert.equal(regJson.authenticated, true);
+      assert.equal(regJson.user.role, 'ADMIN');
+      assert.equal(regJson.user.pinEnabled, true);
+      assert.equal(authService.isBootstrapRequired(), false);
+
+      // 4. Login via POST /api/auth/login-pin succeeds
+      const loginPinRes = await fetch(`${baseUrl}/api/auth/login-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: 'pin.admin@winhood.local',
+          pin: '482917',
+        }),
+      });
+      assert.equal(loginPinRes.status, 200);
+      const loginPinJson = (await loginPinRes.json()) as {
+        authenticated: boolean;
+        sessionId: string;
+        csrfToken: string;
+      };
+      assert.equal(loginPinJson.authenticated, true);
+      assert.ok(loginPinJson.sessionId.length >= 32);
+
+      // 4b. Verify Global Security Headers & Permissions-Policy for WebAuthn
+      assert.equal(loginPinRes.headers.get('x-content-type-options'), 'nosniff');
+      assert.equal(loginPinRes.headers.get('x-frame-options'), 'SAMEORIGIN');
+      assert.equal(loginPinRes.headers.get('referrer-policy'), 'no-referrer');
+      assert.match(
+        loginPinRes.headers.get('permissions-policy') || '',
+        /publickey-credentials-create=\*, publickey-credentials-get=\*/
+      );
+
+      // 5. Update PIN via authenticated POST /api/auth/pin/setup with CSRF
+      const setupPinRes = await fetch(`${baseUrl}/api/auth/pin/setup`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${loginPinJson.sessionId}`,
+          'x-csrf-token': loginPinJson.csrfToken,
+        },
+        body: JSON.stringify({ pin: '73918462' }),
+      });
+      assert.equal(setupPinRes.status, 200);
+
+      // 6. Brute-force lockout after 5 wrong PIN attempts
+      for (let i = 0; i < AuthService.MAX_LOGIN_ATTEMPTS; i++) {
+        const badPinRes = await fetch(`${baseUrl}/api/auth/login-pin`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: 'pin.admin@winhood.local',
+            pin: '998877',
+          }),
+        });
+        assert.equal(badPinRes.status, 401);
+      }
+
+      const lockedPinRes = await fetch(`${baseUrl}/api/auth/login-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: 'pin.admin@winhood.local',
+          pin: '73918462',
+        }),
+      });
+      assert.equal(lockedPinRes.status, 429);
+      const lockedJson = (await lockedPinRes.json()) as { error: string; code: string };
+      assert.match(lockedJson.error, /AUTH_ACCOUNT_LOCKED/);
+      assert.equal(lockedJson.code, 'RATE_LIMITED');
+
+      // 7. Self-service local account deletion (DELETE /api/auth/me) requires CSRF + valid PIN/password and revokes session
+      const delNoCsrf = await fetch(`${baseUrl}/api/auth/me`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${loginPinJson.sessionId}`,
+        },
+        body: JSON.stringify({ pin: '73918462' }),
+      });
+      assert.equal(delNoCsrf.status, 403);
+
+      const delWrongPin = await fetch(`${baseUrl}/api/auth/me`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${loginPinJson.sessionId}`,
+          'x-csrf-token': loginPinJson.csrfToken,
+        },
+        body: JSON.stringify({ pin: '999999' }),
+      });
+      assert.equal(delWrongPin.status, 401);
+
+      const delOkRes = await fetch(`${baseUrl}/api/auth/me`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${loginPinJson.sessionId}`,
+          'x-csrf-token': loginPinJson.csrfToken,
+        },
+        body: JSON.stringify({ pin: '73918462' }),
+      });
+      assert.equal(delOkRes.status, 200);
+      const delOkJson = (await delOkRes.json()) as { ok: boolean; revokedSessionsCount: number };
+      assert.equal(delOkJson.ok, true);
+      assert.ok(delOkJson.revokedSessionsCount >= 1);
+
+      // Session is immediately invalid after DELETE /api/auth/me
+      const postDelMe = await fetch(`${baseUrl}/api/auth/me`, {
+        headers: { Authorization: `Bearer ${loginPinJson.sessionId}` },
+      });
+      assert.equal(postDelMe.status, 401);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+test('WebAuthn / Windows Hello (FIDO2) generates platform challenge options and verifies ES256 cryptographic registration and login with signCount anti-replay', async () => {
+  await withIsolatedKeystoreEnv(async (tmpDir) => {
+    const { app, authService } = await createWinHoodApp({
+      dataDir: tmpDir,
+      enforceProductionAuth: true,
+    });
+
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    // Minimal CBOR helper to build a valid attestationObject { authData: bstr } for ES256 (-7)
+    const buildEs256CosePublicKey = (x: Buffer, y: Buffer): Buffer => {
+      // CBOR map(5): { 1: 2 (EC2), 3: -7 (ES256), -1: 1 (P-256), -2: bstr(32) x, -3: bstr(32) y }
+      return Buffer.concat([
+        Buffer.from([0xa5]),
+        Buffer.from([0x01, 0x02]), // 1: 2
+        Buffer.from([0x03, 0x26]), // 3: -7 (0x20 | 6)
+        Buffer.from([0x20, 0x01]), // -1: 1
+        Buffer.from([0x21, 0x58, 0x20]), // -2: bstr(32)
+        x,
+        Buffer.from([0x22, 0x58, 0x20]), // -3: bstr(32)
+        y,
+      ]);
+    };
+
+    const wrapAuthDataInAttestationCbor = (authData: Buffer): Buffer => {
+      // CBOR map(1): { "authData": bstr(authData) }
+      const keyBytes = Buffer.from('authData', 'utf8');
+      const lenHeader =
+        authData.length < 256
+          ? Buffer.from([0x58, authData.length])
+          : Buffer.from([0x59, (authData.length >> 8) & 0xff, authData.length & 0xff]);
+      return Buffer.concat([
+        Buffer.from([0xa1, 0x60 | keyBytes.length]),
+        keyBytes,
+        lenHeader,
+        authData,
+      ]);
+    };
+
+    try {
+      // 1. Request WebAuthn registration options via HTTP
+      const regOptRes = await fetch(`${baseUrl}/api/auth/webauthn/register-account/options`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Host: `127.0.0.1:${port}`,
+        },
+        body: JSON.stringify({
+          name: 'Windows Hello Admin',
+          email: 'hello.admin@winhood.local',
+          role: 'SECURITY_LEAD',
+        }),
+      });
+      assert.equal(regOptRes.status, 200);
+      const regOptJson = (await regOptRes.json()) as {
+        challengeId: string;
+        publicKey: {
+          challenge: string;
+          rp: { id: string; name: string };
+          authenticatorSelection: { authenticatorAttachment: string; userVerification: string };
+          pubKeyCredParams: Array<{ type: string; alg: number }>;
+        };
+      };
+      assert.ok(regOptJson.challengeId);
+      assert.equal(regOptJson.publicKey.authenticatorSelection.authenticatorAttachment, 'platform');
+      assert.equal(regOptJson.publicKey.authenticatorSelection.userVerification, 'required');
+      assert.deepEqual(
+        regOptJson.publicKey.pubKeyCredParams.map((p) => p.alg),
+        [-7, -257]
+      );
+      assert.equal(Buffer.from(regOptJson.publicKey.challenge, 'base64url').length, 32);
+
+      // 2. Construct valid ES256 credential and verify WebAuthn registration (1st user -> ADMIN)
+      const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+      const jwk = publicKey.export({ format: 'jwk' }) as { x: string; y: string };
+      const coseKey = buildEs256CosePublicKey(
+        Buffer.from(jwk.x, 'base64url'),
+        Buffer.from(jwk.y, 'base64url')
+      );
+
+      const rpIdHash = crypto.createHash('sha256').update(regOptJson.publicKey.rp.id, 'utf8').digest();
+      const flags = Buffer.from([0x45]); // UP (0x01) | UV (0x04) | AT (0x40)
+      const signCountBuf = Buffer.alloc(4);
+      signCountBuf.writeUInt32BE(1, 0);
+      const aaguid = Buffer.alloc(16, 0);
+      const credIdBytes = crypto.randomBytes(32);
+      const credIdB64 = credIdBytes.toString('base64url');
+      const credLenBuf = Buffer.alloc(2);
+      credLenBuf.writeUInt16BE(credIdBytes.length, 0);
+
+      const authDataReg = Buffer.concat([rpIdHash, flags, signCountBuf, aaguid, credLenBuf, credIdBytes, coseKey]);
+      const attestationObject = wrapAuthDataInAttestationCbor(authDataReg);
+      const clientDataReg = Buffer.from(
+        JSON.stringify({
+          type: 'webauthn.create',
+          challenge: regOptJson.publicKey.challenge,
+          origin: `http://127.0.0.1:${port}`,
+        }),
+        'utf8'
+      );
+
+      const regVerifyRes = await fetch(`${baseUrl}/api/auth/webauthn/register-account/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          challengeId: regOptJson.challengeId,
+          credential: {
+            id: credIdB64,
+            rawId: credIdB64,
+            type: 'public-key',
+            response: {
+              clientDataJSON: clientDataReg.toString('base64url'),
+              attestationObject: attestationObject.toString('base64url'),
+            },
+          },
+        }),
+      });
+      assert.equal(regVerifyRes.status, 201);
+      const regVerifyJson = (await regVerifyRes.json()) as {
+        authenticated: boolean;
+        user: { email: string; role: string; webauthnEnabled?: boolean };
+      };
+      assert.equal(regVerifyJson.authenticated, true);
+      assert.equal(regVerifyJson.user.role, 'ADMIN');
+      assert.equal(regVerifyJson.user.webauthnEnabled, true);
+      assert.equal(authService.isBootstrapRequired(), false);
+
+      // 3. Request WebAuthn login options and verify cryptographic signature + signCount anti-replay
+      const loginOptRes = await fetch(`${baseUrl}/api/auth/webauthn/login/options`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Host: `127.0.0.1:${port}`,
+        },
+        body: JSON.stringify({ email: 'hello.admin@winhood.local' }),
+      });
+      assert.equal(loginOptRes.status, 200);
+      const loginOptJson = (await loginOptRes.json()) as {
+        challengeId: string;
+        publicKey: { challenge: string; rpId: string; userVerification: string };
+      };
+      assert.equal(loginOptJson.publicKey.userVerification, 'required');
+
+      const loginSignCount = Buffer.alloc(4);
+      loginSignCount.writeUInt32BE(2, 0);
+      const authDataLogin = Buffer.concat([rpIdHash, Buffer.from([0x05]), loginSignCount]); // UP | UV
+      const clientDataLogin = Buffer.from(
+        JSON.stringify({
+          type: 'webauthn.get',
+          challenge: loginOptJson.publicKey.challenge,
+          origin: `http://127.0.0.1:${port}`,
+        }),
+        'utf8'
+      );
+      const clientDataHash = crypto.createHash('sha256').update(clientDataLogin).digest();
+      const signedPayload = Buffer.concat([authDataLogin, clientDataHash]);
+      const signature = crypto.sign('sha256', signedPayload, privateKey);
+
+      const loginVerifyRes = await fetch(`${baseUrl}/api/auth/webauthn/login/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          challengeId: loginOptJson.challengeId,
+          credential: {
+            id: credIdB64,
+            rawId: credIdB64,
+            type: 'public-key',
+            response: {
+              clientDataJSON: clientDataLogin.toString('base64url'),
+              authenticatorData: authDataLogin.toString('base64url'),
+              signature: signature.toString('base64url'),
+            },
+          },
+        }),
+      });
+      assert.equal(loginVerifyRes.status, 200);
+      const loginVerifyJson = (await loginVerifyRes.json()) as { authenticated: boolean; sessionId: string };
+      assert.equal(loginVerifyJson.authenticated, true);
+      assert.ok(loginVerifyJson.sessionId.length >= 32);
+
+      // 4. Replay attempt with stale signCount (<= 2) must be rejected with WEBAUTHN_COUNTER_REPLAY
+      const replayOptRes = await fetch(`${baseUrl}/api/auth/webauthn/login/options`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Host: `127.0.0.1:${port}`,
+        },
+        body: JSON.stringify({ email: 'hello.admin@winhood.local' }),
+      });
+      const replayOptJson = (await replayOptRes.json()) as {
+        challengeId: string;
+        publicKey: { challenge: string };
+      };
+      const staleCount = Buffer.alloc(4);
+      staleCount.writeUInt32BE(2, 0); // same signCount = 2 -> replay!
+      const authDataReplay = Buffer.concat([rpIdHash, Buffer.from([0x05]), staleCount]);
+      const clientDataReplay = Buffer.from(
+        JSON.stringify({
+          type: 'webauthn.get',
+          challenge: replayOptJson.publicKey.challenge,
+          origin: `http://127.0.0.1:${port}`,
+        }),
+        'utf8'
+      );
+      const replaySig = crypto.sign(
+        'sha256',
+        Buffer.concat([authDataReplay, crypto.createHash('sha256').update(clientDataReplay).digest()]),
+        privateKey
+      );
+      const replayVerifyRes = await fetch(`${baseUrl}/api/auth/webauthn/login/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          challengeId: replayOptJson.challengeId,
+          credential: {
+            id: credIdB64,
+            rawId: credIdB64,
+            type: 'public-key',
+            response: {
+              clientDataJSON: clientDataReplay.toString('base64url'),
+              authenticatorData: authDataReplay.toString('base64url'),
+              signature: replaySig.toString('base64url'),
+            },
+          },
+        }),
+      });
+      assert.equal(replayVerifyRes.status, 401);
+      const replayVerifyJson = (await replayVerifyRes.json()) as { error: string };
+      assert.match(replayVerifyJson.error, /WEBAUTHN_REPLAY_DETECTED/);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+test('WebAuthn options prioritize body.rpId and Origin hostname over Host header, and native Windows Hello OS verification enforces win32 + ES256 P-256 key generation', async () => {
+  await withIsolatedKeystoreEnv(async (tmpDir) => {
+    const { app, authService } = await createWinHoodApp({
+      dataDir: tmpDir,
+      enforceProductionAuth: true,
+    });
+
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      // 1. Dynamic rpId: body.rpId takes priority over Origin and Host headers
+      const bodyRpRes = await fetch(`${baseUrl}/api/auth/webauthn/register-account/options`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://proxy.example.com:8443',
+          Host: `127.0.0.1:${port}`,
+        },
+        body: JSON.stringify({
+          name: 'Proxy Domain User',
+          email: 'proxy.domain@winhood.local',
+          rpId: 'ais-dev-preview.us-east1.run.app',
+        }),
+      });
+      assert.equal(bodyRpRes.status, 200);
+      const bodyRpJson = (await bodyRpRes.json()) as { rp: { id: string } };
+      assert.equal(bodyRpJson.rp.id, 'ais-dev-preview.us-east1.run.app');
+
+      // 2. Origin header hostname takes priority over Host header when body.rpId is omitted
+      const originRpRes = await fetch(`${baseUrl}/api/auth/webauthn/login/options`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://portal.winhood.dev:9443',
+          Host: `127.0.0.1:${port}`,
+        },
+        body: JSON.stringify({}),
+      });
+      assert.equal(originRpRes.status, 200);
+      const originRpJson = (await originRpRes.json()) as { rpId: string };
+      assert.equal(originRpJson.rpId, 'portal.winhood.dev');
+
+      // 3. PowerShell WinRT UserConsentVerifier script contains official Windows Hello API
+      const psScript = AuthService.buildWindowsHelloPowerShellScript();
+      assert.match(psScript, /Windows\.Security\.Credentials\.UI\.UserConsentVerifier/);
+      assert.match(psScript, /RequestVerificationAsync/);
+
+      // 4. On non-Windows hosts (e.g. Linux container), native endpoints fail cleanly with 501 WINDOWS_HELLO_OS_UNSUPPORTED
+      if (process.platform !== 'win32') {
+        const nativeRegRes = await fetch(`${baseUrl}/api/auth/windows-hello/native-register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: 'Native Linux Check',
+            email: 'native.linux@winhood.local',
+          }),
+        });
+        assert.equal(nativeRegRes.status, 501);
+        const nativeRegJson = (await nativeRegRes.json()) as { code: string };
+        assert.equal(nativeRegJson.code, 'WINDOWS_HELLO_OS_UNSUPPORTED');
+
+        const nativeLoginRes = await fetch(`${baseUrl}/api/auth/windows-hello/native-login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: 'native.linux@winhood.local' }),
+        });
+        assert.equal(nativeLoginRes.status, 501);
+        const nativeLoginJson = (await nativeLoginRes.json()) as { code: string };
+        assert.equal(nativeLoginJson.code, 'WINDOWS_HELLO_OS_UNSUPPORTED');
+      }
+
+      // 5. Native Windows Hello registration + login with verified OS prompt generates valid ES256 P-256 keypair in auth_users.json
+      const nativeRegOutcome = await authService.registerNativeWindowsHelloAccount({
+        name: 'Windows Native User',
+        email: 'win.native@winhood.local',
+        promptVerifier: async (msg) => {
+          assert.match(msg, /win\.native@winhood\.local/);
+        },
+      });
+      assert.equal(nativeRegOutcome.keyAlgorithm, 'ES256');
+      assert.equal(nativeRegOutcome.user.role, 'ADMIN');
+      assert.equal(nativeRegOutcome.user.webauthnEnabled, true);
+      assert.ok(nativeRegOutcome.sessionId.length >= 32);
+
+      const nativeLoginOutcome = await authService.loginNativeWindowsHelloAccount({
+        email: 'win.native@winhood.local',
+        promptVerifier: async (msg) => {
+          assert.match(msg, /win\.native@winhood\.local/);
+        },
+      });
+      assert.equal(nativeLoginOutcome.user.email, 'win.native@winhood.local');
+      assert.ok(nativeLoginOutcome.sessionId.length >= 32);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
 
 

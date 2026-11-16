@@ -56,5 +56,5 @@ if !HEALTH_OK! neq 1 (
 )
 
 echo [OK] Health check verificado (status=ONLINE). Abrindo interface...
-start http://127.0.0.1:3000
+start http://localhost:3000
 exit /b 0

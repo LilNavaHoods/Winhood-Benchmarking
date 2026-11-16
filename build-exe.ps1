@@ -30,11 +30,15 @@ Write-Host "=================================================================" -
 Write-Host " WinHood Benchmarking v$appVersion — Windows x64 Desktop Builder" -ForegroundColor Cyan
 Write-Host "=================================================================" -ForegroundColor Cyan
 
-Write-Host "[1/5] Validando arvore de dependencias com npm ci..." -ForegroundColor Yellow
+Write-Host "[1/5] Validando e instalando arvore de dependencias (npm ci com fallback automatico para npm install)..." -ForegroundColor Yellow
 npm ci
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "ERRO: Falha ao instalar dependencias com npm ci."
-    exit $LASTEXITCODE
+    Write-Warning "AVISO: npm ci retornou codigo $LASTEXITCODE (sincronizando binarios Electron/Windows via npm install)..."
+    npm install
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "ERRO: Falha ao instalar dependencias com npm install."
+        exit $LASTEXITCODE
+    }
 }
 
 Write-Host "[2/5] Compilando frontend Vite + bundle desktop (npm run desktop:compile)..." -ForegroundColor Yellow

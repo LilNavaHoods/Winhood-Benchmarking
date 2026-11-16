@@ -87,6 +87,18 @@ describe('Windows Desktop Architecture, Electron Security & Lifecycle Suite (FAS
       true
     );
     assert.equal(
+      isAuthorizedLoopbackSender('http://localhost:3000/index.html', 'http://127.0.0.1:3000'),
+      true
+    );
+    assert.equal(
+      isAuthorizedLoopbackSender('http://127.0.0.1:3000/index.html', 'http://localhost:3000'),
+      true
+    );
+    assert.equal(
+      isAuthorizedLoopbackSender('http://localhost:4999/index.html', 'http://127.0.0.1:3000'),
+      false
+    );
+    assert.equal(
       isAuthorizedLoopbackSender('https://malicious.example.com/', 'http://127.0.0.1:3000'),
       false
     );
@@ -118,6 +130,7 @@ describe('Windows Desktop Architecture, Electron Security & Lifecycle Suite (FAS
       assert.equal(desktopInstance.backend.host, '127.0.0.1');
       assert.notEqual(desktopInstance.backend.port, occupiedPort);
       assert.ok(desktopInstance.backend.port > 0);
+      assert.equal(desktopInstance.windowUrl, `http://localhost:${desktopInstance.backend.port}`);
 
       // Verify bootstrap_admin_token.txt was written inside per-user WinHoodPaths.rootDataDir
       const bootstrapTokenFile = path.join(
@@ -216,22 +229,67 @@ describe('Windows Desktop Architecture, Electron Security & Lifecycle Suite (FAS
     };
     const eb = JSON.parse(fs.readFileSync(path.join(repoRoot, 'electron-builder.json'), 'utf8')) as {
       directories?: { output?: string };
+      files?: string[];
     };
     const iss = fs.readFileSync(path.join(repoRoot, 'installer', 'WinHoodBenchmarking.iss'), 'utf8');
     const ps1 = fs.readFileSync(path.join(repoRoot, 'build-exe.ps1'), 'utf8');
+    const rootBat = fs.readFileSync(path.join(repoRoot, 'start-winhood-desktop.bat'), 'utf8');
+    const scriptsBat = fs.readFileSync(
+      path.join(repoRoot, 'scripts', 'windows', 'run-winhood-desktop.bat'),
+      'utf8'
+    );
+    const termsMd = fs.readFileSync(path.join(repoRoot, 'TERMS.md'), 'utf8');
+    const privacyMd = fs.readFileSync(path.join(repoRoot, 'PRIVACY.md'), 'utf8');
+    const securityMd = fs.readFileSync(path.join(repoRoot, 'SECURITY.md'), 'utf8');
 
     assert.equal(pkg.name, 'winhood-benchmarking');
     assert.equal(lock.name, pkg.name);
     assert.equal(lock.version, pkg.version);
     assert.equal(eb.directories?.output, 'release-windows');
+    assert.ok(Array.isArray(eb.files));
+    for (const legalFile of ['LICENSE', 'PRIVACY.md', 'TERMS.md', 'SECURITY.md']) {
+      assert.equal(eb.files.includes(legalFile), true, `Missing ${legalFile} in electron-builder.json files`);
+    }
+
+    // Verify multi-resolution public/icon.ico (16, 24, 32, 48, 64, 128, 256)
+    const icoBuf = fs.readFileSync(path.join(repoRoot, 'public', 'icon.ico'));
+    assert.equal(icoBuf.readUInt16LE(0), 0);
+    assert.equal(icoBuf.readUInt16LE(2), 1);
+    const icoCount = icoBuf.readUInt16LE(4);
+    assert.equal(icoCount, 7);
+    const icoSizes: number[] = [];
+    for (let i = 0; i < icoCount; i++) {
+      const w = icoBuf[6 + i * 16] || 256;
+      icoSizes.push(w);
+    }
+    assert.deepEqual(icoSizes, [16, 24, 32, 48, 64, 128, 256]);
+
+    // Verify TERMS.md, PRIVACY.md, SECURITY.md point to official GitHub issues/advisories without personal email
+    assert.match(termsMd, /https:\/\/github\.com\/LilNavaHoods\/Winhood-Benchmarking\/issues/);
+    assert.match(privacyMd, /https:\/\/github\.com\/LilNavaHoods\/Winhood-Benchmarking\/issues/);
+    assert.match(securityMd, /https:\/\/github\.com\/LilNavaHoods\/Winhood-Benchmarking\/security\/advisories/);
+    assert.equal(termsMd.includes('lohansilva351@gmail.com'), false);
+    assert.equal(privacyMd.includes('lohansilva351@gmail.com'), false);
+    assert.equal(securityMd.includes('lohansilva351@gmail.com'), false);
 
     assert.match(iss, /#define MyAppVersion "4\.4\.0"/);
+    assert.match(iss, /LicenseFile=\.\.\\LICENSE/);
+    assert.match(iss, /SetupIconFile=\.\.\\public\\icon\.ico/);
     assert.match(iss, /OutputDir=\.\.\\release-windows\\installer/);
     assert.match(iss, /OutputBaseFilename=WinHood-Benchmarking-Setup/);
     assert.match(iss, /Source: "\.\.\\release-windows\\win-unpacked\\\*"/);
 
+    assert.equal(fs.existsSync(path.join(repoRoot, 'LICENSE')), true);
+    assert.equal(fs.existsSync(path.join(repoRoot, 'PRIVACY.md')), true);
+    assert.equal(fs.existsSync(path.join(repoRoot, 'TERMS.md')), true);
+    assert.equal(fs.existsSync(path.join(repoRoot, 'SECURITY.md')), true);
+
+    assert.match(ps1, /npm install/);
     assert.match(ps1, /release-windows\\win-unpacked/);
     assert.match(ps1, /release-windows\\installer\\WinHood-Benchmarking-Setup\.exe/);
+    assert.match(rootBat, /release-windows\\win-unpacked\\WinHood Benchmark Analyzer\.exe/);
+    assert.match(rootBat, /http:\/\/localhost:3000/);
+    assert.match(scriptsBat, /start http:\/\/localhost:3000/);
     assert.ok(pkg.scripts['desktop:compile']);
     assert.ok(pkg.scripts['pack:win']);
     assert.ok(pkg.scripts['installer:win']);

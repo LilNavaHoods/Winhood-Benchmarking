@@ -1539,6 +1539,18 @@ export async function createWinHoodApp(options?: {
     return allowedOriginMap.get(origin) ?? null;
   };
 
+  // Global Security Headers (Seção 10.5 Microsoft Store & AppSec Hardening)
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader(
+      'Permissions-Policy',
+      'publickey-credentials-create=*, publickey-credentials-get=*'
+    );
+    next();
+  });
+
   // Security CORS + Telemetry + Session Authentication + CSRF double-submit middleware
   app.use('/api', (req, res, next) => {
     const rawOrigin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
@@ -1612,16 +1624,25 @@ export async function createWinHoodApp(options?: {
       '/auth/bootstrap-admin',
       '/auth/register',
       '/auth/login',
+      '/auth/login-pin',
+      '/auth/webauthn/register-account/options',
+      '/auth/webauthn/register-account/verify',
+      '/auth/webauthn/login/options',
+      '/auth/webauthn/login/verify',
+      '/auth/windows-hello/native-register',
+      '/auth/windows-hello/native-login',
       '/auth/logout',
       '/auth/session',
-      '/auth/me',
       '/auth/mfa/verify',
       '/auth/totp/authenticate',
       '/auth/recovery/request',
       '/auth/recovery/confirm',
     ]);
 
-    if (!publicApiPaths.has(reqPath)) {
+    const isPublicRequest =
+      publicApiPaths.has(reqPath) || (reqPath === '/auth/me' && req.method.toUpperCase() === 'GET');
+
+    if (!isPublicRequest) {
       if (!(req as any).authUser) {
         return res.status(401).json({
           error: 'AUTH_REQUIRED',
@@ -1771,10 +1792,11 @@ export async function createWinHoodApp(options?: {
 
   app.post('/api/auth/register', (req, res) => {
     try {
-      const { name, email, password, role, enableMfa } = (req.body || {}) as {
+      const { name, email, password, pin, role, enableMfa } = (req.body || {}) as {
         name?: string;
         email?: string;
         password?: string;
+        pin?: string;
         role?: RbacRole;
         enableMfa?: boolean;
       };
@@ -1782,6 +1804,7 @@ export async function createWinHoodApp(options?: {
         name: name || '',
         email: email || '',
         password: password || '',
+        pin: pin || undefined,
         role,
         enableMfa: Boolean(enableMfa),
         ipAddress: req.ip || '127.0.0.1',
@@ -1793,7 +1816,7 @@ export async function createWinHoodApp(options?: {
         'USER_SELF_REGISTERED',
         'AUTH',
         result.user.id,
-        `Novo usuário "${result.user.email}" cadastrado com perfil ${result.user.role} (MFA=${result.user.mfaEnabled}).`,
+        `Novo usuário "${result.user.email}" cadastrado com perfil ${result.user.role} (MFA=${result.user.mfaEnabled}, PIN=${Boolean(result.user.pinEnabled)}).`,
         result.user
       );
       saveDatabase(db);
@@ -1822,7 +1845,11 @@ export async function createWinHoodApp(options?: {
             ? 'ROLE_ELEVATION_BLOCKED'
             : msg.startsWith('AUTH_RATE_LIMITED')
               ? 'RATE_LIMITED'
-              : 'VALIDATION_ERROR';
+              : msg.startsWith('WEAK_PIN')
+                ? 'WEAK_PIN'
+                : msg.startsWith('INVALID_PIN')
+                  ? 'INVALID_PIN'
+                  : 'VALIDATION_ERROR';
       appendAuditLog(db, 'AUTH_REGISTER_FAILED', 'AUTH', String(req.body?.email || 'unknown'), msg);
       saveDatabase(db);
       return res.status(status).json({ error: msg, code });
@@ -1893,6 +1920,440 @@ export async function createWinHoodApp(options?: {
     }
   });
 
+  app.post('/api/auth/login-pin', (req, res) => {
+    try {
+      const { email, pin, totpCode, trustDevice } = (req.body || {}) as {
+        email?: string;
+        pin?: string;
+        totpCode?: string;
+        trustDevice?: boolean;
+      };
+      const outcome = authService.loginWithPin({
+        email: email || '',
+        pin: pin || '',
+        totpCode,
+        trustDevice: Boolean(trustDevice),
+        ipAddress: req.ip || '127.0.0.1',
+        userAgent: String(req.headers['user-agent'] || 'unknown'),
+      });
+      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
+        trustDevice: outcome.trustDevice,
+      });
+      appendAuditLog(
+        db,
+        outcome.mfaRequired ? 'AUTH_LOGIN_PIN_PENDING_MFA' : 'AUTH_LOGIN_PIN_SUCCESS',
+        'AUTH',
+        outcome.user.id,
+        `Login por PIN Rápido efetuado para ${outcome.user.email} (MFA=${outcome.user.mfaEnabled}, verified=${outcome.user.mfaVerified}).`,
+        outcome.user
+      );
+      saveDatabase(db);
+      return res.json({
+        authenticated: !outcome.mfaRequired,
+        mfaRequired: outcome.mfaRequired,
+        requiresTotp: outcome.requiresTotp,
+        preAuthToken: outcome.preAuthToken,
+        trustDevice: outcome.trustDevice,
+        serverTimeIso: outcome.serverTimeIso,
+        totpPeriodSeconds: outcome.totpPeriodSeconds,
+        user: outcome.user,
+        sessionId: outcome.sessionId,
+        csrfToken: outcome.csrfToken,
+      });
+    } catch (err: any) {
+      const msg = err?.message || 'Falha na autenticação com PIN.';
+      const status =
+        msg.startsWith('AUTH_RATE_LIMITED') || msg.startsWith('AUTH_ACCOUNT_LOCKED')
+          ? 429
+          : 401;
+      const code =
+        msg.startsWith('AUTH_RATE_LIMITED') || msg.startsWith('AUTH_ACCOUNT_LOCKED')
+          ? 'RATE_LIMITED'
+          : 'INVALID_CREDENTIALS';
+      appendAuditLog(db, 'AUTH_LOGIN_PIN_FAILED', 'AUTH', String(req.body?.email || 'unknown'), msg);
+      saveDatabase(db);
+      return res.status(status).json({ error: msg, code });
+    }
+  });
+
+  app.post('/api/auth/pin/setup', (req, res) => {
+    const actor = getRequestActor(req, res);
+    if (actor.id === 'usr-anonymous') {
+      return res.status(401).json({ error: 'AUTH_REQUIRED' });
+    }
+    const { pin } = (req.body || {}) as { pin?: string };
+    try {
+      const updatedUser = authService.setupPinForUser(actor.id, pin || '');
+      appendAuditLog(
+        db,
+        'AUTH_PIN_CONFIGURED',
+        'AUTH',
+        updatedUser.id,
+        `PIN Rápido (6-8 dígitos) configurado para ${updatedUser.email}.`,
+        updatedUser
+      );
+      saveDatabase(db);
+      return res.json({ ok: true, user: updatedUser });
+    } catch (err: any) {
+      const msg = err?.message || 'Falha ao configurar PIN.';
+      return res.status(400).json({ error: msg, code: 'INVALID_PIN' });
+    }
+  });
+
+  const resolveWebAuthnRpId = (req: express.Request): string => {
+    const sanitizeHost = (raw: string): string => {
+      const cleaned = raw.trim().toLowerCase().replace(/^https?:\/\//, '').split('/')[0] || '';
+      const hostOnly = cleaned.startsWith('[')
+        ? cleaned.slice(0, cleaned.indexOf(']') + 1)
+        : cleaned.split(':')[0] || '';
+      if (/^[a-z0-9.-]+$/.test(hostOnly) || hostOnly === '[::1]') {
+        return hostOnly;
+      }
+      return '';
+    };
+
+    const bodyRpId =
+      typeof req.body?.rpId === 'string' ? sanitizeHost(req.body.rpId) : '';
+    if (bodyRpId) return bodyRpId;
+
+    const originHeader = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
+    if (originHeader) {
+      try {
+        const originHost = sanitizeHost(new URL(originHeader).hostname);
+        if (originHost) return originHost;
+      } catch {
+        // Ignore malformed Origin header and fall back to Host header
+      }
+    }
+
+    const hostHeader = typeof req.headers.host === 'string' ? sanitizeHost(req.headers.host) : '';
+    return hostHeader || 'localhost';
+  };
+
+  app.post('/api/auth/webauthn/register-account/options', (req, res) => {
+    try {
+      const { name, email, role } = (req.body || {}) as {
+        name?: string;
+        email?: string;
+        role?: RbacRole;
+        rpId?: string;
+      };
+      const resolvedRpId = resolveWebAuthnRpId(req);
+      const options = authService.createWebAuthnRegistrationOptions({
+        name: name || '',
+        email: email || '',
+        role,
+        rpId: resolvedRpId,
+        ipAddress: req.ip || '127.0.0.1',
+      });
+      return res.json({ ...options, publicKey: options });
+    } catch (err: any) {
+      const msg = err?.message || 'Falha ao gerar opções WebAuthn de cadastro.';
+      const status = msg.startsWith('EMAIL_ALREADY_EXISTS')
+        ? 409
+        : msg.startsWith('ROLE_ELEVATION_BLOCKED')
+          ? 403
+          : msg.startsWith('AUTH_RATE_LIMITED')
+            ? 429
+            : 400;
+      return res.status(status).json({ error: msg });
+    }
+  });
+
+  app.post('/api/auth/webauthn/register-account/verify', (req, res) => {
+    try {
+      const {
+        challengeId,
+        credentialId,
+        clientDataJSON,
+        attestationObject,
+        authenticatorData,
+        publicKeySpkiBase64,
+        coseAlgorithm,
+        transports,
+        trustDevice,
+        credential,
+      } = (req.body || {}) as {
+        challengeId?: string;
+        credentialId?: string;
+        clientDataJSON?: string;
+        attestationObject?: string;
+        authenticatorData?: string;
+        publicKeySpkiBase64?: string;
+        coseAlgorithm?: number;
+        transports?: string[];
+        trustDevice?: boolean;
+        credential?: {
+          id?: string;
+          rawId?: string;
+          response?: {
+            clientDataJSON?: string;
+            attestationObject?: string;
+            authenticatorData?: string;
+            publicKey?: string;
+            publicKeyAlgorithm?: number;
+            transports?: string[];
+          };
+        };
+      };
+      const result = authService.verifyWebAuthnAccountRegistration({
+        challengeId,
+        credentialId: credentialId || credential?.id || credential?.rawId || '',
+        clientDataJSON: clientDataJSON || credential?.response?.clientDataJSON || '',
+        attestationObject: attestationObject || credential?.response?.attestationObject,
+        authenticatorData: authenticatorData || credential?.response?.authenticatorData,
+        publicKeySpkiBase64: publicKeySpkiBase64 || credential?.response?.publicKey,
+        coseAlgorithm: coseAlgorithm ?? credential?.response?.publicKeyAlgorithm,
+        transports: transports || credential?.response?.transports,
+        trustDevice: trustDevice !== false,
+        ipAddress: req.ip || '127.0.0.1',
+        userAgent: String(req.headers['user-agent'] || 'unknown'),
+      });
+      setSessionCookies(res, result.sessionId, result.csrfToken, {
+        trustDevice: result.trustDevice,
+      });
+      appendAuditLog(
+        db,
+        'USER_WEBAUTHN_REGISTERED',
+        'AUTH',
+        result.user.id,
+        `Conta "${result.user.email}" cadastrada via Windows Hello / WebAuthn FIDO2 com perfil ${result.user.role}.`,
+        result.user
+      );
+      saveDatabase(db);
+      return res.status(201).json({
+        authenticated: true,
+        mfaRequired: false,
+        user: result.user,
+        sessionId: result.sessionId,
+        csrfToken: result.csrfToken,
+      });
+    } catch (err: any) {
+      const msg = err?.message || 'Falha na verificação WebAuthn de cadastro.';
+      const status = msg.startsWith('ROLE_ELEVATION_BLOCKED')
+        ? 403
+        : msg.startsWith('EMAIL_ALREADY_EXISTS')
+          ? 409
+          : 400;
+      return res.status(status).json({ error: msg });
+    }
+  });
+
+  app.post('/api/auth/webauthn/login/options', (req, res) => {
+    try {
+      const { email } = (req.body || {}) as { email?: string; rpId?: string };
+      const resolvedRpId = resolveWebAuthnRpId(req);
+      const options = authService.createWebAuthnLoginOptions({
+        email,
+        rpId: resolvedRpId,
+        ipAddress: req.ip || '127.0.0.1',
+      });
+      return res.json({ ...options, publicKey: options });
+    } catch (err: any) {
+      const msg = err?.message || 'Falha ao gerar desafio de login WebAuthn.';
+      return res.status(400).json({ error: msg });
+    }
+  });
+
+  app.post('/api/auth/webauthn/login/verify', (req, res) => {
+    try {
+      const {
+        challengeId,
+        credentialId,
+        clientDataJSON,
+        authenticatorData,
+        signature,
+        email,
+        trustDevice,
+        credential,
+      } = (req.body || {}) as {
+        challengeId?: string;
+        credentialId?: string;
+        clientDataJSON?: string;
+        authenticatorData?: string;
+        signature?: string;
+        email?: string;
+        trustDevice?: boolean;
+        credential?: {
+          id?: string;
+          rawId?: string;
+          response?: {
+            clientDataJSON?: string;
+            authenticatorData?: string;
+            signature?: string;
+          };
+        };
+      };
+      const outcome = authService.verifyWebAuthnLogin({
+        challengeId,
+        credentialId: credentialId || credential?.id || credential?.rawId || '',
+        clientDataJSON: clientDataJSON || credential?.response?.clientDataJSON || '',
+        authenticatorData: authenticatorData || credential?.response?.authenticatorData || '',
+        signature: signature || credential?.response?.signature || '',
+        email,
+        trustDevice: trustDevice !== false,
+        ipAddress: req.ip || '127.0.0.1',
+        userAgent: String(req.headers['user-agent'] || 'unknown'),
+      });
+      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
+        trustDevice: outcome.trustDevice,
+      });
+      appendAuditLog(
+        db,
+        'AUTH_WEBAUTHN_LOGIN_SUCCESS',
+        'AUTH',
+        outcome.user.id,
+        `Login via Windows Hello / WebAuthn FIDO2 efetuado para ${outcome.user.email}.`,
+        outcome.user
+      );
+      saveDatabase(db);
+      return res.json({
+        authenticated: !outcome.mfaRequired,
+        mfaRequired: outcome.mfaRequired,
+        requiresTotp: outcome.requiresTotp,
+        preAuthToken: outcome.preAuthToken,
+        trustDevice: outcome.trustDevice,
+        serverTimeIso: outcome.serverTimeIso,
+        totpPeriodSeconds: outcome.totpPeriodSeconds,
+        user: outcome.user,
+        sessionId: outcome.sessionId,
+        csrfToken: outcome.csrfToken,
+      });
+    } catch (err: any) {
+      const msg = err?.message || 'Falha na autenticação Windows Hello / WebAuthn.';
+      const status =
+        msg.startsWith('AUTH_RATE_LIMITED') || msg.startsWith('AUTH_ACCOUNT_LOCKED') ? 429 : 401;
+      appendAuditLog(db, 'AUTH_WEBAUTHN_LOGIN_FAILED', 'AUTH', String(req.body?.email || 'unknown'), msg);
+      saveDatabase(db);
+      return res.status(status).json({ error: msg });
+    }
+  });
+
+  app.post('/api/auth/windows-hello/native-register', async (req, res) => {
+    try {
+      const { name, email, role, trustDevice } = (req.body || {}) as {
+        name?: string;
+        email?: string;
+        role?: RbacRole;
+        trustDevice?: boolean;
+      };
+      const result = await authService.registerNativeWindowsHelloAccount({
+        name: name || '',
+        email: email || '',
+        role,
+        trustDevice: trustDevice !== false,
+        ipAddress: req.ip || '127.0.0.1',
+        userAgent: String(req.headers['user-agent'] || 'unknown'),
+      });
+      setSessionCookies(res, result.sessionId, result.csrfToken, {
+        trustDevice: result.trustDevice,
+      });
+      appendAuditLog(
+        db,
+        'USER_WINHELLO_NATIVE_REGISTERED',
+        'AUTH',
+        result.user.id,
+        `Conta "${result.user.email}" cadastrada via Windows Hello Nativo (UserConsentVerifier + ES256 P-256) com perfil ${result.user.role}.`,
+        result.user
+      );
+      saveDatabase(db);
+      return res.status(201).json({
+        authenticated: true,
+        mfaRequired: false,
+        nativeWindowsHello: true,
+        keyAlgorithm: result.keyAlgorithm,
+        credentialId: result.credentialId,
+        user: result.user,
+        sessionId: result.sessionId,
+        csrfToken: result.csrfToken,
+      });
+    } catch (err: any) {
+      const msg = err?.message || 'Falha ao cadastrar com Windows Hello nativo.';
+      const code = msg.includes(':') ? msg.split(':')[0]!.trim() : 'WINDOWS_HELLO_NATIVE_FAILED';
+      const status =
+        code === 'WINDOWS_HELLO_OS_UNSUPPORTED'
+          ? 501
+          : code === 'EMAIL_ALREADY_EXISTS'
+            ? 409
+            : code === 'ROLE_ELEVATION_BLOCKED'
+              ? 403
+              : code === 'AUTH_RATE_LIMITED'
+                ? 429
+                : code === 'WINDOWS_HELLO_CANCELLED'
+                  ? 401
+                  : 400;
+      appendAuditLog(
+        db,
+        'AUTH_WINHELLO_NATIVE_REGISTER_FAILED',
+        'AUTH',
+        String(req.body?.email || 'unknown'),
+        msg
+      );
+      saveDatabase(db);
+      return res.status(status).json({ error: msg, code, platform: process.platform });
+    }
+  });
+
+  app.post('/api/auth/windows-hello/native-login', async (req, res) => {
+    try {
+      const { email, trustDevice } = (req.body || {}) as {
+        email?: string;
+        trustDevice?: boolean;
+      };
+      const outcome = await authService.loginNativeWindowsHelloAccount({
+        email,
+        trustDevice: trustDevice !== false,
+        ipAddress: req.ip || '127.0.0.1',
+        userAgent: String(req.headers['user-agent'] || 'unknown'),
+      });
+      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
+        trustDevice: outcome.trustDevice,
+      });
+      appendAuditLog(
+        db,
+        'AUTH_WINHELLO_NATIVE_LOGIN_SUCCESS',
+        'AUTH',
+        outcome.user.id,
+        `Login via Windows Hello Nativo (UserConsentVerifier) efetuado para ${outcome.user.email}.`,
+        outcome.user
+      );
+      saveDatabase(db);
+      return res.json({
+        authenticated: !outcome.mfaRequired,
+        mfaRequired: outcome.mfaRequired,
+        requiresTotp: outcome.requiresTotp,
+        preAuthToken: outcome.preAuthToken,
+        trustDevice: outcome.trustDevice,
+        serverTimeIso: outcome.serverTimeIso,
+        totpPeriodSeconds: outcome.totpPeriodSeconds,
+        nativeWindowsHello: true,
+        user: outcome.user,
+        sessionId: outcome.sessionId,
+        csrfToken: outcome.csrfToken,
+      });
+    } catch (err: any) {
+      const msg = err?.message || 'Falha ao autenticar via Windows Hello nativo.';
+      const code = msg.includes(':') ? msg.split(':')[0]!.trim() : 'WINDOWS_HELLO_NATIVE_FAILED';
+      const status =
+        code === 'WINDOWS_HELLO_OS_UNSUPPORTED'
+          ? 501
+          : code === 'AUTH_RATE_LIMITED' || code === 'AUTH_ACCOUNT_LOCKED'
+            ? 429
+            : code === 'WEBAUTHN_CREDENTIAL_NOT_FOUND'
+              ? 404
+              : 401;
+      appendAuditLog(
+        db,
+        'AUTH_WINHELLO_NATIVE_LOGIN_FAILED',
+        'AUTH',
+        String(req.body?.email || 'unknown'),
+        msg
+      );
+      saveDatabase(db);
+      return res.status(status).json({ error: msg, code, platform: process.platform });
+    }
+  });
+
   app.post('/api/auth/logout', (req, res) => {
     const actor = (req as any).authUser as PublicUserView | undefined;
     const sessionToken = extractSessionTokenFromRequest(req).token;
@@ -1945,6 +2406,63 @@ export async function createWinHoodApp(options?: {
       },
       csrfToken: validated?.session.csrfToken || (req as any).authSession?.csrfToken,
     });
+  });
+
+  app.delete('/api/auth/me', (req, res) => {
+    const actor = (req as any).authUser as PublicUserView | undefined;
+    const authSession = (req as any).authSession as { csrfToken?: string } | undefined;
+    if (!actor || actor.id === 'usr-anonymous' || actor.id === 'usr-test-header') {
+      return res.status(401).json({
+        error: 'AUTH_REQUIRED',
+        code: 'SESSION_INVALID',
+        message: 'Sessão autenticada obrigatória para excluir conta local.',
+      });
+    }
+
+    // Require valid CSRF token for account deletion regardless of transport
+    const expectedCsrf = String(authSession?.csrfToken || '');
+    const providedCsrf = String(req.headers['x-csrf-token'] || req.headers['x-winhood-csrf'] || '').trim();
+    const expBuf = Buffer.from(expectedCsrf, 'utf8');
+    const provBuf = Buffer.from(providedCsrf, 'utf8');
+    if (
+      !expectedCsrf ||
+      expBuf.length !== provBuf.length ||
+      !crypto.timingSafeEqual(expBuf, provBuf)
+    ) {
+      return res.status(403).json({
+        error: 'CSRF_INVALID',
+        code: 'CSRF_INVALID',
+        message: 'Token CSRF ausente ou inválido para exclusão de conta.',
+      });
+    }
+
+    const { password, pin } = (req.body || {}) as { password?: string; pin?: string };
+    try {
+      const outcome = authService.deleteOwnAccount(actor.id, { password, pin });
+      clearSessionCookies(res);
+      appendAuditLog(
+        db,
+        'USER_ACCOUNT_DELETED',
+        'AUTH',
+        outcome.deletedUserId,
+        `Conta local "${outcome.email}" excluída pelo próprio titular (${outcome.revokedSessionsCount} sessões revogadas).`,
+        actor
+      );
+      saveDatabase(db, true);
+      return res.json({
+        ok: true,
+        deletedUserId: outcome.deletedUserId,
+        revokedSessionsCount: outcome.revokedSessionsCount,
+      });
+    } catch (err: any) {
+      const msg = err?.message || 'Falha ao excluir conta local.';
+      const status = msg.startsWith('AUTH_INVALID_CREDENTIALS')
+        ? 401
+        : msg.startsWith('USER_NOT_FOUND')
+          ? 404
+          : 400;
+      return res.status(status).json({ error: msg });
+    }
   });
 
   app.get('/api/auth/session', (req, res) => {

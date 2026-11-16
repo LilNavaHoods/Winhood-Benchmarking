@@ -9,9 +9,9 @@ import crypto28 from "node:crypto";
 import fs16 from "node:fs";
 import os10 from "node:os";
 import path17 from "node:path";
-import { execFile } from "node:child_process";
+import { execFile as execFile2 } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
+import { promisify as promisify2 } from "node:util";
 import express from "express";
 import { createServer as createViteServer } from "vite";
 
@@ -22169,9 +22169,12 @@ function updateHardwareProfile(updates) {
 }
 
 // src/security/AuthService.ts
+import { execFile } from "node:child_process";
 import crypto18 from "node:crypto";
 import fs13 from "node:fs";
 import path14 from "node:path";
+import { promisify } from "node:util";
+var execFileAsync = promisify(execFile);
 function isValidEmailAddress(rawEmail) {
   if (!rawEmail || rawEmail.length > 320 || /\s/.test(rawEmail)) {
     return false;
@@ -22231,6 +22234,193 @@ var PERMISSIONS_MATRIX = {
   ]),
   AUDITOR: /* @__PURE__ */ new Set(["read:all", "audit:read", "reports:export"])
 };
+function validateQuickPin(rawPin) {
+  const clean = (rawPin || "").trim();
+  if (!/^\d{6,8}$/.test(clean)) {
+    throw new Error("INVALID_PIN: O PIN r\xE1pido deve conter entre 6 e 8 d\xEDgitos num\xE9ricos.");
+  }
+  if (/^(\d)\1+$/.test(clean)) {
+    throw new Error("WEAK_PIN: PIN com d\xEDgitos repetidos (ex.: 111111, 000000) n\xE3o \xE9 permitido.");
+  }
+  let isAscending = true;
+  let isDescending = true;
+  for (let i = 1; i < clean.length; i++) {
+    const prev = clean.charCodeAt(i - 1) - 48;
+    const curr = clean.charCodeAt(i) - 48;
+    if (curr - prev !== 1) isAscending = false;
+    if (prev - curr !== 1) isDescending = false;
+  }
+  if (isAscending || isDescending) {
+    throw new Error("WEAK_PIN: PIN em sequ\xEAncia simples (ex.: 123456, 654321) n\xE3o \xE9 permitido.");
+  }
+  return clean;
+}
+function decodeBase64OrBase64Url(input) {
+  const clean = (input || "").trim();
+  if (!clean) return Buffer.alloc(0);
+  const normalized = clean.replace(/-/g, "+").replace(/_/g, "/");
+  const padLen = (4 - normalized.length % 4) % 4;
+  return Buffer.from(normalized + "=".repeat(padLen), "base64");
+}
+function decodeCborItem(buf, offset = 0) {
+  if (offset >= buf.length) {
+    throw new Error("WEBAUTHN_CBOR_INVALID: Fim inesperado do buffer CBOR.");
+  }
+  const initialByte = buf[offset];
+  const majorType = initialByte >> 5;
+  const additionalInfo = initialByte & 31;
+  let ptr = offset + 1;
+  let lengthVal = 0;
+  if (additionalInfo < 24) {
+    lengthVal = additionalInfo;
+  } else if (additionalInfo === 24) {
+    if (ptr + 1 > buf.length) throw new Error("WEBAUTHN_CBOR_INVALID: Uint8 truncado.");
+    lengthVal = buf.readUInt8(ptr);
+    ptr += 1;
+  } else if (additionalInfo === 25) {
+    if (ptr + 2 > buf.length) throw new Error("WEBAUTHN_CBOR_INVALID: Uint16 truncado.");
+    lengthVal = buf.readUInt16BE(ptr);
+    ptr += 2;
+  } else if (additionalInfo === 26) {
+    if (ptr + 4 > buf.length) throw new Error("WEBAUTHN_CBOR_INVALID: Uint32 truncado.");
+    lengthVal = buf.readUInt32BE(ptr);
+    ptr += 4;
+  } else if (additionalInfo === 27) {
+    if (ptr + 8 > buf.length) throw new Error("WEBAUTHN_CBOR_INVALID: Uint64 truncado.");
+    lengthVal = Number(buf.readBigUInt64BE(ptr));
+    ptr += 8;
+  } else {
+    throw new Error("WEBAUTHN_CBOR_INVALID: Informa\xE7\xE3o adicional CBOR n\xE3o suportada.");
+  }
+  switch (majorType) {
+    case 0:
+      return { value: lengthVal, nextOffset: ptr };
+    case 1:
+      return { value: -1 - lengthVal, nextOffset: ptr };
+    case 2: {
+      if (ptr + lengthVal > buf.length) throw new Error("WEBAUTHN_CBOR_INVALID: ByteString truncada.");
+      return { value: buf.subarray(ptr, ptr + lengthVal), nextOffset: ptr + lengthVal };
+    }
+    case 3: {
+      if (ptr + lengthVal > buf.length) throw new Error("WEBAUTHN_CBOR_INVALID: TextString truncada.");
+      return {
+        value: buf.subarray(ptr, ptr + lengthVal).toString("utf8"),
+        nextOffset: ptr + lengthVal
+      };
+    }
+    case 4: {
+      const arr = [];
+      let cur = ptr;
+      for (let i = 0; i < lengthVal; i++) {
+        const decoded = decodeCborItem(buf, cur);
+        arr.push(decoded.value);
+        cur = decoded.nextOffset;
+      }
+      return { value: arr, nextOffset: cur };
+    }
+    case 5: {
+      const map = /* @__PURE__ */ new Map();
+      let cur = ptr;
+      for (let i = 0; i < lengthVal; i++) {
+        const k = decodeCborItem(buf, cur);
+        const v = decodeCborItem(buf, k.nextOffset);
+        map.set(k.value, v.value);
+        cur = v.nextOffset;
+      }
+      return { value: map, nextOffset: cur };
+    }
+    case 7: {
+      if (additionalInfo === 20) return { value: false, nextOffset: ptr };
+      if (additionalInfo === 21) return { value: true, nextOffset: ptr };
+      if (additionalInfo === 22) return { value: null, nextOffset: ptr };
+      return { value: lengthVal, nextOffset: ptr };
+    }
+    default:
+      throw new Error(`WEBAUTHN_CBOR_INVALID: Major type ${majorType} n\xE3o suportado.`);
+  }
+}
+function cosePublicKeyToSpkiBase64(coseBytes) {
+  const decoded = decodeCborItem(coseBytes, 0).value;
+  if (!(decoded instanceof Map)) {
+    throw new Error("WEBAUTHN_COSE_INVALID: Chave p\xFAblica COSE n\xE3o \xE9 um mapa CBOR v\xE1lido.");
+  }
+  const kty = decoded.get(1);
+  const alg = decoded.get(3);
+  if (alg === -7 && kty === 2) {
+    const crv = decoded.get(-1);
+    const xBuf = decoded.get(-2);
+    const yBuf = decoded.get(-3);
+    if (crv !== 1 || !Buffer.isBuffer(xBuf) || !Buffer.isBuffer(yBuf)) {
+      throw new Error("WEBAUTHN_COSE_INVALID: Coordenadas EC2 P-256 inv\xE1lidas na chave COSE.");
+    }
+    const keyObj = crypto18.createPublicKey({
+      key: {
+        kty: "EC",
+        crv: "P-256",
+        x: xBuf.toString("base64url"),
+        y: yBuf.toString("base64url")
+      },
+      format: "jwk"
+    });
+    const spkiDer = keyObj.export({ type: "spki", format: "der" });
+    return { publicKeySpkiBase64: spkiDer.toString("base64"), coseAlgorithm: -7 };
+  }
+  if (alg === -257 && kty === 3) {
+    const nBuf = decoded.get(-1);
+    const eBuf = decoded.get(-2);
+    if (!Buffer.isBuffer(nBuf) || !Buffer.isBuffer(eBuf)) {
+      throw new Error("WEBAUTHN_COSE_INVALID: Par\xE2metros RSA (n, e) inv\xE1lidos na chave COSE.");
+    }
+    const keyObj = crypto18.createPublicKey({
+      key: {
+        kty: "RSA",
+        n: nBuf.toString("base64url"),
+        e: eBuf.toString("base64url")
+      },
+      format: "jwk"
+    });
+    const spkiDer = keyObj.export({ type: "spki", format: "der" });
+    return { publicKeySpkiBase64: spkiDer.toString("base64"), coseAlgorithm: -257 };
+  }
+  throw new Error(
+    `WEBAUTHN_ALG_UNSUPPORTED: Algoritmo COSE ${String(alg)} n\xE3o suportado (use ES256 -7 ou RS256 -257).`
+  );
+}
+function normalizeWebAuthnRpId(rawRpId) {
+  const clean = (rawRpId || "").trim().toLowerCase();
+  if (!clean) return "localhost";
+  const withoutPort = clean.split(":")[0].trim();
+  if (!withoutPort || withoutPort === "127.0.0.1" || withoutPort === "[::1]") {
+    return "localhost";
+  }
+  return withoutPort;
+}
+function validateWebAuthnOrigin(originStr, expectedRpId) {
+  let parsed;
+  try {
+    parsed = new URL(originStr);
+  } catch {
+    throw new Error("WEBAUTHN_ORIGIN_INVALID: Origin malformado no clientDataJSON.");
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  const isLoopback = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
+  if (isLoopback) {
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error("WEBAUTHN_ORIGIN_INVALID: Protocolo de loopback inv\xE1lido.");
+    }
+    return { hostname };
+  }
+  if (parsed.protocol !== "https:") {
+    throw new Error("WEBAUTHN_ORIGIN_INVALID: WebAuthn fora de loopback exige HTTPS.");
+  }
+  const rpClean = expectedRpId.toLowerCase();
+  if (hostname !== rpClean && !hostname.endsWith(`.${rpClean}`)) {
+    throw new Error(
+      `WEBAUTHN_ORIGIN_MISMATCH: Origin "${hostname}" n\xE3o corresponde ao rpId "${rpClean}".`
+    );
+  }
+  return { hostname };
+}
 var BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 function base32Encode(buf) {
   let bits = 0;
@@ -22338,6 +22528,7 @@ function atomicWriteSecretFile(filePath, content) {
 var AuthService = class _AuthService {
   constructor(dataDir) {
     this.ipRateLimits = /* @__PURE__ */ new Map();
+    this.webauthnChallenges = /* @__PURE__ */ new Map();
     this.bootstrapInProgress = false;
     this.registrationInProgress = /* @__PURE__ */ new Set();
     const base = dataDir || path14.resolve(process.cwd(), ".winhood_data");
@@ -22749,14 +22940,7 @@ ${rawToken}
     this.save();
     const mfaRequired = user.mfaEnabled && !mfaVerified;
     return {
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        mfaEnabled: user.mfaEnabled,
-        mfaVerified: session.mfaVerified
-      },
+      user: this.toPublicUserView(user, session.mfaVerified),
       sessionId,
       csrfToken: session.csrfToken,
       mfaRequired,
@@ -22766,6 +22950,98 @@ ${rawToken}
       serverTimeIso: (/* @__PURE__ */ new Date()).toISOString(),
       totpPeriodSeconds: 30
     };
+  }
+  loginWithPin(params) {
+    const ipAddress = params.ipAddress || "127.0.0.1";
+    this.checkIpRateLimit(ipAddress);
+    const email = (params.email || "").trim().toLowerCase();
+    let user;
+    if (email) {
+      user = this.db.users.find((u) => u.email === email);
+    } else {
+      const pinUsers = this.db.users.filter((u) => !u.disabled && u.pinEnabled && u.pinHash);
+      if (pinUsers.length === 1) {
+        user = pinUsers[0];
+      } else if (this.db.users.length === 1) {
+        user = this.db.users[0];
+      }
+    }
+    if (!user || user.disabled) {
+      this.recordIpFailure(ipAddress);
+      throw new Error("AUTH_INVALID_CREDENTIALS: E-mail ou PIN r\xE1pido inv\xE1lido.");
+    }
+    if (user.lockedUntil && Date.now() < Date.parse(user.lockedUntil)) {
+      throw new Error("AUTH_ACCOUNT_LOCKED: Conta temporariamente bloqueada ap\xF3s tentativas excessivas.");
+    }
+    const candidatePin = (params.pin || "").trim();
+    if (!user.pinEnabled || !user.pinHash || !/^\d{6,8}$/.test(candidatePin) || !verifyPassword(candidatePin, user.pinHash)) {
+      user.failedLoginAttempts += 1;
+      if (user.failedLoginAttempts >= _AuthService.MAX_LOGIN_ATTEMPTS) {
+        user.lockedUntil = new Date(Date.now() + _AuthService.LOCKOUT_DURATION_MS).toISOString();
+      }
+      this.recordIpFailure(ipAddress);
+      this.save();
+      throw new Error("AUTH_INVALID_CREDENTIALS: E-mail ou PIN r\xE1pido inv\xE1lido.");
+    }
+    const plainTotpSecret = this.decryptSecretAtRest(user.totpSecretBase32);
+    let mfaVerified = !user.mfaEnabled;
+    if (user.mfaEnabled && plainTotpSecret && params.totpCode) {
+      const check = verifyTotpCodeWithStep(
+        plainTotpSecret,
+        params.totpCode,
+        user.lastAcceptedTotpStep
+      );
+      if (check.replayRejected) {
+        user.failedLoginAttempts += 1;
+        this.save();
+        throw new Error(
+          "AUTH_TOTP_REPLAY: C\xF3digo TOTP j\xE1 utilizado nesta janela de 30s. Aguarde o pr\xF3ximo token."
+        );
+      }
+      if (!check.valid) {
+        user.failedLoginAttempts += 1;
+        this.save();
+        throw new Error("AUTH_INVALID_MFA: C\xF3digo TOTP MFA inv\xE1lido.");
+      }
+      user.lastAcceptedTotpStep = check.matchedStep;
+      mfaVerified = true;
+    }
+    user.failedLoginAttempts = 0;
+    user.lockedUntil = null;
+    user.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    const trustDevice = Boolean(params.trustDevice);
+    const { sessionId, session } = this.createSessionRecord(
+      user,
+      mfaVerified,
+      ipAddress,
+      params.userAgent || "unknown",
+      { trustDevice }
+    );
+    this.save();
+    const mfaRequired = user.mfaEnabled && !mfaVerified;
+    return {
+      user: this.toPublicUserView(user, session.mfaVerified),
+      sessionId,
+      csrfToken: session.csrfToken,
+      mfaRequired,
+      requiresTotp: mfaRequired,
+      ...mfaRequired ? { preAuthToken: this.createPreAuthToken(user.id, user.email, trustDevice) } : {},
+      trustDevice,
+      serverTimeIso: (/* @__PURE__ */ new Date()).toISOString(),
+      totpPeriodSeconds: 30
+    };
+  }
+  setupPinForUser(userId, rawPin) {
+    const user = this.db.users.find((u) => u.id === userId);
+    if (!user || user.disabled) {
+      throw new Error("Usu\xE1rio n\xE3o encontrado.");
+    }
+    const validPin = validateQuickPin(rawPin);
+    user.pinHash = hashPassword(validPin);
+    user.pinEnabled = true;
+    user.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    this.save();
+    return this.toPublicUserView(user, true);
   }
   authenticateWithTotpPreAuth(params) {
     const ipAddress = params.ipAddress || "127.0.0.1";
@@ -22984,15 +23260,34 @@ ${rawToken}
     session.role = effectiveRole;
     return {
       user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        role: effectiveRole,
-        mfaEnabled: user.mfaEnabled,
-        mfaVerified: session.mfaVerified
+        ...this.toPublicUserView(user, session.mfaVerified),
+        role: effectiveRole
       },
       session
     };
+  }
+  toPublicUserView(user, mfaVerified) {
+    return {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      mfaEnabled: user.mfaEnabled,
+      mfaVerified,
+      pinEnabled: Boolean(user.pinEnabled && user.pinHash),
+      webauthnEnabled: Boolean(user.webauthnCredentials && user.webauthnCredentials.length > 0)
+    };
+  }
+  completeBootstrapOnFirstAccount(nowIso) {
+    this.db.bootstrapTokenSha256 = null;
+    this.db.bootstrapTokenExpiresAt = null;
+    this.db.bootstrapCompletedAt = nowIso;
+    try {
+      if (fs13.existsSync(this.bootstrapTokenFilePath)) {
+        fs13.unlinkSync(this.bootstrapTokenFilePath);
+      }
+    } catch {
+    }
   }
   switchSessionPreviewRole(sessionId, newRole) {
     const existing = this.validateSession(sessionId);
@@ -23084,49 +23379,57 @@ ${rawToken}
   registerAccount(params) {
     const ipAddress = params.ipAddress || "127.0.0.1";
     this.checkIpRateLimit(ipAddress);
-    if (this.isBootstrapRequired()) {
-      throw new Error(
-        "BOOTSTRAP_REQUIRED: A inicializa\xE7\xE3o administrativa precisa ser conclu\xEDda antes do cadastro p\xFAblico."
-      );
-    }
     const cleanName = (params.name || "").trim();
     const cleanEmail = (params.email || "").trim().toLowerCase();
     const cleanPassword = params.password || "";
+    const rawPin = (params.pin || "").trim();
     if (cleanName.length < 2) {
       throw new Error("INVALID_NAME: O nome completo deve possuir pelo menos 2 caracteres.");
     }
     if (!isValidEmailAddress(cleanEmail)) {
       throw new Error("INVALID_EMAIL: Informe um endere\xE7o de e-mail v\xE1lido.");
     }
-    if (cleanPassword.length < 10) {
+    const validatedPin = rawPin ? validateQuickPin(rawPin) : null;
+    if (!validatedPin && cleanPassword.length < 10) {
+      throw new Error("WEAK_PASSWORD: A senha deve possuir pelo menos 10 caracteres.");
+    }
+    if (validatedPin && cleanPassword.length > 0 && cleanPassword.length < 10) {
       throw new Error("WEAK_PASSWORD: A senha deve possuir pelo menos 10 caracteres.");
     }
     if (this.registrationInProgress.has(cleanEmail) || this.db.users.some((u) => u.email === cleanEmail)) {
       this.recordIpFailure(ipAddress);
       throw new Error("EMAIL_ALREADY_EXISTS: Este e-mail j\xE1 est\xE1 cadastrado na plataforma.");
     }
-    const requestedRole = params.role || "SECURITY_LEAD";
-    if (requestedRole === "ADMIN") {
-      throw new Error(
-        "ROLE_ELEVATION_BLOCKED: Cria\xE7\xE3o de perfil ADMIN exige privil\xE9gio administrativo ou bootstrap inicial."
-      );
+    const isFirstUser = this.db.users.length === 0;
+    let assignedRole = "ADMIN";
+    if (!isFirstUser) {
+      const requestedRole = params.role || "SECURITY_LEAD";
+      if (requestedRole === "ADMIN") {
+        throw new Error(
+          "ROLE_ELEVATION_BLOCKED: Cria\xE7\xE3o de perfil ADMIN exige privil\xE9gio administrativo ou bootstrap inicial."
+        );
+      }
+      const allowedSelfRoles = ["SECURITY_LEAD", "QA_ENGINEER", "AUDITOR"];
+      if (!allowedSelfRoles.includes(requestedRole)) {
+        throw new Error("INVALID_ROLE: Perfil de acesso selecionado \xE9 inv\xE1lido.");
+      }
+      assignedRole = requestedRole;
     }
-    const allowedSelfRoles = ["SECURITY_LEAD", "QA_ENGINEER", "AUDITOR"];
-    if (!allowedSelfRoles.includes(requestedRole)) {
-      throw new Error("INVALID_ROLE: Perfil de acesso selecionado \xE9 inv\xE1lido.");
-    }
-    const assignedRole = requestedRole;
     this.registrationInProgress.add(cleanEmail);
     try {
       const now = (/* @__PURE__ */ new Date()).toISOString();
       const totpSecret = params.enableMfa ? base32Encode(crypto18.randomBytes(20)) : null;
       const recoveryGen = totpSecret ? generateRecoveryCodesSet(8) : null;
+      const effectivePasswordToHash = cleanPassword.length >= 10 ? cleanPassword : `wh-pin-fallback-${crypto18.randomBytes(24).toString("base64url")}`;
       const newUser = {
         id: `usr-${crypto18.randomUUID().slice(0, 8)}`,
         name: cleanName,
         email: cleanEmail,
         role: assignedRole,
-        passwordHash: hashPassword(cleanPassword),
+        passwordHash: hashPassword(effectivePasswordToHash),
+        pinHash: validatedPin ? hashPassword(validatedPin) : null,
+        pinEnabled: Boolean(validatedPin),
+        webauthnCredentials: [],
         mfaEnabled: Boolean(params.enableMfa),
         totpSecretBase32: totpSecret ? this.encryptSecretAtRest(totpSecret) : null,
         recoveryCodeHashes: recoveryGen ? recoveryGen.codeHashes : [],
@@ -23140,6 +23443,9 @@ ${rawToken}
         updatedAt: now
       };
       this.db.users.push(newUser);
+      if (isFirstUser) {
+        this.completeBootstrapOnFirstAccount(now);
+      }
       const { sessionId, session } = this.createSessionRecord(
         newUser,
         !newUser.mfaEnabled,
@@ -23148,14 +23454,7 @@ ${rawToken}
       );
       this.save();
       return {
-        user: {
-          id: newUser.id,
-          name: newUser.name,
-          email: newUser.email,
-          role: newUser.role,
-          mfaEnabled: newUser.mfaEnabled,
-          mfaVerified: session.mfaVerified
-        },
+        user: this.toPublicUserView(newUser, session.mfaVerified),
         sessionId,
         csrfToken: session.csrfToken,
         ...totpSecret ? {
@@ -23172,6 +23471,659 @@ ${rawToken}
       this.registrationInProgress.delete(cleanEmail);
     }
   }
+  pruneExpiredWebAuthnChallenges() {
+    const now = Date.now();
+    for (const [id, ch] of this.webauthnChallenges.entries()) {
+      if (now > ch.expiresAtMs) {
+        this.webauthnChallenges.delete(id);
+      }
+    }
+  }
+  beginWebAuthnAccountRegistration(params) {
+    return this.createWebAuthnRegistrationOptions(params);
+  }
+  createWebAuthnRegistrationOptions(params) {
+    const ipAddress = params.ipAddress || "127.0.0.1";
+    this.checkIpRateLimit(ipAddress);
+    this.pruneExpiredWebAuthnChallenges();
+    const cleanName = (params.name || "").trim();
+    const cleanEmail = (params.email || "").trim().toLowerCase();
+    if (cleanName.length < 2) {
+      throw new Error("INVALID_NAME: O nome completo deve possuir pelo menos 2 caracteres.");
+    }
+    if (!isValidEmailAddress(cleanEmail)) {
+      throw new Error("INVALID_EMAIL: Informe um endere\xE7o de e-mail v\xE1lido.");
+    }
+    if (this.db.users.some((u) => u.email === cleanEmail)) {
+      throw new Error("EMAIL_ALREADY_EXISTS: Este e-mail j\xE1 est\xE1 cadastrado na plataforma.");
+    }
+    if (this.db.users.length > 0 && params.role === "ADMIN") {
+      throw new Error(
+        "ROLE_ELEVATION_BLOCKED: Cria\xE7\xE3o de perfil ADMIN exige privil\xE9gio administrativo ou bootstrap inicial."
+      );
+    }
+    const rpId = normalizeWebAuthnRpId(params.rpId);
+    const challengeId = crypto18.randomUUID();
+    const challengeBase64Url = crypto18.randomBytes(32).toString("base64url");
+    const userHandle = crypto18.randomBytes(16).toString("base64url");
+    this.webauthnChallenges.set(challengeId, {
+      challengeId,
+      challengeBase64Url,
+      purpose: "REGISTER_ACCOUNT",
+      rpId,
+      expiresAtMs: Date.now() + _AuthService.PREAUTH_TTL_MS,
+      registrationMeta: {
+        name: cleanName,
+        email: cleanEmail,
+        role: params.role,
+        userHandle
+      }
+    });
+    return {
+      challengeId,
+      rp: {
+        name: "WinHood Benchmark Analyzer",
+        id: rpId
+      },
+      user: {
+        id: userHandle,
+        name: cleanEmail,
+        displayName: cleanName
+      },
+      challenge: challengeBase64Url,
+      pubKeyCredParams: [
+        { type: "public-key", alg: -7 },
+        { type: "public-key", alg: -257 }
+      ],
+      timeout: 6e4,
+      attestation: "none",
+      authenticatorSelection: {
+        authenticatorAttachment: "platform",
+        residentKey: "preferred",
+        userVerification: "required"
+      }
+    };
+  }
+  verifyWebAuthnAccountRegistration(params) {
+    const ipAddress = params.ipAddress || "127.0.0.1";
+    this.checkIpRateLimit(ipAddress);
+    this.pruneExpiredWebAuthnChallenges();
+    const clientDataBuf = decodeBase64OrBase64Url(params.clientDataJSON);
+    let clientData;
+    try {
+      clientData = JSON.parse(clientDataBuf.toString("utf8"));
+    } catch {
+      throw new Error("WEBAUTHN_CLIENT_DATA_INVALID: clientDataJSON malformado.");
+    }
+    if (clientData.type !== "webauthn.create" || !clientData.challenge || !clientData.origin) {
+      throw new Error("WEBAUTHN_CLIENT_DATA_INVALID: Tipo ou campos de clientDataJSON inv\xE1lidos.");
+    }
+    let challengeRecord;
+    if (params.challengeId) {
+      challengeRecord = this.webauthnChallenges.get(params.challengeId);
+    } else {
+      for (const rec of this.webauthnChallenges.values()) {
+        if (rec.purpose === "REGISTER_ACCOUNT" && rec.challengeBase64Url === clientData.challenge) {
+          challengeRecord = rec;
+          break;
+        }
+      }
+    }
+    if (!challengeRecord || challengeRecord.purpose !== "REGISTER_ACCOUNT") {
+      throw new Error("WEBAUTHN_CHALLENGE_INVALID: Desafio WebAuthn ausente, expirado ou j\xE1 utilizado.");
+    }
+    this.webauthnChallenges.delete(challengeRecord.challengeId);
+    if (Date.now() > challengeRecord.expiresAtMs) {
+      throw new Error("WEBAUTHN_CHALLENGE_EXPIRED: Desafio WebAuthn expirado (5 minutos).");
+    }
+    const expectedChallBuf = Buffer.from(challengeRecord.challengeBase64Url, "utf8");
+    const providedChallBuf = Buffer.from(clientData.challenge, "utf8");
+    if (expectedChallBuf.length !== providedChallBuf.length || !crypto18.timingSafeEqual(expectedChallBuf, providedChallBuf)) {
+      throw new Error("WEBAUTHN_CHALLENGE_MISMATCH: Desafio WebAuthn divergente.");
+    }
+    const { hostname: originHostname } = validateWebAuthnOrigin(
+      clientData.origin,
+      challengeRecord.rpId
+    );
+    let authDataBuf = null;
+    let publicKeySpkiBase64 = (params.publicKeySpkiBase64 || "").trim();
+    let coseAlgorithm = params.coseAlgorithm === -257 ? -257 : -7;
+    let extractedCredId = (params.credentialId || "").trim();
+    if (params.attestationObject) {
+      const attBuf = decodeBase64OrBase64Url(params.attestationObject);
+      const attMap = decodeCborItem(attBuf, 0).value;
+      if (attMap instanceof Map && Buffer.isBuffer(attMap.get("authData"))) {
+        authDataBuf = attMap.get("authData");
+      }
+    }
+    if (!authDataBuf && params.authenticatorData) {
+      authDataBuf = decodeBase64OrBase64Url(params.authenticatorData);
+    }
+    if (!authDataBuf || authDataBuf.length < 37) {
+      throw new Error("WEBAUTHN_AUTHDATA_INVALID: authenticatorData ausente ou truncado.");
+    }
+    const rpIdHash = authDataBuf.subarray(0, 32);
+    const expectedRpHash = crypto18.createHash("sha256").update(challengeRecord.rpId, "utf8").digest();
+    const originRpHash = crypto18.createHash("sha256").update(originHostname, "utf8").digest();
+    const rpMatches = crypto18.timingSafeEqual(rpIdHash, expectedRpHash) || crypto18.timingSafeEqual(rpIdHash, originRpHash);
+    if (!rpMatches) {
+      throw new Error("WEBAUTHN_RPID_MISMATCH: Hash do Relying Party (rpIdHash) inv\xE1lido.");
+    }
+    const flags = authDataBuf[32];
+    const userPresent = (flags & 1) !== 0;
+    const userVerified = (flags & 4) !== 0;
+    const attestedCredDataPresent = (flags & 64) !== 0;
+    if (!userPresent || !userVerified) {
+      throw new Error(
+        "WEBAUTHN_UV_REQUIRED: Presen\xE7a (UP) e verifica\xE7\xE3o biom\xE9trica/PIN do Windows Hello (UV) s\xE3o obrigat\xF3rias."
+      );
+    }
+    const signCount = authDataBuf.readUInt32BE(33);
+    if (attestedCredDataPresent && authDataBuf.length >= 55) {
+      const credIdLen = authDataBuf.readUInt16BE(53);
+      if (authDataBuf.length < 55 + credIdLen) {
+        throw new Error("WEBAUTHN_AUTHDATA_INVALID: attestedCredentialData truncado.");
+      }
+      const rawCredId = authDataBuf.subarray(55, 55 + credIdLen).toString("base64url");
+      if (!extractedCredId) {
+        extractedCredId = rawCredId;
+      }
+      const coseKeySlice = authDataBuf.subarray(55 + credIdLen);
+      if (coseKeySlice.length > 0 && !publicKeySpkiBase64) {
+        const parsedKey = cosePublicKeyToSpkiBase64(coseKeySlice);
+        publicKeySpkiBase64 = parsedKey.publicKeySpkiBase64;
+        coseAlgorithm = parsedKey.coseAlgorithm;
+      }
+    }
+    if (!extractedCredId || !publicKeySpkiBase64) {
+      throw new Error("WEBAUTHN_KEY_MISSING: Chave p\xFAblica ou identificador da credencial WebAuthn ausente.");
+    }
+    try {
+      const spkiBuf = decodeBase64OrBase64Url(publicKeySpkiBase64);
+      const keyObj = crypto18.createPublicKey({ key: spkiBuf, format: "der", type: "spki" });
+      publicKeySpkiBase64 = keyObj.export({ type: "spki", format: "der" }).toString("base64");
+    } catch {
+      throw new Error("WEBAUTHN_KEY_INVALID: Chave p\xFAblica SPKI inv\xE1lida.");
+    }
+    const regMeta = challengeRecord.registrationMeta;
+    if (this.db.users.some((u) => u.email === regMeta.email)) {
+      throw new Error("EMAIL_ALREADY_EXISTS: Este e-mail j\xE1 est\xE1 cadastrado na plataforma.");
+    }
+    const isFirstUser = this.db.users.length === 0;
+    let assignedRole = "ADMIN";
+    if (!isFirstUser) {
+      const requestedRole = regMeta.role || "SECURITY_LEAD";
+      if (requestedRole === "ADMIN") {
+        throw new Error("ROLE_ELEVATION_BLOCKED: Cria\xE7\xE3o de perfil ADMIN exige privil\xE9gio administrativo.");
+      }
+      assignedRole = requestedRole;
+    }
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const newUser = {
+      id: `usr-${crypto18.randomUUID().slice(0, 8)}`,
+      name: regMeta.name,
+      email: regMeta.email,
+      role: assignedRole,
+      passwordHash: hashPassword(`wh-webauthn-${crypto18.randomBytes(24).toString("base64url")}`),
+      pinHash: null,
+      pinEnabled: false,
+      webauthnCredentials: [
+        {
+          credentialId: extractedCredId,
+          publicKeySpkiBase64,
+          coseAlgorithm,
+          signCount,
+          transports: params.transports || ["internal"],
+          createdAt: now,
+          lastUsedAt: now
+        }
+      ],
+      mfaEnabled: false,
+      totpSecretBase32: null,
+      recoveryCodeHashes: [],
+      lastAcceptedTotpStep: null,
+      disabled: false,
+      failedLoginAttempts: 0,
+      lockedUntil: null,
+      recoveryTokenSha256: null,
+      recoveryExpiresAt: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    this.db.users.push(newUser);
+    if (isFirstUser) {
+      this.completeBootstrapOnFirstAccount(now);
+    }
+    const trustDevice = params.trustDevice !== false;
+    const { sessionId, session } = this.createSessionRecord(
+      newUser,
+      true,
+      ipAddress,
+      params.userAgent || "unknown",
+      { trustDevice }
+    );
+    this.save();
+    return {
+      user: this.toPublicUserView(newUser, true),
+      sessionId,
+      csrfToken: session.csrfToken,
+      trustDevice
+    };
+  }
+  createWebAuthnLoginOptions(params) {
+    const ipAddress = params?.ipAddress || "127.0.0.1";
+    this.checkIpRateLimit(ipAddress);
+    this.pruneExpiredWebAuthnChallenges();
+    const cleanEmail = (params?.email || "").trim().toLowerCase();
+    const rpId = normalizeWebAuthnRpId(params?.rpId);
+    const challengeId = crypto18.randomUUID();
+    const challengeBase64Url = crypto18.randomBytes(32).toString("base64url");
+    const allowCredentials = [];
+    const candidateUsers = cleanEmail ? this.db.users.filter((u) => !u.disabled && u.email === cleanEmail) : this.db.users.filter((u) => !u.disabled);
+    for (const u of candidateUsers) {
+      for (const cred of u.webauthnCredentials || []) {
+        allowCredentials.push({
+          type: "public-key",
+          id: cred.credentialId,
+          transports: cred.transports || ["internal"]
+        });
+      }
+    }
+    this.webauthnChallenges.set(challengeId, {
+      challengeId,
+      challengeBase64Url,
+      purpose: "LOGIN",
+      rpId,
+      expiresAtMs: Date.now() + _AuthService.PREAUTH_TTL_MS,
+      email: cleanEmail || void 0
+    });
+    return {
+      challengeId,
+      challenge: challengeBase64Url,
+      rpId,
+      timeout: 6e4,
+      userVerification: "required",
+      authenticatorAttachment: "platform",
+      allowCredentials
+    };
+  }
+  verifyWebAuthnLogin(params) {
+    const ipAddress = params.ipAddress || "127.0.0.1";
+    this.checkIpRateLimit(ipAddress);
+    this.pruneExpiredWebAuthnChallenges();
+    const clientDataBuf = decodeBase64OrBase64Url(params.clientDataJSON);
+    let clientData;
+    try {
+      clientData = JSON.parse(clientDataBuf.toString("utf8"));
+    } catch {
+      throw new Error("WEBAUTHN_CLIENT_DATA_INVALID: clientDataJSON malformado.");
+    }
+    if (clientData.type !== "webauthn.get" || !clientData.challenge || !clientData.origin) {
+      throw new Error("WEBAUTHN_CLIENT_DATA_INVALID: Tipo ou campos de clientDataJSON inv\xE1lidos.");
+    }
+    let challengeRecord;
+    if (params.challengeId) {
+      challengeRecord = this.webauthnChallenges.get(params.challengeId);
+    } else {
+      for (const rec of this.webauthnChallenges.values()) {
+        if (rec.purpose === "LOGIN" && rec.challengeBase64Url === clientData.challenge) {
+          challengeRecord = rec;
+          break;
+        }
+      }
+    }
+    if (!challengeRecord || challengeRecord.purpose !== "LOGIN") {
+      throw new Error("WEBAUTHN_CHALLENGE_INVALID: Desafio de login WebAuthn ausente, expirado ou j\xE1 utilizado.");
+    }
+    this.webauthnChallenges.delete(challengeRecord.challengeId);
+    if (Date.now() > challengeRecord.expiresAtMs) {
+      throw new Error("WEBAUTHN_CHALLENGE_EXPIRED: Desafio de login WebAuthn expirado.");
+    }
+    const expectedChallBuf = Buffer.from(challengeRecord.challengeBase64Url, "utf8");
+    const providedChallBuf = Buffer.from(clientData.challenge, "utf8");
+    if (expectedChallBuf.length !== providedChallBuf.length || !crypto18.timingSafeEqual(expectedChallBuf, providedChallBuf)) {
+      throw new Error("WEBAUTHN_CHALLENGE_MISMATCH: Desafio de login WebAuthn divergente.");
+    }
+    const { hostname: originHostname } = validateWebAuthnOrigin(
+      clientData.origin,
+      challengeRecord.rpId
+    );
+    const credId = (params.credentialId || "").trim();
+    const targetEmail = (params.email || challengeRecord.email || "").trim().toLowerCase();
+    let matchedUser;
+    let matchedCred;
+    for (const u of this.db.users) {
+      if (u.disabled) continue;
+      if (targetEmail && u.email !== targetEmail) continue;
+      const found = (u.webauthnCredentials || []).find((c) => c.credentialId === credId);
+      if (found) {
+        matchedUser = u;
+        matchedCred = found;
+        break;
+      }
+    }
+    if (!matchedUser || !matchedCred) {
+      this.recordIpFailure(ipAddress);
+      throw new Error("WEBAUTHN_CREDENTIAL_NOT_FOUND: Credencial Windows Hello n\xE3o localizada.");
+    }
+    if (matchedUser.lockedUntil && Date.now() < Date.parse(matchedUser.lockedUntil)) {
+      throw new Error("AUTH_ACCOUNT_LOCKED: Conta temporariamente bloqueada ap\xF3s tentativas excessivas.");
+    }
+    const authDataBuf = decodeBase64OrBase64Url(params.authenticatorData);
+    if (authDataBuf.length < 37) {
+      throw new Error("WEBAUTHN_AUTHDATA_INVALID: authenticatorData inv\xE1lido.");
+    }
+    const rpIdHash = authDataBuf.subarray(0, 32);
+    const expectedRpHash = crypto18.createHash("sha256").update(challengeRecord.rpId, "utf8").digest();
+    const originRpHash = crypto18.createHash("sha256").update(originHostname, "utf8").digest();
+    if (!crypto18.timingSafeEqual(rpIdHash, expectedRpHash) && !crypto18.timingSafeEqual(rpIdHash, originRpHash)) {
+      throw new Error("WEBAUTHN_RPID_MISMATCH: Hash do Relying Party (rpIdHash) inv\xE1lido.");
+    }
+    const flags = authDataBuf[32];
+    if ((flags & 1) === 0 || (flags & 4) === 0) {
+      throw new Error(
+        "WEBAUTHN_UV_REQUIRED: Presen\xE7a (UP) e verifica\xE7\xE3o do usu\xE1rio (UV) s\xE3o obrigat\xF3rias no Windows Hello."
+      );
+    }
+    const signCount = authDataBuf.readUInt32BE(33);
+    const clientDataHash = crypto18.createHash("sha256").update(clientDataBuf).digest();
+    const signedPayload = Buffer.concat([authDataBuf, clientDataHash]);
+    const signatureBuf = decodeBase64OrBase64Url(params.signature);
+    const pubKeyObj = crypto18.createPublicKey({
+      key: Buffer.from(matchedCred.publicKeySpkiBase64, "base64"),
+      format: "der",
+      type: "spki"
+    });
+    const isSigValid = crypto18.verify("sha256", signedPayload, pubKeyObj, signatureBuf);
+    if (!isSigValid) {
+      matchedUser.failedLoginAttempts += 1;
+      if (matchedUser.failedLoginAttempts >= _AuthService.MAX_LOGIN_ATTEMPTS) {
+        matchedUser.lockedUntil = new Date(Date.now() + _AuthService.LOCKOUT_DURATION_MS).toISOString();
+      }
+      this.recordIpFailure(ipAddress);
+      this.save();
+      throw new Error("WEBAUTHN_SIGNATURE_INVALID: Assinatura criptogr\xE1fica WebAuthn inv\xE1lida.");
+    }
+    if (matchedCred.signCount > 0 && signCount <= matchedCred.signCount) {
+      this.recordIpFailure(ipAddress);
+      throw new Error(
+        "WEBAUTHN_REPLAY_DETECTED: Contador anti-replay WebAuthn regressivo ou repetido."
+      );
+    }
+    matchedCred.signCount = signCount;
+    matchedCred.lastUsedAt = (/* @__PURE__ */ new Date()).toISOString();
+    matchedUser.failedLoginAttempts = 0;
+    matchedUser.lockedUntil = null;
+    matchedUser.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    const mfaVerified = !matchedUser.mfaEnabled;
+    const trustDevice = params.trustDevice !== false;
+    const { sessionId, session } = this.createSessionRecord(
+      matchedUser,
+      mfaVerified,
+      ipAddress,
+      params.userAgent || "unknown",
+      { trustDevice }
+    );
+    this.save();
+    const mfaRequired = matchedUser.mfaEnabled && !mfaVerified;
+    return {
+      user: this.toPublicUserView(matchedUser, session.mfaVerified),
+      sessionId,
+      csrfToken: session.csrfToken,
+      mfaRequired,
+      requiresTotp: mfaRequired,
+      ...mfaRequired ? { preAuthToken: this.createPreAuthToken(matchedUser.id, matchedUser.email, trustDevice) } : {},
+      trustDevice,
+      serverTimeIso: (/* @__PURE__ */ new Date()).toISOString(),
+      totpPeriodSeconds: 30
+    };
+  }
+  static buildWindowsHelloPowerShellScript() {
+    return [
+      '$ErrorActionPreference = "Stop"',
+      "Add-Type -AssemblyName System.Runtime.WindowsRuntime",
+      '$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq "AsTask" -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq "IAsyncOperation`1" })[0]',
+      "function Await-WinRtTask($WinRtTask, $ResultType) {",
+      "  $asTask = $asTaskGeneric.MakeGenericMethod($ResultType)",
+      "  $netTask = $asTask.Invoke($null, @($WinRtTask))",
+      "  $netTask.Wait(-1) | Out-Null",
+      "  return $netTask.Result",
+      "}",
+      "[Windows.Security.Credentials.UI.UserConsentVerifier,Windows.Security.Credentials.UI,ContentType=WindowsRuntime] | Out-Null",
+      "$avail = Await-WinRtTask ([Windows.Security.Credentials.UI.UserConsentVerifier]::CheckAvailabilityAsync()) ([Windows.Security.Credentials.UI.UserConsentVerifierAvailability])",
+      "if ([int]$avail -ne 0) {",
+      '  Write-Output ("UNAVAILABLE:" + [int]$avail + ":" + $avail.ToString())',
+      "  exit 2",
+      "}",
+      "$prompt = $env:WINHOOD_HELLO_PROMPT",
+      'if ([string]::IsNullOrWhiteSpace($prompt)) { $prompt = "WinHood Benchmark Analyzer - Windows Hello" }',
+      "$res = Await-WinRtTask ([Windows.Security.Credentials.UI.UserConsentVerifier]::RequestVerificationAsync($prompt)) ([Windows.Security.Credentials.UI.UserConsentVerificationResult])",
+      "if ([int]$res -eq 0) {",
+      '  Write-Output "VERIFIED:0"',
+      "  exit 0",
+      "}",
+      'Write-Output ("FAILED:" + [int]$res + ":" + $res.ToString())',
+      "exit 1"
+    ].join("\n");
+  }
+  async verifyWindowsOsHelloPrompt(promptMessage) {
+    if (process.platform !== "win32") {
+      throw new Error(
+        `WINDOWS_HELLO_OS_UNSUPPORTED: Verifica\xE7\xE3o nativa do sistema operacional Windows Hello requer Windows (plataforma atual: ${process.platform}).`
+      );
+    }
+    const sanitizedPrompt = (promptMessage || "WinHood Benchmark Analyzer \u2014 Windows Hello").replace(/[\r\n\0]/g, " ").trim().slice(0, 160);
+    const script = _AuthService.buildWindowsHelloPowerShellScript();
+    const encodedCommand = Buffer.from(script, "utf16le").toString("base64");
+    try {
+      const { stdout } = await execFileAsync(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-STA", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodedCommand],
+        {
+          timeout: 65e3,
+          windowsHide: true,
+          env: {
+            ...process.env,
+            WINHOOD_HELLO_PROMPT: sanitizedPrompt
+          }
+        }
+      );
+      const line = String(stdout || "").trim().split(/\r?\n/).pop() || "";
+      if (line.startsWith("VERIFIED:0")) {
+        return { verified: true, statusCode: 0, statusName: "Verified" };
+      }
+      throw new Error(`WINDOWS_HELLO_CANCELLED: Verifica\xE7\xE3o do Windows Hello n\xE3o confirmada (${line || "Unknown"}).`);
+    } catch (err) {
+      const stdout = String(err?.stdout || "").trim();
+      const stderr = String(err?.stderr || "").trim();
+      const combined = `${stdout} ${stderr} ${err?.message || ""}`;
+      if (stdout.startsWith("UNAVAILABLE:")) {
+        throw new Error(
+          `WINDOWS_HELLO_UNAVAILABLE: Windows Hello n\xE3o est\xE1 configurado ou dispon\xEDvel neste dispositivo Windows (${stdout}).`
+        );
+      }
+      if (stdout.startsWith("FAILED:")) {
+        throw new Error(
+          `WINDOWS_HELLO_CANCELLED: Verifica\xE7\xE3o do Windows Hello cancelada ou recusada na janela Seguran\xE7a do Windows (${stdout}).`
+        );
+      }
+      if (combined.startsWith("WINDOWS_HELLO_")) {
+        throw err;
+      }
+      throw new Error(
+        `WINDOWS_HELLO_EXECUTION_FAILED: N\xE3o foi poss\xEDvel acionar o prompt nativo do Windows Hello (${err?.message || "Erro PowerShell"}).`
+      );
+    }
+  }
+  async registerNativeWindowsHelloAccount(params) {
+    const ipAddress = params.ipAddress || "127.0.0.1";
+    this.checkIpRateLimit(ipAddress);
+    const cleanName = (params.name || "").trim();
+    const cleanEmail = (params.email || "").trim().toLowerCase();
+    if (cleanName.length < 2) {
+      throw new Error("INVALID_NAME: O nome completo deve possuir pelo menos 2 caracteres.");
+    }
+    if (!isValidEmailAddress(cleanEmail)) {
+      throw new Error("INVALID_EMAIL: Informe um endere\xE7o de e-mail v\xE1lido.");
+    }
+    if (this.registrationInProgress.has(cleanEmail) || this.db.users.some((u) => u.email === cleanEmail)) {
+      throw new Error("EMAIL_ALREADY_EXISTS: Este e-mail j\xE1 est\xE1 cadastrado na plataforma.");
+    }
+    const isFirstUser = this.db.users.length === 0;
+    let assignedRole = "ADMIN";
+    if (!isFirstUser) {
+      const requestedRole = params.role || "SECURITY_LEAD";
+      if (requestedRole === "ADMIN") {
+        throw new Error(
+          "ROLE_ELEVATION_BLOCKED: Cria\xE7\xE3o de perfil ADMIN exige privil\xE9gio administrativo ou bootstrap inicial."
+        );
+      }
+      const allowedSelfRoles = ["SECURITY_LEAD", "QA_ENGINEER", "AUDITOR"];
+      if (!allowedSelfRoles.includes(requestedRole)) {
+        throw new Error("INVALID_ROLE: Perfil de acesso selecionado \xE9 inv\xE1lido.");
+      }
+      assignedRole = requestedRole;
+    }
+    this.registrationInProgress.add(cleanEmail);
+    try {
+      const promptMsg = `WinHood Benchmark Analyzer: Confirmar cadastro com Windows Hello para ${cleanEmail}`;
+      if (params.promptVerifier) {
+        await params.promptVerifier(promptMsg);
+      } else {
+        await this.verifyWindowsOsHelloPrompt(promptMsg);
+      }
+      if (this.db.users.some((u) => u.email === cleanEmail)) {
+        throw new Error("EMAIL_ALREADY_EXISTS: Este e-mail j\xE1 est\xE1 cadastrado na plataforma.");
+      }
+      const { publicKey } = crypto18.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+      const spkiBase64 = publicKey.export({ type: "spki", format: "der" }).toString("base64");
+      const credentialId = `winhello-os-${crypto18.randomBytes(16).toString("base64url")}`;
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      const newUser = {
+        id: `usr-${crypto18.randomUUID().slice(0, 8)}`,
+        name: cleanName,
+        email: cleanEmail,
+        role: assignedRole,
+        passwordHash: hashPassword(`wh-winhello-${crypto18.randomBytes(24).toString("base64url")}`),
+        pinHash: null,
+        pinEnabled: false,
+        webauthnCredentials: [
+          {
+            credentialId,
+            publicKeySpkiBase64: spkiBase64,
+            coseAlgorithm: -7,
+            signCount: 1,
+            transports: ["internal"],
+            createdAt: now,
+            lastUsedAt: now
+          }
+        ],
+        mfaEnabled: false,
+        totpSecretBase32: null,
+        recoveryCodeHashes: [],
+        lastAcceptedTotpStep: null,
+        disabled: false,
+        failedLoginAttempts: 0,
+        lockedUntil: null,
+        recoveryTokenSha256: null,
+        recoveryExpiresAt: null,
+        createdAt: now,
+        updatedAt: now
+      };
+      this.db.users.push(newUser);
+      if (isFirstUser) {
+        this.completeBootstrapOnFirstAccount(now);
+      }
+      const trustDevice = params.trustDevice !== false;
+      const { sessionId, session } = this.createSessionRecord(
+        newUser,
+        true,
+        ipAddress,
+        params.userAgent || "unknown",
+        { trustDevice }
+      );
+      this.save();
+      return {
+        user: this.toPublicUserView(newUser, true),
+        sessionId,
+        csrfToken: session.csrfToken,
+        trustDevice,
+        credentialId,
+        keyAlgorithm: "ES256"
+      };
+    } finally {
+      this.registrationInProgress.delete(cleanEmail);
+    }
+  }
+  async loginNativeWindowsHelloAccount(params) {
+    const ipAddress = params?.ipAddress || "127.0.0.1";
+    this.checkIpRateLimit(ipAddress);
+    if (!params?.promptVerifier && process.platform !== "win32") {
+      throw new Error(
+        `WINDOWS_HELLO_OS_UNSUPPORTED: Verifica\xE7\xE3o nativa do sistema operacional Windows Hello requer Windows (plataforma atual: ${process.platform}).`
+      );
+    }
+    const cleanEmail = (params?.email || "").trim().toLowerCase();
+    let matchedUser;
+    if (cleanEmail) {
+      matchedUser = this.db.users.find(
+        (u) => !u.disabled && u.email === cleanEmail && Boolean(u.webauthnCredentials?.length)
+      );
+    } else {
+      const helloUsers = this.db.users.filter(
+        (u) => !u.disabled && Boolean(u.webauthnCredentials?.length)
+      );
+      if (helloUsers.length === 1) {
+        matchedUser = helloUsers[0];
+      }
+    }
+    if (!matchedUser) {
+      this.recordIpFailure(ipAddress);
+      throw new Error(
+        cleanEmail ? "WEBAUTHN_CREDENTIAL_NOT_FOUND: Nenhuma credencial Windows Hello cadastrada para este e-mail." : "WEBAUTHN_CREDENTIAL_NOT_FOUND: Informe o e-mail da conta Windows Hello (ou cadastre uma credencial primeiro)."
+      );
+    }
+    if (matchedUser.lockedUntil && Date.now() < Date.parse(matchedUser.lockedUntil)) {
+      throw new Error("AUTH_ACCOUNT_LOCKED: Conta temporariamente bloqueada ap\xF3s tentativas excessivas.");
+    }
+    const promptMsg = `WinHood Benchmark Analyzer: Autenticar acesso de ${matchedUser.email} com Windows Hello`;
+    if (params?.promptVerifier) {
+      await params.promptVerifier(promptMsg);
+    } else {
+      await this.verifyWindowsOsHelloPrompt(promptMsg);
+    }
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const firstCred = matchedUser.webauthnCredentials?.[0];
+    if (firstCred) {
+      firstCred.signCount = (firstCred.signCount || 0) + 1;
+      firstCred.lastUsedAt = now;
+    }
+    matchedUser.failedLoginAttempts = 0;
+    matchedUser.lockedUntil = null;
+    matchedUser.updatedAt = now;
+    const mfaVerified = !matchedUser.mfaEnabled;
+    const trustDevice = params?.trustDevice !== false;
+    const { sessionId, session } = this.createSessionRecord(
+      matchedUser,
+      mfaVerified,
+      ipAddress,
+      params?.userAgent || "unknown",
+      { trustDevice }
+    );
+    this.save();
+    const mfaRequired = matchedUser.mfaEnabled && !mfaVerified;
+    return {
+      user: this.toPublicUserView(matchedUser, session.mfaVerified),
+      sessionId,
+      csrfToken: session.csrfToken,
+      mfaRequired,
+      requiresTotp: mfaRequired,
+      ...mfaRequired ? { preAuthToken: this.createPreAuthToken(matchedUser.id, matchedUser.email, trustDevice) } : {},
+      trustDevice,
+      serverTimeIso: (/* @__PURE__ */ new Date()).toISOString(),
+      totpPeriodSeconds: 30
+    };
+  }
   listUsers() {
     return this.db.users.map((u) => ({
       id: u.id,
@@ -23179,6 +24131,8 @@ ${rawToken}
       email: u.email,
       role: u.role,
       mfaEnabled: u.mfaEnabled,
+      pinEnabled: Boolean(u.pinEnabled && u.pinHash),
+      webauthnEnabled: Boolean(u.webauthnCredentials && u.webauthnCredentials.length > 0),
       createdAt: u.createdAt,
       disabled: u.disabled
     }));
@@ -23244,6 +24198,52 @@ ${token}
       if (s.userId === user.id) s.revoked = true;
     }
     this.save();
+  }
+  deleteOwnAccount(userId, verification) {
+    const userIndex = this.db.users.findIndex((u) => u.id === userId);
+    if (userIndex === -1) {
+      throw new Error("USER_NOT_FOUND: Conta de usu\xE1rio n\xE3o encontrada.");
+    }
+    const user = this.db.users[userIndex];
+    const rawPassword = (verification?.password || "").trim();
+    const rawPin = (verification?.pin || "").trim();
+    const hasPin = Boolean(user.pinEnabled && user.pinHash);
+    const hasWebAuthn = Boolean(user.webauthnCredentials && user.webauthnCredentials.length > 0);
+    if (rawPin) {
+      if (!hasPin || !user.pinHash || !verifyPassword(rawPin, user.pinHash)) {
+        throw new Error("AUTH_INVALID_CREDENTIALS: PIN de confirma\xE7\xE3o inv\xE1lido.");
+      }
+    } else if (rawPassword) {
+      if (!verifyPassword(rawPassword, user.passwordHash)) {
+        throw new Error("AUTH_INVALID_CREDENTIALS: Senha de confirma\xE7\xE3o inv\xE1lida.");
+      }
+    } else if (!hasWebAuthn) {
+      throw new Error(
+        "VERIFICATION_REQUIRED: Confirme sua senha ou PIN atual para excluir permanentemente sua conta."
+      );
+    }
+    let revokedSessionsCount = 0;
+    for (const s of this.db.sessions) {
+      if (s.userId === userId && !s.revoked) {
+        s.revoked = true;
+        revokedSessionsCount += 1;
+      }
+    }
+    this.db.sessions = this.db.sessions.filter((s) => s.userId !== userId);
+    this.db.users.splice(userIndex, 1);
+    try {
+      const recPath = path14.join(this.recoveryDir, `recovery_${user.id}.txt`);
+      if (fs13.existsSync(recPath)) {
+        fs13.unlinkSync(recPath);
+      }
+    } catch {
+    }
+    this.save();
+    return {
+      deletedUserId: user.id,
+      email: user.email,
+      revokedSessionsCount
+    };
   }
   static hasPermission(role, permission) {
     return PERMISSIONS_MATRIX[role]?.has(permission) ?? false;
@@ -28335,6 +29335,16 @@ async function createWinHoodApp(options) {
     }
     return allowedOriginMap.get(origin) ?? null;
   };
+  app.use((_req, res, next) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "SAMEORIGIN");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader(
+      "Permissions-Policy",
+      "publickey-credentials-create=*, publickey-credentials-get=*"
+    );
+    next();
+  });
   app.use("/api", (req, res, next) => {
     const rawOrigin = typeof req.headers.origin === "string" ? req.headers.origin : "";
     const canonicalCorsOrigin = resolveAllowedCorsOrigin(rawOrigin);
@@ -28398,15 +29408,22 @@ async function createWinHoodApp(options) {
       "/auth/bootstrap-admin",
       "/auth/register",
       "/auth/login",
+      "/auth/login-pin",
+      "/auth/webauthn/register-account/options",
+      "/auth/webauthn/register-account/verify",
+      "/auth/webauthn/login/options",
+      "/auth/webauthn/login/verify",
+      "/auth/windows-hello/native-register",
+      "/auth/windows-hello/native-login",
       "/auth/logout",
       "/auth/session",
-      "/auth/me",
       "/auth/mfa/verify",
       "/auth/totp/authenticate",
       "/auth/recovery/request",
       "/auth/recovery/confirm"
     ]);
-    if (!publicApiPaths.has(reqPath)) {
+    const isPublicRequest = publicApiPaths.has(reqPath) || reqPath === "/auth/me" && req.method.toUpperCase() === "GET";
+    if (!isPublicRequest) {
       if (!req.authUser) {
         return res.status(401).json({
           error: "AUTH_REQUIRED",
@@ -28523,11 +29540,12 @@ async function createWinHoodApp(options) {
   });
   app.post("/api/auth/register", (req, res) => {
     try {
-      const { name, email, password, role, enableMfa } = req.body || {};
+      const { name, email, password, pin, role, enableMfa } = req.body || {};
       const result = authService.registerAccount({
         name: name || "",
         email: email || "",
         password: password || "",
+        pin: pin || void 0,
         role,
         enableMfa: Boolean(enableMfa),
         ipAddress: req.ip || "127.0.0.1",
@@ -28539,7 +29557,7 @@ async function createWinHoodApp(options) {
         "USER_SELF_REGISTERED",
         "AUTH",
         result.user.id,
-        `Novo usu\xE1rio "${result.user.email}" cadastrado com perfil ${result.user.role} (MFA=${result.user.mfaEnabled}).`,
+        `Novo usu\xE1rio "${result.user.email}" cadastrado com perfil ${result.user.role} (MFA=${result.user.mfaEnabled}, PIN=${Boolean(result.user.pinEnabled)}).`,
         result.user
       );
       saveDatabase(db);
@@ -28554,7 +29572,7 @@ async function createWinHoodApp(options) {
     } catch (err) {
       const msg = err?.message || "Falha ao realizar cadastro.";
       const status = msg.startsWith("EMAIL_ALREADY_EXISTS") ? 409 : msg.startsWith("ROLE_ELEVATION_BLOCKED") || msg.startsWith("BOOTSTRAP_REQUIRED") ? 403 : msg.startsWith("AUTH_RATE_LIMITED") ? 429 : 400;
-      const code = msg.startsWith("EMAIL_ALREADY_EXISTS") ? "ACCOUNT_ALREADY_EXISTS" : msg.startsWith("BOOTSTRAP_REQUIRED") ? "BOOTSTRAP_REQUIRED" : msg.startsWith("ROLE_ELEVATION_BLOCKED") ? "ROLE_ELEVATION_BLOCKED" : msg.startsWith("AUTH_RATE_LIMITED") ? "RATE_LIMITED" : "VALIDATION_ERROR";
+      const code = msg.startsWith("EMAIL_ALREADY_EXISTS") ? "ACCOUNT_ALREADY_EXISTS" : msg.startsWith("BOOTSTRAP_REQUIRED") ? "BOOTSTRAP_REQUIRED" : msg.startsWith("ROLE_ELEVATION_BLOCKED") ? "ROLE_ELEVATION_BLOCKED" : msg.startsWith("AUTH_RATE_LIMITED") ? "RATE_LIMITED" : msg.startsWith("WEAK_PIN") ? "WEAK_PIN" : msg.startsWith("INVALID_PIN") ? "INVALID_PIN" : "VALIDATION_ERROR";
       appendAuditLog(db, "AUTH_REGISTER_FAILED", "AUTH", String(req.body?.email || "unknown"), msg);
       saveDatabase(db);
       return res.status(status).json({ error: msg, code });
@@ -28602,6 +29620,332 @@ async function createWinHoodApp(options) {
       appendAuditLog(db, "AUTH_LOGIN_FAILED", "AUTH", String(req.body?.email || "unknown"), msg);
       saveDatabase(db);
       return res.status(status).json({ error: msg, code });
+    }
+  });
+  app.post("/api/auth/login-pin", (req, res) => {
+    try {
+      const { email, pin, totpCode, trustDevice } = req.body || {};
+      const outcome = authService.loginWithPin({
+        email: email || "",
+        pin: pin || "",
+        totpCode,
+        trustDevice: Boolean(trustDevice),
+        ipAddress: req.ip || "127.0.0.1",
+        userAgent: String(req.headers["user-agent"] || "unknown")
+      });
+      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
+        trustDevice: outcome.trustDevice
+      });
+      appendAuditLog(
+        db,
+        outcome.mfaRequired ? "AUTH_LOGIN_PIN_PENDING_MFA" : "AUTH_LOGIN_PIN_SUCCESS",
+        "AUTH",
+        outcome.user.id,
+        `Login por PIN R\xE1pido efetuado para ${outcome.user.email} (MFA=${outcome.user.mfaEnabled}, verified=${outcome.user.mfaVerified}).`,
+        outcome.user
+      );
+      saveDatabase(db);
+      return res.json({
+        authenticated: !outcome.mfaRequired,
+        mfaRequired: outcome.mfaRequired,
+        requiresTotp: outcome.requiresTotp,
+        preAuthToken: outcome.preAuthToken,
+        trustDevice: outcome.trustDevice,
+        serverTimeIso: outcome.serverTimeIso,
+        totpPeriodSeconds: outcome.totpPeriodSeconds,
+        user: outcome.user,
+        sessionId: outcome.sessionId,
+        csrfToken: outcome.csrfToken
+      });
+    } catch (err) {
+      const msg = err?.message || "Falha na autentica\xE7\xE3o com PIN.";
+      const status = msg.startsWith("AUTH_RATE_LIMITED") || msg.startsWith("AUTH_ACCOUNT_LOCKED") ? 429 : 401;
+      const code = msg.startsWith("AUTH_RATE_LIMITED") || msg.startsWith("AUTH_ACCOUNT_LOCKED") ? "RATE_LIMITED" : "INVALID_CREDENTIALS";
+      appendAuditLog(db, "AUTH_LOGIN_PIN_FAILED", "AUTH", String(req.body?.email || "unknown"), msg);
+      saveDatabase(db);
+      return res.status(status).json({ error: msg, code });
+    }
+  });
+  app.post("/api/auth/pin/setup", (req, res) => {
+    const actor = getRequestActor(req, res);
+    if (actor.id === "usr-anonymous") {
+      return res.status(401).json({ error: "AUTH_REQUIRED" });
+    }
+    const { pin } = req.body || {};
+    try {
+      const updatedUser = authService.setupPinForUser(actor.id, pin || "");
+      appendAuditLog(
+        db,
+        "AUTH_PIN_CONFIGURED",
+        "AUTH",
+        updatedUser.id,
+        `PIN R\xE1pido (6-8 d\xEDgitos) configurado para ${updatedUser.email}.`,
+        updatedUser
+      );
+      saveDatabase(db);
+      return res.json({ ok: true, user: updatedUser });
+    } catch (err) {
+      const msg = err?.message || "Falha ao configurar PIN.";
+      return res.status(400).json({ error: msg, code: "INVALID_PIN" });
+    }
+  });
+  const resolveWebAuthnRpId = (req) => {
+    const sanitizeHost = (raw) => {
+      const cleaned = raw.trim().toLowerCase().replace(/^https?:\/\//, "").split("/")[0] || "";
+      const hostOnly = cleaned.startsWith("[") ? cleaned.slice(0, cleaned.indexOf("]") + 1) : cleaned.split(":")[0] || "";
+      if (/^[a-z0-9.-]+$/.test(hostOnly) || hostOnly === "[::1]") {
+        return hostOnly;
+      }
+      return "";
+    };
+    const bodyRpId = typeof req.body?.rpId === "string" ? sanitizeHost(req.body.rpId) : "";
+    if (bodyRpId) return bodyRpId;
+    const originHeader = typeof req.headers.origin === "string" ? req.headers.origin.trim() : "";
+    if (originHeader) {
+      try {
+        const originHost = sanitizeHost(new URL(originHeader).hostname);
+        if (originHost) return originHost;
+      } catch {
+      }
+    }
+    const hostHeader = typeof req.headers.host === "string" ? sanitizeHost(req.headers.host) : "";
+    return hostHeader || "localhost";
+  };
+  app.post("/api/auth/webauthn/register-account/options", (req, res) => {
+    try {
+      const { name, email, role } = req.body || {};
+      const resolvedRpId = resolveWebAuthnRpId(req);
+      const options2 = authService.createWebAuthnRegistrationOptions({
+        name: name || "",
+        email: email || "",
+        role,
+        rpId: resolvedRpId,
+        ipAddress: req.ip || "127.0.0.1"
+      });
+      return res.json({ ...options2, publicKey: options2 });
+    } catch (err) {
+      const msg = err?.message || "Falha ao gerar op\xE7\xF5es WebAuthn de cadastro.";
+      const status = msg.startsWith("EMAIL_ALREADY_EXISTS") ? 409 : msg.startsWith("ROLE_ELEVATION_BLOCKED") ? 403 : msg.startsWith("AUTH_RATE_LIMITED") ? 429 : 400;
+      return res.status(status).json({ error: msg });
+    }
+  });
+  app.post("/api/auth/webauthn/register-account/verify", (req, res) => {
+    try {
+      const {
+        challengeId,
+        credentialId,
+        clientDataJSON,
+        attestationObject,
+        authenticatorData,
+        publicKeySpkiBase64,
+        coseAlgorithm,
+        transports,
+        trustDevice,
+        credential
+      } = req.body || {};
+      const result = authService.verifyWebAuthnAccountRegistration({
+        challengeId,
+        credentialId: credentialId || credential?.id || credential?.rawId || "",
+        clientDataJSON: clientDataJSON || credential?.response?.clientDataJSON || "",
+        attestationObject: attestationObject || credential?.response?.attestationObject,
+        authenticatorData: authenticatorData || credential?.response?.authenticatorData,
+        publicKeySpkiBase64: publicKeySpkiBase64 || credential?.response?.publicKey,
+        coseAlgorithm: coseAlgorithm ?? credential?.response?.publicKeyAlgorithm,
+        transports: transports || credential?.response?.transports,
+        trustDevice: trustDevice !== false,
+        ipAddress: req.ip || "127.0.0.1",
+        userAgent: String(req.headers["user-agent"] || "unknown")
+      });
+      setSessionCookies(res, result.sessionId, result.csrfToken, {
+        trustDevice: result.trustDevice
+      });
+      appendAuditLog(
+        db,
+        "USER_WEBAUTHN_REGISTERED",
+        "AUTH",
+        result.user.id,
+        `Conta "${result.user.email}" cadastrada via Windows Hello / WebAuthn FIDO2 com perfil ${result.user.role}.`,
+        result.user
+      );
+      saveDatabase(db);
+      return res.status(201).json({
+        authenticated: true,
+        mfaRequired: false,
+        user: result.user,
+        sessionId: result.sessionId,
+        csrfToken: result.csrfToken
+      });
+    } catch (err) {
+      const msg = err?.message || "Falha na verifica\xE7\xE3o WebAuthn de cadastro.";
+      const status = msg.startsWith("ROLE_ELEVATION_BLOCKED") ? 403 : msg.startsWith("EMAIL_ALREADY_EXISTS") ? 409 : 400;
+      return res.status(status).json({ error: msg });
+    }
+  });
+  app.post("/api/auth/webauthn/login/options", (req, res) => {
+    try {
+      const { email } = req.body || {};
+      const resolvedRpId = resolveWebAuthnRpId(req);
+      const options2 = authService.createWebAuthnLoginOptions({
+        email,
+        rpId: resolvedRpId,
+        ipAddress: req.ip || "127.0.0.1"
+      });
+      return res.json({ ...options2, publicKey: options2 });
+    } catch (err) {
+      const msg = err?.message || "Falha ao gerar desafio de login WebAuthn.";
+      return res.status(400).json({ error: msg });
+    }
+  });
+  app.post("/api/auth/webauthn/login/verify", (req, res) => {
+    try {
+      const {
+        challengeId,
+        credentialId,
+        clientDataJSON,
+        authenticatorData,
+        signature,
+        email,
+        trustDevice,
+        credential
+      } = req.body || {};
+      const outcome = authService.verifyWebAuthnLogin({
+        challengeId,
+        credentialId: credentialId || credential?.id || credential?.rawId || "",
+        clientDataJSON: clientDataJSON || credential?.response?.clientDataJSON || "",
+        authenticatorData: authenticatorData || credential?.response?.authenticatorData || "",
+        signature: signature || credential?.response?.signature || "",
+        email,
+        trustDevice: trustDevice !== false,
+        ipAddress: req.ip || "127.0.0.1",
+        userAgent: String(req.headers["user-agent"] || "unknown")
+      });
+      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
+        trustDevice: outcome.trustDevice
+      });
+      appendAuditLog(
+        db,
+        "AUTH_WEBAUTHN_LOGIN_SUCCESS",
+        "AUTH",
+        outcome.user.id,
+        `Login via Windows Hello / WebAuthn FIDO2 efetuado para ${outcome.user.email}.`,
+        outcome.user
+      );
+      saveDatabase(db);
+      return res.json({
+        authenticated: !outcome.mfaRequired,
+        mfaRequired: outcome.mfaRequired,
+        requiresTotp: outcome.requiresTotp,
+        preAuthToken: outcome.preAuthToken,
+        trustDevice: outcome.trustDevice,
+        serverTimeIso: outcome.serverTimeIso,
+        totpPeriodSeconds: outcome.totpPeriodSeconds,
+        user: outcome.user,
+        sessionId: outcome.sessionId,
+        csrfToken: outcome.csrfToken
+      });
+    } catch (err) {
+      const msg = err?.message || "Falha na autentica\xE7\xE3o Windows Hello / WebAuthn.";
+      const status = msg.startsWith("AUTH_RATE_LIMITED") || msg.startsWith("AUTH_ACCOUNT_LOCKED") ? 429 : 401;
+      appendAuditLog(db, "AUTH_WEBAUTHN_LOGIN_FAILED", "AUTH", String(req.body?.email || "unknown"), msg);
+      saveDatabase(db);
+      return res.status(status).json({ error: msg });
+    }
+  });
+  app.post("/api/auth/windows-hello/native-register", async (req, res) => {
+    try {
+      const { name, email, role, trustDevice } = req.body || {};
+      const result = await authService.registerNativeWindowsHelloAccount({
+        name: name || "",
+        email: email || "",
+        role,
+        trustDevice: trustDevice !== false,
+        ipAddress: req.ip || "127.0.0.1",
+        userAgent: String(req.headers["user-agent"] || "unknown")
+      });
+      setSessionCookies(res, result.sessionId, result.csrfToken, {
+        trustDevice: result.trustDevice
+      });
+      appendAuditLog(
+        db,
+        "USER_WINHELLO_NATIVE_REGISTERED",
+        "AUTH",
+        result.user.id,
+        `Conta "${result.user.email}" cadastrada via Windows Hello Nativo (UserConsentVerifier + ES256 P-256) com perfil ${result.user.role}.`,
+        result.user
+      );
+      saveDatabase(db);
+      return res.status(201).json({
+        authenticated: true,
+        mfaRequired: false,
+        nativeWindowsHello: true,
+        keyAlgorithm: result.keyAlgorithm,
+        credentialId: result.credentialId,
+        user: result.user,
+        sessionId: result.sessionId,
+        csrfToken: result.csrfToken
+      });
+    } catch (err) {
+      const msg = err?.message || "Falha ao cadastrar com Windows Hello nativo.";
+      const code = msg.includes(":") ? msg.split(":")[0].trim() : "WINDOWS_HELLO_NATIVE_FAILED";
+      const status = code === "WINDOWS_HELLO_OS_UNSUPPORTED" ? 501 : code === "EMAIL_ALREADY_EXISTS" ? 409 : code === "ROLE_ELEVATION_BLOCKED" ? 403 : code === "AUTH_RATE_LIMITED" ? 429 : code === "WINDOWS_HELLO_CANCELLED" ? 401 : 400;
+      appendAuditLog(
+        db,
+        "AUTH_WINHELLO_NATIVE_REGISTER_FAILED",
+        "AUTH",
+        String(req.body?.email || "unknown"),
+        msg
+      );
+      saveDatabase(db);
+      return res.status(status).json({ error: msg, code, platform: process.platform });
+    }
+  });
+  app.post("/api/auth/windows-hello/native-login", async (req, res) => {
+    try {
+      const { email, trustDevice } = req.body || {};
+      const outcome = await authService.loginNativeWindowsHelloAccount({
+        email,
+        trustDevice: trustDevice !== false,
+        ipAddress: req.ip || "127.0.0.1",
+        userAgent: String(req.headers["user-agent"] || "unknown")
+      });
+      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
+        trustDevice: outcome.trustDevice
+      });
+      appendAuditLog(
+        db,
+        "AUTH_WINHELLO_NATIVE_LOGIN_SUCCESS",
+        "AUTH",
+        outcome.user.id,
+        `Login via Windows Hello Nativo (UserConsentVerifier) efetuado para ${outcome.user.email}.`,
+        outcome.user
+      );
+      saveDatabase(db);
+      return res.json({
+        authenticated: !outcome.mfaRequired,
+        mfaRequired: outcome.mfaRequired,
+        requiresTotp: outcome.requiresTotp,
+        preAuthToken: outcome.preAuthToken,
+        trustDevice: outcome.trustDevice,
+        serverTimeIso: outcome.serverTimeIso,
+        totpPeriodSeconds: outcome.totpPeriodSeconds,
+        nativeWindowsHello: true,
+        user: outcome.user,
+        sessionId: outcome.sessionId,
+        csrfToken: outcome.csrfToken
+      });
+    } catch (err) {
+      const msg = err?.message || "Falha ao autenticar via Windows Hello nativo.";
+      const code = msg.includes(":") ? msg.split(":")[0].trim() : "WINDOWS_HELLO_NATIVE_FAILED";
+      const status = code === "WINDOWS_HELLO_OS_UNSUPPORTED" ? 501 : code === "AUTH_RATE_LIMITED" || code === "AUTH_ACCOUNT_LOCKED" ? 429 : code === "WEBAUTHN_CREDENTIAL_NOT_FOUND" ? 404 : 401;
+      appendAuditLog(
+        db,
+        "AUTH_WINHELLO_NATIVE_LOGIN_FAILED",
+        "AUTH",
+        String(req.body?.email || "unknown"),
+        msg
+      );
+      saveDatabase(db);
+      return res.status(status).json({ error: msg, code, platform: process.platform });
     }
   });
   app.post("/api/auth/logout", (req, res) => {
@@ -28655,6 +29999,51 @@ async function createWinHoodApp(options) {
       },
       csrfToken: validated?.session.csrfToken || req.authSession?.csrfToken
     });
+  });
+  app.delete("/api/auth/me", (req, res) => {
+    const actor = req.authUser;
+    const authSession = req.authSession;
+    if (!actor || actor.id === "usr-anonymous" || actor.id === "usr-test-header") {
+      return res.status(401).json({
+        error: "AUTH_REQUIRED",
+        code: "SESSION_INVALID",
+        message: "Sess\xE3o autenticada obrigat\xF3ria para excluir conta local."
+      });
+    }
+    const expectedCsrf = String(authSession?.csrfToken || "");
+    const providedCsrf = String(req.headers["x-csrf-token"] || req.headers["x-winhood-csrf"] || "").trim();
+    const expBuf = Buffer.from(expectedCsrf, "utf8");
+    const provBuf = Buffer.from(providedCsrf, "utf8");
+    if (!expectedCsrf || expBuf.length !== provBuf.length || !crypto28.timingSafeEqual(expBuf, provBuf)) {
+      return res.status(403).json({
+        error: "CSRF_INVALID",
+        code: "CSRF_INVALID",
+        message: "Token CSRF ausente ou inv\xE1lido para exclus\xE3o de conta."
+      });
+    }
+    const { password, pin } = req.body || {};
+    try {
+      const outcome = authService.deleteOwnAccount(actor.id, { password, pin });
+      clearSessionCookies(res);
+      appendAuditLog(
+        db,
+        "USER_ACCOUNT_DELETED",
+        "AUTH",
+        outcome.deletedUserId,
+        `Conta local "${outcome.email}" exclu\xEDda pelo pr\xF3prio titular (${outcome.revokedSessionsCount} sess\xF5es revogadas).`,
+        actor
+      );
+      saveDatabase(db, true);
+      return res.json({
+        ok: true,
+        deletedUserId: outcome.deletedUserId,
+        revokedSessionsCount: outcome.revokedSessionsCount
+      });
+    } catch (err) {
+      const msg = err?.message || "Falha ao excluir conta local.";
+      const status = msg.startsWith("AUTH_INVALID_CREDENTIALS") ? 401 : msg.startsWith("USER_NOT_FOUND") ? 404 : 400;
+      return res.status(status).json({ error: msg });
+    }
   });
   app.get("/api/auth/session", (req, res) => {
     const sessionToken = extractSessionTokenFromRequest(req).token;
@@ -28987,7 +30376,7 @@ async function createWinHoodApp(options) {
     saveDatabase(db);
     res.json(profile);
   });
-  const execFileAsync = promisify(execFile);
+  const execFileAsync2 = promisify2(execFile2);
   function resolveDockerBinaryPath() {
     if (process.platform === "win32") {
       const programFiles = process.env.ProgramFiles || "C:\\Program Files";
@@ -29006,7 +30395,7 @@ async function createWinHoodApp(options) {
     if (process.platform === "win32" && process.env.SystemRoot) {
       controlledEnv.SystemRoot = process.env.SystemRoot;
     }
-    return execFileAsync(resolveDockerBinaryPath(), args, {
+    return execFileAsync2(resolveDockerBinaryPath(), args, {
       timeout: timeoutMs,
       shell: false,
       env: controlledEnv
@@ -35088,8 +36477,22 @@ async function waitForBackendHealth(params) {
 function isAuthorizedLoopbackSender(senderUrl, expectedOrigin) {
   if (!senderUrl) return false;
   try {
-    const parsed = new URL(senderUrl);
-    return parsed.origin === expectedOrigin;
+    const parsedSender = new URL(senderUrl);
+    const parsedExpected = new URL(expectedOrigin);
+    if (parsedSender.protocol !== "http:" || parsedExpected.protocol !== "http:") {
+      return false;
+    }
+    const senderPort = parsedSender.port || "80";
+    const expectedPort = parsedExpected.port || "80";
+    if (senderPort !== expectedPort) {
+      return false;
+    }
+    const isSenderLoopback = parsedSender.hostname === "localhost" || parsedSender.hostname === "127.0.0.1";
+    const isExpectedLoopback = parsedExpected.hostname === "localhost" || parsedExpected.hostname === "127.0.0.1";
+    if (isSenderLoopback && isExpectedLoopback) {
+      return true;
+    }
+    return parsedSender.origin === parsedExpected.origin;
   } catch {
     return false;
   }
@@ -35142,16 +36545,18 @@ async function bootstrapWindowsDesktop(options) {
       `FATAL_BACKEND_HEALTH: Backend n\xE3o respondeu em ${startedBackend.url}/api/health ap\xF3s ${health.attempts} tentativas (${health.errorMessage}).`
     );
   }
+  const desktopWindowUrl = `http://localhost:${startedBackend.port}`;
   if (!isElectronBinary || options?.headlessCheckOnly) {
     return {
       mode: "HEADLESS_VERIFIED",
       backend: startedBackend,
+      windowUrl: desktopWindowUrl,
       health,
       layout,
       securityWebPreferences: ELECTRON_SECURITY_WEB_PREFERENCES
     };
   }
-  const { app, BrowserWindow, ipcMain, shell } = electron;
+  const { app, BrowserWindow, ipcMain, session, shell } = electron;
   const hasSingleInstanceLock = app.requestSingleInstanceLock?.() ?? true;
   if (!hasSingleInstanceLock) {
     await startedBackend.close().catch(() => {
@@ -35160,6 +36565,35 @@ async function bootstrapWindowsDesktop(options) {
     return null;
   }
   await app.whenReady();
+  if (session?.defaultSession) {
+    const allowedPermissions = /* @__PURE__ */ new Set([
+      "publickey-credentials-get",
+      "publickey-credentials-create",
+      "clipboard-sanitized-write",
+      "clipboard-read",
+      "hid",
+      "usb"
+    ]);
+    session.defaultSession.setPermissionCheckHandler?.(
+      (webContents, permission, requestingOrigin) => {
+        const originToCheck = requestingOrigin || webContents?.getURL?.() || "";
+        if (!isAuthorizedLoopbackSender(originToCheck, startedBackend.url)) {
+          return false;
+        }
+        return allowedPermissions.has(permission) || permission.startsWith("publickey");
+      }
+    );
+    session.defaultSession.setPermissionRequestHandler?.(
+      (webContents, permission, callback, details) => {
+        const originToCheck = details?.requestingUrl || webContents?.getURL?.() || "";
+        if (!isAuthorizedLoopbackSender(originToCheck, startedBackend.url)) {
+          callback(false);
+          return;
+        }
+        callback(allowedPermissions.has(permission) || permission.startsWith("publickey"));
+      }
+    );
+  }
   const preloadCandidates = [
     path18.resolve(__dirname, "electron-preload.cjs"),
     path18.resolve(__dirname, "electron-preload.js"),
@@ -35177,7 +36611,7 @@ async function bootstrapWindowsDesktop(options) {
         arch: process.arch,
         electronVersion: process.versions.electron || null,
         nodeVersion: process.versions.node,
-        backendUrl: startedBackend.url,
+        backendUrl: desktopWindowUrl,
         backendPort: startedBackend.port,
         userDataDir: layout.rootDataDir
       };
@@ -35224,7 +36658,7 @@ async function bootstrapWindowsDesktop(options) {
       event.preventDefault();
     }
   });
-  await mainWindow.loadURL(startedBackend.url);
+  await mainWindow.loadURL(desktopWindowUrl);
   mainWindow.show();
   let shuttingDown = false;
   const shutdownCleanly = async () => {

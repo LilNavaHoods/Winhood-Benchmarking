@@ -1,7 +1,11 @@
+import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { KeyManagementService, type VaultReencryptContext } from './KeyManagementService';
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Valida formato básico de e-mail em tempo linear O(n) sem backtracking super-linear (typescript:S8786).
@@ -86,12 +90,25 @@ export const PERMISSIONS_MATRIX: Record<RbacRole, ReadonlySet<RbacPermission>> =
   AUDITOR: new Set<RbacPermission>(['read:all', 'audit:read', 'reports:export']),
 };
 
+export interface WebAuthnCredentialRecord {
+  credentialId: string; // base64url
+  publicKeySpkiBase64: string; // DER SubjectPublicKeyInfo in base64
+  coseAlgorithm: -7 | -257; // -7 (ES256) or -257 (RS256)
+  signCount: number;
+  transports?: string[];
+  createdAt: string;
+  lastUsedAt?: string | null;
+}
+
 export interface UserAccountRecord {
   id: string;
   name: string;
   email: string;
   role: RbacRole;
   passwordHash: string; // scrypt:N=16384,r=8,p=1:<saltHex>:<hashHex>
+  pinHash?: string | null; // scrypt:N=16384,r=8,p=1:<saltHex>:<hashHex>
+  pinEnabled?: boolean;
+  webauthnCredentials?: WebAuthnCredentialRecord[];
   mfaEnabled: boolean;
   totpSecretBase32: string | null; // AES-256-GCM encrypted payload (whvault:v1:...) or legacy Base32
   pendingTotpSecretBase32?: string | null;
@@ -113,6 +130,8 @@ export interface PublicUserView {
   role: RbacRole;
   mfaEnabled: boolean;
   mfaVerified: boolean;
+  pinEnabled?: boolean;
+  webauthnEnabled?: boolean;
 }
 
 export interface AuthSessionRecord {
@@ -139,6 +158,223 @@ interface PersistedAuthDatabase {
   bootstrapCompletedAt: string | null;
   users: UserAccountRecord[];
   sessions: AuthSessionRecord[];
+}
+
+export interface WebAuthnChallengeRecord {
+  challengeId: string;
+  challengeBase64Url: string;
+  purpose: 'REGISTER_ACCOUNT' | 'LOGIN';
+  rpId: string;
+  expiresAtMs: number;
+  registrationMeta?: {
+    name: string;
+    email: string;
+    role?: RbacRole;
+    userHandle: string;
+  };
+  email?: string;
+}
+
+/**
+ * Valida PIN numérico rápido (6 a 8 dígitos), rejeitando repetições ('111111', '000000')
+ * e sequências simples ascendentes ou descendentes ('123456', '654321').
+ */
+export function validateQuickPin(rawPin: string): string {
+  const clean = (rawPin || '').trim();
+  if (!/^\d{6,8}$/.test(clean)) {
+    throw new Error('INVALID_PIN: O PIN rápido deve conter entre 6 e 8 dígitos numéricos.');
+  }
+  if (/^(\d)\1+$/.test(clean)) {
+    throw new Error('WEAK_PIN: PIN com dígitos repetidos (ex.: 111111, 000000) não é permitido.');
+  }
+  let isAscending = true;
+  let isDescending = true;
+  for (let i = 1; i < clean.length; i++) {
+    const prev = clean.charCodeAt(i - 1) - 48;
+    const curr = clean.charCodeAt(i) - 48;
+    if (curr - prev !== 1) isAscending = false;
+    if (prev - curr !== 1) isDescending = false;
+  }
+  if (isAscending || isDescending) {
+    throw new Error('WEAK_PIN: PIN em sequência simples (ex.: 123456, 654321) não é permitido.');
+  }
+  return clean;
+}
+
+function decodeBase64OrBase64Url(input: string): Buffer {
+  const clean = (input || '').trim();
+  if (!clean) return Buffer.alloc(0);
+  const normalized = clean.replace(/-/g, '+').replace(/_/g, '/');
+  const padLen = (4 - (normalized.length % 4)) % 4;
+  return Buffer.from(normalized + '='.repeat(padLen), 'base64');
+}
+
+function decodeCborItem(buf: Buffer, offset = 0): { value: any; nextOffset: number } {
+  if (offset >= buf.length) {
+    throw new Error('WEBAUTHN_CBOR_INVALID: Fim inesperado do buffer CBOR.');
+  }
+  const initialByte = buf[offset]!;
+  const majorType = initialByte >> 5;
+  const additionalInfo = initialByte & 0x1f;
+  let ptr = offset + 1;
+  let lengthVal = 0;
+
+  if (additionalInfo < 24) {
+    lengthVal = additionalInfo;
+  } else if (additionalInfo === 24) {
+    if (ptr + 1 > buf.length) throw new Error('WEBAUTHN_CBOR_INVALID: Uint8 truncado.');
+    lengthVal = buf.readUInt8(ptr);
+    ptr += 1;
+  } else if (additionalInfo === 25) {
+    if (ptr + 2 > buf.length) throw new Error('WEBAUTHN_CBOR_INVALID: Uint16 truncado.');
+    lengthVal = buf.readUInt16BE(ptr);
+    ptr += 2;
+  } else if (additionalInfo === 26) {
+    if (ptr + 4 > buf.length) throw new Error('WEBAUTHN_CBOR_INVALID: Uint32 truncado.');
+    lengthVal = buf.readUInt32BE(ptr);
+    ptr += 4;
+  } else if (additionalInfo === 27) {
+    if (ptr + 8 > buf.length) throw new Error('WEBAUTHN_CBOR_INVALID: Uint64 truncado.');
+    lengthVal = Number(buf.readBigUInt64BE(ptr));
+    ptr += 8;
+  } else {
+    throw new Error('WEBAUTHN_CBOR_INVALID: Informação adicional CBOR não suportada.');
+  }
+
+  switch (majorType) {
+    case 0:
+      return { value: lengthVal, nextOffset: ptr };
+    case 1:
+      return { value: -1 - lengthVal, nextOffset: ptr };
+    case 2: {
+      if (ptr + lengthVal > buf.length) throw new Error('WEBAUTHN_CBOR_INVALID: ByteString truncada.');
+      return { value: buf.subarray(ptr, ptr + lengthVal), nextOffset: ptr + lengthVal };
+    }
+    case 3: {
+      if (ptr + lengthVal > buf.length) throw new Error('WEBAUTHN_CBOR_INVALID: TextString truncada.');
+      return {
+        value: buf.subarray(ptr, ptr + lengthVal).toString('utf8'),
+        nextOffset: ptr + lengthVal,
+      };
+    }
+    case 4: {
+      const arr: any[] = [];
+      let cur = ptr;
+      for (let i = 0; i < lengthVal; i++) {
+        const decoded = decodeCborItem(buf, cur);
+        arr.push(decoded.value);
+        cur = decoded.nextOffset;
+      }
+      return { value: arr, nextOffset: cur };
+    }
+    case 5: {
+      const map = new Map<any, any>();
+      let cur = ptr;
+      for (let i = 0; i < lengthVal; i++) {
+        const k = decodeCborItem(buf, cur);
+        const v = decodeCborItem(buf, k.nextOffset);
+        map.set(k.value, v.value);
+        cur = v.nextOffset;
+      }
+      return { value: map, nextOffset: cur };
+    }
+    case 7: {
+      if (additionalInfo === 20) return { value: false, nextOffset: ptr };
+      if (additionalInfo === 21) return { value: true, nextOffset: ptr };
+      if (additionalInfo === 22) return { value: null, nextOffset: ptr };
+      return { value: lengthVal, nextOffset: ptr };
+    }
+    default:
+      throw new Error(`WEBAUTHN_CBOR_INVALID: Major type ${majorType} não suportado.`);
+  }
+}
+
+function cosePublicKeyToSpkiBase64(coseBytes: Buffer): {
+  publicKeySpkiBase64: string;
+  coseAlgorithm: -7 | -257;
+} {
+  const decoded = decodeCborItem(coseBytes, 0).value;
+  if (!(decoded instanceof Map)) {
+    throw new Error('WEBAUTHN_COSE_INVALID: Chave pública COSE não é um mapa CBOR válido.');
+  }
+  const kty = decoded.get(1);
+  const alg = decoded.get(3);
+  if (alg === -7 && kty === 2) {
+    const crv = decoded.get(-1);
+    const xBuf = decoded.get(-2);
+    const yBuf = decoded.get(-3);
+    if (crv !== 1 || !Buffer.isBuffer(xBuf) || !Buffer.isBuffer(yBuf)) {
+      throw new Error('WEBAUTHN_COSE_INVALID: Coordenadas EC2 P-256 inválidas na chave COSE.');
+    }
+    const keyObj = crypto.createPublicKey({
+      key: {
+        kty: 'EC',
+        crv: 'P-256',
+        x: xBuf.toString('base64url'),
+        y: yBuf.toString('base64url'),
+      },
+      format: 'jwk',
+    });
+    const spkiDer = keyObj.export({ type: 'spki', format: 'der' }) as Buffer;
+    return { publicKeySpkiBase64: spkiDer.toString('base64'), coseAlgorithm: -7 };
+  }
+  if (alg === -257 && kty === 3) {
+    const nBuf = decoded.get(-1);
+    const eBuf = decoded.get(-2);
+    if (!Buffer.isBuffer(nBuf) || !Buffer.isBuffer(eBuf)) {
+      throw new Error('WEBAUTHN_COSE_INVALID: Parâmetros RSA (n, e) inválidos na chave COSE.');
+    }
+    const keyObj = crypto.createPublicKey({
+      key: {
+        kty: 'RSA',
+        n: nBuf.toString('base64url'),
+        e: eBuf.toString('base64url'),
+      },
+      format: 'jwk',
+    });
+    const spkiDer = keyObj.export({ type: 'spki', format: 'der' }) as Buffer;
+    return { publicKeySpkiBase64: spkiDer.toString('base64'), coseAlgorithm: -257 };
+  }
+  throw new Error(
+    `WEBAUTHN_ALG_UNSUPPORTED: Algoritmo COSE ${String(alg)} não suportado (use ES256 -7 ou RS256 -257).`
+  );
+}
+
+function normalizeWebAuthnRpId(rawRpId?: string): string {
+  const clean = (rawRpId || '').trim().toLowerCase();
+  if (!clean) return 'localhost';
+  const withoutPort = clean.split(':')[0]!.trim();
+  if (!withoutPort || withoutPort === '127.0.0.1' || withoutPort === '[::1]') {
+    return 'localhost';
+  }
+  return withoutPort;
+}
+
+function validateWebAuthnOrigin(originStr: string, expectedRpId: string): { hostname: string } {
+  let parsed: URL;
+  try {
+    parsed = new URL(originStr);
+  } catch {
+    throw new Error('WEBAUTHN_ORIGIN_INVALID: Origin malformado no clientDataJSON.');
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  const isLoopback = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]';
+  if (isLoopback) {
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error('WEBAUTHN_ORIGIN_INVALID: Protocolo de loopback inválido.');
+    }
+    return { hostname };
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error('WEBAUTHN_ORIGIN_INVALID: WebAuthn fora de loopback exige HTTPS.');
+  }
+  const rpClean = expectedRpId.toLowerCase();
+  if (hostname !== rpClean && !hostname.endsWith(`.${rpClean}`)) {
+    throw new Error(
+      `WEBAUTHN_ORIGIN_MISMATCH: Origin "${hostname}" não corresponde ao rpId "${rpClean}".`
+    );
+  }
+  return { hostname };
 }
 
 const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -294,6 +530,7 @@ export class AuthService {
   private readonly keystorePath: string;
   private db: PersistedAuthDatabase;
   private ipRateLimits = new Map<string, { count: number; windowStartMs: number; blockedUntilMs: number }>();
+  private webauthnChallenges = new Map<string, WebAuthnChallengeRecord>();
 
   public static readonly SESSION_IDLE_MS = 30 * 60 * 1000;
   public static readonly SESSION_ABSOLUTE_MS = 8 * 60 * 60 * 1000;
@@ -804,14 +1041,7 @@ export class AuthService {
 
     const mfaRequired = user.mfaEnabled && !mfaVerified;
     return {
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        mfaEnabled: user.mfaEnabled,
-        mfaVerified: session.mfaVerified,
-      },
+      user: this.toPublicUserView(user, session.mfaVerified),
       sessionId,
       csrfToken: session.csrfToken,
       mfaRequired,
@@ -823,6 +1053,132 @@ export class AuthService {
       serverTimeIso: new Date().toISOString(),
       totpPeriodSeconds: 30,
     };
+  }
+
+  public loginWithPin(params: {
+    email?: string;
+    pin: string;
+    totpCode?: string;
+    trustDevice?: boolean;
+    ipAddress?: string;
+    userAgent?: string;
+  }): {
+    user: PublicUserView;
+    sessionId: string;
+    csrfToken: string;
+    mfaRequired: boolean;
+    requiresTotp: boolean;
+    preAuthToken?: string;
+    trustDevice: boolean;
+    serverTimeIso: string;
+    totpPeriodSeconds: number;
+  } {
+    const ipAddress = params.ipAddress || '127.0.0.1';
+    this.checkIpRateLimit(ipAddress);
+
+    const email = (params.email || '').trim().toLowerCase();
+    let user: UserAccountRecord | undefined;
+    if (email) {
+      user = this.db.users.find((u) => u.email === email);
+    } else {
+      const pinUsers = this.db.users.filter((u) => !u.disabled && u.pinEnabled && u.pinHash);
+      if (pinUsers.length === 1) {
+        user = pinUsers[0];
+      } else if (this.db.users.length === 1) {
+        user = this.db.users[0];
+      }
+    }
+
+    if (!user || user.disabled) {
+      this.recordIpFailure(ipAddress);
+      throw new Error('AUTH_INVALID_CREDENTIALS: E-mail ou PIN rápido inválido.');
+    }
+
+    if (user.lockedUntil && Date.now() < Date.parse(user.lockedUntil)) {
+      throw new Error('AUTH_ACCOUNT_LOCKED: Conta temporariamente bloqueada após tentativas excessivas.');
+    }
+
+    const candidatePin = (params.pin || '').trim();
+    if (
+      !user.pinEnabled ||
+      !user.pinHash ||
+      !/^\d{6,8}$/.test(candidatePin) ||
+      !verifyPassword(candidatePin, user.pinHash)
+    ) {
+      user.failedLoginAttempts += 1;
+      if (user.failedLoginAttempts >= AuthService.MAX_LOGIN_ATTEMPTS) {
+        user.lockedUntil = new Date(Date.now() + AuthService.LOCKOUT_DURATION_MS).toISOString();
+      }
+      this.recordIpFailure(ipAddress);
+      this.save();
+      throw new Error('AUTH_INVALID_CREDENTIALS: E-mail ou PIN rápido inválido.');
+    }
+
+    const plainTotpSecret = this.decryptSecretAtRest(user.totpSecretBase32);
+    let mfaVerified = !user.mfaEnabled;
+    if (user.mfaEnabled && plainTotpSecret && params.totpCode) {
+      const check = verifyTotpCodeWithStep(
+        plainTotpSecret,
+        params.totpCode,
+        user.lastAcceptedTotpStep
+      );
+      if (check.replayRejected) {
+        user.failedLoginAttempts += 1;
+        this.save();
+        throw new Error(
+          'AUTH_TOTP_REPLAY: Código TOTP já utilizado nesta janela de 30s. Aguarde o próximo token.'
+        );
+      }
+      if (!check.valid) {
+        user.failedLoginAttempts += 1;
+        this.save();
+        throw new Error('AUTH_INVALID_MFA: Código TOTP MFA inválido.');
+      }
+      user.lastAcceptedTotpStep = check.matchedStep;
+      mfaVerified = true;
+    }
+
+    user.failedLoginAttempts = 0;
+    user.lockedUntil = null;
+    user.updatedAt = new Date().toISOString();
+
+    const trustDevice = Boolean(params.trustDevice);
+    const { sessionId, session } = this.createSessionRecord(
+      user,
+      mfaVerified,
+      ipAddress,
+      params.userAgent || 'unknown',
+      { trustDevice }
+    );
+    this.save();
+
+    const mfaRequired = user.mfaEnabled && !mfaVerified;
+    return {
+      user: this.toPublicUserView(user, session.mfaVerified),
+      sessionId,
+      csrfToken: session.csrfToken,
+      mfaRequired,
+      requiresTotp: mfaRequired,
+      ...(mfaRequired
+        ? { preAuthToken: this.createPreAuthToken(user.id, user.email, trustDevice) }
+        : {}),
+      trustDevice,
+      serverTimeIso: new Date().toISOString(),
+      totpPeriodSeconds: 30,
+    };
+  }
+
+  public setupPinForUser(userId: string, rawPin: string): PublicUserView {
+    const user = this.db.users.find((u) => u.id === userId);
+    if (!user || user.disabled) {
+      throw new Error('Usuário não encontrado.');
+    }
+    const validPin = validateQuickPin(rawPin);
+    user.pinHash = hashPassword(validPin);
+    user.pinEnabled = true;
+    user.updatedAt = new Date().toISOString();
+    this.save();
+    return this.toPublicUserView(user, true);
   }
 
   public authenticateWithTotpPreAuth(params: {
@@ -1107,15 +1463,37 @@ export class AuthService {
     session.role = effectiveRole;
     return {
       user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
+        ...this.toPublicUserView(user, session.mfaVerified),
         role: effectiveRole,
-        mfaEnabled: user.mfaEnabled,
-        mfaVerified: session.mfaVerified,
       },
       session,
     };
+  }
+
+  private toPublicUserView(user: UserAccountRecord, mfaVerified: boolean): PublicUserView {
+    return {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      mfaEnabled: user.mfaEnabled,
+      mfaVerified,
+      pinEnabled: Boolean(user.pinEnabled && user.pinHash),
+      webauthnEnabled: Boolean(user.webauthnCredentials && user.webauthnCredentials.length > 0),
+    };
+  }
+
+  private completeBootstrapOnFirstAccount(nowIso: string): void {
+    this.db.bootstrapTokenSha256 = null;
+    this.db.bootstrapTokenExpiresAt = null;
+    this.db.bootstrapCompletedAt = nowIso;
+    try {
+      if (fs.existsSync(this.bootstrapTokenFilePath)) {
+        fs.unlinkSync(this.bootstrapTokenFilePath);
+      }
+    } catch {
+      // Best-effort delete
+    }
   }
 
   public switchSessionPreviewRole(sessionId: string, newRole: RbacRole): PublicUserView {
@@ -1218,7 +1596,8 @@ export class AuthService {
   public registerAccount(params: {
     name: string;
     email: string;
-    password: string;
+    password?: string;
+    pin?: string;
     role?: RbacRole;
     enableMfa?: boolean;
     ipAddress?: string;
@@ -1238,15 +1617,10 @@ export class AuthService {
     const ipAddress = params.ipAddress || '127.0.0.1';
     this.checkIpRateLimit(ipAddress);
 
-    if (this.isBootstrapRequired()) {
-      throw new Error(
-        'BOOTSTRAP_REQUIRED: A inicialização administrativa precisa ser concluída antes do cadastro público.'
-      );
-    }
-
     const cleanName = (params.name || '').trim();
     const cleanEmail = (params.email || '').trim().toLowerCase();
     const cleanPassword = params.password || '';
+    const rawPin = (params.pin || '').trim();
 
     if (cleanName.length < 2) {
       throw new Error('INVALID_NAME: O nome completo deve possuir pelo menos 2 caracteres.');
@@ -1254,38 +1628,56 @@ export class AuthService {
     if (!isValidEmailAddress(cleanEmail)) {
       throw new Error('INVALID_EMAIL: Informe um endereço de e-mail válido.');
     }
-    if (cleanPassword.length < 10) {
+
+    const validatedPin = rawPin ? validateQuickPin(rawPin) : null;
+    if (!validatedPin && cleanPassword.length < 10) {
       throw new Error('WEAK_PASSWORD: A senha deve possuir pelo menos 10 caracteres.');
     }
+    if (validatedPin && cleanPassword.length > 0 && cleanPassword.length < 10) {
+      throw new Error('WEAK_PASSWORD: A senha deve possuir pelo menos 10 caracteres.');
+    }
+
     if (this.registrationInProgress.has(cleanEmail) || this.db.users.some((u) => u.email === cleanEmail)) {
       this.recordIpFailure(ipAddress);
       throw new Error('EMAIL_ALREADY_EXISTS: Este e-mail já está cadastrado na plataforma.');
     }
 
-    const requestedRole: RbacRole = params.role || 'SECURITY_LEAD';
-    if (requestedRole === 'ADMIN') {
-      throw new Error(
-        'ROLE_ELEVATION_BLOCKED: Criação de perfil ADMIN exige privilégio administrativo ou bootstrap inicial.'
-      );
+    const isFirstUser = this.db.users.length === 0;
+    let assignedRole: RbacRole = 'ADMIN';
+
+    if (!isFirstUser) {
+      const requestedRole: RbacRole = params.role || 'SECURITY_LEAD';
+      if (requestedRole === 'ADMIN') {
+        throw new Error(
+          'ROLE_ELEVATION_BLOCKED: Criação de perfil ADMIN exige privilégio administrativo ou bootstrap inicial.'
+        );
+      }
+      const allowedSelfRoles: ReadonlyArray<RbacRole> = ['SECURITY_LEAD', 'QA_ENGINEER', 'AUDITOR'];
+      if (!allowedSelfRoles.includes(requestedRole)) {
+        throw new Error('INVALID_ROLE: Perfil de acesso selecionado é inválido.');
+      }
+      assignedRole = requestedRole;
     }
-    const allowedSelfRoles: ReadonlyArray<RbacRole> = ['SECURITY_LEAD', 'QA_ENGINEER', 'AUDITOR'];
-    if (!allowedSelfRoles.includes(requestedRole)) {
-      throw new Error('INVALID_ROLE: Perfil de acesso selecionado é inválido.');
-    }
-    const assignedRole: RbacRole = requestedRole;
 
     this.registrationInProgress.add(cleanEmail);
     try {
       const now = new Date().toISOString();
       const totpSecret = params.enableMfa ? base32Encode(crypto.randomBytes(20)) : null;
       const recoveryGen = totpSecret ? generateRecoveryCodesSet(8) : null;
+      const effectivePasswordToHash =
+        cleanPassword.length >= 10
+          ? cleanPassword
+          : `wh-pin-fallback-${crypto.randomBytes(24).toString('base64url')}`;
 
       const newUser: UserAccountRecord = {
         id: `usr-${crypto.randomUUID().slice(0, 8)}`,
         name: cleanName,
         email: cleanEmail,
         role: assignedRole,
-        passwordHash: hashPassword(cleanPassword),
+        passwordHash: hashPassword(effectivePasswordToHash),
+        pinHash: validatedPin ? hashPassword(validatedPin) : null,
+        pinEnabled: Boolean(validatedPin),
+        webauthnCredentials: [],
         mfaEnabled: Boolean(params.enableMfa),
         totpSecretBase32: totpSecret ? this.encryptSecretAtRest(totpSecret) : null,
         recoveryCodeHashes: recoveryGen ? recoveryGen.codeHashes : [],
@@ -1300,6 +1692,9 @@ export class AuthService {
       };
 
       this.db.users.push(newUser);
+      if (isFirstUser) {
+        this.completeBootstrapOnFirstAccount(now);
+      }
 
       const { sessionId, session } = this.createSessionRecord(
         newUser,
@@ -1310,14 +1705,7 @@ export class AuthService {
       this.save();
 
       return {
-        user: {
-          id: newUser.id,
-          name: newUser.name,
-          email: newUser.email,
-          role: newUser.role,
-          mfaEnabled: newUser.mfaEnabled,
-          mfaVerified: session.mfaVerified,
-        },
+        user: this.toPublicUserView(newUser, session.mfaVerified),
         sessionId,
         csrfToken: session.csrfToken,
         ...(totpSecret
@@ -1337,6 +1725,871 @@ export class AuthService {
     }
   }
 
+  private pruneExpiredWebAuthnChallenges(): void {
+    const now = Date.now();
+    for (const [id, ch] of this.webauthnChallenges.entries()) {
+      if (now > ch.expiresAtMs) {
+        this.webauthnChallenges.delete(id);
+      }
+    }
+  }
+
+  public beginWebAuthnAccountRegistration(params: {
+    name: string;
+    email: string;
+    role?: RbacRole;
+    rpId?: string;
+    ipAddress?: string;
+  }) {
+    return this.createWebAuthnRegistrationOptions(params);
+  }
+
+  public createWebAuthnRegistrationOptions(params: {
+    name: string;
+    email: string;
+    role?: RbacRole;
+    rpId?: string;
+    ipAddress?: string;
+  }): {
+    challengeId: string;
+    rp: { name: string; id: string };
+    user: { id: string; name: string; displayName: string };
+    challenge: string;
+    pubKeyCredParams: Array<{ type: 'public-key'; alg: -7 | -257 }>;
+    timeout: number;
+    attestation: 'none';
+    authenticatorSelection: {
+      authenticatorAttachment: 'platform';
+      residentKey: 'preferred';
+      userVerification: 'required';
+    };
+  } {
+    const ipAddress = params.ipAddress || '127.0.0.1';
+    this.checkIpRateLimit(ipAddress);
+    this.pruneExpiredWebAuthnChallenges();
+
+    const cleanName = (params.name || '').trim();
+    const cleanEmail = (params.email || '').trim().toLowerCase();
+    if (cleanName.length < 2) {
+      throw new Error('INVALID_NAME: O nome completo deve possuir pelo menos 2 caracteres.');
+    }
+    if (!isValidEmailAddress(cleanEmail)) {
+      throw new Error('INVALID_EMAIL: Informe um endereço de e-mail válido.');
+    }
+    if (this.db.users.some((u) => u.email === cleanEmail)) {
+      throw new Error('EMAIL_ALREADY_EXISTS: Este e-mail já está cadastrado na plataforma.');
+    }
+    if (this.db.users.length > 0 && params.role === 'ADMIN') {
+      throw new Error(
+        'ROLE_ELEVATION_BLOCKED: Criação de perfil ADMIN exige privilégio administrativo ou bootstrap inicial.'
+      );
+    }
+
+    const rpId = normalizeWebAuthnRpId(params.rpId);
+    const challengeId = crypto.randomUUID();
+    const challengeBase64Url = crypto.randomBytes(32).toString('base64url');
+    const userHandle = crypto.randomBytes(16).toString('base64url');
+
+    this.webauthnChallenges.set(challengeId, {
+      challengeId,
+      challengeBase64Url,
+      purpose: 'REGISTER_ACCOUNT',
+      rpId,
+      expiresAtMs: Date.now() + AuthService.PREAUTH_TTL_MS,
+      registrationMeta: {
+        name: cleanName,
+        email: cleanEmail,
+        role: params.role,
+        userHandle,
+      },
+    });
+
+    return {
+      challengeId,
+      rp: {
+        name: 'WinHood Benchmark Analyzer',
+        id: rpId,
+      },
+      user: {
+        id: userHandle,
+        name: cleanEmail,
+        displayName: cleanName,
+      },
+      challenge: challengeBase64Url,
+      pubKeyCredParams: [
+        { type: 'public-key', alg: -7 },
+        { type: 'public-key', alg: -257 },
+      ],
+      timeout: 60000,
+      attestation: 'none',
+      authenticatorSelection: {
+        authenticatorAttachment: 'platform',
+        residentKey: 'preferred',
+        userVerification: 'required',
+      },
+    };
+  }
+
+  public verifyWebAuthnAccountRegistration(params: {
+    challengeId?: string;
+    credentialId: string;
+    clientDataJSON: string;
+    attestationObject?: string;
+    authenticatorData?: string;
+    publicKeySpkiBase64?: string;
+    coseAlgorithm?: number;
+    transports?: string[];
+    trustDevice?: boolean;
+    ipAddress?: string;
+    userAgent?: string;
+  }): {
+    user: PublicUserView;
+    sessionId: string;
+    csrfToken: string;
+    trustDevice: boolean;
+  } {
+    const ipAddress = params.ipAddress || '127.0.0.1';
+    this.checkIpRateLimit(ipAddress);
+    this.pruneExpiredWebAuthnChallenges();
+
+    const clientDataBuf = decodeBase64OrBase64Url(params.clientDataJSON);
+    let clientData: { type?: string; challenge?: string; origin?: string };
+    try {
+      clientData = JSON.parse(clientDataBuf.toString('utf8'));
+    } catch {
+      throw new Error('WEBAUTHN_CLIENT_DATA_INVALID: clientDataJSON malformado.');
+    }
+    if (clientData.type !== 'webauthn.create' || !clientData.challenge || !clientData.origin) {
+      throw new Error('WEBAUTHN_CLIENT_DATA_INVALID: Tipo ou campos de clientDataJSON inválidos.');
+    }
+
+    let challengeRecord: WebAuthnChallengeRecord | undefined;
+    if (params.challengeId) {
+      challengeRecord = this.webauthnChallenges.get(params.challengeId);
+    } else {
+      for (const rec of this.webauthnChallenges.values()) {
+        if (rec.purpose === 'REGISTER_ACCOUNT' && rec.challengeBase64Url === clientData.challenge) {
+          challengeRecord = rec;
+          break;
+        }
+      }
+    }
+
+    if (!challengeRecord || challengeRecord.purpose !== 'REGISTER_ACCOUNT') {
+      throw new Error('WEBAUTHN_CHALLENGE_INVALID: Desafio WebAuthn ausente, expirado ou já utilizado.');
+    }
+    this.webauthnChallenges.delete(challengeRecord.challengeId);
+
+    if (Date.now() > challengeRecord.expiresAtMs) {
+      throw new Error('WEBAUTHN_CHALLENGE_EXPIRED: Desafio WebAuthn expirado (5 minutos).');
+    }
+
+    const expectedChallBuf = Buffer.from(challengeRecord.challengeBase64Url, 'utf8');
+    const providedChallBuf = Buffer.from(clientData.challenge, 'utf8');
+    if (
+      expectedChallBuf.length !== providedChallBuf.length ||
+      !crypto.timingSafeEqual(expectedChallBuf, providedChallBuf)
+    ) {
+      throw new Error('WEBAUTHN_CHALLENGE_MISMATCH: Desafio WebAuthn divergente.');
+    }
+
+    const { hostname: originHostname } = validateWebAuthnOrigin(
+      clientData.origin,
+      challengeRecord.rpId
+    );
+
+    let authDataBuf: Buffer | null = null;
+    let publicKeySpkiBase64 = (params.publicKeySpkiBase64 || '').trim();
+    let coseAlgorithm: -7 | -257 = params.coseAlgorithm === -257 ? -257 : -7;
+    let extractedCredId = (params.credentialId || '').trim();
+
+    if (params.attestationObject) {
+      const attBuf = decodeBase64OrBase64Url(params.attestationObject);
+      const attMap = decodeCborItem(attBuf, 0).value;
+      if (attMap instanceof Map && Buffer.isBuffer(attMap.get('authData'))) {
+        authDataBuf = attMap.get('authData') as Buffer;
+      }
+    }
+    if (!authDataBuf && params.authenticatorData) {
+      authDataBuf = decodeBase64OrBase64Url(params.authenticatorData);
+    }
+    if (!authDataBuf || authDataBuf.length < 37) {
+      throw new Error('WEBAUTHN_AUTHDATA_INVALID: authenticatorData ausente ou truncado.');
+    }
+
+    const rpIdHash = authDataBuf.subarray(0, 32);
+    const expectedRpHash = crypto.createHash('sha256').update(challengeRecord.rpId, 'utf8').digest();
+    const originRpHash = crypto.createHash('sha256').update(originHostname, 'utf8').digest();
+    const rpMatches =
+      crypto.timingSafeEqual(rpIdHash, expectedRpHash) ||
+      crypto.timingSafeEqual(rpIdHash, originRpHash);
+    if (!rpMatches) {
+      throw new Error('WEBAUTHN_RPID_MISMATCH: Hash do Relying Party (rpIdHash) inválido.');
+    }
+
+    const flags = authDataBuf[32]!;
+    const userPresent = (flags & 0x01) !== 0;
+    const userVerified = (flags & 0x04) !== 0;
+    const attestedCredDataPresent = (flags & 0x40) !== 0;
+    if (!userPresent || !userVerified) {
+      throw new Error(
+        'WEBAUTHN_UV_REQUIRED: Presença (UP) e verificação biométrica/PIN do Windows Hello (UV) são obrigatórias.'
+      );
+    }
+
+    const signCount = authDataBuf.readUInt32BE(33);
+
+    if (attestedCredDataPresent && authDataBuf.length >= 55) {
+      const credIdLen = authDataBuf.readUInt16BE(53);
+      if (authDataBuf.length < 55 + credIdLen) {
+        throw new Error('WEBAUTHN_AUTHDATA_INVALID: attestedCredentialData truncado.');
+      }
+      const rawCredId = authDataBuf.subarray(55, 55 + credIdLen).toString('base64url');
+      if (!extractedCredId) {
+        extractedCredId = rawCredId;
+      }
+      const coseKeySlice = authDataBuf.subarray(55 + credIdLen);
+      if (coseKeySlice.length > 0 && !publicKeySpkiBase64) {
+        const parsedKey = cosePublicKeyToSpkiBase64(coseKeySlice);
+        publicKeySpkiBase64 = parsedKey.publicKeySpkiBase64;
+        coseAlgorithm = parsedKey.coseAlgorithm;
+      }
+    }
+
+    if (!extractedCredId || !publicKeySpkiBase64) {
+      throw new Error('WEBAUTHN_KEY_MISSING: Chave pública ou identificador da credencial WebAuthn ausente.');
+    }
+
+    // Validate SPKI public key is importable by node:crypto
+    try {
+      const spkiBuf = decodeBase64OrBase64Url(publicKeySpkiBase64);
+      const keyObj = crypto.createPublicKey({ key: spkiBuf, format: 'der', type: 'spki' });
+      publicKeySpkiBase64 = (keyObj.export({ type: 'spki', format: 'der' }) as Buffer).toString('base64');
+    } catch {
+      throw new Error('WEBAUTHN_KEY_INVALID: Chave pública SPKI inválida.');
+    }
+
+    const regMeta = challengeRecord.registrationMeta!;
+    if (this.db.users.some((u) => u.email === regMeta.email)) {
+      throw new Error('EMAIL_ALREADY_EXISTS: Este e-mail já está cadastrado na plataforma.');
+    }
+
+    const isFirstUser = this.db.users.length === 0;
+    let assignedRole: RbacRole = 'ADMIN';
+    if (!isFirstUser) {
+      const requestedRole: RbacRole = regMeta.role || 'SECURITY_LEAD';
+      if (requestedRole === 'ADMIN') {
+        throw new Error('ROLE_ELEVATION_BLOCKED: Criação de perfil ADMIN exige privilégio administrativo.');
+      }
+      assignedRole = requestedRole;
+    }
+
+    const now = new Date().toISOString();
+    const newUser: UserAccountRecord = {
+      id: `usr-${crypto.randomUUID().slice(0, 8)}`,
+      name: regMeta.name,
+      email: regMeta.email,
+      role: assignedRole,
+      passwordHash: hashPassword(`wh-webauthn-${crypto.randomBytes(24).toString('base64url')}`),
+      pinHash: null,
+      pinEnabled: false,
+      webauthnCredentials: [
+        {
+          credentialId: extractedCredId,
+          publicKeySpkiBase64,
+          coseAlgorithm,
+          signCount,
+          transports: params.transports || ['internal'],
+          createdAt: now,
+          lastUsedAt: now,
+        },
+      ],
+      mfaEnabled: false,
+      totpSecretBase32: null,
+      recoveryCodeHashes: [],
+      lastAcceptedTotpStep: null,
+      disabled: false,
+      failedLoginAttempts: 0,
+      lockedUntil: null,
+      recoveryTokenSha256: null,
+      recoveryExpiresAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    this.db.users.push(newUser);
+    if (isFirstUser) {
+      this.completeBootstrapOnFirstAccount(now);
+    }
+
+    const trustDevice = params.trustDevice !== false;
+    const { sessionId, session } = this.createSessionRecord(
+      newUser,
+      true,
+      ipAddress,
+      params.userAgent || 'unknown',
+      { trustDevice }
+    );
+    this.save();
+
+    return {
+      user: this.toPublicUserView(newUser, true),
+      sessionId,
+      csrfToken: session.csrfToken,
+      trustDevice,
+    };
+  }
+
+  public createWebAuthnLoginOptions(params?: {
+    email?: string;
+    rpId?: string;
+    ipAddress?: string;
+  }): {
+    challengeId: string;
+    challenge: string;
+    rpId: string;
+    timeout: number;
+    userVerification: 'required';
+    authenticatorAttachment: 'platform';
+    allowCredentials: Array<{ type: 'public-key'; id: string; transports?: string[] }>;
+  } {
+    const ipAddress = params?.ipAddress || '127.0.0.1';
+    this.checkIpRateLimit(ipAddress);
+    this.pruneExpiredWebAuthnChallenges();
+
+    const cleanEmail = (params?.email || '').trim().toLowerCase();
+    const rpId = normalizeWebAuthnRpId(params?.rpId);
+    const challengeId = crypto.randomUUID();
+    const challengeBase64Url = crypto.randomBytes(32).toString('base64url');
+
+    const allowCredentials: Array<{ type: 'public-key'; id: string; transports?: string[] }> = [];
+    const candidateUsers = cleanEmail
+      ? this.db.users.filter((u) => !u.disabled && u.email === cleanEmail)
+      : this.db.users.filter((u) => !u.disabled);
+
+    for (const u of candidateUsers) {
+      for (const cred of u.webauthnCredentials || []) {
+        allowCredentials.push({
+          type: 'public-key',
+          id: cred.credentialId,
+          transports: cred.transports || ['internal'],
+        });
+      }
+    }
+
+    this.webauthnChallenges.set(challengeId, {
+      challengeId,
+      challengeBase64Url,
+      purpose: 'LOGIN',
+      rpId,
+      expiresAtMs: Date.now() + AuthService.PREAUTH_TTL_MS,
+      email: cleanEmail || undefined,
+    });
+
+    return {
+      challengeId,
+      challenge: challengeBase64Url,
+      rpId,
+      timeout: 60000,
+      userVerification: 'required',
+      authenticatorAttachment: 'platform',
+      allowCredentials,
+    };
+  }
+
+  public verifyWebAuthnLogin(params: {
+    challengeId?: string;
+    credentialId: string;
+    clientDataJSON: string;
+    authenticatorData: string;
+    signature: string;
+    email?: string;
+    trustDevice?: boolean;
+    ipAddress?: string;
+    userAgent?: string;
+  }): {
+    user: PublicUserView;
+    sessionId: string;
+    csrfToken: string;
+    mfaRequired: boolean;
+    requiresTotp: boolean;
+    preAuthToken?: string;
+    trustDevice: boolean;
+    serverTimeIso: string;
+    totpPeriodSeconds: number;
+  } {
+    const ipAddress = params.ipAddress || '127.0.0.1';
+    this.checkIpRateLimit(ipAddress);
+    this.pruneExpiredWebAuthnChallenges();
+
+    const clientDataBuf = decodeBase64OrBase64Url(params.clientDataJSON);
+    let clientData: { type?: string; challenge?: string; origin?: string };
+    try {
+      clientData = JSON.parse(clientDataBuf.toString('utf8'));
+    } catch {
+      throw new Error('WEBAUTHN_CLIENT_DATA_INVALID: clientDataJSON malformado.');
+    }
+    if (clientData.type !== 'webauthn.get' || !clientData.challenge || !clientData.origin) {
+      throw new Error('WEBAUTHN_CLIENT_DATA_INVALID: Tipo ou campos de clientDataJSON inválidos.');
+    }
+
+    let challengeRecord: WebAuthnChallengeRecord | undefined;
+    if (params.challengeId) {
+      challengeRecord = this.webauthnChallenges.get(params.challengeId);
+    } else {
+      for (const rec of this.webauthnChallenges.values()) {
+        if (rec.purpose === 'LOGIN' && rec.challengeBase64Url === clientData.challenge) {
+          challengeRecord = rec;
+          break;
+        }
+      }
+    }
+
+    if (!challengeRecord || challengeRecord.purpose !== 'LOGIN') {
+      throw new Error('WEBAUTHN_CHALLENGE_INVALID: Desafio de login WebAuthn ausente, expirado ou já utilizado.');
+    }
+    this.webauthnChallenges.delete(challengeRecord.challengeId);
+
+    if (Date.now() > challengeRecord.expiresAtMs) {
+      throw new Error('WEBAUTHN_CHALLENGE_EXPIRED: Desafio de login WebAuthn expirado.');
+    }
+
+    const expectedChallBuf = Buffer.from(challengeRecord.challengeBase64Url, 'utf8');
+    const providedChallBuf = Buffer.from(clientData.challenge, 'utf8');
+    if (
+      expectedChallBuf.length !== providedChallBuf.length ||
+      !crypto.timingSafeEqual(expectedChallBuf, providedChallBuf)
+    ) {
+      throw new Error('WEBAUTHN_CHALLENGE_MISMATCH: Desafio de login WebAuthn divergente.');
+    }
+
+    const { hostname: originHostname } = validateWebAuthnOrigin(
+      clientData.origin,
+      challengeRecord.rpId
+    );
+
+    const credId = (params.credentialId || '').trim();
+    const targetEmail = (params.email || challengeRecord.email || '').trim().toLowerCase();
+
+    let matchedUser: UserAccountRecord | undefined;
+    let matchedCred: WebAuthnCredentialRecord | undefined;
+    for (const u of this.db.users) {
+      if (u.disabled) continue;
+      if (targetEmail && u.email !== targetEmail) continue;
+      const found = (u.webauthnCredentials || []).find((c) => c.credentialId === credId);
+      if (found) {
+        matchedUser = u;
+        matchedCred = found;
+        break;
+      }
+    }
+
+    if (!matchedUser || !matchedCred) {
+      this.recordIpFailure(ipAddress);
+      throw new Error('WEBAUTHN_CREDENTIAL_NOT_FOUND: Credencial Windows Hello não localizada.');
+    }
+
+    if (matchedUser.lockedUntil && Date.now() < Date.parse(matchedUser.lockedUntil)) {
+      throw new Error('AUTH_ACCOUNT_LOCKED: Conta temporariamente bloqueada após tentativas excessivas.');
+    }
+
+    const authDataBuf = decodeBase64OrBase64Url(params.authenticatorData);
+    if (authDataBuf.length < 37) {
+      throw new Error('WEBAUTHN_AUTHDATA_INVALID: authenticatorData inválido.');
+    }
+
+    const rpIdHash = authDataBuf.subarray(0, 32);
+    const expectedRpHash = crypto.createHash('sha256').update(challengeRecord.rpId, 'utf8').digest();
+    const originRpHash = crypto.createHash('sha256').update(originHostname, 'utf8').digest();
+    if (
+      !crypto.timingSafeEqual(rpIdHash, expectedRpHash) &&
+      !crypto.timingSafeEqual(rpIdHash, originRpHash)
+    ) {
+      throw new Error('WEBAUTHN_RPID_MISMATCH: Hash do Relying Party (rpIdHash) inválido.');
+    }
+
+    const flags = authDataBuf[32]!;
+    if ((flags & 0x01) === 0 || (flags & 0x04) === 0) {
+      throw new Error(
+        'WEBAUTHN_UV_REQUIRED: Presença (UP) e verificação do usuário (UV) são obrigatórias no Windows Hello.'
+      );
+    }
+
+    const signCount = authDataBuf.readUInt32BE(33);
+    const clientDataHash = crypto.createHash('sha256').update(clientDataBuf).digest();
+    const signedPayload = Buffer.concat([authDataBuf, clientDataHash]);
+    const signatureBuf = decodeBase64OrBase64Url(params.signature);
+    const pubKeyObj = crypto.createPublicKey({
+      key: Buffer.from(matchedCred.publicKeySpkiBase64, 'base64'),
+      format: 'der',
+      type: 'spki',
+    });
+
+    const isSigValid = crypto.verify('sha256', signedPayload, pubKeyObj, signatureBuf);
+    if (!isSigValid) {
+      matchedUser.failedLoginAttempts += 1;
+      if (matchedUser.failedLoginAttempts >= AuthService.MAX_LOGIN_ATTEMPTS) {
+        matchedUser.lockedUntil = new Date(Date.now() + AuthService.LOCKOUT_DURATION_MS).toISOString();
+      }
+      this.recordIpFailure(ipAddress);
+      this.save();
+      throw new Error('WEBAUTHN_SIGNATURE_INVALID: Assinatura criptográfica WebAuthn inválida.');
+    }
+
+    if (matchedCred.signCount > 0 && signCount <= matchedCred.signCount) {
+      this.recordIpFailure(ipAddress);
+      throw new Error(
+        'WEBAUTHN_REPLAY_DETECTED: Contador anti-replay WebAuthn regressivo ou repetido.'
+      );
+    }
+
+    matchedCred.signCount = signCount;
+    matchedCred.lastUsedAt = new Date().toISOString();
+    matchedUser.failedLoginAttempts = 0;
+    matchedUser.lockedUntil = null;
+    matchedUser.updatedAt = new Date().toISOString();
+
+    const mfaVerified = !matchedUser.mfaEnabled;
+    const trustDevice = params.trustDevice !== false;
+    const { sessionId, session } = this.createSessionRecord(
+      matchedUser,
+      mfaVerified,
+      ipAddress,
+      params.userAgent || 'unknown',
+      { trustDevice }
+    );
+    this.save();
+
+    const mfaRequired = matchedUser.mfaEnabled && !mfaVerified;
+    return {
+      user: this.toPublicUserView(matchedUser, session.mfaVerified),
+      sessionId,
+      csrfToken: session.csrfToken,
+      mfaRequired,
+      requiresTotp: mfaRequired,
+      ...(mfaRequired
+        ? { preAuthToken: this.createPreAuthToken(matchedUser.id, matchedUser.email, trustDevice) }
+        : {}),
+      trustDevice,
+      serverTimeIso: new Date().toISOString(),
+      totpPeriodSeconds: 30,
+    };
+  }
+
+  public static buildWindowsHelloPowerShellScript(): string {
+    return [
+      '$ErrorActionPreference = "Stop"',
+      'Add-Type -AssemblyName System.Runtime.WindowsRuntime',
+      '$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq "AsTask" -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq "IAsyncOperation`1" })[0]',
+      'function Await-WinRtTask($WinRtTask, $ResultType) {',
+      '  $asTask = $asTaskGeneric.MakeGenericMethod($ResultType)',
+      '  $netTask = $asTask.Invoke($null, @($WinRtTask))',
+      '  $netTask.Wait(-1) | Out-Null',
+      '  return $netTask.Result',
+      '}',
+      '[Windows.Security.Credentials.UI.UserConsentVerifier,Windows.Security.Credentials.UI,ContentType=WindowsRuntime] | Out-Null',
+      '$avail = Await-WinRtTask ([Windows.Security.Credentials.UI.UserConsentVerifier]::CheckAvailabilityAsync()) ([Windows.Security.Credentials.UI.UserConsentVerifierAvailability])',
+      'if ([int]$avail -ne 0) {',
+      '  Write-Output ("UNAVAILABLE:" + [int]$avail + ":" + $avail.ToString())',
+      '  exit 2',
+      '}',
+      '$prompt = $env:WINHOOD_HELLO_PROMPT',
+      'if ([string]::IsNullOrWhiteSpace($prompt)) { $prompt = "WinHood Benchmark Analyzer - Windows Hello" }',
+      '$res = Await-WinRtTask ([Windows.Security.Credentials.UI.UserConsentVerifier]::RequestVerificationAsync($prompt)) ([Windows.Security.Credentials.UI.UserConsentVerificationResult])',
+      'if ([int]$res -eq 0) {',
+      '  Write-Output "VERIFIED:0"',
+      '  exit 0',
+      '}',
+      'Write-Output ("FAILED:" + [int]$res + ":" + $res.ToString())',
+      'exit 1',
+    ].join('\n');
+  }
+
+  public async verifyWindowsOsHelloPrompt(promptMessage: string): Promise<{
+    verified: boolean;
+    statusCode: number;
+    statusName: string;
+  }> {
+    if (process.platform !== 'win32') {
+      throw new Error(
+        `WINDOWS_HELLO_OS_UNSUPPORTED: Verificação nativa do sistema operacional Windows Hello requer Windows (plataforma atual: ${process.platform}).`
+      );
+    }
+
+    const sanitizedPrompt = (promptMessage || 'WinHood Benchmark Analyzer — Windows Hello')
+      .replace(/[\r\n\0]/g, ' ')
+      .trim()
+      .slice(0, 160);
+
+    const script = AuthService.buildWindowsHelloPowerShellScript();
+    const encodedCommand = Buffer.from(script, 'utf16le').toString('base64');
+
+    try {
+      const { stdout } = await execFileAsync(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodedCommand],
+        {
+          timeout: 65000,
+          windowsHide: true,
+          env: {
+            ...process.env,
+            WINHOOD_HELLO_PROMPT: sanitizedPrompt,
+          },
+        }
+      );
+
+      const line = String(stdout || '').trim().split(/\r?\n/).pop() || '';
+      if (line.startsWith('VERIFIED:0')) {
+        return { verified: true, statusCode: 0, statusName: 'Verified' };
+      }
+      throw new Error(`WINDOWS_HELLO_CANCELLED: Verificação do Windows Hello não confirmada (${line || 'Unknown'}).`);
+    } catch (err: any) {
+      const stdout = String(err?.stdout || '').trim();
+      const stderr = String(err?.stderr || '').trim();
+      const combined = `${stdout} ${stderr} ${err?.message || ''}`;
+      if (stdout.startsWith('UNAVAILABLE:')) {
+        throw new Error(
+          `WINDOWS_HELLO_UNAVAILABLE: Windows Hello não está configurado ou disponível neste dispositivo Windows (${stdout}).`
+        );
+      }
+      if (stdout.startsWith('FAILED:')) {
+        throw new Error(
+          `WINDOWS_HELLO_CANCELLED: Verificação do Windows Hello cancelada ou recusada na janela Segurança do Windows (${stdout}).`
+        );
+      }
+      if (combined.startsWith('WINDOWS_HELLO_')) {
+        throw err;
+      }
+      throw new Error(
+        `WINDOWS_HELLO_EXECUTION_FAILED: Não foi possível acionar o prompt nativo do Windows Hello (${err?.message || 'Erro PowerShell'}).`
+      );
+    }
+  }
+
+  public async registerNativeWindowsHelloAccount(params: {
+    name: string;
+    email: string;
+    role?: RbacRole;
+    trustDevice?: boolean;
+    ipAddress?: string;
+    userAgent?: string;
+    promptVerifier?: (promptMessage: string) => Promise<void>;
+  }): Promise<{
+    user: PublicUserView;
+    sessionId: string;
+    csrfToken: string;
+    trustDevice: boolean;
+    credentialId: string;
+    keyAlgorithm: 'ES256';
+  }> {
+    const ipAddress = params.ipAddress || '127.0.0.1';
+    this.checkIpRateLimit(ipAddress);
+
+    const cleanName = (params.name || '').trim();
+    const cleanEmail = (params.email || '').trim().toLowerCase();
+    if (cleanName.length < 2) {
+      throw new Error('INVALID_NAME: O nome completo deve possuir pelo menos 2 caracteres.');
+    }
+    if (!isValidEmailAddress(cleanEmail)) {
+      throw new Error('INVALID_EMAIL: Informe um endereço de e-mail válido.');
+    }
+    if (this.registrationInProgress.has(cleanEmail) || this.db.users.some((u) => u.email === cleanEmail)) {
+      throw new Error('EMAIL_ALREADY_EXISTS: Este e-mail já está cadastrado na plataforma.');
+    }
+
+    const isFirstUser = this.db.users.length === 0;
+    let assignedRole: RbacRole = 'ADMIN';
+    if (!isFirstUser) {
+      const requestedRole: RbacRole = params.role || 'SECURITY_LEAD';
+      if (requestedRole === 'ADMIN') {
+        throw new Error(
+          'ROLE_ELEVATION_BLOCKED: Criação de perfil ADMIN exige privilégio administrativo ou bootstrap inicial.'
+        );
+      }
+      const allowedSelfRoles: ReadonlyArray<RbacRole> = ['SECURITY_LEAD', 'QA_ENGINEER', 'AUDITOR'];
+      if (!allowedSelfRoles.includes(requestedRole)) {
+        throw new Error('INVALID_ROLE: Perfil de acesso selecionado é inválido.');
+      }
+      assignedRole = requestedRole;
+    }
+
+    this.registrationInProgress.add(cleanEmail);
+    try {
+      const promptMsg = `WinHood Benchmark Analyzer: Confirmar cadastro com Windows Hello para ${cleanEmail}`;
+      if (params.promptVerifier) {
+        await params.promptVerifier(promptMsg);
+      } else {
+        await this.verifyWindowsOsHelloPrompt(promptMsg);
+      }
+
+      if (this.db.users.some((u) => u.email === cleanEmail)) {
+        throw new Error('EMAIL_ALREADY_EXISTS: Este e-mail já está cadastrado na plataforma.');
+      }
+
+      // Generate ECDSA P-256 (ES256) keypair bound to the Windows Hello verified account
+      const { publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+      const spkiBase64 = (publicKey.export({ type: 'spki', format: 'der' }) as Buffer).toString('base64');
+      const credentialId = `winhello-os-${crypto.randomBytes(16).toString('base64url')}`;
+
+      const now = new Date().toISOString();
+      const newUser: UserAccountRecord = {
+        id: `usr-${crypto.randomUUID().slice(0, 8)}`,
+        name: cleanName,
+        email: cleanEmail,
+        role: assignedRole,
+        passwordHash: hashPassword(`wh-winhello-${crypto.randomBytes(24).toString('base64url')}`),
+        pinHash: null,
+        pinEnabled: false,
+        webauthnCredentials: [
+          {
+            credentialId,
+            publicKeySpkiBase64: spkiBase64,
+            coseAlgorithm: -7,
+            signCount: 1,
+            transports: ['internal'],
+            createdAt: now,
+            lastUsedAt: now,
+          },
+        ],
+        mfaEnabled: false,
+        totpSecretBase32: null,
+        recoveryCodeHashes: [],
+        lastAcceptedTotpStep: null,
+        disabled: false,
+        failedLoginAttempts: 0,
+        lockedUntil: null,
+        recoveryTokenSha256: null,
+        recoveryExpiresAt: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      this.db.users.push(newUser);
+      if (isFirstUser) {
+        this.completeBootstrapOnFirstAccount(now);
+      }
+
+      const trustDevice = params.trustDevice !== false;
+      const { sessionId, session } = this.createSessionRecord(
+        newUser,
+        true,
+        ipAddress,
+        params.userAgent || 'unknown',
+        { trustDevice }
+      );
+      this.save();
+
+      return {
+        user: this.toPublicUserView(newUser, true),
+        sessionId,
+        csrfToken: session.csrfToken,
+        trustDevice,
+        credentialId,
+        keyAlgorithm: 'ES256',
+      };
+    } finally {
+      this.registrationInProgress.delete(cleanEmail);
+    }
+  }
+
+  public async loginNativeWindowsHelloAccount(params?: {
+    email?: string;
+    trustDevice?: boolean;
+    ipAddress?: string;
+    userAgent?: string;
+    promptVerifier?: (promptMessage: string) => Promise<void>;
+  }): Promise<{
+    user: PublicUserView;
+    sessionId: string;
+    csrfToken: string;
+    mfaRequired: boolean;
+    requiresTotp: boolean;
+    preAuthToken?: string;
+    trustDevice: boolean;
+    serverTimeIso: string;
+    totpPeriodSeconds: number;
+  }> {
+    const ipAddress = params?.ipAddress || '127.0.0.1';
+    this.checkIpRateLimit(ipAddress);
+
+    if (!params?.promptVerifier && process.platform !== 'win32') {
+      throw new Error(
+        `WINDOWS_HELLO_OS_UNSUPPORTED: Verificação nativa do sistema operacional Windows Hello requer Windows (plataforma atual: ${process.platform}).`
+      );
+    }
+
+    const cleanEmail = (params?.email || '').trim().toLowerCase();
+    let matchedUser: UserAccountRecord | undefined;
+    if (cleanEmail) {
+      matchedUser = this.db.users.find(
+        (u) => !u.disabled && u.email === cleanEmail && Boolean(u.webauthnCredentials?.length)
+      );
+    } else {
+      const helloUsers = this.db.users.filter(
+        (u) => !u.disabled && Boolean(u.webauthnCredentials?.length)
+      );
+      if (helloUsers.length === 1) {
+        matchedUser = helloUsers[0];
+      }
+    }
+
+    if (!matchedUser) {
+      this.recordIpFailure(ipAddress);
+      throw new Error(
+        cleanEmail
+          ? 'WEBAUTHN_CREDENTIAL_NOT_FOUND: Nenhuma credencial Windows Hello cadastrada para este e-mail.'
+          : 'WEBAUTHN_CREDENTIAL_NOT_FOUND: Informe o e-mail da conta Windows Hello (ou cadastre uma credencial primeiro).'
+      );
+    }
+
+    if (matchedUser.lockedUntil && Date.now() < Date.parse(matchedUser.lockedUntil)) {
+      throw new Error('AUTH_ACCOUNT_LOCKED: Conta temporariamente bloqueada após tentativas excessivas.');
+    }
+
+    const promptMsg = `WinHood Benchmark Analyzer: Autenticar acesso de ${matchedUser.email} com Windows Hello`;
+    if (params?.promptVerifier) {
+      await params.promptVerifier(promptMsg);
+    } else {
+      await this.verifyWindowsOsHelloPrompt(promptMsg);
+    }
+
+    const now = new Date().toISOString();
+    const firstCred = matchedUser.webauthnCredentials?.[0];
+    if (firstCred) {
+      firstCred.signCount = (firstCred.signCount || 0) + 1;
+      firstCred.lastUsedAt = now;
+    }
+    matchedUser.failedLoginAttempts = 0;
+    matchedUser.lockedUntil = null;
+    matchedUser.updatedAt = now;
+
+    const mfaVerified = !matchedUser.mfaEnabled;
+    const trustDevice = params?.trustDevice !== false;
+    const { sessionId, session } = this.createSessionRecord(
+      matchedUser,
+      mfaVerified,
+      ipAddress,
+      params?.userAgent || 'unknown',
+      { trustDevice }
+    );
+    this.save();
+
+    const mfaRequired = matchedUser.mfaEnabled && !mfaVerified;
+    return {
+      user: this.toPublicUserView(matchedUser, session.mfaVerified),
+      sessionId,
+      csrfToken: session.csrfToken,
+      mfaRequired,
+      requiresTotp: mfaRequired,
+      ...(mfaRequired
+        ? { preAuthToken: this.createPreAuthToken(matchedUser.id, matchedUser.email, trustDevice) }
+        : {}),
+      trustDevice,
+      serverTimeIso: new Date().toISOString(),
+      totpPeriodSeconds: 30,
+    };
+  }
+
   public listUsers(): Array<Omit<PublicUserView, 'mfaVerified'> & { createdAt: string; disabled: boolean }> {
     return this.db.users.map((u) => ({
       id: u.id,
@@ -1344,6 +2597,8 @@ export class AuthService {
       email: u.email,
       role: u.role,
       mfaEnabled: u.mfaEnabled,
+      pinEnabled: Boolean(u.pinEnabled && u.pinHash),
+      webauthnEnabled: Boolean(u.webauthnCredentials && u.webauthnCredentials.length > 0),
       createdAt: u.createdAt,
       disabled: u.disabled,
     }));
@@ -1415,6 +2670,69 @@ export class AuthService {
       if (s.userId === user.id) s.revoked = true;
     }
     this.save();
+  }
+
+  public deleteOwnAccount(
+    userId: string,
+    verification?: {
+      password?: string;
+      pin?: string;
+    }
+  ): {
+    deletedUserId: string;
+    email: string;
+    revokedSessionsCount: number;
+  } {
+    const userIndex = this.db.users.findIndex((u) => u.id === userId);
+    if (userIndex === -1) {
+      throw new Error('USER_NOT_FOUND: Conta de usuário não encontrada.');
+    }
+    const user = this.db.users[userIndex]!;
+    const rawPassword = (verification?.password || '').trim();
+    const rawPin = (verification?.pin || '').trim();
+    const hasPin = Boolean(user.pinEnabled && user.pinHash);
+    const hasWebAuthn = Boolean(user.webauthnCredentials && user.webauthnCredentials.length > 0);
+
+    if (rawPin) {
+      if (!hasPin || !user.pinHash || !verifyPassword(rawPin, user.pinHash)) {
+        throw new Error('AUTH_INVALID_CREDENTIALS: PIN de confirmação inválido.');
+      }
+    } else if (rawPassword) {
+      if (!verifyPassword(rawPassword, user.passwordHash)) {
+        throw new Error('AUTH_INVALID_CREDENTIALS: Senha de confirmação inválida.');
+      }
+    } else if (!hasWebAuthn) {
+      throw new Error(
+        'VERIFICATION_REQUIRED: Confirme sua senha ou PIN atual para excluir permanentemente sua conta.'
+      );
+    }
+
+    let revokedSessionsCount = 0;
+    for (const s of this.db.sessions) {
+      if (s.userId === userId && !s.revoked) {
+        s.revoked = true;
+        revokedSessionsCount += 1;
+      }
+    }
+    this.db.sessions = this.db.sessions.filter((s) => s.userId !== userId);
+    this.db.users.splice(userIndex, 1);
+
+    // Clean up any local recovery file if present
+    try {
+      const recPath = path.join(this.recoveryDir, `recovery_${user.id}.txt`);
+      if (fs.existsSync(recPath)) {
+        fs.unlinkSync(recPath);
+      }
+    } catch {
+      // Best-effort cleanup
+    }
+
+    this.save();
+    return {
+      deletedUserId: user.id,
+      email: user.email,
+      revokedSessionsCount,
+    };
   }
 
   public static hasPermission(role: RbacRole, permission: RbacPermission): boolean {

@@ -43,6 +43,9 @@ jobs:
           npm ci --ignore-scripts
           npm ls --depth=0
 
+      - name: Audit dependencies for high/critical CVEs
+        run: npm audit --audit-level=high
+
       - name: Typecheck (tsc --noEmit)
         run: npm run lint
 

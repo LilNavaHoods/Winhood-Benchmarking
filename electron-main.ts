@@ -114,8 +114,24 @@ export function isAuthorizedLoopbackSender(
 ): boolean {
   if (!senderUrl) return false;
   try {
-    const parsed = new URL(senderUrl);
-    return parsed.origin === expectedOrigin;
+    const parsedSender = new URL(senderUrl);
+    const parsedExpected = new URL(expectedOrigin);
+    if (parsedSender.protocol !== 'http:' || parsedExpected.protocol !== 'http:') {
+      return false;
+    }
+    const senderPort = parsedSender.port || '80';
+    const expectedPort = parsedExpected.port || '80';
+    if (senderPort !== expectedPort) {
+      return false;
+    }
+    const isSenderLoopback =
+      parsedSender.hostname === 'localhost' || parsedSender.hostname === '127.0.0.1';
+    const isExpectedLoopback =
+      parsedExpected.hostname === 'localhost' || parsedExpected.hostname === '127.0.0.1';
+    if (isSenderLoopback && isExpectedLoopback) {
+      return true;
+    }
+    return parsedSender.origin === parsedExpected.origin;
   } catch {
     return false;
   }
@@ -190,17 +206,20 @@ export async function bootstrapWindowsDesktop(options?: {
     );
   }
 
+  const desktopWindowUrl = `http://localhost:${startedBackend.port}`;
+
   if (!isElectronBinary || options?.headlessCheckOnly) {
     return {
       mode: 'HEADLESS_VERIFIED' as const,
       backend: startedBackend,
+      windowUrl: desktopWindowUrl,
       health,
       layout,
       securityWebPreferences: ELECTRON_SECURITY_WEB_PREFERENCES,
     };
   }
 
-  const { app, BrowserWindow, ipcMain, shell } = electron;
+  const { app, BrowserWindow, ipcMain, session, shell } = electron;
 
   const hasSingleInstanceLock = app.requestSingleInstanceLock?.() ?? true;
   if (!hasSingleInstanceLock) {
@@ -210,6 +229,37 @@ export async function bootstrapWindowsDesktop(options?: {
   }
 
   await app.whenReady();
+
+  // Ensure WebAuthn / FIDO2 / Windows Hello permissions on authorized loopback origin are not blocked
+  if (session?.defaultSession) {
+    const allowedPermissions = new Set([
+      'publickey-credentials-get',
+      'publickey-credentials-create',
+      'clipboard-sanitized-write',
+      'clipboard-read',
+      'hid',
+      'usb',
+    ]);
+    session.defaultSession.setPermissionCheckHandler?.(
+      (webContents: any, permission: string, requestingOrigin: string) => {
+        const originToCheck = requestingOrigin || webContents?.getURL?.() || '';
+        if (!isAuthorizedLoopbackSender(originToCheck, startedBackend.url)) {
+          return false;
+        }
+        return allowedPermissions.has(permission) || permission.startsWith('publickey');
+      }
+    );
+    session.defaultSession.setPermissionRequestHandler?.(
+      (webContents: any, permission: string, callback: (granted: boolean) => void, details: any) => {
+        const originToCheck = details?.requestingUrl || webContents?.getURL?.() || '';
+        if (!isAuthorizedLoopbackSender(originToCheck, startedBackend.url)) {
+          callback(false);
+          return;
+        }
+        callback(allowedPermissions.has(permission) || permission.startsWith('publickey'));
+      }
+    );
+  }
 
   // 5. Register validated IPC handlers
   const preloadCandidates = [
@@ -231,7 +281,7 @@ export async function bootstrapWindowsDesktop(options?: {
         arch: process.arch,
         electronVersion: process.versions.electron || null,
         nodeVersion: process.versions.node,
-        backendUrl: startedBackend.url,
+        backendUrl: desktopWindowUrl,
         backendPort: startedBackend.port,
         userDataDir: layout.rootDataDir,
       };
@@ -285,7 +335,8 @@ export async function bootstrapWindowsDesktop(options?: {
     }
   });
 
-  await mainWindow.loadURL(startedBackend.url);
+  // Load via http://localhost:<port> so Windows Hello / WebAuthn FIDO2 accepts valid rpId="localhost"
+  await mainWindow.loadURL(desktopWindowUrl);
   mainWindow.show();
 
   let shuttingDown = false;

@@ -25,6 +25,7 @@ import {
 import type { AppNavSection } from './StepByStepJourneyBar';
 import { WinHoodLogo } from './WinHoodLogo';
 import { HairlineAnimatedFigure } from './HairlineAnimatedFigure';
+import { PrivacyAndTermsModal } from './PrivacyAndTermsModal';
 
 export type GuideChapterId =
   | 'quickstart'
@@ -243,6 +244,7 @@ export const UserGuideModule: React.FC<UserGuideModuleProps> = ({
   );
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedGlossaryCategory, setSelectedGlossaryCategory] = useState<string>('TODOS');
+  const [isPrivacyModalOpen, setIsPrivacyModalOpen] = useState<boolean>(false);
 
   // Sincronizar quando initialChapterId mudar externamente
   React.useEffect(() => {
@@ -1262,6 +1264,26 @@ export const UserGuideModule: React.FC<UserGuideModuleProps> = ({
           </div>
         </div>
       )}
+
+      {/* Footer: Privacidade, Transparência de IA & Termos Open Source (Microsoft Store Section 10.5) */}
+      <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] px-5 py-3.5 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500 dark:text-slate-400">
+        <div className="flex items-center gap-2 font-mono">
+          <ShieldCheck className="w-4 h-4 text-[#31d6c4]" />
+          <span>Execução 100% Local · Cofre whdb:enc:v2 · Licença MIT Open Source</span>
+        </div>
+        <button
+          type="button"
+          onClick={() => setIsPrivacyModalOpen(true)}
+          className="font-semibold text-[#0e9f8e] dark:text-[#31d6c4] hover:underline cursor-pointer"
+        >
+          Privacidade &amp; Termos
+        </button>
+      </div>
+
+      <PrivacyAndTermsModal
+        isOpen={isPrivacyModalOpen}
+        onClose={() => setIsPrivacyModalOpen(false)}
+      />
     </div>
   );
 };

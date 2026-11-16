@@ -31,6 +31,7 @@ import {
   Sparkles,
   Sun,
   Server,
+  Trash2,
   Upload,
   UserCheck,
   Wrench,
@@ -527,6 +528,54 @@ export default function App() {
     }
   };
 
+  const [isDeleteAccountOpen, setIsDeleteAccountOpen] = useState(false);
+  const [deleteVerifyPassword, setDeleteVerifyPassword] = useState('');
+  const [deleteVerifyPin, setDeleteVerifyPin] = useState('');
+  const [deletingAccount, setDeletingAccount] = useState(false);
+
+  const handleDeleteOwnAccount = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!currentUser) return;
+    setDeletingAccount(true);
+    try {
+      const res = await fetch('/api/auth/me', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          password: deleteVerifyPassword.trim() || undefined,
+          pin: deleteVerifyPin.trim() || undefined,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        notify(
+          data.error || 'Falha ao excluir conta. Verifique sua senha ou PIN de confirmação.',
+          'error'
+        );
+        return;
+      }
+      setIsDeleteAccountOpen(false);
+      setDeleteVerifyPassword('');
+      setDeleteVerifyPin('');
+      clearClientAuthTokens();
+      lastAuthConfirmedAtRef.current = 0;
+      setAuthenticated(false);
+      setAuthStatus('unauthenticated');
+      setMfaRequired(false);
+      setIsAdminOrigin(false);
+      setCurrentUser(null);
+      setDashboardData(null);
+      setProjects([]);
+      setSoftwares([]);
+      notify('Sua conta local e todas as sessões ativas foram excluídas permanentemente.', 'success');
+      await checkAuthSession();
+    } catch {
+      notify('Erro de comunicação ao tentar excluir conta local.', 'error');
+    } finally {
+      setDeletingAccount(false);
+    }
+  };
+
   const handleOpenMfaSetup = async () => {
     try {
       const res = await fetch('/api/auth/totp/setup', { method: 'POST' });
@@ -895,6 +944,20 @@ export default function App() {
                   >
                     <KeyRound className="w-3 h-3 text-[#31d6c4]" />
                     <span>{currentUser.mfaEnabled ? 'MFA Ativo' : 'Ativar MFA'}</span>
+                  </button>
+                </div>
+                <div className="pt-1 flex items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDeleteVerifyPassword('');
+                      setDeleteVerifyPin('');
+                      setIsDeleteAccountOpen(true);
+                    }}
+                    className="inline-flex items-center gap-1 text-[10px] font-semibold text-rose-500 hover:text-rose-400 hover:underline cursor-pointer"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    <span>Excluir minha conta</span>
                   </button>
                 </div>
                 {isAdminOrigin && (
@@ -1437,6 +1500,91 @@ export default function App() {
                 </button>
               </>
             )}
+          </form>
+        </div>
+      )}
+
+      {/* Local Account Deletion Confirmation Modal (DELETE /api/auth/me) */}
+      {isDeleteAccountOpen && currentUser && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4"
+        >
+          <form
+            onSubmit={handleDeleteOwnAccount}
+            className="w-full max-w-md rounded-xl border border-rose-500/40 bg-white dark:bg-[#0c1017] p-5 space-y-4 text-xs shadow-2xl"
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-rose-600 dark:text-rose-400 flex items-center gap-2">
+                <Trash2 className="w-4 h-4" />
+                <span>Excluir minha conta local</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setIsDeleteAccountOpen(false)}
+                className="text-slate-400 hover:text-slate-200 cursor-pointer"
+              >
+                Fechar
+              </button>
+            </div>
+
+            <p className="text-slate-600 dark:text-slate-300 leading-relaxed">
+              Esta ação removerá permanentemente o registro da conta{' '}
+              <strong className="font-mono">{currentUser.email}</strong> de{' '}
+              <code className="font-mono">auth_users.json</code> e revogará todas as sessões ativas.
+            </p>
+
+            <div className="space-y-3">
+              <div>
+                <label htmlFor="delete-account-password" className="block font-semibold mb-1">
+                  Confirme sua Senha atual (ou preencha o PIN abaixo):
+                </label>
+                <input
+                  id="delete-account-password"
+                  type="password"
+                  autoComplete="current-password"
+                  value={deleteVerifyPassword}
+                  onChange={(e) => setDeleteVerifyPassword(e.target.value)}
+                  placeholder="Senha atual da conta"
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 text-slate-900 dark:text-slate-100"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="delete-account-pin" className="block font-semibold mb-1">
+                  Ou confirme com seu PIN Rápido (6 a 8 dígitos):
+                </label>
+                <input
+                  id="delete-account-pin"
+                  type="password"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  maxLength={8}
+                  value={deleteVerifyPin}
+                  onChange={(e) => setDeleteVerifyPin(e.target.value.replace(/\D/g, '').slice(0, 8))}
+                  placeholder="PIN de 6 a 8 dígitos"
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 font-mono tracking-widest text-slate-900 dark:text-slate-100"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                type="submit"
+                disabled={deletingAccount}
+                className="flex-1 py-2.5 rounded-lg font-bold bg-rose-600 text-white hover:bg-rose-500 transition-colors cursor-pointer disabled:opacity-50"
+              >
+                {deletingAccount ? 'Excluindo...' : 'Confirmar Exclusão Permanente'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsDeleteAccountOpen(false)}
+                className="px-4 py-2.5 rounded-lg font-semibold border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 cursor-pointer"
+              >
+                Cancelar
+              </button>
+            </div>
           </form>
         </div>
       )}

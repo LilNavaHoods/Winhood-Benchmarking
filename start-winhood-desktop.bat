@@ -1,14 +1,14 @@
 @echo off
 SETLOCAL EnableDelayedExpansion
-TITLE WinHood Benchmark Analyzer v4.5.0 — Desktop Launcher
+TITLE WinHood Benchmark Analyzer v4.4.0 — Desktop Launcher
 
 echo ============================================================================
-echo   WinHood Benchmark ^& Quality Analyzer v4.5.0 — Inicializador Local Windows
+echo   WinHood Benchmark ^& Quality Analyzer v4.4.0 — Inicializador Local Windows
 echo ============================================================================
 
-IF EXIST "%~dp0release\win-unpacked\WinHood Benchmark Analyzer.exe" (
+IF EXIST "%~dp0release-windows\win-unpacked\WinHood Benchmark Analyzer.exe" (
     echo [INFO] Iniciando executavel nativo empacotado...
-    START "" "%~dp0release\win-unpacked\WinHood Benchmark Analyzer.exe"
+    START "" "%~dp0release-windows\win-unpacked\WinHood Benchmark Analyzer.exe"
     EXIT /B 0
 )
 
@@ -33,5 +33,5 @@ echo [3/3] Iniciando servidor local WinHood e abrindo interface...
 SET NODE_ENV=production
 SET WINHOOD_RUNTIME_ENV=LOCAL_PRODUCTION
 SET PORT=3000
-START "" cmd /c "timeout /t 2 /nobreak >nul && start http://127.0.0.1:3000"
+START "" cmd /c "timeout /t 2 /nobreak >nul && start http://localhost:3000"
 node "%~dp0dist-desktop\server.mjs"
