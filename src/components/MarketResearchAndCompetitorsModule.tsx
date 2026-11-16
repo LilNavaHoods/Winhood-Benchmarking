@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import type { MarketCompetitorCandidate, Project, Software } from '../types/benchmark';
 import { WinHoodLogo } from './WinHoodLogo';
+import { HairlineAnimatedFigure } from './HairlineAnimatedFigure';
 import { csrfFetch as fetch } from '../utils/csrfFetch';
 
 interface MarketResearchAndCompetitorsModuleProps {
@@ -285,23 +286,34 @@ export const MarketResearchAndCompetitorsModule: React.FC<
       {/* Header Principal */}
       <div className="rounded-xl border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-6 shadow-sm">
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-          <div className="flex items-start gap-4">
-            <WinHoodLogo size={48} className="shrink-0" />
-            <div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="px-2.5 py-0.5 rounded text-[11px] font-mono font-semibold bg-[#31d6c4]/15 text-[#31d6c4] border border-[#31d6c4]/30">
-                  MARKET INTELLIGENCE ENGINE
-                </span>
-                <span className="px-2.5 py-0.5 rounded text-[11px] font-mono bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
-                  {catalogSize} Softwares Reais Verificados · {availableCategories.length} Categorias
-                </span>
+          <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+            <HairlineAnimatedFigure
+              type="loupe"
+              variant="hero"
+              width={160}
+              height={126}
+              active={true}
+              scanning={loading}
+              accentColor="#38bdf8"
+            />
+            <div className="flex items-start gap-3">
+              <WinHoodLogo size={42} className="shrink-0 mt-1" />
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="px-2.5 py-0.5 rounded text-[11px] font-mono font-semibold bg-[#31d6c4]/15 text-[#31d6c4] border border-[#31d6c4]/30">
+                    MARKET INTELLIGENCE ENGINE
+                  </span>
+                  <span className="px-2.5 py-0.5 rounded text-[11px] font-mono bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                    {catalogSize} Softwares Reais Verificados · {availableCategories.length} Categorias
+                  </span>
+                </div>
+                <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-slate-100 mt-1.5">
+                  Pesquisa de Mercado &amp; Descoberta de Concorrentes Equivalentes
+                </h1>
+                <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 mt-1">
+                  Descubra concorrentes reais de mercado (Open-Source ou Closed-Source), calibre os 6 eixos matemáticos de similaridade e homologue candidatos para comparação técnica imparcial.
+                </p>
               </div>
-              <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-slate-100 mt-1.5">
-                Pesquisa de Mercado &amp; Descoberta de Concorrentes Equivalentes
-              </h1>
-              <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 mt-1">
-                Descubra concorrentes reais de mercado (Open-Source ou Closed-Source), calibre os 6 eixos matemáticos de similaridade e homologue candidatos para comparação técnica imparcial.
-              </p>
             </div>
           </div>
 

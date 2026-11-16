@@ -17,6 +17,7 @@ import type {
   SecurityAssessmentSuiteBundle,
   VulnerabilityValidationState,
 } from '../types/benchmark';
+import { HairlineAnimatedFigure } from './HairlineAnimatedFigure';
 import { csrfFetch as fetch } from '../utils/csrfFetch';
 
 interface SecurityAssessmentSuiteModuleProps {
@@ -118,10 +119,30 @@ export const SecurityAssessmentSuiteModule: React.FC<
 
   if (!latestRun) {
     return (
-      <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-8 text-center">
-        <p className="text-sm text-slate-500">
-          Execute um benchmark para carregar os 15 módulos de Avaliação Comparativa de Segurança (A vs. B).
-        </p>
+      <div className="space-y-6">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
+          <HairlineAnimatedFigure
+            type="vault"
+            variant="hero"
+            width={160}
+            height={126}
+            active={true}
+            accentColor="#f43f5e"
+          />
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
+              Suíte de Avaliação de Segurança, Superfície &amp; Attack Path Analysis (A vs. B)
+            </h1>
+            <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
+              Comparação determinística sob os mesmos parâmetros com validação em 6 estados, isolamento por MicroVM e trilha SHA-256.
+            </p>
+          </div>
+        </div>
+        <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-8 text-center">
+          <p className="text-sm text-slate-500">
+            Execute um benchmark para carregar os 15 módulos de Avaliação Comparativa de Segurança (A vs. B).
+          </p>
+        </div>
       </div>
     );
   }
@@ -138,13 +159,23 @@ export const SecurityAssessmentSuiteModule: React.FC<
     <div className="space-y-6">
       {/* Header + Controle de Escopo e Botão de Cancelamento Emergencial */}
       <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
-            Suíte de Avaliação de Segurança, Superfície &amp; Attack Path Analysis (A vs. B)
-          </h1>
-          <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
-            Comparação determinística sob os mesmos parâmetros com validação em 6 estados, isolamento por MicroVM e trilha SHA-256.
-          </p>
+        <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+          <HairlineAnimatedFigure
+            type="vault"
+            variant="hero"
+            width={160}
+            height={126}
+            active={true}
+            accentColor="#f43f5e"
+          />
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
+              Suíte de Avaliação de Segurança, Superfície &amp; Attack Path Analysis (A vs. B)
+            </h1>
+            <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
+              Comparação determinística sob os mesmos parâmetros com validação em 6 estados, isolamento por MicroVM e trilha SHA-256.
+            </p>
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <button
@@ -347,12 +378,21 @@ export const SecurityAssessmentSuiteModule: React.FC<
             </div>
           </div>
 
-          {/* Attack Path Analysis */}
+          {/* Attack Path & Taint Analysis */}
           <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-5 space-y-4">
-            <h3 className="text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-              <GitBranch className="w-4 h-4 text-rose-500" />
-              <span>Attack Path Analysis (Caminhos Críticos no Grafo de Código)</span>
-            </h3>
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+                <GitBranch className="w-4 h-4 text-rose-500" />
+                <span>Attack Path &amp; Taint Analysis (Caminhos Críticos no Grafo de Código)</span>
+              </h3>
+              <HairlineAnimatedFigure
+                type="sieve"
+                size={56}
+                active={true}
+                accentColor="#f59e0b"
+                title="Funil SAST & Taint Analysis (15 Sinks CWE)"
+              />
+            </div>
             {suite.attackPaths.length === 0 ? (
               <p className="text-xs text-slate-500">
                 Nenhum caminho de ataque encadeado identificado nos softwares analisados.

@@ -31,6 +31,7 @@ import type {
   SonarAndToolsDatabaseBundle,
   SonarInstanceRecord,
 } from '../types/benchmark';
+import { HairlineAnimatedFigure } from './HairlineAnimatedFigure';
 
 interface ToolsAndIntegrationsModuleProps {
   softwares: Software[];
@@ -481,13 +482,24 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
     <div className="space-y-6">
       {/* Header & Sub-Navigation */}
       <div className="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
-            Ferramentas e Integrações (MqrBridge Community Build, Cloud, VS Code &amp; Remediação Supervisionada)
-          </h1>
-          <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
-            Gerenciamento sob demanda, comparação padronizada A/B via Web API, revisão assistida de PRs em branch isolada e otimização de recursos.
-          </p>
+        <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+          <HairlineAnimatedFigure
+            type="terminal"
+            variant="hero"
+            width={160}
+            height={126}
+            active={true}
+            scanning={Boolean(busyAction)}
+            accentColor="#10b981"
+          />
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
+              Ferramentas e Integrações (MqrBridge Community Build, Cloud, VS Code &amp; Remediação Supervisionada)
+            </h1>
+            <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
+              Gerenciamento sob demanda, comparação padronizada A/B via Web API, revisão assistida de PRs em branch isolada e otimização de recursos.
+            </p>
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-1 p-1 rounded-lg bg-slate-200/70 dark:bg-[#0f141c] border border-slate-300/60 dark:border-slate-800 shrink-0">

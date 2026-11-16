@@ -31,6 +31,7 @@ import type {
   Software,
 } from '../types/benchmark';
 import { CATEGORY_LABELS } from './DashboardModule';
+import { HairlineAnimatedFigure } from './HairlineAnimatedFigure';
 import {
   ALL_BENCHMARK_CATEGORIES,
   DEFAULT_CATEGORY_WEIGHTS,
@@ -395,15 +396,28 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
     <div className="space-y-6">
       {/* Header */}
       <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100 flex items-center gap-3">
-            <Scale className="w-7 h-7 text-[#31d6c4]" />
-            <span>Assistente de Avaliação &amp; Benchmark de Softwares</span>
-          </h1>
-          <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 mt-1">
-            Plataforma independente de Software Quality Assessment, Security Assessment e Benchmark
-            Intelligence. Três modalidades com auditoria, pré-análise e veracidade absoluta.
-          </p>
+        <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+          <HairlineAnimatedFigure
+            type={step === 3 || assessmentMode === 'MARKET_COMPETITOR' ? 'loupe' : 'phosphor'}
+            variant="hero"
+            width={160}
+            height={126}
+            active={true}
+            scanning={executing || discovering}
+            accentColor={
+              step === 3 || assessmentMode === 'MARKET_COMPETITOR' ? '#38bdf8' : '#10b981'
+            }
+          />
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100 flex items-center gap-3">
+              <Scale className="w-7 h-7 text-[#31d6c4]" />
+              <span>Assistente de Avaliação &amp; Benchmark de Softwares</span>
+            </h1>
+            <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 mt-1">
+              Plataforma independente de Software Quality Assessment, Security Assessment e Benchmark
+              Intelligence. Três modalidades com auditoria, pré-análise e veracidade absoluta.
+            </p>
+          </div>
         </div>
 
         {/* 3 Wizard Modes Selector (Seção 10.2: Rápido, Personalizado, Avançado) */}

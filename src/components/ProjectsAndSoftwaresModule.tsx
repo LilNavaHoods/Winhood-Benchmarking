@@ -14,6 +14,7 @@ import {
   Upload,
 } from 'lucide-react';
 import type { Project, Software } from '../types/benchmark';
+import { HairlineAnimatedFigure } from './HairlineAnimatedFigure';
 import { csrfFetch as fetch } from '../utils/csrfFetch';
 
 interface ProjectsAndSoftwaresModuleProps {
@@ -342,19 +343,29 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
     <div className="space-y-6">
       {/* Module Header & Sub-Tabs */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
-        <div>
-          <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
-              Projetos, Softwares &amp; Ingestão de Artefatos (SHA-256)
-            </h1>
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[11px] font-mono font-bold bg-emerald-500/15 text-emerald-700 dark:text-[#31d6c4] border border-emerald-500/30">
-              <ShieldCheck className="w-3.5 h-3.5" />
-              Cofre de Código AES-256-GCM Ativo (whdb:enc:v2 · SHA-256 Verificado)
-            </span>
+        <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+          <HairlineAnimatedFigure
+            type="lockers"
+            variant="hero"
+            width={160}
+            height={126}
+            active={true}
+            accentColor="#38bdf8"
+          />
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
+                Projetos, Softwares &amp; Ingestão de Artefatos (SHA-256)
+              </h1>
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[11px] font-mono font-bold bg-emerald-500/15 text-emerald-700 dark:text-[#31d6c4] border border-emerald-500/30">
+                <ShieldCheck className="w-3.5 h-3.5" />
+                Cofre de Código AES-256-GCM Ativo (whdb:enc:v2 · SHA-256 Verificado)
+              </span>
+            </div>
+            <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
+              Gerenciamento completo de projetos com UUID, cadastro de múltiplos softwares e código-fonte comprimido + cifrado em repouso.
+            </p>
           </div>
-          <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
-            Gerenciamento completo de projetos com UUID, cadastro de múltiplos softwares e código-fonte comprimido + cifrado em repouso.
-          </p>
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">

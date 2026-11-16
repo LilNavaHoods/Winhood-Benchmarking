@@ -38,6 +38,7 @@ import type {
   SonarQualityModelMode,
   SonarTokenVerificationResult,
 } from '../types/benchmark';
+import { HairlineAnimatedFigure } from './HairlineAnimatedFigure';
 
 interface SonarMethodologySummaryPayload {
   projectKey: string;
@@ -769,18 +770,29 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 relative overflow-hidden">
         <div className="absolute top-0 right-0 w-96 h-96 bg-[#31d6c4]/5 rounded-full blur-3xl pointer-events-none" />
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 relative z-10">
-          <div className="space-y-2">
-            <div className="flex items-center gap-2 text-xs font-semibold text-[#31d6c4] tracking-wider uppercase">
-              <Server className="w-4 h-4" />
-              Sonar Hub Oficial & Motor Windows Multi-Core
+          <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+            <HairlineAnimatedFigure
+              type="router"
+              variant="hero"
+              width={160}
+              height={126}
+              active={true}
+              scanning={testingDocker || testingCloud || runningQuickAnalysis}
+              accentColor="#38bdf8"
+            />
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 text-xs font-semibold text-[#31d6c4] tracking-wider uppercase">
+                <Server className="w-4 h-4" />
+                Sonar Hub Oficial &amp; Motor Windows Multi-Core
+              </div>
+              <h1 className="text-2xl font-bold text-white tracking-tight">
+                MqrBridge Local (Docker) vs Nuvem MQR (Nuvem)
+              </h1>
+              <p className="text-sm text-slate-400 max-w-3xl leading-relaxed">
+                Execute a análise de código do MqrBridge via container oficial Docker sem necessidade de baixar zips pesados
+                na máquina física, conecte ao Nuvem MQR na nuvem e utilize o poder multithread dos núcleos do seu processador.
+              </p>
             </div>
-            <h1 className="text-2xl font-bold text-white tracking-tight">
-              MqrBridge Local (Docker) vs Nuvem MQR (Nuvem)
-            </h1>
-            <p className="text-sm text-slate-400 max-w-3xl leading-relaxed">
-              Execute a análise de código do MqrBridge via container oficial Docker sem necessidade de baixar zips pesados
-              na máquina física, conecte ao Nuvem MQR na nuvem e utilize o poder multithread dos núcleos do seu processador.
-            </p>
           </div>
 
           <div className="flex items-center gap-3 shrink-0">

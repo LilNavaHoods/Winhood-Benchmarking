@@ -25,6 +25,7 @@ import type {
   ScaVulnerabilityCorrelation,
   Software,
 } from '../types/benchmark';
+import { HairlineAnimatedFigure } from './HairlineAnimatedFigure';
 
 interface KeyStatusRecord {
   keyId: string;
@@ -624,14 +625,37 @@ export const ReferenceIntelligenceModule: React.FC<ReferenceIntelligenceModulePr
     <div className="space-y-6">
       {/* Header */}
       <div className="flex flex-col gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2.5">
-            <Database className="w-6 h-6 text-[#31d6c4] shrink-0" />
-            <span>Inteligência de Referência, Golden Dataset, SBOM &amp; Chaves</span>
-          </h1>
-          <p className="text-sm text-slate-600 dark:text-slate-400 mt-1 max-w-4xl">
-            Fontes oficiais versionadas com fallback offline seguro, comparabilidade em 11 critérios, calibração TP/TN OWASP, CycloneDX/SPDX + CVE/EPSS/KEV e rotação criptográfica.
-          </p>
+        <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+          <HairlineAnimatedFigure
+            type={
+              subTab === 'sbom_sca'
+                ? 'stack'
+                : subTab === 'execution_keys'
+                  ? 'padlock'
+                  : 'terrain'
+            }
+            variant="hero"
+            width={160}
+            height={126}
+            active={true}
+            unlocked={Boolean(keyVerificationResult?.valid)}
+            accentColor={
+              subTab === 'sbom_sca'
+                ? '#38bdf8'
+                : subTab === 'execution_keys'
+                  ? '#a855f7'
+                  : '#10b981'
+            }
+          />
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2.5">
+              <Database className="w-6 h-6 text-[#31d6c4] shrink-0" />
+              <span>Inteligência de Referência, Golden Dataset, SBOM &amp; Chaves</span>
+            </h1>
+            <p className="text-sm text-slate-600 dark:text-slate-400 mt-1 max-w-4xl">
+              Fontes oficiais versionadas com fallback offline seguro, comparabilidade em 11 critérios, calibração TP/TN OWASP, CycloneDX/SPDX + CVE/EPSS/KEV e rotação criptográfica.
+            </p>
+          </div>
         </div>
 
         {/* Sub-Tabs */}

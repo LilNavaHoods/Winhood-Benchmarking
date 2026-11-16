@@ -16,6 +16,7 @@ import {
   UserPlus,
 } from 'lucide-react';
 import { WinHoodLogo } from './WinHoodLogo';
+import { HairlineAnimatedFigure } from './HairlineAnimatedFigure';
 import {
   clearClientAuthTokens,
   csrfFetch as fetch,
@@ -206,8 +207,8 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
   }, [serverTimeIso]);
 
   React.useEffect(() => {
-    if (bootstrapRequired && mode !== 'BOOTSTRAP' && mode !== 'REGISTER') {
-      setMode('BOOTSTRAP');
+    if (bootstrapRequired && mode !== 'REGISTER' && mode !== 'BOOTSTRAP') {
+      setMode('REGISTER');
     } else if (!bootstrapRequired && mfaRequired && mode !== 'MFA') {
       setMode('MFA');
     } else if (!bootstrapRequired && !mfaRequired && mode === 'BOOTSTRAP') {
@@ -580,30 +581,61 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
       role="dialog"
       aria-modal="true"
       aria-labelledby="winhood-auth-title"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 backdrop-blur-sm p-4 overflow-y-auto"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/92 p-4 overflow-y-auto"
     >
       <div className="w-full max-w-lg rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0c1017] shadow-2xl overflow-hidden my-auto">
-        {/* Header */}
-        <div className="px-6 py-5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50 dark:bg-[#080b10]">
-          <div className="flex items-center gap-3">
-            <WinHoodLogo size={36} className="shrink-0" />
-            <div>
-              <h2
-                id="winhood-auth-title"
-                className="text-base font-bold text-slate-900 dark:text-slate-100"
-              >
-                {mode === 'BOOTSTRAP' && 'Provisionamento Inicial do Administrador'}
-                {mode === 'LOGIN' && 'Autenticação WinHood Platform'}
-                {mode === 'REGISTER' && 'Criar Nova Conta WinHood'}
-                {mode === 'MFA' && 'Verificação em Duas Etapas (TOTP MFA)'}
-                {mode === 'RECOVERY' && 'Recuperação Segura de Senha'}
-              </h2>
-              <p className="text-[11px] font-mono text-[#0e9f8e] dark:text-[#31d6c4]">
-                Sessão HttpOnly · Cofre AES-256-GCM · Scrypt + TOTP RFC 6238
-              </p>
+        {/* Header + 3D Isometric Padlock Showcase */}
+        <div className="px-6 pt-5 pb-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10]">
+          <div className="flex flex-col items-center justify-center mb-3.5">
+            <HairlineAnimatedFigure
+              type="padlock"
+              variant="hero"
+              width={184}
+              height={142}
+              active={true}
+              unlocked={Boolean(infoMsg)}
+              typingProgress={Math.min(
+                1,
+                ((mode === 'REGISTER'
+                  ? regPassword.length + regEmail.length + regName.length
+                  : mode === 'BOOTSTRAP'
+                    ? bsPassword.length + bsEmail.length
+                    : loginPassword.length + loginEmail.length) || 0) / 18
+              )}
+              accentColor={mode === 'REGISTER' ? '#10b981' : '#31d6c4'}
+              subtitle={
+                infoMsg
+                  ? 'COFRE KMS DESBLOQUEADO'
+                  : mode === 'REGISTER'
+                    ? 'SCRYPT · COFRE AES-256-GCM'
+                    : 'KMS · SESSÃO HTTPONLY'
+              }
+            />
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <WinHoodLogo size={36} className="shrink-0" />
+              <div>
+                <h2
+                  id="winhood-auth-title"
+                  className="text-base font-bold text-slate-900 dark:text-slate-100"
+                >
+                  {mode === 'BOOTSTRAP' && 'Provisionamento Inicial do Administrador'}
+                  {mode === 'LOGIN' && 'Autenticação WinHood Platform'}
+                  {mode === 'REGISTER' && 'Criar Nova Conta WinHood'}
+                  {mode === 'MFA' && 'Verificação em Duas Etapas (TOTP MFA)'}
+                  {mode === 'RECOVERY' && 'Recuperação Segura de Senha'}
+                </h2>
+                <p className="text-[11px] font-mono text-[#0e9f8e] dark:text-[#31d6c4]">
+                  Sessão HttpOnly · Cofre AES-256-GCM · Scrypt + TOTP RFC 6238
+                </p>
+              </div>
+            </div>
+            <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-[#31d6c4]/30 bg-[#31d6c4]/10 text-[10px] font-mono font-semibold text-[#0e9f8e] dark:text-[#31d6c4] shrink-0">
+              <Lock className="w-3.5 h-3.5" />
+              <span>whdb:enc:v2</span>
             </div>
           </div>
-          <Lock className="w-5 h-5 text-[#31d6c4]" />
         </div>
 
         {/* Mode Switcher Tabs (Login vs Cadastro / Bootstrap) */}
@@ -962,8 +994,9 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                 <div className="text-[11px] text-slate-700 dark:text-slate-200">
                   {bootstrapRequired ? (
                     <span>
-                      <strong>Primeiro acesso detectado:</strong> a 1ª conta criada recebe automaticamente perfil{' '}
-                      <code className="font-mono font-bold text-[#0e9f8e] dark:text-[#31d6c4]">ADMIN</code> sem exigir arquivo de token.
+                      <strong>Primeiro Acesso Detectado — Crie sua conta de Administrador em 1 passo (chave criptográfica gerada automaticamente):</strong>{' '}
+                      a 1ª conta recebe perfil{' '}
+                      <code className="font-mono font-bold text-[#0e9f8e] dark:text-[#31d6c4]">ADMIN</code>.
                     </span>
                   ) : (
                     <span>Cadastro direto com sessão persistente de 30 dias.</span>

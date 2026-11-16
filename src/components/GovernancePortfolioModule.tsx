@@ -22,6 +22,7 @@ import {
   Webhook,
 } from 'lucide-react';
 import type { BenchmarkRun, Software } from '../types/benchmark';
+import { HairlineAnimatedFigure } from './HairlineAnimatedFigure';
 
 interface GovernancePortfolioModuleProps {
   latestRun: BenchmarkRun | null;
@@ -560,14 +561,25 @@ export const GovernancePortfolioModule: React.FC<GovernancePortfolioModuleProps>
     <div className="space-y-6">
       {/* Header & Sub-Tabs */}
       <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2.5">
-            <Scale className="w-6 h-6 text-[#31d6c4]" />
-            <span>Governança, Quality Gates, Portfólio &amp; Rastreabilidade</span>
-          </h1>
-          <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
-            Camada independente de auditoria baseada em padrões abertos (SARIF 2.1.0, CWE, OWASP Top 10, CVSS, CycloneDX 1.5, SPDX 2.3).
-          </p>
+        <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+          <HairlineAnimatedFigure
+            type="stack"
+            variant="hero"
+            width={160}
+            height={126}
+            active={true}
+            scanning={gateLoading}
+            accentColor="#a855f7"
+          />
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2.5">
+              <Scale className="w-6 h-6 text-[#31d6c4]" />
+              <span>Governança, Quality Gates, Portfólio &amp; Rastreabilidade</span>
+            </h1>
+            <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
+              Camada independente de auditoria baseada em padrões abertos (SARIF 2.1.0, CWE, OWASP Top 10, CVSS, CycloneDX 1.5, SPDX 2.3).
+            </p>
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-1 p-1 rounded-lg bg-slate-200/70 dark:bg-[#0f141c] border border-slate-300/60 dark:border-slate-800 shrink-0">

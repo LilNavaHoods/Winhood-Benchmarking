@@ -11,6 +11,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import type { BenchmarkRun } from '../types/benchmark';
+import { HairlineAnimatedFigure } from './HairlineAnimatedFigure';
 
 interface ArchitectureQaPerfOsModuleProps {
   latestRun: BenchmarkRun | null;
@@ -25,10 +26,30 @@ export const ArchitectureQaPerfOsModule: React.FC<ArchitectureQaPerfOsModuleProp
 
   if (!latestRun) {
     return (
-      <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-8 text-center">
-        <p className="text-sm text-slate-500">
-          Execute um benchmark para visualizar as análises de Arquitetura, QA, Desempenho, Banco de Dados e Instalação Windows Sandbox.
-        </p>
+      <div className="space-y-6">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
+          <HairlineAnimatedFigure
+            type="exploded"
+            variant="hero"
+            width={160}
+            height={126}
+            active={true}
+            accentColor="#f59e0b"
+          />
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
+              Arquitetura, QA Funcional, Desempenho, Banco &amp; Sistema Operacional
+            </h1>
+            <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
+              Inspeção estrutural de acoplamento/ciclos, matriz de equivalência funcional, latência sob carga equivalente e snapshots Windows T0/T1/T2.
+            </p>
+          </div>
+        </div>
+        <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-8 text-center">
+          <p className="text-sm text-slate-500">
+            Execute um benchmark para visualizar as análises de Arquitetura, QA, Desempenho, Banco de Dados e Instalação Windows Sandbox.
+          </p>
+        </div>
       </div>
     );
   }
@@ -37,13 +58,23 @@ export const ArchitectureQaPerfOsModule: React.FC<ArchitectureQaPerfOsModuleProp
     <div className="space-y-6">
       {/* Header & Tabs */}
       <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
-            Arquitetura, QA Funcional, Desempenho, Banco &amp; Sistema Operacional
-          </h1>
-          <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
-            Inspeção estrutural de acoplamento/ciclos, matriz de equivalência funcional, latência sob carga equivalente e snapshots Windows T0/T1/T2.
-          </p>
+        <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+          <HairlineAnimatedFigure
+            type="exploded"
+            variant="hero"
+            width={160}
+            height={126}
+            active={true}
+            accentColor="#f59e0b"
+          />
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
+              Arquitetura, QA Funcional, Desempenho, Banco &amp; Sistema Operacional
+            </h1>
+            <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
+              Inspeção estrutural de acoplamento/ciclos, matriz de equivalência funcional, latência sob carga equivalente e snapshots Windows T0/T1/T2.
+            </p>
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-1 p-1 rounded-lg bg-slate-200/70 dark:bg-[#0f141c] border border-slate-300/60 dark:border-slate-800">

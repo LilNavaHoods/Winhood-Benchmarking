@@ -640,13 +640,25 @@ export const VeracityAdaptersReportsModule: React.FC<
   return (
     <div className="space-y-6">
       <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
-            Motor de Veracidade, Adaptadores, Evidências &amp; Relatórios MQR
-          </h1>
-          <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
-            Auditoria criptográfica de cobertura, reconciliação algébrica das 12 categorias com evidências de código e geração de relatórios oficiais.
-          </p>
+        <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+          <HairlineAnimatedFigure
+            type={subTab === 'veracity' ? 'vault' : subTab === 'adapters' ? 'router' : 'stack'}
+            variant="hero"
+            width={164}
+            height={128}
+            active={true}
+            accentColor={
+              subTab === 'veracity' ? '#10b981' : subTab === 'adapters' ? '#38bdf8' : '#a855f7'
+            }
+          />
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
+              Motor de Veracidade, Adaptadores, Evidências &amp; Relatórios MQR
+            </h1>
+            <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
+              Auditoria criptográfica de cobertura, reconciliação algébrica das 12 categorias com evidências de código e geração de relatórios oficiais.
+            </p>
+          </div>
         </div>
 
         <div className="flex items-center gap-1 p-1 rounded-lg bg-slate-200/70 dark:bg-[#0f141c] border border-slate-300/60 dark:border-slate-800 shrink-0">
@@ -1312,7 +1324,8 @@ export const VeracityAdaptersReportsModule: React.FC<
                           >
                             <HairlineAnimatedFigure
                               type={catConfig.figure}
-                              size={34}
+                              size={56}
+                              active={true}
                               color={catConfig.color}
                             />
                             <div className="min-w-0">
@@ -1342,7 +1355,8 @@ export const VeracityAdaptersReportsModule: React.FC<
                             <>
                               <HairlineAnimatedFigure
                                 type={currentConfig.figure}
-                                size={44}
+                                size={56}
+                                active={true}
                                 color={currentConfig.color}
                               />
                               <div>

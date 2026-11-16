@@ -391,25 +391,162 @@ export const FindingsAndDevSecOpsModule: React.FC<FindingsAndDevSecOpsModuleProp
     }
   };
 
+  const renderCategoryGallery = () => (
+    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
+      <button
+        type="button"
+        onClick={() => setSelectedVisualCat('all')}
+        className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer flex items-center gap-2.5 ${
+          selectedVisualCat === 'all'
+            ? 'bg-white dark:bg-[#131a24] border-[#10b981] shadow-sm'
+            : 'border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-[#090d13] hover:border-slate-300'
+        }`}
+      >
+        <HairlineAnimatedFigure type="vault" size={54} active={true} accentColor="#10b981" />
+        <div className="min-w-0">
+          <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">Todos</div>
+          <div className="text-[10px] text-slate-500 font-mono">Consolidado</div>
+        </div>
+      </button>
+
+      <button
+        type="button"
+        onClick={() => setSelectedVisualCat('database')}
+        className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer flex items-center gap-2.5 ${
+          selectedVisualCat === 'database'
+            ? 'bg-white dark:bg-[#131a24] border-[#38bdf8] shadow-sm'
+            : 'border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-[#090d13] hover:border-slate-300'
+        }`}
+      >
+        <HairlineAnimatedFigure type="lockers" size={54} active={true} accentColor="#38bdf8" />
+        <div className="min-w-0">
+          <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">Banco / DB</div>
+          <div className="text-[10px] text-slate-500 font-mono">Storage &amp; SQL</div>
+        </div>
+      </button>
+
+      <button
+        type="button"
+        onClick={() => setSelectedVisualCat('security')}
+        className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer flex items-center gap-2.5 ${
+          selectedVisualCat === 'security'
+            ? 'bg-white dark:bg-[#131a24] border-[#f43f5e] shadow-sm'
+            : 'border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-[#090d13] hover:border-slate-300'
+        }`}
+      >
+        <HairlineAnimatedFigure type="turntable" size={54} active={true} accentColor="#06b6d4" />
+        <div className="min-w-0">
+          <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">Segurança</div>
+          <div className="text-[10px] text-slate-500 font-mono">DevSecOps</div>
+        </div>
+      </button>
+
+      <button
+        type="button"
+        onClick={() => setSelectedVisualCat('auth_passwords')}
+        className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer flex items-center gap-2.5 ${
+          selectedVisualCat === 'auth_passwords'
+            ? 'bg-white dark:bg-[#131a24] border-[#a855f7] shadow-sm'
+            : 'border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-[#090d13] hover:border-slate-300'
+        }`}
+      >
+        <HairlineAnimatedFigure type="padlock" size={54} active={true} accentColor="#a855f7" />
+        <div className="min-w-0">
+          <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">Senhas &amp; IAM</div>
+          <div className="text-[10px] text-slate-500 font-mono">Segredos</div>
+        </div>
+      </button>
+
+      <button
+        type="button"
+        onClick={() => setSelectedVisualCat('web_network')}
+        className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer flex items-center gap-2.5 ${
+          selectedVisualCat === 'web_network'
+            ? 'bg-white dark:bg-[#131a24] border-[#10b981] shadow-sm'
+            : 'border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-[#090d13] hover:border-slate-300'
+        }`}
+      >
+        <HairlineAnimatedFigure type="router" size={54} active={true} accentColor="#10b981" />
+        <div className="min-w-0">
+          <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">Web &amp; APIs</div>
+          <div className="text-[10px] text-slate-500 font-mono">TLS / Rede</div>
+        </div>
+      </button>
+
+      <button
+        type="button"
+        onClick={() => setSelectedVisualCat('code_quality')}
+        className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer flex items-center gap-2.5 ${
+          selectedVisualCat === 'code_quality'
+            ? 'bg-white dark:bg-[#131a24] border-[#f59e0b] shadow-sm'
+            : 'border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-[#090d13] hover:border-slate-300'
+        }`}
+      >
+        <HairlineAnimatedFigure type="exploded" size={54} active={true} accentColor="#f59e0b" />
+        <div className="min-w-0">
+          <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">Qualidade</div>
+          <div className="text-[10px] text-slate-500 font-mono">SAST / Smells</div>
+        </div>
+      </button>
+    </div>
+  );
+
   if (!latestRun) {
     return (
-      <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-8 text-center">
-        <p className="text-sm text-slate-500">
-          Nenhuma execução de benchmark disponível. Execute um benchmark no Wizard para inspecionar os achados de Qualidade e DevSecOps.
-        </p>
+      <div className="space-y-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
+          <div className="flex items-center gap-4">
+            <HairlineAnimatedFigure
+              type="sieve"
+              variant="hero"
+              width={168}
+              height={132}
+              active={true}
+              accentColor="#f59e0b"
+            />
+            <div>
+              <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
+                Central de Qualidade de Código, Taint Analysis &amp; Triagem DevSecOps (MQR)
+              </h1>
+              <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
+                Rastreabilidade total no código-fonte (linha/coluna, contexto ±2 linhas, fluxo Source-to-Sink, impactos MQR nas 12 categorias e recálculo em tempo real ao aceitar ou revisar falsos positivos).
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {renderCategoryGallery()}
+
+        <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-8 text-center">
+          <p className="text-sm text-slate-500">
+            Nenhuma execução de benchmark disponível. Execute um benchmark no Wizard para inspecionar os achados de Qualidade e DevSecOps.
+          </p>
+        </div>
       </div>
     );
   }
 
   return (
     <div className="space-y-6">
-      <div className="border-b border-slate-200 dark:border-slate-800 pb-4">
-        <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
-          Central de Qualidade de Código, Taint Analysis &amp; Triagem DevSecOps (MQR)
-        </h1>
-        <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
-          Rastreabilidade total no código-fonte (linha/coluna, contexto ±2 linhas, fluxo Source-to-Sink, impactos MQR nas 12 categorias e recálculo em tempo real ao aceitar ou revisar falsos positivos).
-        </p>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
+        <div className="flex items-center gap-4">
+          <HairlineAnimatedFigure
+            type="sieve"
+            variant="hero"
+            width={168}
+            height={132}
+            active={true}
+            accentColor="#f59e0b"
+          />
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
+              Central de Qualidade de Código, Taint Analysis &amp; Triagem DevSecOps (MQR)
+            </h1>
+            <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
+              Rastreabilidade total no código-fonte (linha/coluna, contexto ±2 linhas, fluxo Source-to-Sink, impactos MQR nas 12 categorias e recálculo em tempo real ao aceitar ou revisar falsos positivos).
+            </p>
+          </div>
+        </div>
       </div>
 
       {/* Comparative Quality & Security Summary Cards */}
@@ -496,103 +633,7 @@ export const FindingsAndDevSecOpsModule: React.FC<FindingsAndDevSecOpsModuleProp
       </div>
 
       {/* Seletor Visual de Categorias com Figuras Hairline (Seção 8) */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
-        <button
-          type="button"
-          onClick={() => setSelectedVisualCat('all')}
-          className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer flex items-center gap-2 ${
-            selectedVisualCat === 'all'
-              ? 'bg-white dark:bg-[#131a24] border-[#10b981] shadow-sm'
-              : 'border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-[#090d13] hover:border-slate-300'
-          }`}
-        >
-          <HairlineAnimatedFigure type="vault" size={30} color="#10b981" />
-          <div className="min-w-0">
-            <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">Todos</div>
-            <div className="text-[10px] text-slate-500 font-mono">Consolidado</div>
-          </div>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setSelectedVisualCat('database')}
-          className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer flex items-center gap-2 ${
-            selectedVisualCat === 'database'
-              ? 'bg-white dark:bg-[#131a24] border-[#3b82f6] shadow-sm'
-              : 'border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-[#090d13] hover:border-slate-300'
-          }`}
-        >
-          <HairlineAnimatedFigure type="lockers" size={30} color="#3b82f6" />
-          <div className="min-w-0">
-            <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">Banco / DB</div>
-            <div className="text-[10px] text-slate-500 font-mono">Storage & SQL</div>
-          </div>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setSelectedVisualCat('security')}
-          className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer flex items-center gap-2 ${
-            selectedVisualCat === 'security'
-              ? 'bg-white dark:bg-[#131a24] border-[#10b981] shadow-sm'
-              : 'border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-[#090d13] hover:border-slate-300'
-          }`}
-        >
-          <HairlineAnimatedFigure type="vault" size={30} color="#10b981" />
-          <div className="min-w-0">
-            <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">Segurança</div>
-            <div className="text-[10px] text-slate-500 font-mono">DevSecOps</div>
-          </div>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setSelectedVisualCat('auth_passwords')}
-          className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer flex items-center gap-2 ${
-            selectedVisualCat === 'auth_passwords'
-              ? 'bg-white dark:bg-[#131a24] border-[#f59e0b] shadow-sm'
-              : 'border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-[#090d13] hover:border-slate-300'
-          }`}
-        >
-          <HairlineAnimatedFigure type="padlock" size={30} color="#f59e0b" />
-          <div className="min-w-0">
-            <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">Senhas & IAM</div>
-            <div className="text-[10px] text-slate-500 font-mono">Segredos</div>
-          </div>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setSelectedVisualCat('web_network')}
-          className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer flex items-center gap-2 ${
-            selectedVisualCat === 'web_network'
-              ? 'bg-white dark:bg-[#131a24] border-[#06b6d4] shadow-sm'
-              : 'border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-[#090d13] hover:border-slate-300'
-          }`}
-        >
-          <HairlineAnimatedFigure type="router" size={30} color="#06b6d4" />
-          <div className="min-w-0">
-            <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">Web & APIs</div>
-            <div className="text-[10px] text-slate-500 font-mono">TLS / Rede</div>
-          </div>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setSelectedVisualCat('code_quality')}
-          className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer flex items-center gap-2 ${
-            selectedVisualCat === 'code_quality'
-              ? 'bg-white dark:bg-[#131a24] border-[#8b5cf6] shadow-sm'
-              : 'border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-[#090d13] hover:border-slate-300'
-          }`}
-        >
-          <HairlineAnimatedFigure type="layers" size={30} color="#8b5cf6" />
-          <div className="min-w-0">
-            <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">Qualidade</div>
-            <div className="text-[10px] text-slate-500 font-mono">SAST / Smells</div>
-          </div>
-        </button>
-      </div>
+      {renderCategoryGallery()}
 
       {/* Filters Toolbar (Frente 3.4: Combinable Filters + Validation Status + Dynamic Counters) */}
       <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-4 space-y-3">

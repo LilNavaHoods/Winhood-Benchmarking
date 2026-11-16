@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { apiFetchJson } from '../utils/apiClient';
 import { BenchmarkRun } from '../types/benchmark';
+import { HairlineAnimatedFigure } from './HairlineAnimatedFigure';
 
 interface HostHardwareBenchmarkResult {
   benchmarkId: string;
@@ -932,26 +933,37 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
     <div className="space-y-6 pb-10">
       {/* Header Banner */}
       <div className="bg-[#111722] border border-slate-800/80 rounded-xl p-5 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2.5">
-            <span className="px-2 py-0.5 text-[11px] font-mono uppercase tracking-wider bg-teal-500/15 text-teal-300 border border-teal-500/30 rounded">
-              P4D • HARDWARE, GPU & DISPLAY LAB
-            </span>
-            <span className="text-xs text-slate-400 font-mono tabular-nums">
-              {telemetry.physicalWidthPx}×{telemetry.physicalHeightPx}px ({telemetry.aspectRatioLabel}) •{' '}
-              {framePacing.estimatedHz}Hz • {telemetry.colorGamut}
-            </span>
+        <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+          <HairlineAnimatedFigure
+            type="turntable"
+            variant="hero"
+            width={160}
+            height={126}
+            active={true}
+            scanning={runningHostBench || samplingHz}
+            accentColor="#06b6d4"
+          />
+          <div>
+            <div className="flex items-center gap-2.5">
+              <span className="px-2 py-0.5 text-[11px] font-mono uppercase tracking-wider bg-teal-500/15 text-teal-300 border border-teal-500/30 rounded">
+                P4D • HARDWARE, GPU &amp; DISPLAY LAB
+              </span>
+              <span className="text-xs text-slate-400 font-mono tabular-nums">
+                {telemetry.physicalWidthPx}×{telemetry.physicalHeightPx}px ({telemetry.aspectRatioLabel}) •{' '}
+                {framePacing.estimatedHz}Hz • {telemetry.colorGamut}
+              </span>
+            </div>
+            <h2 className="text-xl font-bold text-white mt-1.5 flex items-center gap-2">
+              <Monitor className="w-5 h-5 text-teal-400" />
+              Suíte de Benchmark de Hardware, GPU, IOPS e Calibração de Monitores
+            </h2>
+            <p className="text-xs text-slate-300 mt-1 max-w-3xl">
+              Avaliação determinística da estação de trabalho e do painel óptico: micro-benchmarks de
+              CPU/RAM/IOPS no servidor, cadência real de quadros (Hz/Jitter) via{' '}
+              <code className="text-teal-300 font-mono">requestAnimationFrame</code> e laboratório
+              visual interativo de Ghosting, Dead Pixels, Banding e Uniformidade DSE.
+            </p>
           </div>
-          <h2 className="text-xl font-bold text-white mt-1.5 flex items-center gap-2">
-            <Monitor className="w-5 h-5 text-teal-400" />
-            Suíte de Benchmark de Hardware, GPU, IOPS e Calibração de Monitores
-          </h2>
-          <p className="text-xs text-slate-300 mt-1 max-w-3xl">
-            Avaliação determinística da estação de trabalho e do painel óptico: micro-benchmarks de
-            CPU/RAM/IOPS no servidor, cadência real de quadros (Hz/Jitter) via{' '}
-            <code className="text-teal-300 font-mono">requestAnimationFrame</code> e laboratório
-            visual interativo de Ghosting, Dead Pixels, Banding e Uniformidade DSE.
-          </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">

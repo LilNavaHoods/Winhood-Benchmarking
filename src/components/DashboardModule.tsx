@@ -455,6 +455,89 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
         </div>
       </div>
 
+      {/* Domínios Auditados em Tempo Real (Hairline Telemetry) — Sempre visível */}
+      <div
+        data-testid="dashboard-hairline-telemetry-bar"
+        className="rounded-xl border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-4 space-y-3"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="text-xs font-bold text-slate-900 dark:text-slate-100">
+            Domínios Auditados em Tempo Real (Hairline Telemetry 3D)
+          </div>
+          <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
+            Projeção Isométrica 30° · Ciclo Cinético 1.8s + Pausa 2.0s · Interativo ao Cursor
+          </div>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3">
+          {[
+            {
+              label: 'Segurança & SAST',
+              sub: '15 Sinks CWE · Taint',
+              type: 'vault' as const,
+              color: '#f43f5e',
+              target: 'security_suite',
+            },
+            {
+              label: 'Dados & Cofre AES-256-GCM',
+              sub: 'whdb:enc:v2 · SHA-256',
+              type: 'lockers' as const,
+              color: '#38bdf8',
+              target: 'projects',
+            },
+            {
+              label: 'Criptografia & IAM',
+              sub: 'KMS · Scrypt · TOTP',
+              type: 'padlock' as const,
+              color: '#a855f7',
+              target: 'reference_intelligence',
+            },
+            {
+              label: 'Rede, Cloud & Sonar',
+              sub: 'MqrBridge · OTel · SSRF',
+              type: 'router' as const,
+              color: '#10b981',
+              target: 'sonar_hub',
+            },
+            {
+              label: 'Arquitetura & Clean Code',
+              sub: 'Ciclos DAG · Camadas',
+              type: 'exploded' as const,
+              color: '#f59e0b',
+              target: 'arch_qa_perf',
+            },
+            {
+              label: 'Performance & Hardware',
+              sub: 'CPU · IOPS · Display Hz',
+              type: 'turntable' as const,
+              color: '#06b6d4',
+              target: 'hardware_benchmark',
+            },
+          ].map((dom) => (
+            <button
+              key={dom.type}
+              type="button"
+              onClick={() => onNavigate(dom.target)}
+              className="flex items-center gap-3 p-2.5 rounded-lg border border-slate-200/80 dark:border-slate-800/90 bg-slate-50/70 dark:bg-[#090d14] hover:border-[#31d6c4]/60 transition-colors text-left cursor-pointer"
+            >
+              <HairlineAnimatedFigure
+                type={dom.type}
+                size={56}
+                active={true}
+                accentColor={dom.color}
+              />
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">
+                  {dom.label}
+                </div>
+                <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                  {dom.sub}
+                </div>
+              </div>
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* 10 Real Backend KPIs Grid (Part 6.2: grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-5 gap-4) */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-5 gap-4">
         <div className="rounded-lg border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-5">
@@ -615,60 +698,109 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
       {!data?.hasEvaluations || !latestRun ? (
         <div
           data-testid="empty-evaluations-state"
-          className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-10 text-center max-w-3xl mx-auto my-8"
+          className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-8 max-w-4xl mx-auto my-8 space-y-6"
         >
-          <ShieldCheck className="w-12 h-12 text-[#31d6c4] mx-auto mb-4" />
-          <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100">
-            Ainda não existem avaliações ou benchmarks executados neste ambiente
-          </h2>
-          <p className="text-sm text-slate-600 dark:text-slate-400 mt-2 max-w-xl mx-auto">
-            Em conformidade com a política de veracidade estrita da plataforma, nenhuma métrica fictícia ou demonstrativa é exibida sem execução real. Cadastre um projeto e importe o código-fonte dos softwares ou carregue os repositórios reais de referência para iniciar.
-          </p>
-          <div className="mt-6 flex flex-wrap items-center justify-center gap-4">
-            <button
-              type="button"
-              onClick={onSeedRealWorkspace}
-              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg text-xs font-semibold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] transition-colors cursor-pointer"
-            >
-              <Play className="w-4 h-4" />
-              Carregar e Analisar Repositórios Reais (VaultCore vs KeeSafe Open)
-            </button>
-            <button
-              type="button"
-              onClick={() => onNavigate('projects')}
-              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg text-xs font-medium border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
-            >
-              Criar Projeto do Zero
-            </button>
-            <button
-              type="button"
-              onClick={() => onNavigate('user_guide')}
-              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg text-xs font-semibold border border-[#31d6c4]/50 text-[#0e9f8e] dark:text-[#31d6c4] hover:bg-[#31d6c4]/10 transition-colors cursor-pointer"
-            >
-              Ler Guia Completo Passo a Passo
-            </button>
+          <div className="flex flex-col md:flex-row items-center gap-6 text-center md:text-left">
+            <HairlineAnimatedFigure
+              type="phosphor"
+              variant="hero"
+              width={176}
+              height={138}
+              active={true}
+              accentColor="#10b981"
+              subtitle="TELEMETRY READY"
+            />
+            <div className="flex-1 space-y-2">
+              <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100">
+                Ainda não existem avaliações ou benchmarks executados neste ambiente
+              </h2>
+              <p className="text-sm text-slate-600 dark:text-slate-400">
+                Em conformidade com a política de veracidade estrita da plataforma, nenhuma métrica fictícia ou demonstrativa é exibida sem execução real. Cadastre um projeto e importe o código-fonte dos softwares ou carregue os repositórios reais de referência para iniciar.
+              </p>
+              <div className="pt-3 flex flex-wrap items-center justify-center md:justify-start gap-3">
+                <button
+                  type="button"
+                  onClick={onSeedRealWorkspace}
+                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg text-xs font-semibold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] transition-colors cursor-pointer"
+                >
+                  <Play className="w-4 h-4" />
+                  Carregar e Analisar Repositórios Reais (VaultCore vs KeeSafe Open)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onNavigate('projects')}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-xs font-medium border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+                >
+                  Criar Projeto do Zero
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onNavigate('user_guide')}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-xs font-semibold border border-[#31d6c4]/50 text-[#0e9f8e] dark:text-[#31d6c4] hover:bg-[#31d6c4]/10 transition-colors cursor-pointer"
+                >
+                  Ler Guia Completo Passo a Passo
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Prévia visual das 6 categorias 3D */}
+          <div className="pt-4 border-t border-slate-200 dark:border-slate-800/80 grid grid-cols-3 sm:grid-cols-6 gap-3">
+            {[
+              { type: 'vault' as const, label: 'Segurança', color: '#f43f5e' },
+              { type: 'lockers' as const, label: 'Cofre & DB', color: '#38bdf8' },
+              { type: 'padlock' as const, label: 'Cripto & IAM', color: '#a855f7' },
+              { type: 'router' as const, label: 'Rede & Cloud', color: '#10b981' },
+              { type: 'exploded' as const, label: 'Arquitetura', color: '#f59e0b' },
+              { type: 'turntable' as const, label: 'Hardware', color: '#06b6d4' },
+            ].map((item) => (
+              <div
+                key={item.type}
+                className="flex flex-col items-center gap-1.5 p-2 rounded-lg bg-slate-50 dark:bg-[#090d14] border border-slate-200/60 dark:border-slate-800/70"
+              >
+                <HairlineAnimatedFigure
+                  type={item.type}
+                  size={52}
+                  active={true}
+                  accentColor={item.color}
+                />
+                <span className="text-[11px] font-mono font-semibold text-slate-600 dark:text-slate-300">
+                  {item.label}
+                </span>
+              </div>
+            ))}
           </div>
         </div>
       ) : (
         <>
           {/* Executive Verdict Banner */}
           <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-6">
-            <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-              <div className="space-y-1.5">
-                <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400 font-mono tabular-nums">
-                  <span>Execução: {latestRun.id}</span>
-                  <span>·</span>
-                  <span>Algoritmo: {latestRun.algorithmVersion}</span>
-                  <span>·</span>
-                  <span>Status: {latestRun.status}</span>
+            <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-5">
+              <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+                <HairlineAnimatedFigure
+                  type="phosphor"
+                  variant="hero"
+                  width={164}
+                  height={128}
+                  active={true}
+                  accentColor="#10b981"
+                />
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400 font-mono tabular-nums">
+                    <span>Execução: {latestRun.id}</span>
+                    <span>·</span>
+                    <span>Algoritmo: {latestRun.algorithmVersion}</span>
+                    <span>·</span>
+                    <span>Status: {latestRun.status}</span>
+                  </div>
+                  <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+                    <Award className="w-5 h-5 text-[#31d6c4] shrink-0" />
+                    <span>{latestRun.projectName} — {latestRun.profileName}</span>
+                  </h2>
+                  <p className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed max-w-4xl">
+                    {latestRun.executiveSummary}
+                  </p>
                 </div>
-                <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-                  <Award className="w-5 h-5 text-[#31d6c4] shrink-0" />
-                  <span>{latestRun.projectName} — {latestRun.profileName}</span>
-                </h2>
-                <p className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed max-w-4xl">
-                  {latestRun.executiveSummary}
-                </p>
               </div>
               <div className="flex items-center gap-3 shrink-0">
                 <button

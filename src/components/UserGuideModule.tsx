@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import type { AppNavSection } from './StepByStepJourneyBar';
 import { WinHoodLogo } from './WinHoodLogo';
+import { HairlineAnimatedFigure } from './HairlineAnimatedFigure';
 
 export type GuideChapterId =
   | 'quickstart'
@@ -358,19 +359,29 @@ export const UserGuideModule: React.FC<UserGuideModuleProps> = ({
       {/* Top Header Banner */}
       <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-6 space-y-5">
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-5">
-          <div className="flex items-start gap-4">
-            <WinHoodLogo size={48} className="shrink-0" />
-            <div className="space-y-1.5">
-              <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-md bg-[#31d6c4]/15 text-[#0e9f8e] dark:text-[#31d6c4] font-mono text-xs font-bold border border-[#31d6c4]/30">
-                <BookOpen className="w-3.5 h-3.5" />
-                <span>MANUAL INTERATIVO OFICIAL — DO BÁSICO AO AVANÇADO</span>
+          <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+            <HairlineAnimatedFigure
+              type="exploded"
+              variant="hero"
+              width={160}
+              height={126}
+              active={true}
+              accentColor="#10b981"
+            />
+            <div className="flex items-start gap-3">
+              <WinHoodLogo size={42} className="shrink-0 mt-1" />
+              <div className="space-y-1.5">
+                <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-md bg-[#31d6c4]/15 text-[#0e9f8e] dark:text-[#31d6c4] font-mono text-xs font-bold border border-[#31d6c4]/30">
+                  <BookOpen className="w-3.5 h-3.5" />
+                  <span>MANUAL INTERATIVO OFICIAL — DO BÁSICO AO AVANÇADO</span>
+                </div>
+                <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
+                  Guia de Utilização &amp; Entendimento do WinHood Analyzer
+                </h1>
+                <p className="text-sm text-slate-600 dark:text-slate-400 max-w-3xl leading-relaxed">
+                  Aprenda passo a passo como cadastrar softwares, configurar pesos matemáticos, interpretar travas de segurança (Kill Switches), operar o MqrBridge / Remediação Supervisionada e emitir laudos técnicos comparativos A/B.
+                </p>
               </div>
-              <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
-                Guia de Utilização &amp; Entendimento do WinHood Analyzer
-              </h1>
-              <p className="text-sm text-slate-600 dark:text-slate-400 max-w-3xl leading-relaxed">
-                Aprenda passo a passo como cadastrar softwares, configurar pesos matemáticos, interpretar travas de segurança (Kill Switches), operar o MqrBridge / Remediação Supervisionada e emitir laudos técnicos comparativos A/B.
-              </p>
             </div>
           </div>
 
