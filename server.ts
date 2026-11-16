@@ -1614,6 +1614,7 @@ export async function createWinHoodApp(options?: {
       '/auth/login',
       '/auth/logout',
       '/auth/session',
+      '/auth/me',
       '/auth/mfa/verify',
       '/auth/totp/authenticate',
       '/auth/recovery/request',
@@ -1624,6 +1625,7 @@ export async function createWinHoodApp(options?: {
       if (!(req as any).authUser) {
         return res.status(401).json({
           error: 'AUTH_REQUIRED',
+          code: 'SESSION_INVALID',
           bootstrapRequired: authService.isBootstrapRequired(),
           message: authService.isBootstrapRequired()
             ? 'Administrador inicial ainda não configurado. Execute o bootstrap inicial antes de operar a plataforma.'
@@ -1646,6 +1648,7 @@ export async function createWinHoodApp(options?: {
         ) {
           return res.status(403).json({
             error: 'CSRF_INVALID',
+            code: 'CSRF_INVALID',
             message: 'Token CSRF ausente ou inválido na requisição mutável.',
           });
         }
@@ -1757,8 +1760,12 @@ export async function createWinHoodApp(options?: {
       });
     } catch (err: any) {
       const msg = err?.message || 'Falha no bootstrap inicial.';
-      const status = msg.startsWith('BOOTSTRAP_ALREADY_COMPLETED') ? 409 : 400;
-      return res.status(status).json({ error: msg });
+      const status =
+        msg.startsWith('BOOTSTRAP_ALREADY_COMPLETED') || msg.startsWith('BOOTSTRAP_CONFLICT')
+          ? 409
+          : 400;
+      const code = msg.includes(':') ? msg.split(':')[0].trim() : 'BOOTSTRAP_FAILED';
+      return res.status(status).json({ error: msg, code });
     }
   });
 
@@ -1802,14 +1809,23 @@ export async function createWinHoodApp(options?: {
       const msg = err?.message || 'Falha ao realizar cadastro.';
       const status = msg.startsWith('EMAIL_ALREADY_EXISTS')
         ? 409
-        : msg.startsWith('ROLE_ELEVATION_BLOCKED')
+        : msg.startsWith('ROLE_ELEVATION_BLOCKED') || msg.startsWith('BOOTSTRAP_REQUIRED')
           ? 403
           : msg.startsWith('AUTH_RATE_LIMITED')
             ? 429
             : 400;
+      const code = msg.startsWith('EMAIL_ALREADY_EXISTS')
+        ? 'ACCOUNT_ALREADY_EXISTS'
+        : msg.startsWith('BOOTSTRAP_REQUIRED')
+          ? 'BOOTSTRAP_REQUIRED'
+          : msg.startsWith('ROLE_ELEVATION_BLOCKED')
+            ? 'ROLE_ELEVATION_BLOCKED'
+            : msg.startsWith('AUTH_RATE_LIMITED')
+              ? 'RATE_LIMITED'
+              : 'VALIDATION_ERROR';
       appendAuditLog(db, 'AUTH_REGISTER_FAILED', 'AUTH', String(req.body?.email || 'unknown'), msg);
       saveDatabase(db);
-      return res.status(status).json({ error: msg });
+      return res.status(status).json({ error: msg, code });
     }
   });
 
@@ -1858,20 +1874,77 @@ export async function createWinHoodApp(options?: {
       const status =
         msg.startsWith('AUTH_RATE_LIMITED') || msg.startsWith('AUTH_ACCOUNT_LOCKED')
           ? 429
-          : 401;
+          : msg.startsWith('AUTH_ACCOUNT_DISABLED')
+            ? 403
+            : 401;
+      const code =
+        msg.startsWith('AUTH_RATE_LIMITED') || msg.startsWith('AUTH_ACCOUNT_LOCKED')
+          ? 'RATE_LIMITED'
+          : msg.startsWith('AUTH_ACCOUNT_DISABLED')
+            ? 'ACCOUNT_DISABLED'
+            : msg.startsWith('AUTH_MFA_REQUIRED')
+              ? 'TOTP_REQUIRED'
+              : msg.startsWith('AUTH_MFA_INVALID')
+                ? 'INVALID_TOTP'
+                : 'INVALID_CREDENTIALS';
       appendAuditLog(db, 'AUTH_LOGIN_FAILED', 'AUTH', String(req.body?.email || 'unknown'), msg);
       saveDatabase(db);
-      return res.status(status).json({ error: msg });
+      return res.status(status).json({ error: msg, code });
     }
   });
 
   app.post('/api/auth/logout', (req, res) => {
+    const actor = (req as any).authUser as PublicUserView | undefined;
     const sessionToken = extractSessionTokenFromRequest(req).token;
     if (sessionToken) {
       authService.revokeSession(sessionToken);
     }
+    if (actor) {
+      appendAuditLog(
+        db,
+        'AUTH_LOGOUT',
+        'AUTH',
+        actor.id,
+        `Sessão encerrada para ${actor.email}.`,
+        actor
+      );
+      saveDatabase(db);
+    }
     clearSessionCookies(res);
     return res.json({ ok: true });
+  });
+
+  app.get('/api/auth/me', (req, res) => {
+    const sessionToken = extractSessionTokenFromRequest(req).token;
+    const validated = sessionToken ? authService.validateSession(sessionToken) : null;
+    const user = validated?.user || ((req as any).authUser as PublicUserView | undefined);
+    if (!user) {
+      return res.status(401).json({
+        authenticated: false,
+        error: 'SESSION_INVALID',
+        code: 'SESSION_INVALID',
+        bootstrapRequired: authService.isBootstrapRequired(),
+        message: 'Sessão ausente, expirada ou inválida.',
+      });
+    }
+    const storedMeta = authService.listUsers().find((u) => u.id === user.id);
+    return res.json({
+      authenticated: true,
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      totpEnabled: user.mfaEnabled,
+      mfaEnabled: user.mfaEnabled,
+      mfaVerified: user.mfaVerified,
+      createdAt: storedMeta?.createdAt || new Date().toISOString(),
+      user: {
+        ...user,
+        totpEnabled: user.mfaEnabled,
+        createdAt: storedMeta?.createdAt || new Date().toISOString(),
+      },
+      csrfToken: validated?.session.csrfToken || (req as any).authSession?.csrfToken,
+    });
   });
 
   app.get('/api/auth/session', (req, res) => {
@@ -1919,7 +1992,7 @@ export async function createWinHoodApp(options?: {
     const sessionToken = extractSessionTokenFromRequest(req).token;
     const renewed = sessionToken ? authService.renewSession(sessionToken) : null;
     if (!renewed) {
-      return res.status(401).json({ error: 'AUTH_SESSION_INVALID' });
+      return res.status(401).json({ error: 'AUTH_SESSION_INVALID', code: 'SESSION_EXPIRED' });
     }
     setSessionCookies(res, renewed.sessionId, renewed.csrfToken);
     return res.json({ ok: true, sessionId: renewed.sessionId, csrfToken: renewed.csrfToken });

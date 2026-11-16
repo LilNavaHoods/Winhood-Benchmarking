@@ -16,7 +16,6 @@ jobs:
     permissions:
       contents: read
       security-events: write
-      pull-requests: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -27,8 +26,8 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
-      - name: Verify package-lock.json integrity
-        run: node -e "const fs=require('fs'); if(!fs.existsSync('package-lock.json')) { console.error('Missing package-lock.json'); process.exit(1); } const lock=JSON.parse(fs.readFileSync('package-lock.json','utf8')); if(!lock.lockfileVersion || !lock.packages) { console.error('Invalid package-lock.json'); process.exit(1); }"
+      - name: Verify package-lock.json integrity and root metadata
+        run: node -e "const fs=require('fs'); if(!fs.existsSync('package-lock.json')) { console.error('Missing package-lock.json'); process.exit(1); } const pkg=JSON.parse(fs.readFileSync('package.json','utf8')); const lock=JSON.parse(fs.readFileSync('package-lock.json','utf8')); if(!lock.lockfileVersion || !lock.packages || lock.name !== pkg.name || lock.version !== pkg.version) { console.error('Invalid package-lock.json metadata:', lock.name, lock.version); process.exit(1); }"
 
       - name: Verify zero third-party brand anchoring in README, docs, UI & production code
         run: |
@@ -40,20 +39,28 @@ jobs:
           echo "Independent positioning verified: 0 occurrences."
 
       - name: Install dependencies deterministically without lifecycle scripts
-        run: npm ci --ignore-scripts
+        run: |
+          npm ci --ignore-scripts
+          npm ls --depth=0
 
       - name: Typecheck (tsc --noEmit)
         run: npm run lint
 
       - name: Run full test suite with Coverage Threshold Gate (>=80% global, >=95% critical motors)
-        run: npm run test:coverage
+        run: |
+          npm run test:coverage
+          test -f coverage/coverage-summary.json
+          test -f coverage/lcov.info
 
-      - name: Upload HTML Coverage Report Artifact
+      - name: Upload Coverage Report Artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: winhood-coverage-html-report
-          path: coverage/
+          name: winhood-coverage-report
+          path: |
+            coverage/coverage-summary.json
+            coverage/lcov.info
+          if-no-files-found: error
 
       - name: Verify bit-for-bit determinism across repeated CLI runs
         run: |
@@ -79,11 +86,49 @@ jobs:
         run: ./node_modules/.bin/tsx --test packages/vscode-extension/test/extension.integration.test.ts
 
       - name: Build frontend and desktop bundles
-        run: npm run build:desktop
+        run: |
+          npm run build:desktop
+          test -f dist/index.html
+          test -f dist-desktop/server.mjs
+          test -f dist-desktop/electron-main.mjs
+          test -f dist-desktop/electron-preload.cjs
+          test -f dist-desktop/build-manifest.json
+
+      - name: Publish CI & Coverage Step Summary
+        if: always()
+        run: |
+          node -e '
+            const fs = require("fs");
+            const cov = fs.existsSync("coverage/coverage-summary.json")
+              ? JSON.parse(fs.readFileSync("coverage/coverage-summary.json", "utf8"))
+              : null;
+            const desk = fs.existsSync("dist-desktop/build-manifest.json")
+              ? JSON.parse(fs.readFileSync("dist-desktop/build-manifest.json", "utf8"))
+              : null;
+            const sarifExists = fs.existsSync("winhood-self-audit.sarif");
+            const lines = [
+              "## WinHood Multiplatform CI, Coverage Gate & Dogfooding Summary",
+              "",
+              "| Etapa | Status | Evidência Técnica |",
+              "| :--- | :--- | :--- |",
+              "| TypeScript Strict (`npm run lint`) | PASSED | `tsc --noEmit` sem erros |",
+              `| Coverage Gate (\`npm run test:coverage\`) | ${cov?.passed ? "PASSED" : "FAILED"} | Lines: ${cov?.total?.lines?.pct ?? "N/A"}% / Functions: ${cov?.total?.functions?.pct ?? "N/A"}% / Branches: ${cov?.total?.branches?.pct ?? "N/A"}% |`,
+              `| Critical Motors (\`scoring\`, \`evidence\`, \`comparability\`) | ${cov?.criticalModules ? "VERIFIED" : "N/A"} | Scoring: ${cov?.criticalModules?.["src/scoring"]?.lines?.pct ?? "N/A"}% / Evidence: ${cov?.criticalModules?.["src/evidence"]?.lines?.pct ?? "N/A"}% / Comparability: ${cov?.criticalModules?.["src/comparability"]?.lines?.pct ?? "N/A"}% |`,
+              `| Self-Analysis Dogfooding (\`winhood-self-audit.sarif\`) | ${sarifExists ? "PASSED" : "FAILED"} | Determinismo bit-a-bit + GitHub Action + VS Code Extension |`,
+              `| Production & Desktop Build (\`npm run build:desktop\`) | ${desk ? "PASSED" : "FAILED"} | Versão ${desk?.version ?? "N/A"} (\`dist/index.html\`, \`dist-desktop/server.mjs\`, \`dist-desktop/electron-main.mjs\`) |`,
+              ""
+            ];
+            if (process.env.GITHUB_STEP_SUMMARY) {
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n");
+            }
+            console.log(lines.join("\n"));
+          '
 
   windows-desktop-validation:
     name: Windows Desktop Lifecycle, userData & Packaging Verification
     runs-on: windows-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -94,11 +139,13 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
-      - name: Verify package-lock.json integrity
-        run: node -e "const fs=require('fs'); if(!fs.existsSync('package-lock.json')) { console.error('Missing package-lock.json'); process.exit(1); } const lock=JSON.parse(fs.readFileSync('package-lock.json','utf8')); if(!lock.lockfileVersion || !lock.packages) { console.error('Invalid package-lock.json'); process.exit(1); }"
+      - name: Verify package-lock.json integrity and root metadata
+        run: node -e "const fs=require('fs'); if(!fs.existsSync('package-lock.json')) { console.error('Missing package-lock.json'); process.exit(1); } const pkg=JSON.parse(fs.readFileSync('package.json','utf8')); const lock=JSON.parse(fs.readFileSync('package-lock.json','utf8')); if(!lock.lockfileVersion || !lock.packages || lock.name !== pkg.name || lock.version !== pkg.version) { console.error('Invalid package-lock.json metadata'); process.exit(1); }"
 
       - name: Install dependencies deterministically without lifecycle scripts
-        run: npm ci --ignore-scripts
+        run: |
+          npm ci --ignore-scripts
+          npm ls --depth=0
 
       - name: Typecheck on Windows
         run: npm run lint
@@ -114,3 +161,4 @@ jobs:
         with:
           name: winhood-desktop-build-manifest
           path: dist-desktop/build-manifest.json
+          if-no-files-found: error

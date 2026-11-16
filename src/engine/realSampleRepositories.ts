@@ -483,6 +483,13 @@ const ALL_12_ENABLED = [
 ] as const;
 
 const VAULTCORE_META = {
+  id: 'fixture-vaultcore-internal-v2.5.0',
+  sourceKind: 'INTERNAL_SYNTHETIC_FIXTURE' as const,
+  isExternalRealRepository: false,
+  version: '2.5.0',
+  license: 'MIT (WinHood Internal Calibration Fixture)',
+  collectionMethod: 'IN_MEMORY_CURATED_BENCHMARK_FIXTURE',
+  reproducibility: 'DETERMINISTIC_BIT_FOR_BIT',
   domainTags: ['Segurança & Criptografia', 'Cofre Corporativo', 'Persistência SQL', 'Arquitetura Multi-Camada'],
   defaultQualityProfileIds: ['qp-sonar-way-ts', 'qp-sonar-way-sql'],
   defaultQualityGateId: 'qg-sonar-way',
@@ -490,6 +497,13 @@ const VAULTCORE_META = {
 };
 
 const KEESAFE_META = {
+  id: 'fixture-keesafe-open-v2.56.0',
+  sourceKind: 'INTERNAL_SYNTHETIC_FIXTURE' as const,
+  isExternalRealRepository: false,
+  version: '2.56.0',
+  license: 'MIT (WinHood Internal Calibration Fixture)',
+  collectionMethod: 'IN_MEMORY_CURATED_BENCHMARK_FIXTURE',
+  reproducibility: 'DETERMINISTIC_BIT_FOR_BIT',
   domainTags: ['Segurança & Criptografia', 'Zero-Knowledge KDBX', 'AES-256-GCM & PBKDF2', 'Clean Architecture'],
   defaultQualityProfileIds: ['qp-sonar-way-ts', 'qp-sonar-way-sql'],
   defaultQualityGateId: 'qg-sonar-way',
@@ -498,8 +512,17 @@ const KEESAFE_META = {
 
 export const DEMO_FIXTURE_METADATA = {
   dataOrigin: 'DEMO_FIXTURE' as const,
+  sourceKind: 'INTERNAL_SYNTHETIC_FIXTURE' as const,
   executionMode: 'DEMONSTRATION' as const,
   isDemoOnly: true,
+  isExternalRealRepository: false,
+  license: 'MIT (WinHood Internal Calibration Fixture)',
+  collectionMethod: 'IN_MEMORY_CURATED_BENCHMARK_FIXTURE',
+  reproducibility: 'DETERMINISTIC_BIT_FOR_BIT',
+  limitations: [
+    'Fixtures internas em memória destinadas a calibração determinística A/B e verificação offline.',
+    'Não representam clones completos de repositórios externos públicos nem substituem auditoria sobre código-fonte importado pelo usuário.',
+  ],
   domainTags: VAULTCORE_META.domainTags,
   defaultQualityProfileIds: VAULTCORE_META.defaultQualityProfileIds,
   defaultQualityGateId: 'qg-sonar-way',
@@ -508,5 +531,6 @@ export const DEMO_FIXTURE_METADATA = {
   KEESAFE: KEESAFE_META,
   vaultCore: VAULTCORE_META,
   keeSafe: KEESAFE_META,
-  description: 'Fixtures demonstrativas de repositórios para validação offline e modo demonstração transversal nas 12 categorias.',
+  description:
+    'Fixtures internas curadas para calibração determinística offline e avaliação comparativa A/B transversal nas 12 categorias (distintas de repositórios externos reais).',
 };

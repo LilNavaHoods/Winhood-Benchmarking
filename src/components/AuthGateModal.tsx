@@ -128,7 +128,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
   onRefreshSession,
 }) => {
   const initialMode: GateMode = bootstrapRequired
-    ? 'REGISTER'
+    ? 'BOOTSTRAP'
     : mfaRequired
       ? 'MFA'
       : 'LOGIN';
@@ -207,8 +207,8 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
   }, [serverTimeIso]);
 
   React.useEffect(() => {
-    if (bootstrapRequired && mode !== 'REGISTER' && mode !== 'BOOTSTRAP') {
-      setMode('REGISTER');
+    if (bootstrapRequired && mode !== 'BOOTSTRAP' && mode !== 'MFA') {
+      setMode('BOOTSTRAP');
     } else if (!bootstrapRequired && mfaRequired && mode !== 'MFA') {
       setMode('MFA');
     } else if (!bootstrapRequired && !mfaRequired && mode === 'BOOTSTRAP') {
@@ -681,11 +681,23 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
               type="button"
               role="tab"
               aria-selected={mode === 'REGISTER'}
-              onClick={() => switchModeClean('REGISTER')}
-              className={`py-2.5 px-4 flex items-center justify-center gap-1.5 border-b-2 transition-colors cursor-pointer ${
-                mode === 'REGISTER'
-                  ? 'border-[#31d6c4] text-[#0e9f8e] dark:text-[#31d6c4] bg-white dark:bg-[#0c1017]'
-                  : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+              disabled={bootstrapRequired}
+              title={
+                bootstrapRequired
+                  ? 'Conclua o Bootstrap Admin inicial antes de habilitar o cadastro público'
+                  : 'Criar uma nova conta de usuário'
+              }
+              onClick={() => {
+                if (!bootstrapRequired) {
+                  switchModeClean('REGISTER');
+                }
+              }}
+              className={`py-2.5 px-4 flex items-center justify-center gap-1.5 border-b-2 transition-colors ${
+                bootstrapRequired
+                  ? 'border-transparent text-slate-400 dark:text-slate-600 cursor-not-allowed opacity-60'
+                  : mode === 'REGISTER'
+                    ? 'border-[#31d6c4] text-[#0e9f8e] dark:text-[#31d6c4] bg-white dark:bg-[#0c1017] cursor-pointer'
+                    : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 cursor-pointer'
               }`}
             >
               <UserPlus className="w-3.5 h-3.5" />
@@ -718,7 +730,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
               <div className="p-3 rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300 space-y-2">
                 <div className="font-bold flex items-center gap-1.5">
                   <KeyRound className="w-3.5 h-3.5" />
-                  <span>Nenhum administrador provisionado neste ambiente</span>
+                  <span>Inicialização Administrativa Obrigatória (Bootstrap)</span>
                 </div>
                 <p className="text-[11px]">
                   Leia o token CSPRNG de uso único gerado no arquivo local:{' '}
@@ -726,16 +738,6 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                     {bootstrapTokenFileHint || '.winhood_data/bootstrap_admin_token.txt'}
                   </code>
                 </p>
-                <div className="pt-1">
-                  <button
-                    type="button"
-                    onClick={() => switchModeClean('REGISTER')}
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md font-bold text-[11px] bg-white dark:bg-[#0c1017] border border-amber-500/40 text-amber-700 dark:text-[#31d6c4] hover:border-[#31d6c4] transition-colors cursor-pointer"
-                  >
-                    <UserPlus className="w-3.5 h-3.5" />
-                    <span>Usar Cadastro Rápido sem Token</span>
-                  </button>
-                </div>
               </div>
 
               <div>
@@ -854,21 +856,6 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
 
           {mode === 'LOGIN' && (
             <form onSubmit={handleLoginSubmit} className="space-y-3.5 text-xs">
-              <div className="flex items-center justify-between gap-2 p-2.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10]">
-                <span className="text-[11px] text-slate-600 dark:text-slate-400">
-                  Acesso rápido Desktop / Localhost:
-                </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setLoginEmail('admin@winhood.local');
-                    setLoginPassword('WinHood#Local2026!');
-                  }}
-                  className="px-2.5 py-1 rounded-md font-bold text-[11px] bg-[#31d6c4]/15 text-[#0e9f8e] dark:text-[#31d6c4] border border-[#31d6c4]/40 hover:bg-[#31d6c4]/25 transition-colors cursor-pointer"
-                >
-                  Preencher Credenciais Locais Padrão (Admin Local)
-                </button>
-              </div>
 
               <div>
                 <label
@@ -990,29 +977,10 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
 
           {mode === 'REGISTER' && (
             <form onSubmit={handleRegisterSubmit} className="space-y-3.5 text-xs">
-              <div className="p-2.5 rounded-lg border border-[#31d6c4]/30 bg-[#31d6c4]/10 flex flex-wrap items-center justify-between gap-2">
-                <div className="text-[11px] text-slate-700 dark:text-slate-200">
-                  {bootstrapRequired ? (
-                    <span>
-                      <strong>Primeiro Acesso Detectado — Crie sua conta de Administrador em 1 passo (chave criptográfica gerada automaticamente):</strong>{' '}
-                      a 1ª conta recebe perfil{' '}
-                      <code className="font-mono font-bold text-[#0e9f8e] dark:text-[#31d6c4]">ADMIN</code>.
-                    </span>
-                  ) : (
-                    <span>Cadastro direto com sessão persistente de 30 dias.</span>
-                  )}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setRegName('Administrador Local WinHood');
-                    setRegEmail('admin@winhood.local');
-                    setRegPassword('WinHood#Local2026!');
-                  }}
-                  className="px-2.5 py-1 rounded-md font-bold text-[11px] bg-white dark:bg-[#0c1017] text-[#0e9f8e] dark:text-[#31d6c4] border border-[#31d6c4]/50 hover:bg-[#31d6c4]/20 transition-colors cursor-pointer shrink-0"
-                >
-                  Preencher Credenciais Locais Padrão (Admin Local)
-                </button>
+              <div className="p-2.5 rounded-lg border border-[#31d6c4]/30 bg-[#31d6c4]/10 text-[11px] text-slate-700 dark:text-slate-200">
+                <span>
+                  Cadastro de usuário autenticado com derivação Scrypt e sessão persistente de 30 dias.
+                </span>
               </div>
 
               <div>

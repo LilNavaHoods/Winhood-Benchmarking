@@ -402,12 +402,12 @@ export class SandboxExecutor {
       const stdout = res.stdout || '';
       const stderr = res.stderr || '';
 
-      return {
+      const result: SandboxedCommandResult = {
         executed: res.status !== null && !res.error,
         blocked: false,
         isolationMode: probe.dockerAvailable ? 'RESTRICTED_CONTAINER' : 'NODE_PERMISSION_SUBPROCESS',
         isolationState,
-        recoveryVerified: false, // Will be verified in finally
+        recoveryVerified: false,
         exitCode: res.status,
         stdout,
         stderr,
@@ -418,16 +418,24 @@ export class SandboxExecutor {
         completedAt: new Date().toISOString(),
         limitations: probe.limitations,
       };
-    } finally {
+
       try {
         fs.rmSync(realTmpRoot, { recursive: true, force: true });
         recoveryVerified = !fs.existsSync(realTmpRoot);
       } catch {
         recoveryVerified = false;
       }
-      // Note: caller checks recoveryVerified directly via return or helper if needed;
-      // mutate nothing else here.
-      void recoveryVerified;
+      result.recoveryVerified = recoveryVerified;
+      result.isolationState = recoveryVerified ? 'RECOVERY_VERIFIED' : 'ISOLATION_FAILED';
+      return result;
+    } finally {
+      if (fs.existsSync(realTmpRoot)) {
+        try {
+          fs.rmSync(realTmpRoot, { recursive: true, force: true });
+        } catch {
+          // Best-effort cleanup if exception occurred before normal return
+        }
+      }
     }
   }
 

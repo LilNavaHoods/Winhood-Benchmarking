@@ -455,59 +455,70 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
         </div>
       </div>
 
-      {/* Domínios Auditados em Tempo Real (Hairline Telemetry) — Sempre visível */}
+      {/* Domínios da Plataforma & Atalhos Operacionais — Estado Real do Backend */}
       <div
         data-testid="dashboard-hairline-telemetry-bar"
         className="rounded-xl border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0f141c] p-4 space-y-3"
       >
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="text-xs font-bold text-slate-900 dark:text-slate-100">
-            Domínios Auditados em Tempo Real (Hairline Telemetry 3D)
+            Domínios da Plataforma &amp; Atalhos Operacionais
           </div>
-          <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
-            Projeção Isométrica 30° · Ciclo Cinético 1.8s + Pausa 2.0s · Interativo ao Cursor
+          <div className="text-[11px] font-mono tabular-nums text-slate-500 dark:text-slate-400">
+            Fonte: /api/dashboard ·{' '}
+            {latestRun?.completedAt
+              ? `Última execução: ${new Date(latestRun.completedAt).toLocaleString('pt-BR')}`
+              : 'Nenhuma execução registrada'}
           </div>
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3">
           {[
             {
               label: 'Segurança & SAST',
-              sub: '15 Sinks CWE · Taint',
+              sub: `${kpis.vulnerabilitiesCount} vulnerabilidade(s) · ${kpis.completedAnalyses} run(s)`,
               type: 'vault' as const,
               color: '#f43f5e',
               target: 'security_suite',
             },
             {
               label: 'Dados & Cofre AES-256-GCM',
-              sub: 'whdb:enc:v2 · SHA-256',
+              sub: `${kpis.totalProjects} projeto(s) · ${kpis.totalSoftwares} software(s)`,
               type: 'lockers' as const,
               color: '#38bdf8',
               target: 'projects',
             },
             {
               label: 'Criptografia & IAM',
-              sub: 'KMS · Scrypt · TOTP',
+              sub: latestRun
+                ? `Score Seg.: ${(latestRun.scoreCards[0]?.groupedScores?.securityScore ?? 0).toFixed(2)}/5.00`
+                : 'Aguardando auditoria IAM',
               type: 'padlock' as const,
               color: '#a855f7',
               target: 'reference_intelligence',
             },
             {
-              label: 'Rede, Cloud & Sonar',
-              sub: 'MqrBridge · OTel · SSRF',
+              label: 'Rede, Cloud & MQR',
+              sub: `${kpis.codeQualityIssuesCount} achado(s) MQR · ${latestRun?.status || 'IDLE'}`,
               type: 'router' as const,
               color: '#10b981',
               target: 'sonar_hub',
             },
             {
               label: 'Arquitetura & Clean Code',
-              sub: 'Ciclos DAG · Camadas',
+              sub:
+                kpis.avgQuality !== null
+                  ? `Qualidade média: ${kpis.avgQuality.toFixed(2)}/5.00`
+                  : 'Sem média calculada',
               type: 'exploded' as const,
               color: '#f59e0b',
               target: 'arch_qa_perf',
             },
             {
               label: 'Performance & Hardware',
-              sub: 'CPU · IOPS · Display Hz',
+              sub:
+                kpis.avgPerformance !== null
+                  ? `Desempenho médio: ${kpis.avgPerformance.toFixed(2)}/5.00`
+                  : 'Benchmark sob demanda',
               type: 'turntable' as const,
               color: '#06b6d4',
               target: 'hardware_benchmark',
@@ -522,14 +533,14 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
               <HairlineAnimatedFigure
                 type={dom.type}
                 size={56}
-                active={true}
+                active={Boolean(data?.hasEvaluations)}
                 accentColor={dom.color}
               />
               <div className="min-w-0">
                 <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">
                   {dom.label}
                 </div>
-                <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                <div className="text-[10px] font-mono tabular-nums text-slate-500 dark:text-slate-400 truncate mt-0.5">
                   {dom.sub}
                 </div>
               </div>

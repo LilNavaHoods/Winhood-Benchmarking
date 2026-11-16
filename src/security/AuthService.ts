@@ -542,6 +542,9 @@ export class AuthService {
     atomicWriteSecretFile(`${this.authStorePath}.sha256`, sha256(serialized));
   }
 
+  private bootstrapInProgress = false;
+  private registrationInProgress = new Set<string>();
+
   public isBootstrapRequired(): boolean {
     return this.db.users.length === 0;
   }
@@ -578,107 +581,115 @@ export class AuthService {
       recoveryCodes?: string[];
     };
   } {
-    if (!this.isBootstrapRequired()) {
-      throw new Error('BOOTSTRAP_ALREADY_COMPLETED: Administrador inicial já foi configurado.');
+    if (this.bootstrapInProgress) {
+      throw new Error('BOOTSTRAP_CONFLICT: Inicialização administrativa já está em processamento.');
     }
-    const provided = (params.bootstrapToken || '').trim();
-    if (!provided || !this.db.bootstrapTokenSha256) {
-      throw new Error('BOOTSTRAP_TOKEN_INVALID: Token de bootstrap obrigatório.');
-    }
-    if (
-      this.db.bootstrapTokenExpiresAt &&
-      Date.now() > Date.parse(this.db.bootstrapTokenExpiresAt)
-    ) {
-      this.issueFreshBootstrapToken(this.db);
-      throw new Error('BOOTSTRAP_TOKEN_EXPIRED: Token expirado; novo token gerado no canal seguro.');
-    }
-
-    const providedSha = Buffer.from(sha256(provided), 'hex');
-    const storedSha = Buffer.from(this.db.bootstrapTokenSha256, 'hex');
-    if (providedSha.length !== storedSha.length || !crypto.timingSafeEqual(providedSha, storedSha)) {
-      throw new Error('BOOTSTRAP_TOKEN_INVALID: Token de bootstrap incorreto.');
-    }
-
-    const cleanName = (params.name || '').trim();
-    const cleanEmail = (params.email || '').trim().toLowerCase();
-    const cleanPassword = params.password || '';
-    if (cleanName.length < 2) {
-      throw new Error('Nome do administrador deve possuir pelo menos 2 caracteres.');
-    }
-    if (!isValidEmailAddress(cleanEmail)) {
-      throw new Error('E-mail inválido.');
-    }
-    if (cleanPassword.length < 10) {
-      throw new Error('A senha deve possuir pelo menos 10 caracteres.');
-    }
-
-    const now = new Date().toISOString();
-    const totpSecret = params.enableMfa ? base32Encode(crypto.randomBytes(20)) : null;
-    const recoveryGen = totpSecret ? generateRecoveryCodesSet(8) : null;
-
-    const adminUser: UserAccountRecord = {
-      id: `usr-${crypto.randomUUID().slice(0, 8)}`,
-      name: cleanName,
-      email: cleanEmail,
-      role: 'ADMIN',
-      passwordHash: hashPassword(cleanPassword),
-      mfaEnabled: Boolean(params.enableMfa),
-      totpSecretBase32: totpSecret ? this.encryptSecretAtRest(totpSecret) : null,
-      recoveryCodeHashes: recoveryGen ? recoveryGen.codeHashes : [],
-      lastAcceptedTotpStep: null,
-      disabled: false,
-      failedLoginAttempts: 0,
-      lockedUntil: null,
-      recoveryTokenSha256: null,
-      recoveryExpiresAt: null,
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    this.db.users.push(adminUser);
-    // Invalidate bootstrap token immediately
-    this.db.bootstrapTokenSha256 = null;
-    this.db.bootstrapTokenExpiresAt = null;
-    this.db.bootstrapCompletedAt = now;
+    this.bootstrapInProgress = true;
     try {
-      if (fs.existsSync(this.bootstrapTokenFilePath)) {
-        fs.unlinkSync(this.bootstrapTokenFilePath);
+      if (!this.isBootstrapRequired()) {
+        throw new Error('BOOTSTRAP_ALREADY_COMPLETED: Administrador inicial já foi configurado.');
       }
-    } catch {
-      // Best-effort delete
+      const provided = (params.bootstrapToken || '').trim();
+      if (!provided || !this.db.bootstrapTokenSha256) {
+        throw new Error('BOOTSTRAP_TOKEN_INVALID: Token de bootstrap obrigatório.');
+      }
+      if (
+        this.db.bootstrapTokenExpiresAt &&
+        Date.now() > Date.parse(this.db.bootstrapTokenExpiresAt)
+      ) {
+        this.issueFreshBootstrapToken(this.db);
+        throw new Error('BOOTSTRAP_TOKEN_EXPIRED: Token expirado; novo token gerado no canal seguro.');
+      }
+
+      const providedSha = Buffer.from(sha256(provided), 'hex');
+      const storedSha = Buffer.from(this.db.bootstrapTokenSha256, 'hex');
+      if (providedSha.length !== storedSha.length || !crypto.timingSafeEqual(providedSha, storedSha)) {
+        throw new Error('BOOTSTRAP_TOKEN_INVALID: Token de bootstrap incorreto.');
+      }
+
+      const cleanName = (params.name || '').trim();
+      const cleanEmail = (params.email || '').trim().toLowerCase();
+      const cleanPassword = params.password || '';
+      if (cleanName.length < 2) {
+        throw new Error('Nome do administrador deve possuir pelo menos 2 caracteres.');
+      }
+      if (!isValidEmailAddress(cleanEmail)) {
+        throw new Error('E-mail inválido.');
+      }
+      if (cleanPassword.length < 10) {
+        throw new Error('A senha deve possuir pelo menos 10 caracteres.');
+      }
+
+      const now = new Date().toISOString();
+      const totpSecret = params.enableMfa ? base32Encode(crypto.randomBytes(20)) : null;
+      const recoveryGen = totpSecret ? generateRecoveryCodesSet(8) : null;
+
+      const adminUser: UserAccountRecord = {
+        id: `usr-${crypto.randomUUID().slice(0, 8)}`,
+        name: cleanName,
+        email: cleanEmail,
+        role: 'ADMIN',
+        passwordHash: hashPassword(cleanPassword),
+        mfaEnabled: Boolean(params.enableMfa),
+        totpSecretBase32: totpSecret ? this.encryptSecretAtRest(totpSecret) : null,
+        recoveryCodeHashes: recoveryGen ? recoveryGen.codeHashes : [],
+        lastAcceptedTotpStep: null,
+        disabled: false,
+        failedLoginAttempts: 0,
+        lockedUntil: null,
+        recoveryTokenSha256: null,
+        recoveryExpiresAt: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      this.db.users.push(adminUser);
+      // Invalidate bootstrap token immediately
+      this.db.bootstrapTokenSha256 = null;
+      this.db.bootstrapTokenExpiresAt = null;
+      this.db.bootstrapCompletedAt = now;
+      try {
+        if (fs.existsSync(this.bootstrapTokenFilePath)) {
+          fs.unlinkSync(this.bootstrapTokenFilePath);
+        }
+      } catch {
+        // Best-effort delete
+      }
+
+      const { sessionId, session } = this.createSessionRecord(
+        adminUser,
+        !adminUser.mfaEnabled,
+        params.ipAddress || '127.0.0.1',
+        params.userAgent || 'unknown'
+      );
+      this.save();
+
+      return {
+        user: {
+          id: adminUser.id,
+          name: adminUser.name,
+          email: adminUser.email,
+          role: adminUser.role,
+          mfaEnabled: adminUser.mfaEnabled,
+          mfaVerified: session.mfaVerified,
+        },
+        sessionId,
+        csrfToken: session.csrfToken,
+        ...(totpSecret
+          ? {
+              totpSetup: {
+                secretBase32: totpSecret,
+                secret: totpSecret,
+                otpauthUri: `otpauth://totp/WinHood:${encodeURIComponent(cleanEmail)}?secret=${totpSecret}&issuer=WinHood`,
+                otpauthUrl: `otpauth://totp/WinHood:${encodeURIComponent(cleanEmail)}?secret=${totpSecret}&issuer=WinHood`,
+                recoveryCodes: recoveryGen?.plaintextCodes || [],
+              },
+            }
+          : {}),
+      };
+    } finally {
+      this.bootstrapInProgress = false;
     }
-
-    const { sessionId, session } = this.createSessionRecord(
-      adminUser,
-      !adminUser.mfaEnabled,
-      params.ipAddress || '127.0.0.1',
-      params.userAgent || 'unknown'
-    );
-    this.save();
-
-    return {
-      user: {
-        id: adminUser.id,
-        name: adminUser.name,
-        email: adminUser.email,
-        role: adminUser.role,
-        mfaEnabled: adminUser.mfaEnabled,
-        mfaVerified: session.mfaVerified,
-      },
-      sessionId,
-      csrfToken: session.csrfToken,
-      ...(totpSecret
-        ? {
-            totpSetup: {
-              secretBase32: totpSecret,
-              secret: totpSecret,
-              otpauthUri: `otpauth://totp/WinHood:${encodeURIComponent(cleanEmail)}?secret=${totpSecret}&issuer=WinHood`,
-              otpauthUrl: `otpauth://totp/WinHood:${encodeURIComponent(cleanEmail)}?secret=${totpSecret}&issuer=WinHood`,
-              recoveryCodes: recoveryGen?.plaintextCodes || [],
-            },
-          }
-        : {}),
-    };
   }
 
   private checkIpRateLimit(ipAddress: string): void {
@@ -1227,6 +1238,12 @@ export class AuthService {
     const ipAddress = params.ipAddress || '127.0.0.1';
     this.checkIpRateLimit(ipAddress);
 
+    if (this.isBootstrapRequired()) {
+      throw new Error(
+        'BOOTSTRAP_REQUIRED: A inicialização administrativa precisa ser concluída antes do cadastro público.'
+      );
+    }
+
     const cleanName = (params.name || '').trim();
     const cleanEmail = (params.email || '').trim().toLowerCase();
     const cleanPassword = params.password || '';
@@ -1240,94 +1257,84 @@ export class AuthService {
     if (cleanPassword.length < 10) {
       throw new Error('WEAK_PASSWORD: A senha deve possuir pelo menos 10 caracteres.');
     }
-    if (this.db.users.some((u) => u.email === cleanEmail)) {
+    if (this.registrationInProgress.has(cleanEmail) || this.db.users.some((u) => u.email === cleanEmail)) {
       this.recordIpFailure(ipAddress);
       throw new Error('EMAIL_ALREADY_EXISTS: Este e-mail já está cadastrado na plataforma.');
     }
 
-    const isFirstUser = this.db.users.length === 0;
     const requestedRole: RbacRole = params.role || 'SECURITY_LEAD';
-    if (!isFirstUser && requestedRole === 'ADMIN') {
+    if (requestedRole === 'ADMIN') {
       throw new Error(
-        'ROLE_ELEVATION_BLOCKED: O perfil ADMIN exige provisionamento via Bootstrap ou atribuição por um Administrador existente.'
+        'ROLE_ELEVATION_BLOCKED: Criação de perfil ADMIN exige privilégio administrativo ou bootstrap inicial.'
       );
     }
-    const allowedSelfRoles: ReadonlyArray<RbacRole> = isFirstUser
-      ? ['ADMIN', 'SECURITY_LEAD', 'QA_ENGINEER', 'AUDITOR']
-      : ['SECURITY_LEAD', 'QA_ENGINEER', 'AUDITOR'];
+    const allowedSelfRoles: ReadonlyArray<RbacRole> = ['SECURITY_LEAD', 'QA_ENGINEER', 'AUDITOR'];
     if (!allowedSelfRoles.includes(requestedRole)) {
       throw new Error('INVALID_ROLE: Perfil de acesso selecionado é inválido.');
     }
-    const assignedRole: RbacRole = isFirstUser ? 'ADMIN' : requestedRole;
+    const assignedRole: RbacRole = requestedRole;
 
-    const now = new Date().toISOString();
-    const totpSecret = params.enableMfa ? base32Encode(crypto.randomBytes(20)) : null;
-    const recoveryGen = totpSecret ? generateRecoveryCodesSet(8) : null;
+    this.registrationInProgress.add(cleanEmail);
+    try {
+      const now = new Date().toISOString();
+      const totpSecret = params.enableMfa ? base32Encode(crypto.randomBytes(20)) : null;
+      const recoveryGen = totpSecret ? generateRecoveryCodesSet(8) : null;
 
-    const newUser: UserAccountRecord = {
-      id: `usr-${crypto.randomUUID().slice(0, 8)}`,
-      name: cleanName,
-      email: cleanEmail,
-      role: assignedRole,
-      passwordHash: hashPassword(cleanPassword),
-      mfaEnabled: Boolean(params.enableMfa),
-      totpSecretBase32: totpSecret ? this.encryptSecretAtRest(totpSecret) : null,
-      recoveryCodeHashes: recoveryGen ? recoveryGen.codeHashes : [],
-      lastAcceptedTotpStep: null,
-      disabled: false,
-      failedLoginAttempts: 0,
-      lockedUntil: null,
-      recoveryTokenSha256: null,
-      recoveryExpiresAt: null,
-      createdAt: now,
-      updatedAt: now,
-    };
+      const newUser: UserAccountRecord = {
+        id: `usr-${crypto.randomUUID().slice(0, 8)}`,
+        name: cleanName,
+        email: cleanEmail,
+        role: assignedRole,
+        passwordHash: hashPassword(cleanPassword),
+        mfaEnabled: Boolean(params.enableMfa),
+        totpSecretBase32: totpSecret ? this.encryptSecretAtRest(totpSecret) : null,
+        recoveryCodeHashes: recoveryGen ? recoveryGen.codeHashes : [],
+        lastAcceptedTotpStep: null,
+        disabled: false,
+        failedLoginAttempts: 0,
+        lockedUntil: null,
+        recoveryTokenSha256: null,
+        recoveryExpiresAt: null,
+        createdAt: now,
+        updatedAt: now,
+      };
 
-    this.db.users.push(newUser);
-    if (isFirstUser) {
-      this.db.bootstrapTokenSha256 = null;
-      this.db.bootstrapTokenExpiresAt = null;
-      this.db.bootstrapCompletedAt = now;
-      try {
-        if (fs.existsSync(this.bootstrapTokenFilePath)) {
-          fs.unlinkSync(this.bootstrapTokenFilePath);
-        }
-      } catch {
-        // Ignore cleanup errors for ephemeral bootstrap file
-      }
+      this.db.users.push(newUser);
+
+      const { sessionId, session } = this.createSessionRecord(
+        newUser,
+        !newUser.mfaEnabled,
+        ipAddress,
+        params.userAgent || 'unknown'
+      );
+      this.save();
+
+      return {
+        user: {
+          id: newUser.id,
+          name: newUser.name,
+          email: newUser.email,
+          role: newUser.role,
+          mfaEnabled: newUser.mfaEnabled,
+          mfaVerified: session.mfaVerified,
+        },
+        sessionId,
+        csrfToken: session.csrfToken,
+        ...(totpSecret
+          ? {
+              totpSetup: {
+                secretBase32: totpSecret,
+                secret: totpSecret,
+                otpauthUri: `otpauth://totp/WinHood:${encodeURIComponent(cleanEmail)}?secret=${totpSecret}&issuer=WinHood`,
+                otpauthUrl: `otpauth://totp/WinHood:${encodeURIComponent(cleanEmail)}?secret=${totpSecret}&issuer=WinHood`,
+                recoveryCodes: recoveryGen?.plaintextCodes || [],
+              },
+            }
+          : {}),
+      };
+    } finally {
+      this.registrationInProgress.delete(cleanEmail);
     }
-
-    const { sessionId, session } = this.createSessionRecord(
-      newUser,
-      !newUser.mfaEnabled,
-      ipAddress,
-      params.userAgent || 'unknown'
-    );
-    this.save();
-
-    return {
-      user: {
-        id: newUser.id,
-        name: newUser.name,
-        email: newUser.email,
-        role: newUser.role,
-        mfaEnabled: newUser.mfaEnabled,
-        mfaVerified: session.mfaVerified,
-      },
-      sessionId,
-      csrfToken: session.csrfToken,
-      ...(totpSecret
-        ? {
-            totpSetup: {
-              secretBase32: totpSecret,
-              secret: totpSecret,
-              otpauthUri: `otpauth://totp/WinHood:${encodeURIComponent(cleanEmail)}?secret=${totpSecret}&issuer=WinHood`,
-              otpauthUrl: `otpauth://totp/WinHood:${encodeURIComponent(cleanEmail)}?secret=${totpSecret}&issuer=WinHood`,
-              recoveryCodes: recoveryGen?.plaintextCodes || [],
-            },
-          }
-        : {}),
-    };
   }
 
   public listUsers(): Array<Omit<PublicUserView, 'mfaVerified'> & { createdAt: string; disabled: boolean }> {

@@ -1056,7 +1056,7 @@ test('TOTP AES-256-GCM at-rest encryption, preAuthToken 2-step flow, replay prot
   });
 });
 
-test('Hybrid session: first-user register clears bootstrap, Bearer/X-WinHood-Session persists /api/bootstrap without cookies, and HTTPS iframe gets Partitioned SameSite=None', async () => {
+test('Hybrid session: public /api/auth/register is blocked with 403 BOOTSTRAP_REQUIRED before bootstrap; after bootstrap, register + /api/auth/me + Bearer/X-WinHood-Session + logout work deterministically', async () => {
   await withIsolatedKeystoreEnv(async (tmpDir) => {
     const { app, authService } = await createWinHoodApp({
       dataDir: tmpDir,
@@ -1073,7 +1073,61 @@ test('Hybrid session: first-user register clears bootstrap, Bearer/X-WinHood-Ses
       const bootMeta = authService.getBootstrapMetadata();
       assert.ok(fs.existsSync(bootMeta.bootstrapTokenFilePath));
 
-      // 1. First user registers directly via /api/auth/register simulating cross-site HTTPS iframe proxy
+      // 0. Unauthenticated GET /api/auth/me returns 401 SESSION_INVALID
+      const unauthMeRes = await fetch(`${baseUrl}/api/auth/me`);
+      assert.equal(unauthMeRes.status, 401);
+      const unauthMeJson = (await unauthMeRes.json()) as { code: string; authenticated: boolean };
+      assert.equal(unauthMeJson.code, 'SESSION_INVALID');
+      assert.equal(unauthMeJson.authenticated, false);
+
+      // 1. Public registration before bootstrap must be blocked with 403 BOOTSTRAP_REQUIRED
+      const blockedRegRes = await fetch(`${baseUrl}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Blocked Pre-Bootstrap User',
+          email: 'blocked.prebootstrap@winhood.local',
+          password: 'BlockedStrongPassword!2026',
+          role: 'SECURITY_LEAD',
+        }),
+      });
+      assert.equal(blockedRegRes.status, 403);
+      const blockedRegJson = (await blockedRegRes.json()) as { code: string; error: string };
+      assert.equal(blockedRegJson.code, 'BOOTSTRAP_REQUIRED');
+      assert.equal(authService.isBootstrapRequired(), true);
+
+      // 2. Complete initial administrative bootstrap with CSPRNG token
+      const bootstrapToken = readBootstrapTokenFromFile(bootMeta.bootstrapTokenFilePath);
+      const bootRes = await fetch(`${baseUrl}/api/auth/bootstrap-admin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bootstrapToken,
+          name: 'Initial Platform Admin',
+          email: 'root.admin@winhood.local',
+          password: 'RootAdminStrongPassword!2026',
+        }),
+      });
+      assert.equal(bootRes.status, 201);
+      assert.equal(authService.isBootstrapRequired(), false);
+      assert.equal(fs.existsSync(bootMeta.bootstrapTokenFilePath), false);
+
+      // 3a. Public registration attempting to self-assign ADMIN role is blocked with 403 ROLE_ELEVATION_BLOCKED
+      const elevationRes = await fetch(`${baseUrl}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Privilege Escalation Attempt',
+          email: 'escalation@winhood.local',
+          password: 'EscalationStrong!2026',
+          role: 'ADMIN',
+        }),
+      });
+      assert.equal(elevationRes.status, 403);
+      const elevationJson = (await elevationRes.json()) as { code: string };
+      assert.equal(elevationJson.code, 'ROLE_ELEVATION_BLOCKED');
+
+      // 3b. Subsequent user registers via /api/auth/register simulating cross-site HTTPS iframe proxy
       const regRes = await fetch(`${baseUrl}/api/auth/register`, {
         method: 'POST',
         headers: {
@@ -1104,15 +1158,30 @@ test('Hybrid session: first-user register clears bootstrap, Bearer/X-WinHood-Ses
         authenticated: boolean;
         sessionId: string;
         csrfToken: string;
-        user: { email: string };
+        user: { email: string; role: string };
       };
       assert.equal(regJson.authenticated, true);
+      assert.notEqual(regJson.user.role, 'ADMIN');
       assert.ok(regJson.sessionId.length >= 32);
       assert.ok(regJson.csrfToken.length >= 16);
-      assert.equal(authService.isBootstrapRequired(), false);
-      assert.equal(fs.existsSync(bootMeta.bootstrapTokenFilePath), false);
 
-      // 2. Subsequent /api/bootstrap & /api/auth/session with NO cookies and ONLY Authorization: Bearer <sessionId>
+      // 4. Verify GET /api/auth/me returns 200 with sanitized user profile
+      const meRes = await fetch(`${baseUrl}/api/auth/me`, {
+        headers: {
+          Authorization: `Bearer ${regJson.sessionId}`,
+        },
+      });
+      assert.equal(meRes.status, 200);
+      const meJson = (await meRes.json()) as {
+        authenticated: boolean;
+        user: { email: string; role: string; passwordHash?: string; totpSecretEncrypted?: string };
+      };
+      assert.equal(meJson.authenticated, true);
+      assert.equal(meJson.user.email, 'iframe.user@winhood.local');
+      assert.equal(meJson.user.passwordHash, undefined);
+      assert.equal(meJson.user.totpSecretEncrypted, undefined);
+
+      // 5. Subsequent /api/bootstrap & /api/auth/session with NO cookies and ONLY Authorization: Bearer <sessionId>
       const bootstrapRes = await fetch(`${baseUrl}/api/bootstrap`, {
         headers: {
           Authorization: `Bearer ${regJson.sessionId}`,
@@ -1137,7 +1206,7 @@ test('Hybrid session: first-user register clears bootstrap, Bearer/X-WinHood-Ses
       assert.equal(sessJson.user.email, 'iframe.user@winhood.local');
       assert.equal(sessJson.csrfToken, regJson.csrfToken);
 
-      // 3. Logout via Bearer header revokes session on server -> subsequent /api/bootstrap returns 401
+      // 6. Logout via Bearer header revokes session on server -> subsequent /api/bootstrap & /api/auth/me return 401
       const logoutRes = await fetch(`${baseUrl}/api/auth/logout`, {
         method: 'POST',
         headers: {
@@ -1152,6 +1221,13 @@ test('Hybrid session: first-user register clears bootstrap, Bearer/X-WinHood-Ses
         },
       });
       assert.equal(postLogoutBootstrap.status, 401);
+
+      const postLogoutMe = await fetch(`${baseUrl}/api/auth/me`, {
+        headers: {
+          Authorization: `Bearer ${regJson.sessionId}`,
+        },
+      });
+      assert.equal(postLogoutMe.status, 401);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
@@ -1533,6 +1609,70 @@ test('isValidEmailAddress validates standard formats and rejects malformed or ba
   assert.equal(isValidEmailAddress(adversarial), false);
   assert.ok(performance.now() - startedAt < 50);
 });
+
+test('PersistentDatabaseManager.decryptSourceFilesMap throws typed cryptographic errors instead of returning empty object silently', async () => {
+  await withIsolatedKeystoreEnv(async () => {
+    const original = {
+      'src/main.ts': 'export const answer = 42;\n',
+      'src/crypto.ts': 'export const alg = "AES-256-GCM";\n',
+    };
+    const envelope = PersistentDatabaseManager.encryptSourceFilesMap(original);
+    assert.ok(envelope.startsWith(PersistentDatabaseManager.ENVELOPE_PREFIX));
+
+    const roundTrip = PersistentDatabaseManager.decryptSourceFilesMap(envelope);
+    assert.deepEqual(roundTrip, original);
+
+    // 1. Tampered authTag must throw DECRYPTION_AUTH_FAILED
+    const parts = envelope.split(':');
+    const lastChar = parts[5].slice(-1) === 'a' ? 'b' : 'a';
+    const tamperedAuthTagEnvelope = [...parts.slice(0, 5), parts[5].slice(0, -1) + lastChar, parts[6]].join(':');
+    assert.throws(
+      () => PersistentDatabaseManager.decryptSourceFilesMap(tamperedAuthTagEnvelope),
+      /DECRYPTION_AUTH_FAILED/
+    );
+
+    // 2. Wrong AES-256 key must throw DECRYPTION_AUTH_FAILED
+    const wrongKey = crypto.randomBytes(32);
+    assert.throws(
+      () => PersistentDatabaseManager.decryptSourceFilesMap(envelope, wrongKey),
+      /DECRYPTION_AUTH_FAILED/
+    );
+
+    // 3. Truncated / malformed envelope must throw DECRYPTION_FORMAT_INVALID
+    assert.throws(
+      () => PersistentDatabaseManager.decryptSourceFilesMap('whdb:enc:v2:only-two:parts'),
+      /DECRYPTION_FORMAT_INVALID/
+    );
+
+    // 4. Unsupported version prefix must throw DECRYPTION_VERSION_UNSUPPORTED
+    assert.throws(
+      () => PersistentDatabaseManager.decryptSourceFilesMap('whdb:enc:v99:kid:iv:tag:payload'),
+      /DECRYPTION_VERSION_UNSUPPORTED/
+    );
+
+    // 5. Invalid JSON string must throw DECRYPTION_FORMAT_INVALID
+    assert.throws(
+      () => PersistentDatabaseManager.decryptSourceFilesMap('{corrupted-json'),
+      /DECRYPTION_FORMAT_INVALID/
+    );
+  });
+});
+
+test('SandboxExecutor.runSandboxedNodeTest updates recoveryVerified to true and isolationState to RECOVERY_VERIFIED after temp cleanup', async () => {
+  const result = await SandboxExecutor.runSandboxedNodeTest({
+    filesMap: {
+      'index.test.mjs': 'import test from "node:test"; import assert from "node:assert"; test("math", () => { assert.strictEqual(2 + 2, 4); });\n',
+    },
+    testFiles: ['index.test.mjs'],
+    timeoutMs: 10000,
+  });
+
+  assert.equal(result.executed, true);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.recoveryVerified, true);
+  assert.equal(result.isolationState, 'RECOVERY_VERIFIED');
+});
+
 
 
 

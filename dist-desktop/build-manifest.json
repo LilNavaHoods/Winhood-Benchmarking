@@ -1,24 +1,24 @@
 {
-  "builtAt": "2026-11-15T14:06:55.169Z",
+  "builtAt": "2026-11-16T15:46:30.701Z",
   "nodeVersion": "v22.23.2",
   "platform": "linux",
   "arch": "x64",
   "artifacts": {
     "dist/index.html": {
       "sizeBytes": 1851,
-      "sha256": "9cd0cb4c44a7b4d4b85bb071d9bc6267720bc2c8f1c20182d0a3c29aac2786a9"
+      "sha256": "a07cb0feb64d9d41a4255e4c1a956966271a5f7bddc86eed5fa4fa139a14dba6"
     },
     "dist-desktop/server.mjs": {
-      "sizeBytes": 1401348,
-      "sha256": "3dc14ddee14eeb45db5845a83643160d06f20a0f82f4caa457b2bc6fdccf6c55"
+      "sizeBytes": 1519362,
+      "sha256": "793945a2d908b6ddb66e6bb663423808c52f4819e9a84c035b9182ca20abfc27"
     },
     "dist-desktop/electron-main.mjs": {
-      "sizeBytes": 1409712,
-      "sha256": "48061f666b848e2110d63c0e9d2b70b793b36120dd9b9f117ddc73545b42b414"
+      "sizeBytes": 1527726,
+      "sha256": "acd8adf2bee6b0d71d71df6dde17b4e9748e9655ff2cf03d0d6db97c79dde775"
     },
     "dist-desktop/electron-preload.cjs": {
-      "sizeBytes": 2378,
-      "sha256": "02804265a0da4a1ea7c4be9476c7ef9c7e0ca054fa6da857f4292104fdb26f89"
+      "sizeBytes": 2430,
+      "sha256": "11da9a3b2dc6c5ebb4a4d57c61aa917140136565ae6fdbb33a97793f195c5932"
     }
   }
 }

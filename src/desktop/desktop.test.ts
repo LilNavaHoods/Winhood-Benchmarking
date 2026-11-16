@@ -202,4 +202,144 @@ describe('Windows Desktop Architecture, Electron Security & Lifecycle Suite (FAS
     assert.equal(stripTrailingSlashes(longInput), 'http://127.0.0.1:3000');
     assert.ok(performance.now() - startedAt < 50);
   });
+
+  it('6. Electron Builder, Inno Setup (.iss), build-exe.ps1, package.json and package-lock.json are 100% aligned on version 4.4.0 and release-windows paths', () => {
+    const repoRoot = path.resolve(process.cwd());
+    const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8')) as {
+      name: string;
+      version: string;
+      scripts: Record<string, string>;
+    };
+    const lock = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package-lock.json'), 'utf8')) as {
+      name: string;
+      version: string;
+    };
+    const eb = JSON.parse(fs.readFileSync(path.join(repoRoot, 'electron-builder.json'), 'utf8')) as {
+      directories?: { output?: string };
+    };
+    const iss = fs.readFileSync(path.join(repoRoot, 'installer', 'WinHoodBenchmarking.iss'), 'utf8');
+    const ps1 = fs.readFileSync(path.join(repoRoot, 'build-exe.ps1'), 'utf8');
+
+    assert.equal(pkg.name, 'winhood-benchmarking');
+    assert.equal(lock.name, pkg.name);
+    assert.equal(lock.version, pkg.version);
+    assert.equal(eb.directories?.output, 'release-windows');
+
+    assert.match(iss, /#define MyAppVersion "4\.4\.0"/);
+    assert.match(iss, /OutputDir=\.\.\\release-windows\\installer/);
+    assert.match(iss, /OutputBaseFilename=WinHood-Benchmarking-Setup/);
+    assert.match(iss, /Source: "\.\.\\release-windows\\win-unpacked\\\*"/);
+
+    assert.match(ps1, /release-windows\\win-unpacked/);
+    assert.match(ps1, /release-windows\\installer\\WinHood-Benchmarking-Setup\.exe/);
+    assert.ok(pkg.scripts['desktop:compile']);
+    assert.ok(pkg.scripts['pack:win']);
+    assert.ok(pkg.scripts['installer:win']);
+    assert.ok(pkg.scripts['release:win']);
+  });
+
+  it('7. HairlineAnimatedFigure clock lifecycle respects prefers-reduced-motion, pauses on hidden visibilityState, and cleans up subscribers on unmount', async () => {
+    const {
+      subscribeClock,
+      getHairlineClockDiagnostics,
+    } = await import('../components/HairlineAnimatedFigure');
+
+    const prevWindow = (globalThis as any).window;
+    const prevDocument = (globalThis as any).document;
+
+    let reducedMotionMatches = false;
+    let docVisibilityState: 'visible' | 'hidden' = 'visible';
+    const docListeners = new Map<string, Set<() => void>>();
+    let nextRafId = 1;
+    const activeRafs = new Map<number, (now: number) => void>();
+
+    (globalThis as any).window = {
+      matchMedia: () => ({
+        get matches() {
+          return reducedMotionMatches;
+        },
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }),
+      requestAnimationFrame: (cb: (now: number) => void) => {
+        const id = nextRafId++;
+        activeRafs.set(id, cb);
+        return id;
+      },
+      cancelAnimationFrame: (id: number) => {
+        activeRafs.delete(id);
+      },
+    };
+
+    (globalThis as any).document = {
+      get visibilityState() {
+        return docVisibilityState;
+      },
+      get hidden() {
+        return docVisibilityState === 'hidden';
+      },
+      addEventListener: (evt: string, fn: () => void) => {
+        if (!docListeners.has(evt)) docListeners.set(evt, new Set());
+        docListeners.get(evt)!.add(fn);
+      },
+      removeEventListener: (evt: string, fn: () => void) => {
+        docListeners.get(evt)?.delete(fn);
+      },
+    };
+
+    try {
+      // 1. When prefers-reduced-motion: reduce is active, subscribeClock is a no-op
+      reducedMotionMatches = true;
+      const unsubReduced = subscribeClock(() => {});
+      assert.equal(getHairlineClockDiagnostics().subscriberCount, 0);
+      assert.equal(getHairlineClockDiagnostics().isRunning, false);
+      unsubReduced();
+
+      // 2. Normal motion subscribes and starts single RAF loop
+      reducedMotionMatches = false;
+      let ticks = 0;
+      const unsub1 = subscribeClock(() => {
+        ticks += 1;
+      });
+      const unsub2 = subscribeClock(() => {
+        ticks += 1;
+      });
+      assert.equal(getHairlineClockDiagnostics().subscriberCount, 2);
+      assert.equal(getHairlineClockDiagnostics().isRunning, true);
+      assert.equal(activeRafs.size, 1);
+
+      // Step one frame (>32ms)
+      const firstRaf = [...activeRafs.values()][0];
+      activeRafs.clear();
+      firstRaf(100);
+      assert.equal(ticks, 2);
+
+      // 3. Document becomes hidden -> visibilitychange stops RAF loop
+      docVisibilityState = 'hidden';
+      for (const fn of docListeners.get('visibilitychange') || []) {
+        fn();
+      }
+      assert.equal(getHairlineClockDiagnostics().isRunning, false);
+      assert.equal(activeRafs.size, 0);
+
+      // 4. Document becomes visible -> visibilitychange resumes RAF loop
+      docVisibilityState = 'visible';
+      for (const fn of docListeners.get('visibilitychange') || []) {
+        fn();
+      }
+      assert.equal(getHairlineClockDiagnostics().isRunning, true);
+
+      // 5. Unmount all subscribers -> stops RAF and detaches visibilitychange listener
+      unsub1();
+      unsub2();
+      assert.equal(getHairlineClockDiagnostics().subscriberCount, 0);
+      assert.equal(getHairlineClockDiagnostics().isRunning, false);
+      assert.equal(getHairlineClockDiagnostics().visibilityListenerAttached, false);
+    } finally {
+      if (prevWindow === undefined) delete (globalThis as any).window;
+      else (globalThis as any).window = prevWindow;
+      if (prevDocument === undefined) delete (globalThis as any).document;
+      else (globalThis as any).document = prevDocument;
+    }
+  });
 });

@@ -226,8 +226,79 @@ const activeSubscribers = new Set<TickSubscriber>();
 let globalRafId: number | null = null;
 let startTimestamp: number | null = null;
 let lastNotifyTimestamp = 0;
+let visibilityListenerAttached = false;
+
+export function isReducedMotionPreferred(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+    return false;
+  }
+  try {
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  } catch {
+    return false;
+  }
+}
+
+export function isDocumentHidden(): boolean {
+  if (typeof document === 'undefined') {
+    return false;
+  }
+  return document.visibilityState === 'hidden' || Boolean(document.hidden);
+}
+
+function stopGlobalClock() {
+  if (globalRafId !== null && typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') {
+    window.cancelAnimationFrame(globalRafId);
+  }
+  globalRafId = null;
+}
+
+function ensureGlobalClockRunning() {
+  if (
+    globalRafId === null &&
+    activeSubscribers.size > 0 &&
+    !isDocumentHidden() &&
+    !isReducedMotionPreferred() &&
+    typeof window !== 'undefined' &&
+    typeof window.requestAnimationFrame === 'function'
+  ) {
+    globalRafId = window.requestAnimationFrame(stepGlobalClock);
+  }
+}
+
+function handleDocumentVisibilityChange() {
+  if (isDocumentHidden() || isReducedMotionPreferred()) {
+    stopGlobalClock();
+  } else {
+    ensureGlobalClockRunning();
+  }
+}
+
+function attachVisibilityListenerIfNeeded() {
+  if (visibilityListenerAttached || typeof document === 'undefined' || typeof document.addEventListener !== 'function') {
+    return;
+  }
+  document.addEventListener('visibilitychange', handleDocumentVisibilityChange);
+  visibilityListenerAttached = true;
+}
+
+function detachVisibilityListenerIfIdle() {
+  if (
+    activeSubscribers.size === 0 &&
+    visibilityListenerAttached &&
+    typeof document !== 'undefined' &&
+    typeof document.removeEventListener === 'function'
+  ) {
+    document.removeEventListener('visibilitychange', handleDocumentVisibilityChange);
+    visibilityListenerAttached = false;
+  }
+}
 
 function stepGlobalClock(now: number) {
+  if (isDocumentHidden() || isReducedMotionPreferred() || activeSubscribers.size === 0) {
+    globalRafId = null;
+    return;
+  }
   if (startTimestamp === null) startTimestamp = now;
   if (now - lastNotifyTimestamp >= 32) {
     lastNotifyTimestamp = now;
@@ -236,24 +307,36 @@ function stepGlobalClock(now: number) {
       sub(elapsed);
     }
   }
-  if (activeSubscribers.size > 0) {
+  if (activeSubscribers.size > 0 && !isDocumentHidden() && !isReducedMotionPreferred()) {
     globalRafId = window.requestAnimationFrame(stepGlobalClock);
   } else {
     globalRafId = null;
   }
 }
 
-function subscribeClock(cb: TickSubscriber): () => void {
-  activeSubscribers.add(cb);
-  if (globalRafId === null && typeof window !== 'undefined') {
-    globalRafId = window.requestAnimationFrame(stepGlobalClock);
+export function subscribeClock(cb: TickSubscriber): () => void {
+  if (isReducedMotionPreferred()) {
+    return () => {};
   }
+  activeSubscribers.add(cb);
+  attachVisibilityListenerIfNeeded();
+  ensureGlobalClockRunning();
   return () => {
     activeSubscribers.delete(cb);
-    if (activeSubscribers.size === 0 && globalRafId !== null && typeof window !== 'undefined') {
-      window.cancelAnimationFrame(globalRafId);
-      globalRafId = null;
+    if (activeSubscribers.size === 0) {
+      stopGlobalClock();
+      detachVisibilityListenerIfIdle();
     }
+  };
+}
+
+export function getHairlineClockDiagnostics() {
+  return {
+    subscriberCount: activeSubscribers.size,
+    isRunning: globalRafId !== null,
+    isDocumentHidden: isDocumentHidden(),
+    isReducedMotion: isReducedMotionPreferred(),
+    visibilityListenerAttached,
   };
 }
 
@@ -319,6 +402,7 @@ export const HairlineAnimatedFigure: React.FC<HairlineAnimatedFigureProps> = Rea
 
     const containerRef = useRef<HTMLDivElement | null>(null);
     const [isVisible, setIsVisible] = useState(true);
+    const [reducedMotion, setReducedMotion] = useState<boolean>(() => isReducedMotionPreferred());
     const [isHovered, setIsHovered] = useState(false);
     const [elapsedMs, setElapsedMs] = useState(0);
     const springRef = useRef<HairlineSpringState>({
@@ -330,6 +414,32 @@ export const HairlineAnimatedFigure: React.FC<HairlineAnimatedFigureProps> = Rea
       ty: 0,
     });
     const [tilt, setTilt] = useState<{ mx: number; my: number }>({ mx: 0, my: 0 });
+
+    useEffect(() => {
+      if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+      let mql: MediaQueryList | null = null;
+      try {
+        mql = window.matchMedia('(prefers-reduced-motion: reduce)');
+      } catch {
+        return;
+      }
+      if (!mql) return;
+      setReducedMotion(mql.matches);
+      const onChange = (ev: MediaQueryListEvent) => {
+        setReducedMotion(ev.matches);
+        if (ev.matches) {
+          stopGlobalClock();
+          setTilt({ mx: 0, my: 0 });
+        } else {
+          ensureGlobalClockRunning();
+        }
+      };
+      if (typeof mql.addEventListener === 'function') {
+        mql.addEventListener('change', onChange);
+        return () => mql?.removeEventListener('change', onChange);
+      }
+      return undefined;
+    }, []);
 
     useEffect(() => {
       const el = containerRef.current;
@@ -348,7 +458,7 @@ export const HairlineAnimatedFigure: React.FC<HairlineAnimatedFigureProps> = Rea
     const pausedRef = useRef(false);
 
     useEffect(() => {
-      if (!isVisible || !active) return;
+      if (!isVisible || !active || reducedMotion) return;
       return subscribeClock((ms) => {
         const effectiveMs = scanning ? ms * 1.65 : ms;
         const effPause = scanning || isHovered ? 350 : pauseDurationMs;
@@ -372,9 +482,10 @@ export const HairlineAnimatedFigure: React.FC<HairlineAnimatedFigureProps> = Rea
           setElapsedMs(cycleDurationMs + 1);
         }
       });
-    }, [isVisible, active, scanning, isHovered, cycleDurationMs, pauseDurationMs]);
+    }, [isVisible, active, reducedMotion, scanning, isHovered, cycleDurationMs, pauseDurationMs]);
 
     const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+      if (reducedMotion) return;
       const rect = e.currentTarget.getBoundingClientRect();
       if (!rect.width || !rect.height) return;
       const nx = ((e.clientX - rect.left) / rect.width - 0.5) * 2;

@@ -71,45 +71,112 @@ export class PersistentDatabaseManager {
 
   /**
    * Decifra um envelope whdb:enc:v2:... (ou preserva objetos legados em claro durante migração).
+   * Lança erro explícito e tipado em caso de falha de autenticação AES-256-GCM, chave inválida,
+   * versão incompatível ou corrupção estrutural (nunca retorna {} silenciosamente em falha).
    */
   public static decryptSourceFilesMap(
-    envelopeOrMap: string | Record<string, string> | undefined | null
+    envelopeOrMap: string | Record<string, string> | undefined | null,
+    explicitKeyBuffer?: Buffer
   ): Record<string, string> {
-    if (!envelopeOrMap) return {};
+    if (envelopeOrMap === undefined || envelopeOrMap === null || envelopeOrMap === '') {
+      return {};
+    }
     if (typeof envelopeOrMap === 'object' && !Array.isArray(envelopeOrMap)) {
       return envelopeOrMap;
     }
-    if (typeof envelopeOrMap !== 'string') return {};
-    if (!envelopeOrMap.startsWith(PersistentDatabaseManager.ENVELOPE_PREFIX)) {
-      try {
-        const parsed = JSON.parse(envelopeOrMap);
-        return parsed && typeof parsed === 'object' ? parsed : {};
-      } catch {
-        return {};
+    if (typeof envelopeOrMap !== 'string') {
+      throw new Error('DECRYPTION_FORMAT_INVALID: Formato de sourceFilesMap inválido.');
+    }
+
+    if (envelopeOrMap.startsWith(PersistentDatabaseManager.ENVELOPE_PREFIX)) {
+      const parts = envelopeOrMap.slice(PersistentDatabaseManager.ENVELOPE_PREFIX.length).split(':');
+      if (parts.length !== 4) {
+        throw new Error(
+          'DECRYPTION_FORMAT_INVALID: Envelope criptográfico whdb:enc:v2 malformado ou truncado.'
+        );
       }
-    }
+      const [keyId, ivHex, authTagHex, cipherBase64] = parts;
+      if (
+        !keyId ||
+        !/^[0-9a-fA-F]+$/.test(ivHex) ||
+        !/^[0-9a-fA-F]+$/.test(authTagHex) ||
+        !cipherBase64
+      ) {
+        throw new Error(
+          'DECRYPTION_FORMAT_INVALID: Campos hexadecimais/base64 ausentes ou corrompidos no envelope whdb:enc:v2.'
+        );
+      }
 
-    const parts = envelopeOrMap.slice(PersistentDatabaseManager.ENVELOPE_PREFIX.length).split(':');
-    if (parts.length !== 4) {
-      return {};
-    }
-    const [keyId, ivHex, authTagHex, cipherBase64] = parts;
-    const keyBuffer =
-      KeyManagementService.getVaultKeyBufferByKeyId(keyId) ||
-      KeyManagementService.getActiveVaultAesKey().keyBuffer;
-
-    try {
       const iv = Buffer.from(ivHex, 'hex');
       const authTag = Buffer.from(authTagHex, 'hex');
       const ciphertext = Buffer.from(cipherBase64, 'base64');
-      const decipher = crypto.createDecipheriv('aes-256-gcm', keyBuffer, iv);
-      decipher.setAuthTag(authTag);
-      const compressed = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-      const inflated = zlib.inflateSync(compressed).toString('utf8');
-      const parsed = JSON.parse(inflated);
-      return parsed && typeof parsed === 'object' ? parsed : {};
-    } catch {
-      return {};
+
+      if (iv.length !== 12 || authTag.length !== 16) {
+        throw new Error(
+          `DECRYPTION_FORMAT_INVALID: Tamanho inválido de IV (${iv.length}B) ou AuthTag (${authTag.length}B) para AES-256-GCM.`
+        );
+      }
+
+      const keyBuffer =
+        explicitKeyBuffer ||
+        KeyManagementService.getVaultKeyBufferByKeyId(keyId) ||
+        KeyManagementService.getActiveVaultAesKey().keyBuffer;
+
+      if (!keyBuffer || keyBuffer.length !== 32) {
+        throw new Error(
+          `DECRYPTION_KEY_MISSING: Chave AES-256-GCM (${keyId}) inválida ou indisponível no KMS.`
+        );
+      }
+
+      let compressed: Buffer;
+      try {
+        const decipher = crypto.createDecipheriv('aes-256-gcm', keyBuffer, iv);
+        decipher.setAuthTag(authTag);
+        compressed = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+      } catch (err: any) {
+        throw new Error(
+          `DECRYPTION_AUTH_FAILED: Falha de integridade ou autenticação AES-256-GCM (${err?.message || 'auth tag mismatch'}).`
+        );
+      }
+
+      let inflated: string;
+      try {
+        inflated = zlib.inflateSync(compressed).toString('utf8');
+      } catch (err: any) {
+        throw new Error(
+          `DECRYPTION_PAYLOAD_CORRUPTED: Falha ao descomprimir payload zlib após decifragem (${err?.message || 'inflate error'}).`
+        );
+      }
+
+      try {
+        const parsed = JSON.parse(inflated);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('Conteúdo decifrado não é um objeto chave-valor válido.');
+        }
+        return parsed as Record<string, string>;
+      } catch (err: any) {
+        throw new Error(
+          `DECRYPTION_PAYLOAD_CORRUPTED: JSON decifrado inválido (${err?.message || 'json parse error'}).`
+        );
+      }
+    }
+
+    if (envelopeOrMap.startsWith('whdb:enc:')) {
+      throw new Error(
+        `DECRYPTION_VERSION_UNSUPPORTED: Versão de envelope criptográfico não suportada (${envelopeOrMap.slice(0, 16)}).`
+      );
+    }
+
+    try {
+      const parsed = JSON.parse(envelopeOrMap);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('Objeto JSON esperado.');
+      }
+      return parsed as Record<string, string>;
+    } catch (err: any) {
+      throw new Error(
+        `DECRYPTION_FORMAT_INVALID: JSON bruto inválido em sourceFilesMap (${err?.message || 'parse error'}).`
+      );
     }
   }
 

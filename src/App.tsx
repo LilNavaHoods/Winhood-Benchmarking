@@ -147,6 +147,9 @@ export default function App() {
   const [loading, setLoading] = useState<boolean>(true);
 
   const [currentUser, setCurrentUser] = useState<AuthUserView | null>(null);
+  const [authStatus, setAuthStatus] = useState<
+    'loading' | 'authenticated' | 'unauthenticated' | 'error'
+  >('loading');
   const [authLoading, setAuthLoading] = useState<boolean>(true);
   const [authenticated, setAuthenticated] = useState<boolean>(false);
   const [mfaRequired, setMfaRequired] = useState<boolean>(false);
@@ -157,6 +160,8 @@ export default function App() {
     '.winhood_data/bootstrap_admin_token.txt'
   );
   const [isAdminOrigin, setIsAdminOrigin] = useState<boolean>(false);
+  const authCheckInFlightRef = React.useRef<boolean>(false);
+  const lastAuthConfirmedAtRef = React.useRef<number>(0);
   const [isMfaSetupOpen, setIsMfaSetupOpen] = useState<boolean>(false);
   const [mfaSetupPayload, setMfaSetupPayload] = useState<{
     secret: string;
@@ -235,7 +240,12 @@ export default function App() {
   const [activeRunningRun, setActiveRunningRun] = useState<BenchmarkRun | null>(null);
 
   const checkAuthSession = useCallback(async (isRecovery = false) => {
+    if (authCheckInFlightRef.current && !isRecovery) {
+      return;
+    }
+    authCheckInFlightRef.current = true;
     setAuthLoading(true);
+    setAuthStatus((prev) => (prev === 'authenticated' && !isRecovery ? prev : 'loading'));
     if (isRecovery) {
       setBackendState('RECOVERING');
     }
@@ -245,6 +255,7 @@ export default function App() {
         fetch('/api/auth/bootstrap-status'),
       ]);
       if (sessRes.status >= 500 || bsRes.status >= 500) {
+        setAuthStatus('error');
         setBackendState('API_ERROR');
         setBackendErrorDetail(
           `Servidor backend respondeu com erro interno (HTTP ${sessRes.status >= 500 ? sessRes.status : bsRes.status}).`
@@ -273,24 +284,35 @@ export default function App() {
         if (sessData.user?.role === 'ADMIN') {
           setIsAdminOrigin(true);
         }
-        setBackendState(isAuthed && !isMfaReq ? 'ONLINE' : 'AUTH_REQUIRED');
+        if (isAuthed && !isMfaReq) {
+          lastAuthConfirmedAtRef.current = Date.now();
+          setAuthStatus('authenticated');
+          setBackendState('ONLINE');
+        } else {
+          setAuthStatus('unauthenticated');
+          setBackendState('AUTH_REQUIRED');
+        }
       } else if (sessRes.status === 401 || sessRes.status === 403) {
         clearClientAuthTokens();
         setAuthenticated(false);
         setMfaRequired(false);
         setCurrentUser(null);
         setBackendErrorDetail(null);
+        setAuthStatus('unauthenticated');
         setBackendState('AUTH_REQUIRED');
       } else {
+        setAuthStatus('error');
         setBackendState('API_ERROR');
         setBackendErrorDetail(`Resposta inesperada da sessão: HTTP ${sessRes.status}`);
       }
     } catch (err: any) {
+      setAuthStatus('error');
       setBackendState('OFFLINE');
       setBackendErrorDetail(
         err?.message || 'Não foi possível estabelecer conexão HTTP com o servidor backend local.'
       );
     } finally {
+      authCheckInFlightRef.current = false;
       setAuthLoading(false);
     }
   }, []);
@@ -303,6 +325,7 @@ export default function App() {
       const res = await fetch('/api/bootstrap');
       if (res.status === 401 || res.status === 403) {
         setAuthenticated(false);
+        setAuthStatus('unauthenticated');
         setBackendState('AUTH_REQUIRED');
         return;
       }
@@ -314,6 +337,7 @@ export default function App() {
       }
       const data = await res.json();
       setBackendState('ONLINE');
+      setAuthStatus('authenticated');
       setBackendErrorDetail(null);
       if (data.user) {
         setCurrentUser(data.user);
@@ -323,8 +347,10 @@ export default function App() {
         setDashboardData(data.dashboard);
         if (data.dashboard.latestRun?.status === 'RUNNING') {
           setActiveRunningRun(data.dashboard.latestRun);
-        } else if (activeRunningRun && data.dashboard.latestRun?.status !== 'RUNNING') {
-          setActiveRunningRun(null);
+        } else {
+          setActiveRunningRun((prev) =>
+            prev && data.dashboard.latestRun?.status !== 'RUNNING' ? null : prev
+          );
         }
       }
       setProjects(data.projects || []);
@@ -341,7 +367,7 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [authenticated, mfaRequired, notify, activeRunningRun]);
+  }, [authenticated, mfaRequired, notify]);
 
   useEffect(() => {
     void checkAuthSession();
@@ -358,9 +384,9 @@ export default function App() {
 
   useEffect(() => {
     const onAuthRequired = () => {
-      setAuthenticated(false);
-      setMfaRequired(false);
-      setIsAdminOrigin(false);
+      if (Date.now() - lastAuthConfirmedAtRef.current < 1500) {
+        return;
+      }
       void checkAuthSession();
     };
     window.addEventListener('winhood:auth-required', onAuthRequired);
@@ -487,7 +513,9 @@ export default function App() {
       await fetch('/api/auth/logout', { method: 'POST' });
     } finally {
       clearClientAuthTokens();
+      lastAuthConfirmedAtRef.current = 0;
       setAuthenticated(false);
+      setAuthStatus('unauthenticated');
       setMfaRequired(false);
       setIsAdminOrigin(false);
       setCurrentUser(null);
@@ -1063,6 +1091,15 @@ export default function App() {
           />
 
           <ModuleErrorBoundary resetKey={activeNav} moduleName={activeNavLabel}>
+            {authStatus === 'loading' ? (
+              <div className="h-64 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] animate-pulse p-6 text-xs text-slate-500 font-mono flex items-center justify-center">
+                Verificando sessão autenticada e integridade do cofre KMS...
+              </div>
+            ) : !authenticated || mfaRequired ? (
+              <div className="h-64 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-6 text-xs text-slate-500 font-mono flex items-center justify-center">
+                Aguardando autenticação na plataforma WinHood...
+              </div>
+            ) : (
             <Suspense
               fallback={
                 <div className="h-64 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] animate-pulse p-6 text-xs text-slate-500 font-mono">
@@ -1212,6 +1249,7 @@ export default function App() {
               />
             )}
             </Suspense>
+            )}
           </ModuleErrorBoundary>
         </main>
       </div>
@@ -1405,6 +1443,7 @@ export default function App() {
 
       {/* Global Auth Gate (Somente quando o backend respondeu AUTH_REQUIRED, nunca quando OFFLINE ou API_ERROR) */}
       {!authLoading &&
+        authStatus !== 'loading' &&
         backendState !== 'OFFLINE' &&
         backendState !== 'API_ERROR' &&
         backendState !== 'RECOVERING' &&
@@ -1415,8 +1454,10 @@ export default function App() {
             mfaRequired={mfaRequired}
             pendingUser={currentUser}
             onAuthenticated={(user) => {
+              lastAuthConfirmedAtRef.current = Date.now();
               setCurrentUser(user);
               setAuthenticated(true);
+              setAuthStatus('authenticated');
               setMfaRequired(false);
               setBootstrapRequired(false);
               setBackendState('ONLINE');
