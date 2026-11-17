@@ -533,6 +533,28 @@ export interface Software {
   sourceCodeFiles?: any[];
 }
 
+export type ToolIntegrationType = 'NATIVE' | 'LOCAL_CLI' | 'REMOTE_API';
+
+export type ToolAdapterVerifiableState =
+  | 'NATIVE_AVAILABLE'
+  | 'EXTERNAL_BINARY_DETECTED'
+  | 'EXTERNAL_CONFIGURED'
+  | 'EXTERNAL_CONNECTION_VERIFIED'
+  | 'EXTERNAL_EXECUTION_VERIFIED'
+  | 'NOT_INSTALLED'
+  | 'NOT_CONFIGURED'
+  | 'NOT_CONNECTED'
+  | 'EXECUTION_FAILED'
+  | 'PARTIAL'
+  | 'NOT_MEASURED';
+
+export type ToolResultCompletenessState =
+  | 'COMPLETE'
+  | 'PARTIAL'
+  | 'EMPTY'
+  | 'INCONCLUSIVE'
+  | 'NOT_EXECUTED';
+
 export interface ToolAdapterInfo {
   id: string;
   name: string;
@@ -540,6 +562,7 @@ export interface ToolAdapterInfo {
   version: string;
   category: 'CODE_QUALITY' | 'SECURITY_DEVSECOPS' | 'ARCHITECTURE' | 'QA_FUNCTIONAL' | 'PERFORMANCE' | 'DATABASE' | 'OS_INSTALL';
   analysisType: string;
+  integrationType?: ToolIntegrationType;
   executionMethod: 'NATIVE_AST_ENGINE' | 'CLI_BINARY' | 'EXTERNAL_API' | 'SANDBOX_WORKER';
   canonicalFormat: 'SARIF_2_1_0' | 'CYCLONEDX_1_5' | 'JUNIT_XML' | 'OTLP_METRICS' | 'ARCH_GRAPH_JSON' | 'SNAPSHOT_DIFF';
   status:
@@ -549,6 +572,14 @@ export interface ToolAdapterInfo {
     | 'INTEGRAÇÃO NÃO CONFIGURADA'
     | 'ACESSO NÃO AUTORIZADO'
     | 'DISABLED';
+  adapterState?: ToolAdapterVerifiableState;
+  nativeAvailable?: boolean;
+  externalBinaryDetected?: boolean;
+  externalVersion?: string | null;
+  configurationValid?: boolean;
+  connectionState?: 'VERIFIED' | 'NOT_CONNECTED' | 'NOT_APPLICABLE';
+  executionVerified?: boolean;
+  resultCompleteness?: ToolResultCompletenessState;
   binaryDetected: boolean;
   configured: boolean;
   signatureHash: string | null;
@@ -630,7 +661,9 @@ export interface ToolExecutionRecord {
   toolId: string;
   toolName: string;
   toolVersion: string;
+  integrationType?: ToolIntegrationType;
   executionMethod?: 'NATIVE_AST_ENGINE' | 'CLI_BINARY' | 'EXTERNAL_API' | 'SANDBOX_WORKER' | 'NOT_EXECUTED';
+  resultCompleteness?: ToolResultCompletenessState;
   configurationUsed?: Record<string, any>;
   configHash?: string;
   sourceHash?: string;
@@ -2196,6 +2229,13 @@ export interface MetricProvenanceRecord {
   notes?: string | null;
 }
 
+export type SbomLicenseProvenance =
+  | 'LOCKFILE_DECLARED'
+  | 'MANIFEST_DECLARED'
+  | 'NODE_MODULES_DECLARED'
+  | 'KNOWN_ECOSYSTEM_REGISTRY'
+  | 'UNVERIFIED';
+
 export interface SbomComponentRecord {
   bomRef: string;
   name: string;
@@ -2203,7 +2243,8 @@ export interface SbomComponentRecord {
   purl: string;
   ecosystem: 'npm' | 'pypi' | 'maven' | 'golang' | 'cargo' | 'nuget' | 'generic';
   license: string;
-  dependencyScope: 'DIRECT' | 'TRANSITIVE' | 'UNKNOWN';
+  licenseProvenance?: SbomLicenseProvenance;
+  dependencyScope: 'DIRECT' | 'TRANSITIVE' | 'DEV' | 'OPTIONAL' | 'UNKNOWN';
   manifestFile: string;
   sha256?: string | null;
 }
@@ -2228,6 +2269,15 @@ export interface SbomDocumentBundle {
   componentsCount: number;
   directCount: number;
   transitiveCount: number;
+  devCount?: number;
+  optionalCount?: number;
+  transitiveCoverageComplete?: boolean;
+  lockfilesDetected?: string[];
+  structuralValidation?: {
+    cyclonedxValid: boolean;
+    spdxValid: boolean;
+    errors: string[];
+  };
   components: SbomComponentRecord[];
   cyclonedx15Json: Record<string, unknown>;
   spdx23Json: Record<string, unknown>;
@@ -2311,6 +2361,11 @@ export interface BenchmarkMatchDecision {
     | 'VS_MQR_BRIDGE'
     | 'VS_PUBLIC_REFERENCE'
     | 'VS_INTERNAL_HISTORY';
+  comparisonModality?: 'SAME_ENGINE' | 'CROSS_TOOL';
+  comparabilityClassification?:
+    | 'STRICTLY_COMPARABLE'
+    | 'QUALIFIED_COMPARISON'
+    | 'NOT_COMPARABLE';
   comparable: boolean;
   canDeclareOfficialWinner: boolean;
   compatibilityScorePercent: number;
@@ -2333,6 +2388,7 @@ export interface BenchmarkMatchDecision {
   }>;
   blockingReasons: string[];
   warnings: string[];
+  qualifications?: string[];
 }
 
 export interface GoldenValidationCaseResult {
@@ -2348,12 +2404,32 @@ export interface GoldenValidationCaseResult {
   detectedRules: string[];
 }
 
+export interface WilsonConfidenceInterval95 {
+  pointEstimate: number | null;
+  lower: number | null;
+  upper: number | null;
+  sampleSize: number;
+}
+
+export interface StatisticalAggregateMetrics {
+  precision: number | null;
+  recall: number | null;
+  f1Score: number | null;
+  truePositiveRate: number | null;
+  trueNegativeRate: number | null;
+  falsePositiveRate: number | null;
+  falseNegativeRate: number | null;
+}
+
 export interface GoldenValidationSuiteReport {
   validationId: string;
   executedAt: string;
   engineVersion: string;
   datasetVersion: string;
-  datasetOriginLabel: 'WINHOOD_INTERNAL_CALIBRATION_CORPUS' | 'OWASP_BENCHMARK_OFFICIAL';
+  datasetOriginLabel:
+    | 'WINHOOD_INTERNAL_CALIBRATION_CORPUS'
+    | 'WINHOOD_INDEPENDENT_VALIDATION_BENCHMARK'
+    | 'OWASP_BENCHMARK_OFFICIAL';
   datasetSha256: string;
   sampleWarning: string | null;
   totalCases: number;
@@ -2365,8 +2441,37 @@ export interface GoldenValidationSuiteReport {
   precision: number | null;
   recall: number | null;
   f1Score: number | null;
+  truePositiveRate?: number | null;
+  trueNegativeRate?: number | null;
   falsePositiveRate: number | null;
   falseNegativeRate: number | null;
+  confidenceIntervals95?: {
+    precision: WilsonConfidenceInterval95;
+    recall: WilsonConfidenceInterval95;
+    truePositiveRate: WilsonConfidenceInterval95;
+    trueNegativeRate: WilsonConfidenceInterval95;
+    falsePositiveRate: WilsonConfidenceInterval95;
+    falseNegativeRate: WilsonConfidenceInterval95;
+  };
+  macroAverages?: {
+    byLanguage: StatisticalAggregateMetrics;
+    byCategory: StatisticalAggregateMetrics;
+  };
+  microAverages?: StatisticalAggregateMetrics;
+  independentValidationSummary?: {
+    datasetVersion: string;
+    datasetOriginLabel: 'WINHOOD_INDEPENDENT_VALIDATION_BENCHMARK';
+    totalCases: number;
+    truePositives: number;
+    falsePositives: number;
+    trueNegatives: number;
+    falseNegatives: number;
+    precision: number | null;
+    recall: number | null;
+    f1Score: number | null;
+    falsePositiveRate: number | null;
+    falseNegativeRate: number | null;
+  };
   totalDurationMs: number;
   memoryDeltaMb: number;
   limitations: string[];
@@ -2381,6 +2486,13 @@ export interface GoldenValidationSuiteReport {
       precision: number | null;
       recall: number | null;
       f1Score: number | null;
+      tpr?: number | null;
+      tnr?: number | null;
+      fpr?: number | null;
+      fnr?: number | null;
+      precisionCi95?: WilsonConfidenceInterval95;
+      recallCi95?: WilsonConfidenceInterval95;
+      lowSampleWarning?: boolean;
     }
   >;
   byCategory: Record<
@@ -2394,6 +2506,13 @@ export interface GoldenValidationSuiteReport {
       precision: number | null;
       recall: number | null;
       f1Score: number | null;
+      tpr?: number | null;
+      tnr?: number | null;
+      fpr?: number | null;
+      fnr?: number | null;
+      precisionCi95?: WilsonConfidenceInterval95;
+      recallCi95?: WilsonConfidenceInterval95;
+      lowSampleWarning?: boolean;
     }
   >;
   cases: GoldenValidationCaseResult[];

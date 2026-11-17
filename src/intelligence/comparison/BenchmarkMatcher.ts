@@ -245,17 +245,35 @@ export class BenchmarkMatcher {
     const passedCount = checks.filter((c) => c.passed).length;
     const compatibilityScorePercent = Math.round((passedCount / checks.length) * 100);
     const comparable = blockingReasons.length === 0;
-    const canDeclareOfficialWinner = comparable && (input.mode === 'INDIVIDUAL' || softwares.length > 1);
+    const comparisonModality: 'SAME_ENGINE' | 'CROSS_TOOL' =
+      input.mode === 'VS_MQR_BRIDGE' || input.mode === 'VS_PUBLIC_REFERENCE'
+        ? 'CROSS_TOOL'
+        : 'SAME_ENGINE';
+    const comparabilityClassification:
+      | 'STRICTLY_COMPARABLE'
+      | 'QUALIFIED_COMPARISON'
+      | 'NOT_COMPARABLE' = !comparable
+      ? 'NOT_COMPARABLE'
+      : comparisonModality === 'CROSS_TOOL' || warnings.length > 0
+        ? 'QUALIFIED_COMPARISON'
+        : 'STRICTLY_COMPARABLE';
+    const canDeclareOfficialWinner =
+      comparable &&
+      comparabilityClassification !== 'NOT_COMPARABLE' &&
+      (input.mode === 'INDIVIDUAL' || softwares.length > 1);
 
     return {
       matchId: `match-${crypto.createHash('sha256').update(`${input.mode}:${softwares.map((s) => s.id).join('|')}`).digest('hex').slice(0, 12)}`,
       mode: input.mode,
+      comparisonModality,
+      comparabilityClassification,
       comparable,
       canDeclareOfficialWinner,
       compatibilityScorePercent,
       checks,
       blockingReasons,
       warnings,
+      qualifications: [...warnings],
     };
   }
 }

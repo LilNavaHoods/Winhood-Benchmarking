@@ -1942,39 +1942,118 @@ var ParserRegistry = class _ParserRegistry {
     if (lower.endsWith(".sql")) return "SQL";
     return "Other";
   }
+  static getLanguageAnalyticalCapabilities() {
+    return [
+      {
+        language: "TypeScript",
+        parserKind: "BABEL_AST",
+        analyticalDepth: "FULL_AST",
+        parserEngine: "@babel/parser",
+        supportsCrossFileTaint: true,
+        supportsFullSyntaxTree: true
+      },
+      {
+        language: "JavaScript",
+        parserKind: "BABEL_AST",
+        analyticalDepth: "FULL_AST",
+        parserEngine: "@babel/parser",
+        supportsCrossFileTaint: true,
+        supportsFullSyntaxTree: true
+      },
+      {
+        language: "Python",
+        parserKind: "STRUCTURAL_PARSER",
+        analyticalDepth: "STRUCTURAL_AST",
+        parserEngine: "winhood-python-token-ast-v1",
+        supportsCrossFileTaint: true,
+        supportsFullSyntaxTree: false
+      },
+      {
+        language: "Java",
+        parserKind: "STRUCTURAL_PARSER",
+        analyticalDepth: "STRUCTURAL_AST",
+        parserEngine: "winhood-java-token-ast-v1",
+        supportsCrossFileTaint: true,
+        supportsFullSyntaxTree: false
+      },
+      {
+        language: "C#",
+        parserKind: "STRUCTURAL_PARSER",
+        analyticalDepth: "STRUCTURAL_AST",
+        parserEngine: "winhood-csharp-token-ast-v1",
+        supportsCrossFileTaint: true,
+        supportsFullSyntaxTree: false
+      },
+      {
+        language: "Go",
+        parserKind: "STRUCTURAL_PARSER",
+        analyticalDepth: "STRUCTURAL_AST",
+        parserEngine: "winhood-go-token-ast-v1",
+        supportsCrossFileTaint: true,
+        supportsFullSyntaxTree: false
+      },
+      {
+        language: "Rust",
+        parserKind: "STRUCTURAL_PARSER",
+        analyticalDepth: "STRUCTURAL_AST",
+        parserEngine: "winhood-rust-token-ast-v1",
+        supportsCrossFileTaint: true,
+        supportsFullSyntaxTree: false
+      },
+      {
+        language: "SQL",
+        parserKind: "STRUCTURAL_PARSER",
+        analyticalDepth: "STRUCTURAL_AST",
+        parserEngine: "winhood-sql-token-ast-v1",
+        supportsCrossFileTaint: false,
+        supportsFullSyntaxTree: false
+      }
+    ];
+  }
   static parseFile(filePath, content) {
     const language = _ParserRegistry.detectLanguage(filePath);
+    let rawResult;
     if (language === "TypeScript" || language === "JavaScript") {
-      return _ParserRegistry.parseTypeScriptOrJsAst(filePath, content, language);
+      rawResult = _ParserRegistry.parseTypeScriptOrJsAst(filePath, content, language);
+    } else if (language === "Python") {
+      rawResult = _ParserRegistry.parsePythonStructuralAst(filePath, content);
+    } else if (language === "Java" || language === "C#" || language === "Go" || language === "Rust") {
+      rawResult = _ParserRegistry.parseBraceLanguageStructuralAst(filePath, content, language);
+    } else if (language === "SQL") {
+      rawResult = _ParserRegistry.parseSqlAst(filePath, content);
+    } else {
+      const lines = content.split(/\r?\n/);
+      rawResult = {
+        filePath,
+        language,
+        astParsed: false,
+        parserKind: "UNSUPPORTED",
+        analyticalDepth: "UNSUPPORTED",
+        errorCount: 0,
+        parserEngine: "UNSUPPORTED_EXTENSION",
+        loc: lines.filter((l) => l.trim().length > 0).length,
+        cyclomaticComplexity: 1,
+        cognitiveComplexity: 0,
+        imports: [],
+        functions: [],
+        callSites: [],
+        issues: [],
+        hasAuditSignals: false,
+        hasCryptoSignals: false,
+        hasWeakCryptoSignals: false,
+        hasPreparedStatementSignals: false
+      };
     }
-    if (language === "Python") {
-      return _ParserRegistry.parsePythonStructuralAst(filePath, content);
-    }
-    if (language === "Java" || language === "C#" || language === "Go" || language === "Rust") {
-      return _ParserRegistry.parseBraceLanguageStructuralAst(filePath, content, language);
-    }
-    if (language === "SQL") {
-      return _ParserRegistry.parseSqlAst(filePath, content);
-    }
-    const lines = content.split(/\r?\n/);
+    const errCount = rawResult.errorCount ?? 0;
+    const analyticalDepth = rawResult.parserKind === "UNSUPPORTED" || !rawResult.astParsed ? "UNSUPPORTED" : errCount > 0 ? "PARTIAL_RECOVERY" : rawResult.parserKind === "BABEL_AST" ? "FULL_AST" : "STRUCTURAL_AST";
+    const calibratedIssues = analyticalDepth === "PARTIAL_RECOVERY" ? rawResult.issues.map((iss) => ({
+      ...iss,
+      confidence: iss.confidence === "HIGH" ? "MEDIUM" : iss.confidence
+    })) : rawResult.issues;
     return {
-      filePath,
-      language,
-      astParsed: false,
-      parserKind: "UNSUPPORTED",
-      errorCount: 0,
-      parserEngine: "UNSUPPORTED_EXTENSION",
-      loc: lines.filter((l) => l.trim().length > 0).length,
-      cyclomaticComplexity: 1,
-      cognitiveComplexity: 0,
-      imports: [],
-      functions: [],
-      callSites: [],
-      issues: [],
-      hasAuditSignals: false,
-      hasCryptoSignals: false,
-      hasWeakCryptoSignals: false,
-      hasPreparedStatementSignals: false
+      ...rawResult,
+      analyticalDepth,
+      issues: calibratedIssues
     };
   }
   static parseTypeScriptOrJsAst(filePath, content, language) {
@@ -2428,7 +2507,11 @@ var ParserRegistry = class _ParserRegistry {
             }
           }
           if (/^(query|execute|raw|exec)$/i.test(calleeBase) && args[0]) {
-            if (containsSqlConcat(args[0]) && !isNoSonarLine(lineNo)) {
+            const sqlVarBinding = args[0].type === "Identifier" ? variableBindings.find((b) => b.varName === args[0].name) : void 0;
+            const hasUnsafeSqlBinding = Boolean(
+              sqlVarBinding && !sqlVarBinding.isSanitized && sqlVarBinding.dependencies.length > 0 && /\b(SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)\b/i.test(sqlVarBinding.expressionText) && (sqlVarBinding.expressionText.includes("+") || sqlVarBinding.expressionText.includes("${"))
+            );
+            if ((containsSqlConcat(args[0]) || hasUnsafeSqlBinding) && !isNoSonarLine(lineNo)) {
               issues.push({
                 ruleId: "ts:S3649",
                 title: "Execu\xE7\xE3o SQL com string concatenada/interpolada",
@@ -2810,14 +2893,13 @@ var ParserRegistry = class _ParserRegistry {
       if (currentFn !== "<module>") {
         const lineIndent = getLineIndent(tok.line);
         const lineText = (lines[tok.line - 1] || "").trim();
-        if (lineText.length > 0 && lineIndent <= currentFnIndent && tok.value !== "def") {
-          const prevFn = functions.find((f) => f.name === currentFn);
-          if (prevFn && prevFn.endLine < tok.line) prevFn.endLine = tok.line - 1;
+        const prevFn = functions.find((f) => f.name === currentFn);
+        if (prevFn && tok.line > prevFn.startLine && lineText.length > 0 && lineIndent <= currentFnIndent && tok.value !== "def") {
+          if (prevFn.endLine < tok.line) prevFn.endLine = tok.line - 1;
           currentFn = "<module>";
           currentFnIndent = -1;
-        } else {
-          const prevFn = functions.find((f) => f.name === currentFn);
-          if (prevFn) prevFn.endLine = Math.max(prevFn.endLine, tok.line);
+        } else if (prevFn) {
+          prevFn.endLine = Math.max(prevFn.endLine, tok.line);
         }
       }
       if (tok.type === "KEYWORD" && (tok.value === "import" || tok.value === "from")) {
@@ -2910,7 +2992,7 @@ var ParserRegistry = class _ParserRegistry {
               if (tokens[k].type === "IDENT") deps.push(tokens[k].value);
               k += 1;
             }
-            const exprLine = (lines[tok.line - 1] || "").split("=")[1]?.trim() || "";
+            const exprLine = (lines[tok.line - 1] || "").split("=").slice(1).join("=").trim() || "";
             const san = detectSanitizerContextPy(exprLine);
             fnObj.variableBindings.push({
               varName: tok.value,
@@ -3028,7 +3110,14 @@ var ParserRegistry = class _ParserRegistry {
             effortMinutes: 25
           });
         }
-        if (tok.value === "execute" && (site.snippet.includes('f"') || site.snippet.includes("f'") || site.snippet.includes("+"))) {
+        const fnObj = functions.find((f) => f.name === currentFn);
+        const pyHasUnsafeSqlBinding = Boolean(
+          fnObj && site.argIdentifiers.some((argId) => {
+            const b = fnObj.variableBindings.find((vb) => vb.varName === argId);
+            return b && !b.isSanitized && b.dependencies.length > 0 && /\b(SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)\b/i.test(b.expressionText) && (b.expressionText.includes("+") || b.expressionText.includes('f"') || b.expressionText.includes("f'"));
+          })
+        );
+        if (tok.value === "execute" && (site.snippet.includes('f"') || site.snippet.includes("f'") || site.snippet.includes("+") || pyHasUnsafeSqlBinding)) {
           issues.push({
             ruleId: "py:B608",
             title: "SQL constru\xEDdo com f-string ou concatena\xE7\xE3o em cursor.execute()",
@@ -3049,7 +3138,6 @@ var ParserRegistry = class _ParserRegistry {
         if (/pbkdf2_hmac|AES|Fernet/i.test(prevIdent)) hasCrypto = true;
         if (tok.value === "execute" && (site.snippet.includes("?") || site.snippet.includes("%s"))) hasPrepared = true;
         if (/audit/i.test(prevIdent)) hasAudit = true;
-        const fnObj = functions.find((f) => f.name === currentFn);
         if (fnObj) fnObj.callsMade.push(site);
       }
     }
@@ -4138,12 +4226,12 @@ function resolvePowerShellExecutable() {
   };
   return { exePath, safeEnv };
 }
-function tryDpapiProtectUtf8(plainText) {
+function tryDpapiProtectBytes(rawBytes) {
   if (os.platform() !== "win32") {
-    return { protectedText: plainText, usedDpapi: false };
+    return { protectedB64: "", usedDpapi: false };
   }
   try {
-    const b64 = Buffer.from(plainText, "utf8").toString("base64");
+    const b64 = rawBytes.toString("base64");
     const ps = [
       "Add-Type -AssemblyName System.Security;",
       `$bytes = [Convert]::FromBase64String('${b64}');`,
@@ -4158,13 +4246,32 @@ function tryDpapiProtectUtf8(plainText) {
       env: safeEnv
     });
     if (res.status === 0 && res.stdout && res.stdout.trim().length > 0) {
-      return { protectedText: res.stdout.trim(), usedDpapi: true };
+      return { protectedB64: res.stdout.trim(), usedDpapi: true };
     }
   } catch {
   }
-  return { protectedText: plainText, usedDpapi: false };
+  return { protectedB64: "", usedDpapi: false };
 }
-function tryDpapiUnprotectUtf8(cipherB64OrPlain, wasProtected) {
+function tryDpapiUnprotectBytes(cipherB64) {
+  const ps = [
+    "Add-Type -AssemblyName System.Security;",
+    `$bytes = [Convert]::FromBase64String('${cipherB64}');`,
+    "$unprot = [System.Security.Cryptography.ProtectedData]::Unprotect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser);",
+    "[Convert]::ToBase64String($unprot)"
+  ].join(" ");
+  const { exePath, safeEnv } = resolvePowerShellExecutable();
+  const res = spawnSync(exePath, ["-NoProfile", "-NonInteractive", "-Command", ps], {
+    shell: false,
+    encoding: "utf8",
+    timeout: 5e3,
+    env: safeEnv
+  });
+  if (res.status !== 0 || !res.stdout) {
+    throw new Error("KEYSTORE_DPAPI_UNPROTECT_FAILED: Falha ao descriptografar DEK via Windows DPAPI.");
+  }
+  return Buffer.from(res.stdout.trim(), "base64");
+}
+function tryDpapiUnprotectUtf8Legacy(cipherB64OrPlain, wasProtected) {
   if (!wasProtected || os.platform() !== "win32") {
     return cipherB64OrPlain;
   }
@@ -4182,9 +4289,61 @@ function tryDpapiUnprotectUtf8(cipherB64OrPlain, wasProtected) {
     env: safeEnv
   });
   if (res.status !== 0 || !res.stdout) {
-    throw new Error("KEYSTORE_DPAPI_UNPROTECT_FAILED: Falha ao descriptografar chave via Windows DPAPI.");
+    throw new Error("KEYSTORE_DPAPI_UNPROTECT_FAILED: Falha ao descriptografar chave legada via Windows DPAPI.");
   }
   return res.stdout.trim();
+}
+function deriveHkdfPurposeKey(ikmBuffer, saltHex, purposeInfo) {
+  const saltBuf = Buffer.from(saltHex, "hex");
+  const infoBuf = Buffer.from(purposeInfo, "utf8");
+  const derived = crypto2.hkdfSync("sha256", ikmBuffer, saltBuf, infoBuf, 32);
+  return Buffer.from(derived);
+}
+function encryptWithAes256GcmEnvelope(plaintextUtf8, key32Bytes, aadContext) {
+  if (key32Bytes.length !== 32) {
+    throw new Error("KEYSTORE_INVALID_KEY_LENGTH: Chave AES-256-GCM deve possuir exatamente 32 bytes.");
+  }
+  const nonce = crypto2.randomBytes(12);
+  const cipher = crypto2.createCipheriv("aes-256-gcm", key32Bytes, nonce, { authTagLength: 16 });
+  cipher.setAAD(Buffer.from(aadContext, "utf8"));
+  const encrypted = Buffer.concat([cipher.update(plaintextUtf8, "utf8"), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return {
+    alg: "AES-256-GCM",
+    nonceHex: nonce.toString("hex"),
+    authTagHex: authTag.toString("hex"),
+    ciphertextHex: encrypted.toString("hex"),
+    aadContext
+  };
+}
+function decryptWithAes256GcmEnvelope(envelope, key32Bytes, expectedAadContext) {
+  if (!envelope || envelope.alg !== "AES-256-GCM") {
+    throw new Error("KEYSTORE_ENVELOPE_INVALID_ALG: Algoritmo de envelope inv\xE1lido.");
+  }
+  if (expectedAadContext && envelope.aadContext !== expectedAadContext) {
+    throw new Error(
+      `KEYSTORE_ENVELOPE_AAD_MISMATCH: Contexto de finalidade divergente (${envelope.aadContext} !== ${expectedAadContext}).`
+    );
+  }
+  const nonce = Buffer.from(envelope.nonceHex, "hex");
+  const authTag = Buffer.from(envelope.authTagHex, "hex");
+  if (nonce.length !== 12 || authTag.length !== 16) {
+    throw new Error("KEYSTORE_ENVELOPE_CORRUPTED_NONCE_OR_TAG: Nonce de 96 bits ou AuthTag de 128 bits inv\xE1lido.");
+  }
+  const decipher = crypto2.createDecipheriv("aes-256-gcm", key32Bytes, nonce, { authTagLength: 16 });
+  decipher.setAAD(Buffer.from(envelope.aadContext, "utf8"));
+  decipher.setAuthTag(authTag);
+  try {
+    const decrypted = Buffer.concat([
+      decipher.update(Buffer.from(envelope.ciphertextHex, "hex")),
+      decipher.final()
+    ]);
+    return decrypted.toString("utf8");
+  } catch {
+    throw new Error(
+      "KEYSTORE_GCM_AUTH_FAILED: Falha de autentica\xE7\xE3o AES-256-GCM \u2014 ciphertext, nonce, AAD ou chave corrompidos."
+    );
+  }
 }
 var KeyManagementService = class _KeyManagementService {
   static {
@@ -4198,13 +4357,125 @@ var KeyManagementService = class _KeyManagementService {
   static getStorePath(customPath) {
     return customPath || process.env.WINHOOD_KEYSTORE_PATH || _KeyManagementService.DEFAULT_STORE_PATH;
   }
+  static resolveOperatingMode() {
+    const explicitMode = (process.env.WINHOOD_KEYSTORE_MODE || "").trim().toUpperCase();
+    if (explicitMode === "PRODUCTION_SECURE" || explicitMode === "DEVELOPMENT" || explicitMode === "RECOVERY") {
+      return explicitMode;
+    }
+    if (process.env.NODE_ENV === "production") {
+      return "PRODUCTION_SECURE";
+    }
+    return "DEVELOPMENT";
+  }
   static computeSha256(content) {
     return crypto2.createHash("sha256").update(content, "utf8").digest("hex");
   }
-  static writeAtomicWithChecksum(storePath, payloadJson) {
+  /**
+   * Resolves the Key Encryption Key (KEK) used exclusively to wrap/unwrap the random Data Encryption Key (DEK).
+   * Never uses predictable machine traits (hostname, username, platform, arch).
+   */
+  static resolveKekForStore(storePath, hkdfSaltHex, hkdfInfo) {
+    const extMasterEnv = (process.env.WINHOOD_KEYSTORE_MASTER_SECRET || "").trim();
+    if (extMasterEnv.length >= 16) {
+      const ikm = Buffer.from(extMasterEnv, "utf8");
+      return {
+        kekBuffer: deriveHkdfPurposeKey(ikm, hkdfSaltHex, hkdfInfo),
+        mechanism: "HKDF_EXTERNAL_ENV"
+      };
+    }
+    const kekFilePath = `${storePath}.kek`;
+    let rawKekSeed;
+    if (fs.existsSync(kekFilePath)) {
+      const hex = fs.readFileSync(kekFilePath, "utf8").trim();
+      rawKekSeed = Buffer.from(hex, "hex");
+      if (rawKekSeed.length < 32) {
+        throw new Error(`KEYSTORE_KEK_CORRUPTED: Arquivo KEK em ${kekFilePath} corrompido.`);
+      }
+    } else {
+      fs.mkdirSync(path.dirname(kekFilePath), { recursive: true });
+      rawKekSeed = crypto2.randomBytes(32);
+      const tmpKek = `${kekFilePath}.tmp-${process.pid}-${crypto2.randomBytes(4).toString("hex")}`;
+      const fd = fs.openSync(tmpKek, "w", 384);
+      try {
+        fs.writeFileSync(fd, rawKekSeed.toString("hex"), "utf8");
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+      fs.renameSync(tmpKek, kekFilePath);
+      fs.chmodSync(kekFilePath, 384);
+    }
+    return {
+      kekBuffer: deriveHkdfPurposeKey(rawKekSeed, hkdfSaltHex, hkdfInfo),
+      mechanism: "HKDF_LOCAL_KEK_FILE"
+    };
+  }
+  /**
+   * Wraps a random 256-bit DEK using OS DPAPI (when on Windows) or HKDF-derived KEK with AES-256-GCM.
+   */
+  static wrapDekBuffer(dekBuffer, storePath) {
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const hkdfSaltHex = crypto2.randomBytes(16).toString("hex");
+    const hkdfInfo = "winhood:keystore:kek-envelope:v2";
+    const dpapiAttempt = tryDpapiProtectBytes(dekBuffer);
+    if (dpapiAttempt.usedDpapi) {
+      return {
+        envelopeVersion: "WINHOOD-ENVELOPE-V2",
+        kekMechanism: "WINDOWS_DPAPI",
+        hkdfSaltHex,
+        hkdfInfo,
+        dpapiProtectedBlobB64: dpapiAttempt.protectedB64,
+        createdAt: now,
+        rotatedAt: null
+      };
+    }
+    const { kekBuffer, mechanism } = _KeyManagementService.resolveKekForStore(
+      storePath,
+      hkdfSaltHex,
+      hkdfInfo
+    );
+    const wrappedCipher = encryptWithAes256GcmEnvelope(
+      dekBuffer.toString("hex"),
+      kekBuffer,
+      "winhood:dek:wrap:v2"
+    );
+    return {
+      envelopeVersion: "WINHOOD-ENVELOPE-V2",
+      kekMechanism: mechanism,
+      hkdfSaltHex,
+      hkdfInfo,
+      aesGcmWrappedDek: wrappedCipher,
+      createdAt: now,
+      rotatedAt: null
+    };
+  }
+  /**
+   * Unwraps the 256-bit DEK from the keystore envelope.
+   */
+  static unwrapDekBuffer(wrappedDek, storePath) {
+    if (wrappedDek.kekMechanism === "WINDOWS_DPAPI" && wrappedDek.dpapiProtectedBlobB64) {
+      return tryDpapiUnprotectBytes(wrappedDek.dpapiProtectedBlobB64);
+    }
+    if (!wrappedDek.aesGcmWrappedDek) {
+      throw new Error("KEYSTORE_DEK_ENVELOPE_MISSING: Envelope AES-256-GCM da DEK ausente.");
+    }
+    const { kekBuffer } = _KeyManagementService.resolveKekForStore(
+      storePath,
+      wrappedDek.hkdfSaltHex,
+      wrappedDek.hkdfInfo
+    );
+    const dekHex = decryptWithAes256GcmEnvelope(
+      wrappedDek.aesGcmWrappedDek,
+      kekBuffer,
+      "winhood:dek:wrap:v2"
+    );
+    return Buffer.from(dekHex, "hex");
+  }
+  static writeAtomicWithChecksum(storePath, payloadJson, monotonicSequence) {
     const dir = path.dirname(storePath);
     fs.mkdirSync(dir, { recursive: true });
     const checksumPath = `${storePath}.sha256`;
+    const seqPath = `${storePath}.seq`;
     const backupPath = `${storePath}.bak`;
     if (fs.existsSync(storePath)) {
       try {
@@ -4234,10 +4505,21 @@ var KeyManagementService = class _KeyManagementService {
     }
     fs.renameSync(tmpHash, checksumPath);
     fs.chmodSync(checksumPath, 384);
+    const tmpSeq = `${seqPath}.tmp-${process.pid}-${crypto2.randomBytes(4).toString("hex")}`;
+    const sfd = fs.openSync(tmpSeq, "w", 384);
+    try {
+      fs.writeFileSync(sfd, String(monotonicSequence), "utf8");
+      fs.fsyncSync(sfd);
+    } finally {
+      fs.closeSync(sfd);
+    }
+    fs.renameSync(tmpSeq, seqPath);
+    fs.chmodSync(seqPath, 384);
   }
   static readVerifiedStoreFile(storePath) {
     if (!fs.existsSync(storePath)) return null;
     const checksumPath = `${storePath}.sha256`;
+    const seqPath = `${storePath}.seq`;
     const raw = fs.readFileSync(storePath, "utf8");
     if (fs.existsSync(checksumPath)) {
       const expectedSha = fs.readFileSync(checksumPath, "utf8").trim();
@@ -4248,7 +4530,7 @@ var KeyManagementService = class _KeyManagementService {
           const bakRaw = fs.readFileSync(backupPath, "utf8");
           const bakParsed = JSON.parse(bakRaw);
           if (bakParsed && bakParsed.keysHex && bakParsed.activeEvidenceKeyId && bakParsed.activeVaultKeyId) {
-            return { store: bakParsed, integrityVerified: false };
+            return { store: bakParsed, integrityVerified: false, rollbackVerified: false };
           }
         }
         throw new Error(`KEYSTORE_INTEGRITY_VIOLATION: Checksum SHA-256 de ${storePath} n\xE3o confere.`);
@@ -4258,31 +4540,101 @@ var KeyManagementService = class _KeyManagementService {
     if (!parsed || !parsed.keysHex || !parsed.activeEvidenceKeyId || !parsed.activeVaultKeyId) {
       throw new Error(`KEYSTORE_CORRUPTED: Estrutura inv\xE1lida em ${storePath}.`);
     }
-    let upgraded = false;
-    if (!parsed.ed25519Keys || !parsed.activeEd25519KeyId) {
-      const now = (/* @__PURE__ */ new Date()).toISOString();
-      const edId = `wh-ed25519-${now.slice(0, 10).replace(/-/g, "")}-${crypto2.randomBytes(4).toString("hex")}`;
-      const pair = generateEd25519Pair();
-      const prot = tryDpapiProtectUtf8(pair.privateKeyPem);
-      parsed.ed25519Keys = {
-        [edId]: {
-          purpose: "EVIDENCE_ED25519",
-          privateKeyPem: prot.protectedText,
-          publicKeyPem: pair.publicKeyPem,
-          dpapiProtected: prot.usedDpapi,
-          createdAt: now,
-          status: "ACTIVE",
-          rotatedAt: null
+    let rollbackVerified = true;
+    if (fs.existsSync(seqPath) && typeof parsed.monotonicSequence === "number") {
+      const recordedSeq = Number.parseInt(fs.readFileSync(seqPath, "utf8").trim(), 10);
+      if (Number.isFinite(recordedSeq) && parsed.monotonicSequence < recordedSeq) {
+        if (_KeyManagementService.resolveOperatingMode() !== "RECOVERY") {
+          throw new Error(
+            `KEYSTORE_ROLLBACK_DETECTED: Sequ\xEAncia monot\xF4nica do keystore (${parsed.monotonicSequence}) \xE9 anterior ao \xFAltimo estado confirmado (${recordedSeq}).`
+          );
         }
-      };
-      parsed.activeEd25519KeyId = edId;
-      parsed.version = Math.max(2, parsed.version || 1);
+        rollbackVerified = false;
+      }
+    }
+    let upgraded = false;
+    if (!parsed.wrappedDek || parsed.envelopeVersion !== "WINHOOD-ENVELOPE-V2") {
+      const dekBuffer = crypto2.randomBytes(32);
+      parsed.wrappedDek = _KeyManagementService.wrapDekBuffer(dekBuffer, storePath);
+      parsed.envelopeVersion = "WINHOOD-ENVELOPE-V2";
+      parsed.operatingMode = _KeyManagementService.resolveOperatingMode();
+      parsed.monotonicSequence = (parsed.monotonicSequence || 0) + 1;
+      for (const [kId, entry] of Object.entries(parsed.keysHex)) {
+        if (!entry.envelopeCipher && entry.secretHex) {
+          const plainHex = tryDpapiUnprotectUtf8Legacy(entry.secretHex, entry.dpapiProtected);
+          entry.envelopeCipher = encryptWithAes256GcmEnvelope(
+            plainHex,
+            dekBuffer,
+            `winhood:key:${kId}:${entry.purpose}`
+          );
+          delete entry.secretHex;
+        }
+      }
+      if (!parsed.ed25519Keys || !parsed.activeEd25519KeyId) {
+        const now = (/* @__PURE__ */ new Date()).toISOString();
+        const edId = `wh-ed25519-${now.slice(0, 10).replace(/-/g, "")}-${crypto2.randomBytes(4).toString("hex")}`;
+        const pair = generateEd25519Pair();
+        parsed.ed25519Keys = {
+          [edId]: {
+            purpose: "EVIDENCE_ED25519",
+            privateKeyEnvelope: encryptWithAes256GcmEnvelope(
+              pair.privateKeyPem,
+              dekBuffer,
+              `winhood:key:${edId}:EVIDENCE_ED25519`
+            ),
+            publicKeyPem: pair.publicKeyPem,
+            createdAt: now,
+            validFrom: now,
+            validUntil: null,
+            status: "ACTIVE",
+            rotatedAt: null,
+            revokedAt: null
+          }
+        };
+        parsed.activeEd25519KeyId = edId;
+      } else {
+        for (const [edId, edEntry] of Object.entries(parsed.ed25519Keys)) {
+          if (!edEntry.privateKeyEnvelope && edEntry.privateKeyPem) {
+            const plainPem = tryDpapiUnprotectUtf8Legacy(edEntry.privateKeyPem, edEntry.dpapiProtected);
+            edEntry.privateKeyEnvelope = encryptWithAes256GcmEnvelope(
+              plainPem,
+              dekBuffer,
+              `winhood:key:${edId}:EVIDENCE_ED25519`
+            );
+            delete edEntry.privateKeyPem;
+          }
+        }
+      }
+      parsed.version = 3;
+      upgraded = true;
+    }
+    if (!parsed.trustedPublicKeys) {
+      parsed.trustedPublicKeys = {};
+      upgraded = true;
+    }
+    for (const [edId, edEntry] of Object.entries(parsed.ed25519Keys || {})) {
+      if (!parsed.trustedPublicKeys[edId]) {
+        parsed.trustedPublicKeys[edId] = {
+          keyId: edId,
+          publicKeyPem: edEntry.publicKeyPem,
+          fingerprintSha256: _KeyManagementService.computeSha256(edEntry.publicKeyPem),
+          validFrom: edEntry.validFrom || edEntry.createdAt,
+          validUntil: edEntry.validUntil || null,
+          revokedAt: edEntry.revokedAt || null,
+          revocationReason: edEntry.revocationReason || null,
+          status: edEntry.status === "REVOKED" ? "REVOKED" : edEntry.status === "RETIRED_VERIFY_ONLY" ? "ROTATED_VERIFY_ONLY" : "ACTIVE"
+        };
+        upgraded = true;
+      }
+    }
+    if (!parsed.rotationHistory) {
+      parsed.rotationHistory = [];
       upgraded = true;
     }
     if (upgraded || !fs.existsSync(checksumPath)) {
       _KeyManagementService.persistStore(parsed, storePath);
     }
-    return { store: parsed, integrityVerified: true };
+    return { store: parsed, integrityVerified: true, rollbackVerified };
   }
   static loadOrInitializeStore(customPath) {
     const storePath = _KeyManagementService.getStorePath(customPath);
@@ -4294,55 +4646,129 @@ var KeyManagementService = class _KeyManagementService {
     const evidenceKeyId = `wh-hmac-${now.slice(0, 10).replace(/-/g, "")}-${crypto2.randomBytes(4).toString("hex")}`;
     const ed25519KeyId = `wh-ed25519-${now.slice(0, 10).replace(/-/g, "")}-${crypto2.randomBytes(4).toString("hex")}`;
     const vaultKeyId = `wh-vault-${now.slice(0, 10).replace(/-/g, "")}-${crypto2.randomBytes(4).toString("hex")}`;
+    const dekBuffer = crypto2.randomBytes(32);
+    const wrappedDek = _KeyManagementService.wrapDekBuffer(dekBuffer, storePath);
     const hmacSecretHex = crypto2.randomBytes(32).toString("hex");
     const vaultSecretHex = crypto2.randomBytes(32).toString("hex");
-    const hmacProt = tryDpapiProtectUtf8(hmacSecretHex);
-    const vaultProt = tryDpapiProtectUtf8(vaultSecretHex);
     const edPair = generateEd25519Pair();
-    const edProt = tryDpapiProtectUtf8(edPair.privateKeyPem);
     const initialStore = {
-      version: 2,
+      version: 3,
+      envelopeVersion: "WINHOOD-ENVELOPE-V2",
+      operatingMode: _KeyManagementService.resolveOperatingMode(),
+      monotonicSequence: 1,
+      wrappedDek,
       activeEvidenceKeyId: evidenceKeyId,
       activeEd25519KeyId: ed25519KeyId,
       activeVaultKeyId: vaultKeyId,
       keysHex: {
         [evidenceKeyId]: {
           purpose: "EVIDENCE_HMAC",
-          secretHex: hmacProt.protectedText,
-          dpapiProtected: hmacProt.usedDpapi,
+          envelopeCipher: encryptWithAes256GcmEnvelope(
+            hmacSecretHex,
+            dekBuffer,
+            `winhood:key:${evidenceKeyId}:EVIDENCE_HMAC`
+          ),
           createdAt: now,
           status: "ACTIVE",
-          rotatedAt: null
+          rotatedAt: null,
+          revokedAt: null
         },
         [vaultKeyId]: {
           purpose: "TOKEN_VAULT_AES256",
-          secretHex: vaultProt.protectedText,
-          dpapiProtected: vaultProt.usedDpapi,
+          envelopeCipher: encryptWithAes256GcmEnvelope(
+            vaultSecretHex,
+            dekBuffer,
+            `winhood:key:${vaultKeyId}:TOKEN_VAULT_AES256`
+          ),
           createdAt: now,
           status: "ACTIVE",
-          rotatedAt: null
+          rotatedAt: null,
+          revokedAt: null
         }
       },
       ed25519Keys: {
         [ed25519KeyId]: {
           purpose: "EVIDENCE_ED25519",
-          privateKeyPem: edProt.protectedText,
+          privateKeyEnvelope: encryptWithAes256GcmEnvelope(
+            edPair.privateKeyPem,
+            dekBuffer,
+            `winhood:key:${ed25519KeyId}:EVIDENCE_ED25519`
+          ),
           publicKeyPem: edPair.publicKeyPem,
-          dpapiProtected: edProt.usedDpapi,
           createdAt: now,
+          validFrom: now,
+          validUntil: null,
           status: "ACTIVE",
-          rotatedAt: null
+          rotatedAt: null,
+          revokedAt: null
         }
       },
+      trustedPublicKeys: {
+        [ed25519KeyId]: {
+          keyId: ed25519KeyId,
+          publicKeyPem: edPair.publicKeyPem,
+          fingerprintSha256: _KeyManagementService.computeSha256(edPair.publicKeyPem),
+          validFrom: now,
+          validUntil: null,
+          revokedAt: null,
+          revocationReason: null,
+          status: "ACTIVE"
+        }
+      },
+      rotationHistory: [],
       adminTokenSha256: process.env.WINHOOD_ADMIN_TOKEN ? crypto2.createHash("sha256").update(process.env.WINHOOD_ADMIN_TOKEN, "utf8").digest("hex") : null
     };
     _KeyManagementService.persistStore(initialStore, storePath);
-    return { store: initialStore, integrityVerified: true };
+    return { store: initialStore, integrityVerified: true, rollbackVerified: true };
+  }
+  static decryptSymmetricKeyHex(store, keyId, storePath) {
+    const entry = store.keysHex[keyId];
+    if (!entry) {
+      throw new Error(`KEYSTORE_KEY_NOT_FOUND: Chave ${keyId} n\xE3o encontrada.`);
+    }
+    if (entry.status === "REVOKED") {
+      throw new Error(`KEYSTORE_KEY_REVOKED: A chave ${keyId} foi revogada e n\xE3o pode ser utilizada.`);
+    }
+    if (entry.envelopeCipher && store.wrappedDek) {
+      const dekBuffer = _KeyManagementService.unwrapDekBuffer(store.wrappedDek, storePath);
+      return decryptWithAes256GcmEnvelope(
+        entry.envelopeCipher,
+        dekBuffer,
+        `winhood:key:${keyId}:${entry.purpose}`
+      );
+    }
+    if (entry.secretHex) {
+      return tryDpapiUnprotectUtf8Legacy(entry.secretHex, entry.dpapiProtected);
+    }
+    throw new Error(`KEYSTORE_KEY_EMPTY: Material criptogr\xE1fico ausente para ${keyId}.`);
+  }
+  static decryptEd25519PrivateKeyPem(store, keyId, storePath) {
+    const entry = store.ed25519Keys[keyId];
+    if (!entry) {
+      throw new Error(`KEYSTORE_ED25519_NOT_FOUND: Chave Ed25519 ${keyId} n\xE3o encontrada.`);
+    }
+    if (entry.status === "REVOKED") {
+      throw new Error(`KEYSTORE_ED25519_REVOKED: Chave Ed25519 ${keyId} encontra-se revogada.`);
+    }
+    if (entry.privateKeyEnvelope && store.wrappedDek) {
+      const dekBuffer = _KeyManagementService.unwrapDekBuffer(store.wrappedDek, storePath);
+      return decryptWithAes256GcmEnvelope(
+        entry.privateKeyEnvelope,
+        dekBuffer,
+        `winhood:key:${keyId}:EVIDENCE_ED25519`
+      );
+    }
+    if (entry.privateKeyPem) {
+      return tryDpapiUnprotectUtf8Legacy(entry.privateKeyPem, entry.dpapiProtected);
+    }
+    throw new Error(`KEYSTORE_ED25519_EMPTY: Chave privada ausente para ${keyId}.`);
   }
   static persistStore(store, customPath) {
     const storePath = _KeyManagementService.getStorePath(customPath);
+    const seq = (store.monotonicSequence || 0) + 1;
+    store.monotonicSequence = seq;
     try {
-      _KeyManagementService.writeAtomicWithChecksum(storePath, JSON.stringify(store, null, 2));
+      _KeyManagementService.writeAtomicWithChecksum(storePath, JSON.stringify(store, null, 2), seq);
     } catch (err) {
       throw new Error(
         `KEYSTORE_PERSISTENCE_FAILED: N\xE3o foi poss\xEDvel persistir o keystore de forma segura em ${storePath}: ${err?.message || String(err)}`
@@ -4350,11 +4776,16 @@ var KeyManagementService = class _KeyManagementService {
     }
   }
   static getActiveEvidenceHmacKey(customPath) {
-    const envSecret = process.env.WINHOOD_EVIDENCE_HMAC_SECRET;
-    if (envSecret && envSecret.trim().length >= 16) {
+    const envVal = process.env.WINHOOD_EVIDENCE_HMAC_SECRET;
+    if (envVal && envVal.trim().length >= 16) {
+      const derived = deriveHkdfPurposeKey(
+        Buffer.from(envVal.trim(), "utf8"),
+        "77696e686f6f642d65766964656e6365",
+        "winhood:purpose:evidence-hmac:v2"
+      );
       return {
         keyId: process.env.WINHOOD_EVIDENCE_KEY_ID || "ENV-HMAC-KEY",
-        secret: envSecret.trim(),
+        secret: derived.toString("hex"),
         origin: "ENV_EXTERNAL"
       };
     }
@@ -4363,43 +4794,154 @@ var KeyManagementService = class _KeyManagementService {
         "KEY_MANAGEMENT_ENV_SECRET_REQUIRED: Defina WINHOOD_EVIDENCE_HMAC_SECRET (>= 16 caracteres) quando WINHOOD_REQUIRE_ENV_SECRETS=true."
       );
     }
+    const storePath = _KeyManagementService.getStorePath(customPath);
     const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
-    const active = store.keysHex[store.activeEvidenceKeyId];
     return {
       keyId: store.activeEvidenceKeyId,
-      secret: tryDpapiUnprotectUtf8(active.secretHex, active.dpapiProtected),
+      secret: _KeyManagementService.decryptSymmetricKeyHex(store, store.activeEvidenceKeyId, storePath),
       origin: "HOST_CSPRNG_KEYSTORE"
     };
   }
   static getEvidenceSecretByKeyId(keyId, customPath) {
-    const envSecret = process.env.WINHOOD_EVIDENCE_HMAC_SECRET;
+    const envVal = process.env.WINHOOD_EVIDENCE_HMAC_SECRET;
     const envKeyId = process.env.WINHOOD_EVIDENCE_KEY_ID || "ENV-HMAC-KEY";
-    if (envSecret && envSecret.trim().length >= 16 && keyId === envKeyId) {
-      return envSecret.trim();
+    if (envVal && envVal.trim().length >= 16 && keyId === envKeyId) {
+      const derived = deriveHkdfPurposeKey(
+        Buffer.from(envVal.trim(), "utf8"),
+        "77696e686f6f642d65766964656e6365",
+        "winhood:purpose:evidence-hmac:v2"
+      );
+      return derived.toString("hex");
     }
+    const storePath = _KeyManagementService.getStorePath(customPath);
     const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
-    const entry = store.keysHex[keyId];
-    return entry ? tryDpapiUnprotectUtf8(entry.secretHex, entry.dpapiProtected) : null;
+    if (!store.keysHex[keyId] || store.keysHex[keyId].status === "REVOKED") {
+      return null;
+    }
+    return _KeyManagementService.decryptSymmetricKeyHex(store, keyId, storePath);
   }
   static getActiveEvidenceEd25519Key(customPath) {
+    const storePath = _KeyManagementService.getStorePath(customPath);
     const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
     const active = store.ed25519Keys[store.activeEd25519KeyId];
     return {
       keyId: store.activeEd25519KeyId,
-      privateKeyPem: tryDpapiUnprotectUtf8(active.privateKeyPem, active.dpapiProtected),
+      privateKeyPem: _KeyManagementService.decryptEd25519PrivateKeyPem(
+        store,
+        store.activeEd25519KeyId,
+        storePath
+      ),
       publicKeyPem: active.publicKeyPem
     };
   }
   static getEd25519PublicKeyByKeyId(keyId, customPath) {
     const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
-    return store.ed25519Keys?.[keyId]?.publicKeyPem ?? null;
+    const trusted = store.trustedPublicKeys?.[keyId];
+    if (trusted) {
+      if (trusted.status === "REVOKED" || trusted.revokedAt) {
+        return null;
+      }
+      return trusted.publicKeyPem;
+    }
+    const fallback = store.ed25519Keys?.[keyId];
+    if (!fallback || fallback.status === "REVOKED") return null;
+    return fallback.publicKeyPem;
+  }
+  /**
+   * Verifies an Ed25519 public key against the Trusted Public Key Registry (Trust Store),
+   * preventing a tampered manifest from substituting its own self-signed public key.
+   */
+  static verifyTrustedEd25519PublicKey(keyId, attachedPublicKeyPem, signedAtIso, customPath) {
+    const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
+    if (!keyId) {
+      return {
+        trusted: false,
+        keyId: null,
+        publicKeyPem: null,
+        status: "UNTRUSTED",
+        reason: "Manifesto n\xE3o declara identificador de chave Ed25519 (ed25519KeyId ausente)."
+      };
+    }
+    const trustedEntry = store.trustedPublicKeys?.[keyId];
+    if (!trustedEntry) {
+      return {
+        trusted: false,
+        keyId,
+        publicKeyPem: null,
+        status: "UNTRUSTED",
+        reason: `Chave Ed25519 ${keyId} n\xE3o consta no Registro de Chaves P\xFAblicas Confi\xE1veis (Trust Store).`
+      };
+    }
+    if (trustedEntry.status === "REVOKED" || trustedEntry.revokedAt) {
+      return {
+        trusted: false,
+        keyId,
+        publicKeyPem: null,
+        status: "REVOKED",
+        reason: `Chave Ed25519 ${keyId} revogada em ${trustedEntry.revokedAt || "data registrada"} (${trustedEntry.revocationReason || "sem motivo especificado"}).`
+      };
+    }
+    if (signedAtIso && trustedEntry.validUntil) {
+      const signedTs = Date.parse(signedAtIso);
+      const untilTs = Date.parse(trustedEntry.validUntil);
+      if (Number.isFinite(signedTs) && Number.isFinite(untilTs) && signedTs > untilTs) {
+        return {
+          trusted: false,
+          keyId,
+          publicKeyPem: null,
+          status: "EXPIRED",
+          reason: `Chave Ed25519 ${keyId} expirada em ${trustedEntry.validUntil}.`
+        };
+      }
+    }
+    if (attachedPublicKeyPem && attachedPublicKeyPem.trim() !== trustedEntry.publicKeyPem.trim()) {
+      return {
+        trusted: false,
+        keyId,
+        publicKeyPem: null,
+        status: "UNTRUSTED",
+        reason: `Chave p\xFAblica anexada ao manifesto diverge da chave registrada no Trust Store para ${keyId}.`
+      };
+    }
+    return {
+      trusted: true,
+      keyId,
+      publicKeyPem: trustedEntry.publicKeyPem,
+      status: trustedEntry.status,
+      reason: `Chave Ed25519 ${keyId} verificada no Trust Store (${trustedEntry.status}).`
+    };
+  }
+  static revokeKey(keyId, reason = "Revoga\xE7\xE3o administrativa de seguran\xE7a", customPath) {
+    const storePath = _KeyManagementService.getStorePath(customPath);
+    const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    if (store.ed25519Keys?.[keyId]) {
+      store.ed25519Keys[keyId].status = "REVOKED";
+      store.ed25519Keys[keyId].revokedAt = now;
+      store.ed25519Keys[keyId].revocationReason = reason;
+    }
+    if (store.trustedPublicKeys?.[keyId]) {
+      store.trustedPublicKeys[keyId].status = "REVOKED";
+      store.trustedPublicKeys[keyId].revokedAt = now;
+      store.trustedPublicKeys[keyId].revocationReason = reason;
+    }
+    if (store.keysHex?.[keyId]) {
+      store.keysHex[keyId].status = "REVOKED";
+      store.keysHex[keyId].revokedAt = now;
+    }
+    _KeyManagementService.persistStore(store, storePath);
   }
   static getActiveVaultAesKey(customPath) {
-    const envVaultSecret = process.env.SONAR_SECRET_SALT || process.env.WINHOOD_VAULT_SECRET;
-    if (envVaultSecret && envVaultSecret.trim().length >= 16) {
+    const envVaultVal = process.env.SONAR_SECRET_SALT || process.env.WINHOOD_VAULT_SECRET;
+    if (envVaultVal && envVaultVal.trim().length >= 16) {
+      const derivedKey = deriveHkdfPurposeKey(
+        Buffer.from(envVaultVal.trim(), "utf8"),
+        "77696e686f6f642d7661756c742d6165",
+        "winhood:purpose:token-vault-aes256:v2"
+      );
       return {
         keyId: "ENV-VAULT-KEY",
-        keyBuffer: crypto2.createHash("sha256").update(envVaultSecret.trim(), "utf8").digest(),
+        keyBuffer: derivedKey,
         origin: "ENV_EXTERNAL"
       };
     }
@@ -4408,9 +4950,9 @@ var KeyManagementService = class _KeyManagementService {
         "KEY_MANAGEMENT_ENV_SECRET_REQUIRED: Defina WINHOOD_VAULT_SECRET ou SONAR_SECRET_SALT (>= 16 caracteres) quando WINHOOD_REQUIRE_ENV_SECRETS=true."
       );
     }
+    const storePath = _KeyManagementService.getStorePath(customPath);
     const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
-    const active = store.keysHex[store.activeVaultKeyId];
-    const hex = tryDpapiUnprotectUtf8(active.secretHex, active.dpapiProtected);
+    const hex = _KeyManagementService.decryptSymmetricKeyHex(store, store.activeVaultKeyId, storePath);
     return {
       keyId: store.activeVaultKeyId,
       keyBuffer: Buffer.from(hex, "hex"),
@@ -4419,40 +4961,74 @@ var KeyManagementService = class _KeyManagementService {
   }
   static getVaultKeyBufferByKeyId(keyId, customPath) {
     if (keyId === "ENV-VAULT-KEY") {
-      const envVaultSecret = process.env.SONAR_SECRET_SALT || process.env.WINHOOD_VAULT_SECRET;
-      if (envVaultSecret && envVaultSecret.trim().length >= 16) {
-        return crypto2.createHash("sha256").update(envVaultSecret.trim(), "utf8").digest();
+      const envVaultVal = process.env.SONAR_SECRET_SALT || process.env.WINHOOD_VAULT_SECRET;
+      if (envVaultVal && envVaultVal.trim().length >= 16) {
+        return deriveHkdfPurposeKey(
+          Buffer.from(envVaultVal.trim(), "utf8"),
+          "77696e686f6f642d7661756c742d6165",
+          "winhood:purpose:token-vault-aes256:v2"
+        );
       }
       return null;
     }
+    const storePath = _KeyManagementService.getStorePath(customPath);
     const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
-    const entry = store.keysHex[keyId];
-    if (!entry) return null;
-    const hex = tryDpapiUnprotectUtf8(entry.secretHex, entry.dpapiProtected);
+    if (!store.keysHex[keyId] || store.keysHex[keyId].status === "REVOKED") return null;
+    const hex = _KeyManagementService.decryptSymmetricKeyHex(store, keyId, storePath);
     return Buffer.from(hex, "hex");
   }
   static rotateKey(purpose, customPath, onVaultReencrypt) {
+    const storePath = _KeyManagementService.getStorePath(customPath);
     const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
     const now = (/* @__PURE__ */ new Date()).toISOString();
+    const dekBuffer = _KeyManagementService.unwrapDekBuffer(store.wrappedDek, storePath);
     if (purpose === "EVIDENCE_ED25519") {
       const prevKeyId2 = store.activeEd25519KeyId;
       if (store.ed25519Keys[prevKeyId2]) {
         store.ed25519Keys[prevKeyId2].status = "RETIRED_VERIFY_ONLY";
         store.ed25519Keys[prevKeyId2].rotatedAt = now;
       }
+      if (store.trustedPublicKeys?.[prevKeyId2]) {
+        store.trustedPublicKeys[prevKeyId2].status = "ROTATED_VERIFY_ONLY";
+      }
       const newKeyId2 = `wh-ed25519-${now.slice(0, 10).replace(/-/g, "")}-${crypto2.randomBytes(4).toString("hex")}`;
       const pair = generateEd25519Pair();
-      const prot2 = tryDpapiProtectUtf8(pair.privateKeyPem);
       store.ed25519Keys[newKeyId2] = {
         purpose: "EVIDENCE_ED25519",
-        privateKeyPem: prot2.protectedText,
+        privateKeyEnvelope: encryptWithAes256GcmEnvelope(
+          pair.privateKeyPem,
+          dekBuffer,
+          `winhood:key:${newKeyId2}:EVIDENCE_ED25519`
+        ),
         publicKeyPem: pair.publicKeyPem,
-        dpapiProtected: prot2.usedDpapi,
         createdAt: now,
+        validFrom: now,
+        validUntil: null,
         status: "ACTIVE",
-        rotatedAt: null
+        rotatedAt: null,
+        revokedAt: null
+      };
+      store.trustedPublicKeys = store.trustedPublicKeys || {};
+      store.trustedPublicKeys[newKeyId2] = {
+        keyId: newKeyId2,
+        publicKeyPem: pair.publicKeyPem,
+        fingerprintSha256: _KeyManagementService.computeSha256(pair.publicKeyPem),
+        validFrom: now,
+        validUntil: null,
+        revokedAt: null,
+        revocationReason: null,
+        status: "ACTIVE"
       };
       store.activeEd25519KeyId = newKeyId2;
+      store.rotationHistory = store.rotationHistory || [];
+      store.rotationHistory.push({
+        timestamp: now,
+        purpose: "EVIDENCE_ED25519",
+        previousKeyId: prevKeyId2,
+        newKeyId: newKeyId2,
+        reason: "Rota\xE7\xE3o programada de par assim\xE9trico Ed25519 com preserva\xE7\xE3o no Trust Store",
+        monotonicSequence: (store.monotonicSequence || 0) + 1
+      });
       _KeyManagementService.persistStore(store, customPath);
       return {
         keyId: newKeyId2,
@@ -4466,11 +5042,11 @@ var KeyManagementService = class _KeyManagementService {
     }
     const prevKeyId = purpose === "EVIDENCE_HMAC" ? store.activeEvidenceKeyId : store.activeVaultKeyId;
     const prevEntry = store.keysHex[prevKeyId];
-    const prevKeyBuffer = purpose === "TOKEN_VAULT_AES256" && prevEntry ? Buffer.from(tryDpapiUnprotectUtf8(prevEntry.secretHex, prevEntry.dpapiProtected), "hex") : null;
+    const prevKeyBuffer = purpose === "TOKEN_VAULT_AES256" && prevEntry ? Buffer.from(_KeyManagementService.decryptSymmetricKeyHex(store, prevKeyId, storePath), "hex") : null;
     const prefix = purpose === "EVIDENCE_HMAC" ? "wh-hmac" : "wh-vault";
     const newKeyId = `${prefix}-${now.slice(0, 10).replace(/-/g, "")}-${crypto2.randomBytes(4).toString("hex")}`;
-    const rawSecretHex = crypto2.randomBytes(32).toString("hex");
-    const newKeyBuffer = Buffer.from(rawSecretHex, "hex");
+    const rawKeyHex = crypto2.randomBytes(32).toString("hex");
+    const newKeyBuffer = Buffer.from(rawKeyHex, "hex");
     if (purpose === "TOKEN_VAULT_AES256" && onVaultReencrypt && prevKeyBuffer) {
       onVaultReencrypt({
         oldKeyId: prevKeyId,
@@ -4483,20 +5059,32 @@ var KeyManagementService = class _KeyManagementService {
       prevEntry.status = "RETIRED_VERIFY_ONLY";
       prevEntry.rotatedAt = now;
     }
-    const prot = tryDpapiProtectUtf8(rawSecretHex);
     store.keysHex[newKeyId] = {
       purpose,
-      secretHex: prot.protectedText,
-      dpapiProtected: prot.usedDpapi,
+      envelopeCipher: encryptWithAes256GcmEnvelope(
+        rawKeyHex,
+        dekBuffer,
+        `winhood:key:${newKeyId}:${purpose}`
+      ),
       createdAt: now,
       status: "ACTIVE",
-      rotatedAt: null
+      rotatedAt: null,
+      revokedAt: null
     };
     if (purpose === "EVIDENCE_HMAC") {
       store.activeEvidenceKeyId = newKeyId;
     } else {
       store.activeVaultKeyId = newKeyId;
     }
+    store.rotationHistory = store.rotationHistory || [];
+    store.rotationHistory.push({
+      timestamp: now,
+      purpose,
+      previousKeyId: prevKeyId,
+      newKeyId,
+      reason: `Rota\xE7\xE3o criptogr\xE1fica de chave ${purpose} sob DEK Envelope V2`,
+      monotonicSequence: (store.monotonicSequence || 0) + 1
+    });
     _KeyManagementService.persistStore(store, customPath);
     return {
       keyId: newKeyId,
@@ -4504,7 +5092,7 @@ var KeyManagementService = class _KeyManagementService {
       createdAt: now,
       rotatedAt: null,
       status: "ACTIVE",
-      fingerprintSha256: _KeyManagementService.computeSha256(rawSecretHex).slice(0, 16),
+      fingerprintSha256: _KeyManagementService.computeSha256(rawKeyHex).slice(0, 16),
       algorithm: purpose === "EVIDENCE_HMAC" ? "HMAC-SHA256" : "AES-256-GCM"
     };
   }
@@ -4526,34 +5114,42 @@ var KeyManagementService = class _KeyManagementService {
     return a.length === b.length && crypto2.timingSafeEqual(a, b);
   }
   static getStatus(customPath) {
-    const { store, integrityVerified } = _KeyManagementService.loadOrInitializeStore(customPath);
+    const { store, integrityVerified, rollbackVerified } = _KeyManagementService.loadOrInitializeStore(customPath);
     const hasEnvEvidence = Boolean(
       process.env.WINHOOD_EVIDENCE_HMAC_SECRET && process.env.WINHOOD_EVIDENCE_HMAC_SECRET.trim().length >= 16
     );
     const hasEnvVault = Boolean(
       (process.env.SONAR_SECRET_SALT || process.env.WINHOOD_VAULT_SECRET || "").trim().length >= 16
     );
-    const symKeys = Object.entries(store.keysHex).map(([keyId, info]) => ({
-      keyId,
-      purpose: info.purpose,
-      createdAt: info.createdAt,
-      rotatedAt: info.rotatedAt,
-      status: info.status,
-      fingerprintSha256: _KeyManagementService.computeSha256(info.secretHex).slice(0, 16),
-      algorithm: info.purpose === "EVIDENCE_HMAC" ? "HMAC-SHA256" : "AES-256-GCM"
-    }));
+    const symKeys = Object.entries(store.keysHex).map(([keyId, info]) => {
+      const fpSource = info.envelopeCipher ? info.envelopeCipher.ciphertextHex : info.secretHex || keyId;
+      return {
+        keyId,
+        purpose: info.purpose,
+        createdAt: info.createdAt,
+        rotatedAt: info.rotatedAt,
+        revokedAt: info.revokedAt || null,
+        status: info.status,
+        fingerprintSha256: _KeyManagementService.computeSha256(fpSource).slice(0, 16),
+        algorithm: info.purpose === "EVIDENCE_HMAC" ? "HMAC-SHA256" : "AES-256-GCM"
+      };
+    });
     const asymKeys = Object.entries(store.ed25519Keys || {}).map(([keyId, info]) => ({
       keyId,
       purpose: info.purpose,
       createdAt: info.createdAt,
       rotatedAt: info.rotatedAt,
+      revokedAt: info.revokedAt || null,
       status: info.status,
       fingerprintSha256: _KeyManagementService.computeSha256(info.publicKeyPem).slice(0, 16),
       algorithm: "ED25519"
     }));
     const keys = [...symKeys, ...asymKeys];
+    const trustedPublicKeys = Object.values(store.trustedPublicKeys || {});
+    const operatingMode = store.operatingMode || _KeyManagementService.resolveOperatingMode();
+    const kekMechanism = store.wrappedDek?.kekMechanism || "HKDF_LOCAL_KEK_FILE";
     const securityWarnings = [];
-    if (process.env.NODE_ENV === "production") {
+    if (process.env.NODE_ENV === "production" || operatingMode === "PRODUCTION_SECURE") {
       if (!hasEnvEvidence) {
         securityWarnings.push(
           "Produ\xE7\xE3o utilizando keystore local para HMAC de evid\xEAncias; configure WINHOOD_EVIDENCE_HMAC_SECRET."
@@ -4564,10 +5160,20 @@ var KeyManagementService = class _KeyManagementService {
           "Produ\xE7\xE3o utilizando keystore local para cofre AES-256; configure WINHOOD_VAULT_SECRET ou SONAR_SECRET_SALT."
         );
       }
+      if (kekMechanism === "HKDF_LOCAL_KEK_FILE") {
+        securityWarnings.push(
+          "DEK protegida por KEK local derivada via HKDF; em produ\xE7\xE3o sem DPAPI/Keychain, recomenda-se definir WINHOOD_KEYSTORE_MASTER_SECRET."
+        );
+      }
     }
     return {
       keystorePath: _KeyManagementService.getStorePath(customPath),
       integrityVerified,
+      envelopeVersion: store.envelopeVersion || "WINHOOD-ENVELOPE-V2",
+      operatingMode,
+      kekProtectionMechanism: kekMechanism,
+      monotonicSequence: store.monotonicSequence || 1,
+      rollbackProtectionVerified: rollbackVerified,
       dpapiSupported: os.platform() === "win32",
       keyOrigin: hasEnvEvidence || hasEnvVault ? "ENV_EXTERNAL" : "HOST_CSPRNG_KEYSTORE",
       productionEnvSecretConfigured: hasEnvEvidence && hasEnvVault,
@@ -4577,7 +5183,10 @@ var KeyManagementService = class _KeyManagementService {
       activeVaultKeyId: store.activeVaultKeyId,
       adminTokenConfigured: Boolean(process.env.WINHOOD_ADMIN_TOKEN || store.adminTokenSha256),
       totalKeysTracked: keys.length,
-      keys
+      trustedPublicKeysCount: trustedPublicKeys.length,
+      keys,
+      trustedPublicKeys,
+      rotationHistory: store.rotationHistory || []
     };
   }
 };
@@ -4634,24 +5243,17 @@ var KNOWN_OSS_PACKAGE_LICENSES = {
   pytest: "MIT"
 };
 var nodeModulesLicenseCache = /* @__PURE__ */ new Map();
-function resolvePackageSpdxLicense(pkgName, explicitLicense, rootManifestLicense) {
+function resolvePackageSpdxLicenseWithProvenance(pkgName, explicitLicense, rootManifestLicense, options) {
   const cleanExplicit = (explicitLicense || "").trim();
   if (cleanExplicit && cleanExplicit !== "UNKNOWN" && cleanExplicit !== "NOASSERTION") {
-    return cleanExplicit;
+    return { license: cleanExplicit, provenance: "LOCKFILE_DECLARED" };
   }
   const normalizedName = pkgName.trim();
   const lowerName = normalizedName.toLowerCase();
-  if (KNOWN_OSS_PACKAGE_LICENSES[normalizedName]) {
-    return KNOWN_OSS_PACKAGE_LICENSES[normalizedName];
-  }
-  if (KNOWN_OSS_PACKAGE_LICENSES[lowerName]) {
-    return KNOWN_OSS_PACKAGE_LICENSES[lowerName];
-  }
-  if (normalizedName.startsWith("@types/")) {
-    return "MIT";
-  }
   const cached = nodeModulesLicenseCache.get(normalizedName);
-  if (cached) return cached;
+  if (cached) {
+    return { license: cached, provenance: "NODE_MODULES_DECLARED" };
+  }
   try {
     const nmPkgPath = path2.resolve(process.cwd(), "node_modules", normalizedName, "package.json");
     if (fs2.existsSync(nmPkgPath)) {
@@ -4659,29 +5261,92 @@ function resolvePackageSpdxLicense(pkgName, explicitLicense, rootManifestLicense
       const lic = typeof parsed?.license === "string" ? parsed.license.trim() : typeof parsed?.license?.type === "string" ? parsed.license.type.trim() : "";
       if (lic) {
         nodeModulesLicenseCache.set(normalizedName, lic);
-        return lic;
+        return { license: lic, provenance: "NODE_MODULES_DECLARED" };
       }
     }
   } catch {
   }
+  if (options?.strictProvenance) {
+    return { license: "NOASSERTION", provenance: "UNVERIFIED" };
+  }
+  if (KNOWN_OSS_PACKAGE_LICENSES[normalizedName]) {
+    return {
+      license: KNOWN_OSS_PACKAGE_LICENSES[normalizedName],
+      provenance: "KNOWN_ECOSYSTEM_REGISTRY"
+    };
+  }
+  if (KNOWN_OSS_PACKAGE_LICENSES[lowerName]) {
+    return {
+      license: KNOWN_OSS_PACKAGE_LICENSES[lowerName],
+      provenance: "KNOWN_ECOSYSTEM_REGISTRY"
+    };
+  }
+  if (normalizedName.startsWith("@types/")) {
+    return { license: "MIT", provenance: "KNOWN_ECOSYSTEM_REGISTRY" };
+  }
   const cleanRoot = (rootManifestLicense || "").trim();
   if (cleanRoot && cleanRoot !== "UNKNOWN" && cleanRoot !== "NOASSERTION") {
-    return cleanRoot;
+    return { license: cleanRoot, provenance: "MANIFEST_DECLARED" };
   }
-  return "NOASSERTION";
+  return { license: "NOASSERTION", provenance: "UNVERIFIED" };
 }
 function deterministicUuidFromSeed(seed) {
   const hex = crypto3.createHash("sha256").update(seed, "utf8").digest("hex").slice(0, 32);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 var SbomGenerator = class _SbomGenerator {
+  static validateSbomBundle(bundle) {
+    const errors = [];
+    const cdx = bundle.cyclonedx15Json;
+    if (!cdx) {
+      errors.push("CycloneDX 1.5 JSON document missing.");
+    } else {
+      if (cdx.bomFormat !== "CycloneDX") errors.push('CycloneDX bomFormat must be "CycloneDX".');
+      if (cdx.specVersion !== "1.5") errors.push('CycloneDX specVersion must be "1.5".');
+      if (typeof cdx.serialNumber !== "string" || !cdx.serialNumber.startsWith("urn:uuid:")) {
+        errors.push("CycloneDX serialNumber must be a valid urn:uuid.");
+      }
+      if (!cdx.metadata?.timestamp || !cdx.metadata?.component?.name) {
+        errors.push("CycloneDX metadata.timestamp and metadata.component.name are required.");
+      }
+      if (!Array.isArray(cdx.components)) {
+        errors.push("CycloneDX components must be an array.");
+      }
+    }
+    const spdx = bundle.spdx23Json;
+    if (!spdx) {
+      errors.push("SPDX 2.3 JSON document missing.");
+    } else {
+      if (spdx.spdxVersion !== "SPDX-2.3") errors.push('SPDX spdxVersion must be "SPDX-2.3".');
+      if (spdx.dataLicense !== "CC0-1.0") errors.push('SPDX dataLicense must be "CC0-1.0".');
+      if (spdx.SPDXID !== "SPDXRef-DOCUMENT") errors.push('SPDX SPDXID must be "SPDXRef-DOCUMENT".');
+      if (typeof spdx.documentNamespace !== "string" || !spdx.documentNamespace.startsWith("https://")) {
+        errors.push("SPDX documentNamespace must be a valid URI.");
+      }
+      if (!spdx.creationInfo?.created || !Array.isArray(spdx.creationInfo?.creators)) {
+        errors.push("SPDX creationInfo.created and creators are required.");
+      }
+      if (!Array.isArray(spdx.packages)) {
+        errors.push("SPDX packages must be an array.");
+      }
+    }
+    const cyclonedxValid = !errors.some((e) => e.startsWith("CycloneDX"));
+    const spdxValid = !errors.some((e) => e.startsWith("SPDX"));
+    return { cyclonedxValid, spdxValid, errors };
+  }
   static generateFromSoftware(software, options) {
     const filesMap = software.sourceFilesContent || {};
-    const components = _SbomGenerator.extractComponents(filesMap);
+    const { components, lockfilesDetected, transitiveCoverageComplete } = _SbomGenerator.extractComponentsWithMetadata(filesMap, {
+      strictLicenseProvenance: options?.strictLicenseProvenance
+    });
     const deterministicMode = Boolean(options?.deterministicTimestamp);
     const generatedAt = options?.deterministicTimestamp || (/* @__PURE__ */ new Date()).toISOString();
-    const directCount = components.filter((c) => c.dependencyScope === "DIRECT").length;
+    const directCount = components.filter(
+      (c) => c.dependencyScope === "DIRECT" || c.dependencyScope === "DEV" || c.dependencyScope === "OPTIONAL"
+    ).length;
     const transitiveCount = components.filter((c) => c.dependencyScope === "TRANSITIVE").length;
+    const devCount = components.filter((c) => c.dependencyScope === "DEV").length;
+    const optionalCount = components.filter((c) => c.dependencyScope === "OPTIONAL").length;
     const serialSeed = JSON.stringify({
       softwareId: software.id,
       version: software.version,
@@ -4699,7 +5364,7 @@ var SbomGenerator = class _SbomGenerator {
           {
             vendor: "WinHood",
             name: "WinHood SBOM Generator",
-            version: "4.3.0"
+            version: "4.4.0"
           }
         ],
         component: {
@@ -4707,7 +5372,17 @@ var SbomGenerator = class _SbomGenerator {
           name: software.name,
           version: software.version,
           "bom-ref": `app:${software.id}@${software.version}`
-        }
+        },
+        properties: [
+          {
+            name: "winhood:transitiveCoverageComplete",
+            value: String(transitiveCoverageComplete)
+          },
+          {
+            name: "winhood:lockfilesDetected",
+            value: lockfilesDetected.join(", ") || "NONE"
+          }
+        ]
       },
       components: components.map((c) => ({
         type: "library",
@@ -4715,11 +5390,12 @@ var SbomGenerator = class _SbomGenerator {
         name: c.name,
         version: c.version,
         purl: c.purl,
-        scope: c.dependencyScope === "DIRECT" ? "required" : "optional",
+        scope: c.dependencyScope === "DIRECT" ? "required" : c.dependencyScope === "OPTIONAL" ? "optional" : "optional",
         hashes: c.sha256 ? [{ alg: "SHA-256", content: c.sha256 }] : [],
         licenses: c.license && c.license !== "UNKNOWN" ? [{ license: { id: c.license } }] : [],
         properties: [
           { name: "winhood:dependencyScope", value: c.dependencyScope },
+          { name: "winhood:licenseProvenance", value: c.licenseProvenance || "UNVERIFIED" },
           { name: "winhood:manifestFile", value: c.manifestFile },
           { name: "winhood:ecosystem", value: c.ecosystem }
         ]
@@ -4733,7 +5409,7 @@ var SbomGenerator = class _SbomGenerator {
       documentNamespace: `https://winhood.local/spdx/${software.id}/${docUuid}`,
       creationInfo: {
         created: generatedAt,
-        creators: ["Tool: WinHood SBOM Generator-4.3.0"]
+        creators: ["Tool: WinHood SBOM Generator-4.4.0"]
       },
       packages: components.map((c, idx) => ({
         SPDXID: `SPDXRef-Package-${idx + 1}`,
@@ -4742,7 +5418,7 @@ var SbomGenerator = class _SbomGenerator {
         downloadLocation: "NOASSERTION",
         filesAnalyzed: false,
         checksums: c.sha256 ? [{ algorithm: "SHA256", checksumValue: c.sha256 }] : [],
-        licenseDeclared: c.license || "NOASSERTION",
+        licenseDeclared: c.license && c.license !== "UNKNOWN" ? c.license : "NOASSERTION",
         externalRefs: [
           {
             referenceCategory: "PACKAGE-MANAGER",
@@ -4750,7 +5426,7 @@ var SbomGenerator = class _SbomGenerator {
             referenceLocator: c.purl
           }
         ],
-        comment: `dependencyScope=${c.dependencyScope}; manifest=${c.manifestFile}`
+        comment: `dependencyScope=${c.dependencyScope}; licenseProvenance=${c.licenseProvenance || "UNVERIFIED"}; manifest=${c.manifestFile}`
       }))
     };
     const cyclonedxSha256 = crypto3.createHash("sha256").update(JSON.stringify(cyclonedx15Json)).digest("hex");
@@ -4764,6 +5440,10 @@ var SbomGenerator = class _SbomGenerator {
       componentsCount: components.length,
       directCount,
       transitiveCount,
+      devCount,
+      optionalCount,
+      transitiveCoverageComplete,
+      lockfilesDetected,
       components,
       cyclonedx15Json,
       spdx23Json,
@@ -4771,6 +5451,7 @@ var SbomGenerator = class _SbomGenerator {
       spdxSha256,
       deterministicMode
     };
+    bundle.structuralValidation = _SbomGenerator.validateSbomBundle(bundle);
     if (options?.signSbom !== false) {
       bundle.signature = _SbomGenerator.signSbomBundle(bundle, generatedAt);
     }
@@ -4835,11 +5516,11 @@ var SbomGenerator = class _SbomGenerator {
     if (expectedPayloadSha !== bundle.signature.payloadSha256) {
       return { valid: false, reason: "SBOM_PAYLOAD_HASH_MISMATCH", ed25519Valid: null };
     }
-    const secret = KeyManagementService.getEvidenceSecretByKeyId(bundle.signature.signingKeyId);
-    if (!secret) {
+    const hmacSecret = KeyManagementService.getEvidenceSecretByKeyId(bundle.signature.signingKeyId);
+    if (!hmacSecret) {
       return { valid: false, reason: "SBOM_HMAC_KEY_NOT_FOUND", ed25519Valid: null };
     }
-    const expectedHmac = crypto3.createHmac("sha256", secret).update(expectedPayloadSha, "utf8").digest("hex");
+    const expectedHmac = crypto3.createHmac("sha256", hmacSecret).update(expectedPayloadSha, "utf8").digest("hex");
     const a = Buffer.from(expectedHmac, "hex");
     const b = Buffer.from(bundle.signature.hmacSignature, "hex");
     const hmacOk = a.length === b.length && crypto3.timingSafeEqual(a, b);
@@ -4848,14 +5529,18 @@ var SbomGenerator = class _SbomGenerator {
     }
     let ed25519Valid = null;
     if (bundle.signature.ed25519Signature) {
-      const pubPem = (bundle.signature.ed25519KeyId ? KeyManagementService.getEd25519PublicKeyByKeyId(bundle.signature.ed25519KeyId) : null) || bundle.signature.ed25519PublicKeyPem;
-      if (!pubPem) {
+      const trustCheck = KeyManagementService.verifyTrustedEd25519PublicKey(
+        bundle.signature.ed25519KeyId,
+        bundle.signature.ed25519PublicKeyPem,
+        bundle.signature.signedAt
+      );
+      if (!trustCheck.trusted || !trustCheck.publicKeyPem) {
         return { valid: false, reason: "SBOM_ED25519_KEY_NOT_FOUND", ed25519Valid: false };
       }
       ed25519Valid = crypto3.verify(
         null,
         Buffer.from(expectedPayloadSha, "utf8"),
-        pubPem,
+        trustCheck.publicKeyPem,
         Buffer.from(bundle.signature.ed25519Signature, "base64")
       );
       if (!ed25519Valid) {
@@ -4864,12 +5549,17 @@ var SbomGenerator = class _SbomGenerator {
     }
     return { valid: true, reason: "SBOM_SIGNATURE_VERIFIED", ed25519Valid };
   }
-  static extractComponents(filesMap) {
+  static extractComponents(filesMap, options) {
+    return _SbomGenerator.extractComponentsWithMetadata(filesMap, options).components;
+  }
+  static extractComponentsWithMetadata(filesMap, options) {
     const components = [];
     const seen = /* @__PURE__ */ new Set();
+    const lockfilesDetected = [];
     const sortedEntries = Object.entries(filesMap).sort(([a], [b]) => a.localeCompare(b));
+    const strictProvenance = Boolean(options?.strictLicenseProvenance);
     const computeComponentDigest = (ecosystem, name, version, manifestDigest, integrityRaw) => {
-      if (integrityRaw && /^sha512-/i.test(integrityRaw)) {
+      if (integrityRaw && /^sha(512|256)-/i.test(integrityRaw)) {
         return crypto3.createHash("sha256").update(integrityRaw, "utf8").digest("hex");
       }
       return crypto3.createHash("sha256").update(`${ecosystem}:${name}@${version}:${manifestDigest}`, "utf8").digest("hex");
@@ -4880,38 +5570,50 @@ var SbomGenerator = class _SbomGenerator {
       seen.add(key);
       components.push(rec);
     };
-    const directNpmNames = /* @__PURE__ */ new Set();
+    const directNpmScopes = /* @__PURE__ */ new Map();
+    let hasManifestWithoutLockfile = false;
     for (const [filePath, content] of sortedEntries) {
       if (filePath.endsWith("package.json")) {
+        hasManifestWithoutLockfile = true;
         const manifestDigest = crypto3.createHash("sha256").update(content, "utf8").digest("hex").slice(0, 16);
         try {
           const pkg = JSON.parse(content);
           const rootLicense = typeof pkg.license === "string" ? pkg.license : "UNKNOWN";
-          const allDirect = {
-            ...pkg.dependencies || {},
-            ...pkg.devDependencies || {}
-          };
-          for (const [name, rawVer] of Object.entries(allDirect).sort(([a], [b]) => a.localeCompare(b))) {
-            directNpmNames.add(name);
-            const ver = String(rawVer).replace(/^[\^~>=< ]+/, "") || "0.0.0";
-            addComponent({
-              bomRef: `pkg:npm/${name}@${ver}`,
-              name,
-              version: ver,
-              purl: `pkg:npm/${name.replace("@", "%40")}@${ver}`,
-              ecosystem: "npm",
-              license: resolvePackageSpdxLicense(name, void 0, rootLicense),
-              dependencyScope: "DIRECT",
-              manifestFile: filePath,
-              sha256: computeComponentDigest("npm", name, ver, manifestDigest)
-            });
+          const depGroups = [
+            { map: pkg.dependencies || {}, scope: "DIRECT" },
+            { map: pkg.optionalDependencies || {}, scope: "OPTIONAL" },
+            { map: pkg.devDependencies || {}, scope: "DEV" }
+          ];
+          for (const grp of depGroups) {
+            for (const [name, rawVer] of Object.entries(grp.map).sort(([a], [b]) => a.localeCompare(b))) {
+              if (!directNpmScopes.has(name)) {
+                directNpmScopes.set(name, grp.scope);
+              }
+              const ver = String(rawVer).replace(/^[\^~>=< ]+/, "") || "0.0.0";
+              const licInfo = resolvePackageSpdxLicenseWithProvenance(name, void 0, rootLicense, {
+                strictProvenance
+              });
+              addComponent({
+                bomRef: `pkg:npm/${name}@${ver}`,
+                name,
+                version: ver,
+                purl: `pkg:npm/${name.replace("@", "%40")}@${ver}`,
+                ecosystem: "npm",
+                license: licInfo.license,
+                licenseProvenance: licInfo.provenance,
+                dependencyScope: grp.scope === "DEV" || grp.scope === "OPTIONAL" ? "DIRECT" : grp.scope,
+                manifestFile: filePath,
+                sha256: computeComponentDigest("npm", name, ver, manifestDigest)
+              });
+            }
           }
         } catch {
         }
       }
     }
     for (const [filePath, content] of sortedEntries) {
-      if (filePath.endsWith("package-lock.json")) {
+      if (filePath.endsWith("package-lock.json") || filePath.endsWith("npm-shrinkwrap.json")) {
+        lockfilesDetected.push(filePath);
         const manifestDigest = crypto3.createHash("sha256").update(content, "utf8").digest("hex").slice(0, 16);
         try {
           const lock = JSON.parse(content);
@@ -4920,18 +5622,21 @@ var SbomGenerator = class _SbomGenerator {
               if (!pkgPath || pkgPath === "") continue;
               const name = pkgPath.replace(/^.*node_modules\//, "");
               const ver = String(meta?.version || "0.0.0");
-              const license = resolvePackageSpdxLicense(
+              const licInfo = resolvePackageSpdxLicenseWithProvenance(
                 name,
-                typeof meta?.license === "string" ? meta.license : void 0
+                typeof meta?.license === "string" ? meta.license : void 0,
+                void 0,
+                { strictProvenance }
               );
-              const scope = directNpmNames.has(name) ? "DIRECT" : "TRANSITIVE";
+              const scope = directNpmScopes.has(name) ? "DIRECT" : "TRANSITIVE";
               const existingIdx = components.findIndex(
                 (c) => c.ecosystem === "npm" && c.name === name && c.version === ver
               );
               const computedSha = computeComponentDigest("npm", name, ver, manifestDigest, meta?.integrity);
               if (existingIdx >= 0) {
-                if (license !== "UNKNOWN" && license !== "NOASSERTION") {
-                  components[existingIdx].license = license;
+                if (licInfo.license !== "UNKNOWN" && licInfo.license !== "NOASSERTION") {
+                  components[existingIdx].license = licInfo.license;
+                  components[existingIdx].licenseProvenance = licInfo.provenance;
                 }
                 components[existingIdx].sha256 = computedSha;
                 continue;
@@ -4942,10 +5647,107 @@ var SbomGenerator = class _SbomGenerator {
                 version: ver,
                 purl: `pkg:npm/${name.replace("@", "%40")}@${ver}`,
                 ecosystem: "npm",
-                license,
+                license: licInfo.license,
+                licenseProvenance: licInfo.provenance,
                 dependencyScope: scope,
                 manifestFile: filePath,
                 sha256: computedSha
+              });
+            }
+          }
+        } catch {
+        }
+      }
+      if (filePath.endsWith("yarn.lock")) {
+        lockfilesDetected.push(filePath);
+        const manifestDigest = crypto3.createHash("sha256").update(content, "utf8").digest("hex").slice(0, 16);
+        const blocks = content.split(/\r?\n\r?\n+/);
+        for (const block of blocks) {
+          const lines = block.split(/\r?\n/).map((l) => l.trim());
+          const header = lines.find((l) => l && !l.startsWith("#") && l.endsWith(":"));
+          if (!header) continue;
+          const firstSpec = header.replace(/:$/, "").split(",")[0].replace(/^["']|["']$/g, "").trim();
+          const atIdx = firstSpec.lastIndexOf("@");
+          if (atIdx <= 0) continue;
+          const name = firstSpec.slice(0, atIdx).replace(/@npm$/, "");
+          const verLine = lines.find((l) => /^version[:\s]/i.test(l));
+          if (!verLine) continue;
+          const verMatch = verLine.match(/version[:\s]+["']?([0-9a-zA-Z._+-]+)["']?/i);
+          if (!verMatch) continue;
+          const ver = verMatch[1];
+          const intLine = lines.find((l) => /^(integrity|checksum)[:\s]/i.test(l));
+          const integrity = intLine ? intLine.split(/[:\s]+/).slice(1).join("").replace(/["']/g, "") : void 0;
+          const licInfo = resolvePackageSpdxLicenseWithProvenance(name, void 0, void 0, {
+            strictProvenance
+          });
+          addComponent({
+            bomRef: `pkg:npm/${name}@${ver}`,
+            name,
+            version: ver,
+            purl: `pkg:npm/${name.replace("@", "%40")}@${ver}`,
+            ecosystem: "npm",
+            license: licInfo.license,
+            licenseProvenance: licInfo.provenance,
+            dependencyScope: directNpmScopes.has(name) ? "DIRECT" : "TRANSITIVE",
+            manifestFile: filePath,
+            sha256: computeComponentDigest("npm", name, ver, manifestDigest, integrity)
+          });
+        }
+      }
+      if (filePath.endsWith("pnpm-lock.yaml")) {
+        lockfilesDetected.push(filePath);
+        const manifestDigest = crypto3.createHash("sha256").update(content, "utf8").digest("hex").slice(0, 16);
+        for (const rawLine of content.split(/\r?\n/)) {
+          const trimmed = rawLine.trim();
+          const m = trimmed.match(/^['"]?\/?(@?[a-zA-Z0-9._/-]+)@([0-9]+\.[0-9]+\.[0-9]+[^('":\s]*)/);
+          if (m && m[1] && m[2]) {
+            const name = m[1];
+            const ver = m[2];
+            const licInfo = resolvePackageSpdxLicenseWithProvenance(name, void 0, void 0, {
+              strictProvenance
+            });
+            addComponent({
+              bomRef: `pkg:npm/${name}@${ver}`,
+              name,
+              version: ver,
+              purl: `pkg:npm/${name.replace("@", "%40")}@${ver}`,
+              ecosystem: "npm",
+              license: licInfo.license,
+              licenseProvenance: licInfo.provenance,
+              dependencyScope: directNpmScopes.has(name) ? "DIRECT" : "TRANSITIVE",
+              manifestFile: filePath,
+              sha256: computeComponentDigest("npm", name, ver, manifestDigest)
+            });
+          }
+        }
+      }
+      if (filePath.endsWith("bun.lock")) {
+        lockfilesDetected.push(filePath);
+        const manifestDigest = crypto3.createHash("sha256").update(content, "utf8").digest("hex").slice(0, 16);
+        try {
+          const cleanJson = content.replace(/,\s*([\]}])/g, "$1");
+          const parsedBun = JSON.parse(cleanJson);
+          if (parsedBun?.packages && typeof parsedBun.packages === "object") {
+            for (const [pkgKey, arr] of Object.entries(parsedBun.packages)) {
+              const firstTuple = Array.isArray(arr) && typeof arr[0] === "string" ? arr[0] : "";
+              const atIdx = firstTuple.lastIndexOf("@");
+              const name = atIdx > 0 ? firstTuple.slice(0, atIdx) : pkgKey;
+              const ver = atIdx > 0 ? firstTuple.slice(atIdx + 1) : "0.0.0";
+              const integrity = Array.isArray(arr) && typeof arr[3] === "string" ? arr[3] : void 0;
+              const licInfo = resolvePackageSpdxLicenseWithProvenance(name, void 0, void 0, {
+                strictProvenance
+              });
+              addComponent({
+                bomRef: `pkg:npm/${name}@${ver}`,
+                name,
+                version: ver,
+                purl: `pkg:npm/${name.replace("@", "%40")}@${ver}`,
+                ecosystem: "npm",
+                license: licInfo.license,
+                licenseProvenance: licInfo.provenance,
+                dependencyScope: directNpmScopes.has(name) ? "DIRECT" : "TRANSITIVE",
+                manifestFile: filePath,
+                sha256: computeComponentDigest("npm", name, ver, manifestDigest, integrity)
               });
             }
           }
@@ -4956,6 +5758,7 @@ var SbomGenerator = class _SbomGenerator {
     for (const [filePath, content] of sortedEntries) {
       const manifestDigest = crypto3.createHash("sha256").update(content, "utf8").digest("hex").slice(0, 16);
       if (filePath.endsWith("requirements.txt")) {
+        lockfilesDetected.push(filePath);
         for (const rawLine of content.split(/\r?\n/)) {
           const line = rawLine.trim();
           if (!line || line.startsWith("#") || line.startsWith("-")) continue;
@@ -4969,7 +5772,8 @@ var SbomGenerator = class _SbomGenerator {
               version: ver,
               purl: `pkg:pypi/${name}@${ver}`,
               ecosystem: "pypi",
-              license: "UNKNOWN",
+              license: "NOASSERTION",
+              licenseProvenance: "UNVERIFIED",
               dependencyScope: "DIRECT",
               manifestFile: filePath,
               sha256: computeComponentDigest("pypi", name, ver, manifestDigest)
@@ -4978,6 +5782,7 @@ var SbomGenerator = class _SbomGenerator {
         }
       }
       if (filePath.endsWith("pyproject.toml")) {
+        hasManifestWithoutLockfile = true;
         const depMatch = content.match(/dependencies\s*=\s*\[([\s\S]*?)\]/);
         if (depMatch) {
           for (const rawItem of depMatch[1].split(",")) {
@@ -4992,7 +5797,8 @@ var SbomGenerator = class _SbomGenerator {
                 version: ver,
                 purl: `pkg:pypi/${name}@${ver}`,
                 ecosystem: "pypi",
-                license: "UNKNOWN",
+                license: "NOASSERTION",
+                licenseProvenance: "UNVERIFIED",
                 dependencyScope: "DIRECT",
                 manifestFile: filePath,
                 sha256: computeComponentDigest("pypi", name, ver, manifestDigest)
@@ -5002,6 +5808,7 @@ var SbomGenerator = class _SbomGenerator {
         }
       }
       if (filePath.endsWith("go.mod")) {
+        lockfilesDetected.push(filePath);
         for (const rawLine of content.split(/\r?\n/)) {
           const line = rawLine.trim();
           const m = line.match(/^([^\s/]+\/[^\s]+)\s+(v[0-9.]+[^\s]*)(?:\s+\/\/\s*(indirect))?/);
@@ -5015,7 +5822,8 @@ var SbomGenerator = class _SbomGenerator {
               version: ver,
               purl: `pkg:golang/${name}@${ver}`,
               ecosystem: "golang",
-              license: "UNKNOWN",
+              license: "NOASSERTION",
+              licenseProvenance: "UNVERIFIED",
               dependencyScope: isIndirect ? "TRANSITIVE" : "DIRECT",
               manifestFile: filePath,
               sha256: computeComponentDigest("golang", name, ver, manifestDigest)
@@ -5024,6 +5832,7 @@ var SbomGenerator = class _SbomGenerator {
         }
       }
       if (filePath.endsWith("Cargo.toml")) {
+        hasManifestWithoutLockfile = true;
         let inDeps = false;
         for (const rawLine of content.split(/\r?\n/)) {
           const line = rawLine.trim();
@@ -5042,7 +5851,8 @@ var SbomGenerator = class _SbomGenerator {
                 version: ver,
                 purl: `pkg:cargo/${name}@${ver}`,
                 ecosystem: "cargo",
-                license: "UNKNOWN",
+                license: "NOASSERTION",
+                licenseProvenance: "UNVERIFIED",
                 dependencyScope: "DIRECT",
                 manifestFile: filePath,
                 sha256: computeComponentDigest("cargo", name, ver, manifestDigest)
@@ -5051,7 +5861,33 @@ var SbomGenerator = class _SbomGenerator {
           }
         }
       }
+      if (filePath.endsWith("Cargo.lock")) {
+        lockfilesDetected.push(filePath);
+        const pkgBlocks = content.split(/\[\[package\]\]/);
+        for (const block of pkgBlocks.slice(1)) {
+          const nameM = block.match(/name\s*=\s*"([^"]+)"/);
+          const verM = block.match(/version\s*=\s*"([^"]+)"/);
+          const chkM = block.match(/checksum\s*=\s*"([^"]+)"/);
+          if (nameM && verM) {
+            const name = nameM[1];
+            const ver = verM[1];
+            addComponent({
+              bomRef: `pkg:cargo/${name}@${ver}`,
+              name,
+              version: ver,
+              purl: `pkg:cargo/${name}@${ver}`,
+              ecosystem: "cargo",
+              license: "NOASSERTION",
+              licenseProvenance: "UNVERIFIED",
+              dependencyScope: "TRANSITIVE",
+              manifestFile: filePath,
+              sha256: chkM?.[1] || computeComponentDigest("cargo", name, ver, manifestDigest)
+            });
+          }
+        }
+      }
       if (filePath.endsWith("pom.xml")) {
+        hasManifestWithoutLockfile = true;
         const depRegex = /<dependency>[\s\S]*?<groupId>([^<]+)<\/groupId>[\s\S]*?<artifactId>([^<]+)<\/artifactId>(?:[\s\S]*?<version>([^<]+)<\/version>)?[\s\S]*?<\/dependency>/g;
         for (const m of content.matchAll(depRegex)) {
           const name = `${m[1].trim()}:${m[2].trim()}`;
@@ -5062,7 +5898,8 @@ var SbomGenerator = class _SbomGenerator {
             version: ver,
             purl: `pkg:maven/${m[1].trim()}/${m[2].trim()}@${ver}`,
             ecosystem: "maven",
-            license: "UNKNOWN",
+            license: "NOASSERTION",
+            licenseProvenance: "UNVERIFIED",
             dependencyScope: "DIRECT",
             manifestFile: filePath,
             sha256: computeComponentDigest("maven", name, ver, manifestDigest)
@@ -5070,6 +5907,7 @@ var SbomGenerator = class _SbomGenerator {
         }
       }
       if (filePath.toLowerCase().endsWith(".csproj")) {
+        hasManifestWithoutLockfile = true;
         const pkgRef = /<PackageReference\s+Include="([^"]+)"\s+Version="([^"]+)"/g;
         for (const m of content.matchAll(pkgRef)) {
           const name = m[1];
@@ -5080,7 +5918,8 @@ var SbomGenerator = class _SbomGenerator {
             version: ver,
             purl: `pkg:nuget/${name}@${ver}`,
             ecosystem: "nuget",
-            license: "UNKNOWN",
+            license: "NOASSERTION",
+            licenseProvenance: "UNVERIFIED",
             dependencyScope: "DIRECT",
             manifestFile: filePath,
             sha256: computeComponentDigest("nuget", name, ver, manifestDigest)
@@ -5089,7 +5928,12 @@ var SbomGenerator = class _SbomGenerator {
       }
     }
     components.sort((a, b) => a.bomRef.localeCompare(b.bomRef));
-    return components;
+    const transitiveCoverageComplete = lockfilesDetected.length > 0 || !hasManifestWithoutLockfile;
+    return {
+      components,
+      lockfilesDetected,
+      transitiveCoverageComplete
+    };
   }
 };
 
@@ -6676,7 +7520,47 @@ var ScaCorrelator = class _ScaCorrelator {
       });
       findings.push(...licEval.findings);
     }
-    return { correlations, findings, toolsAvailability };
+    const hasLiveSync = Boolean(syncedBundle.updatedAt && syncedBundle.advisories.length > 0);
+    const snapshotTimestamp = syncedBundle.updatedAt || "2026-11-14T00:00:00Z";
+    const ageMs = Math.max(0, Date.parse(nowIso) - Date.parse(snapshotTimestamp));
+    const isStale = ageMs > 30 * 24 * 60 * 60 * 1e3;
+    const advisoryFeedMetadata = {
+      dbVersion,
+      cacheMode: hasLiveSync ? "LIVE_SYNCED_CACHE" : "OFFLINE_VERIFIED_SNAPSHOT",
+      lastSyncedAt: snapshotTimestamp,
+      isStale,
+      feeds: [
+        {
+          source: "OSV.dev",
+          snapshotVersion: dbVersion,
+          lastUpdated: snapshotTimestamp,
+          recordsCount: hasLiveSync ? syncedBundle.advisories.length : ADVISORY_INTELLIGENCE_DB.length,
+          isStale
+        },
+        {
+          source: "NVD",
+          snapshotVersion: dbVersion,
+          lastUpdated: snapshotTimestamp,
+          recordsCount: Object.keys(syncedBundle.nvdByCve).length || ADVISORY_INTELLIGENCE_DB.length,
+          isStale
+        },
+        {
+          source: "FIRST_EPSS",
+          snapshotVersion: dbVersion,
+          lastUpdated: snapshotTimestamp,
+          recordsCount: Object.keys(syncedBundle.epssByCve).length || ADVISORY_INTELLIGENCE_DB.length,
+          isStale
+        },
+        {
+          source: "CISA_KEV",
+          snapshotVersion: dbVersion,
+          lastUpdated: snapshotTimestamp,
+          recordsCount: syncedBundle.kevCveIds.length || ADVISORY_INTELLIGENCE_DB.filter((a) => a.cisaKev).length,
+          isStale
+        }
+      ]
+    };
+    return { correlations, findings, toolsAvailability, advisoryFeedMetadata };
   }
   static evaluateLicensePolicy(params) {
     const {
@@ -10942,20 +11826,28 @@ function verifyEvidenceChainAndManifest(evidenceChain, signedManifest, secret) {
       hmacValid = a.length === b.length && crypto8.timingSafeEqual(a, b);
     }
     if (signedManifest.ed25519Signature) {
-      const pubPem = (signedManifest.ed25519KeyId ? KeyManagementService.getEd25519PublicKeyByKeyId(signedManifest.ed25519KeyId) : null) || signedManifest.ed25519PublicKeyPem;
-      if (!pubPem) {
+      const trustCheck = KeyManagementService.verifyTrustedEd25519PublicKey(
+        signedManifest.ed25519KeyId ?? void 0,
+        signedManifest.ed25519PublicKeyPem ?? void 0,
+        signedManifest.generatedAt
+      );
+      if (!trustCheck.trusted || !trustCheck.publicKeyPem) {
         ed25519SignatureValid = false;
-        details.push("Chave p\xFAblica Ed25519 indispon\xEDvel para validar assinatura assim\xE9trica.");
+        details.push(`Falha de confian\xE7a na chave Ed25519: ${trustCheck.reason}`);
       } else {
         try {
           ed25519SignatureValid = crypto8.verify(
             null,
             Buffer.from(manifestPayloadSha256, "utf8"),
-            pubPem,
+            trustCheck.publicKeyPem,
             Buffer.from(signedManifest.ed25519Signature, "base64")
           );
+          if (!ed25519SignatureValid) {
+            details.push("Assinatura criptogr\xE1fica Ed25519 inv\xE1lida para o payload do manifesto.");
+          }
         } catch {
           ed25519SignatureValid = false;
+          details.push("Erro ao verificar assinatura Ed25519 com a chave p\xFAblica registrada no Trust Store.");
         }
       }
     }
@@ -12372,16 +13264,21 @@ var BenchmarkMatcher = class {
     const passedCount = checks.filter((c) => c.passed).length;
     const compatibilityScorePercent = Math.round(passedCount / checks.length * 100);
     const comparable = blockingReasons.length === 0;
-    const canDeclareOfficialWinner = comparable && (input.mode === "INDIVIDUAL" || softwares.length > 1);
+    const comparisonModality = input.mode === "VS_MQR_BRIDGE" || input.mode === "VS_PUBLIC_REFERENCE" ? "CROSS_TOOL" : "SAME_ENGINE";
+    const comparabilityClassification = !comparable ? "NOT_COMPARABLE" : comparisonModality === "CROSS_TOOL" || warnings.length > 0 ? "QUALIFIED_COMPARISON" : "STRICTLY_COMPARABLE";
+    const canDeclareOfficialWinner = comparable && comparabilityClassification !== "NOT_COMPARABLE" && (input.mode === "INDIVIDUAL" || softwares.length > 1);
     return {
       matchId: `match-${crypto10.createHash("sha256").update(`${input.mode}:${softwares.map((s) => s.id).join("|")}`).digest("hex").slice(0, 12)}`,
       mode: input.mode,
+      comparisonModality,
+      comparabilityClassification,
       comparable,
       canDeclareOfficialWinner,
       compatibilityScorePercent,
       checks,
       blockingReasons,
-      warnings
+      warnings,
+      qualifications: [...warnings]
     };
   }
 };
@@ -13070,7 +13967,8 @@ var BUILTIN_QUALITY_GATES = [
         label: "Achados BLOCKER",
         operator: "EQ",
         threshold: 0,
-        severityOnFail: "BLOCKER"
+        severityOnFail: "BLOCKER",
+        requirementTier: "REQUIRED"
       },
       {
         id: "cond-no-critical",
@@ -13078,7 +13976,8 @@ var BUILTIN_QUALITY_GATES = [
         label: "Achados CRITICAL",
         operator: "EQ",
         threshold: 0,
-        severityOnFail: "BLOCKER"
+        severityOnFail: "BLOCKER",
+        requirementTier: "REQUIRED"
       },
       {
         id: "cond-no-secrets",
@@ -13086,7 +13985,8 @@ var BUILTIN_QUALITY_GATES = [
         label: "Segredos Expostos",
         operator: "EQ",
         threshold: 0,
-        severityOnFail: "BLOCKER"
+        severityOnFail: "BLOCKER",
+        requirementTier: "REQUIRED"
       },
       {
         id: "cond-min-coverage",
@@ -13094,7 +13994,8 @@ var BUILTIN_QUALITY_GATES = [
         label: "Cobertura de Escopo (%)",
         operator: "GTE",
         threshold: 50,
-        severityOnFail: "RESERVATION"
+        severityOnFail: "RESERVATION",
+        requirementTier: "REQUIRED"
       },
       {
         id: "cond-min-confidence",
@@ -13102,7 +14003,8 @@ var BUILTIN_QUALITY_GATES = [
         label: "Confian\xE7a M\xEDnima da Evid\xEAncia (1=LOW,2=MED,3=HIGH)",
         operator: "GTE",
         threshold: 2,
-        severityOnFail: "RESERVATION"
+        severityOnFail: "RESERVATION",
+        requirementTier: "REQUIRED"
       }
     ]
   },
@@ -13120,7 +14022,8 @@ var BUILTIN_QUALITY_GATES = [
         label: "Achados BLOCKER",
         operator: "EQ",
         threshold: 0,
-        severityOnFail: "BLOCKER"
+        severityOnFail: "BLOCKER",
+        requirementTier: "REQUIRED"
       },
       {
         id: "zt-no-critical",
@@ -13128,7 +14031,8 @@ var BUILTIN_QUALITY_GATES = [
         label: "Achados CRITICAL",
         operator: "EQ",
         threshold: 0,
-        severityOnFail: "BLOCKER"
+        severityOnFail: "BLOCKER",
+        requirementTier: "REQUIRED"
       },
       {
         id: "zt-max-high",
@@ -13136,7 +14040,8 @@ var BUILTIN_QUALITY_GATES = [
         label: "Achados HIGH",
         operator: "LTE",
         threshold: 2,
-        severityOnFail: "BLOCKER"
+        severityOnFail: "BLOCKER",
+        requirementTier: "REQUIRED"
       },
       {
         id: "zt-no-secrets",
@@ -13144,7 +14049,8 @@ var BUILTIN_QUALITY_GATES = [
         label: "Segredos Expostos",
         operator: "EQ",
         threshold: 0,
-        severityOnFail: "BLOCKER"
+        severityOnFail: "BLOCKER",
+        requirementTier: "REQUIRED"
       },
       {
         id: "zt-no-iac-crit",
@@ -13152,7 +14058,8 @@ var BUILTIN_QUALITY_GATES = [
         label: "Achados IaC Cr\xEDticos",
         operator: "EQ",
         threshold: 0,
-        severityOnFail: "BLOCKER"
+        severityOnFail: "BLOCKER",
+        requirementTier: "REQUIRED"
       },
       {
         id: "zt-min-coverage",
@@ -13160,7 +14067,8 @@ var BUILTIN_QUALITY_GATES = [
         label: "Cobertura de Escopo (%)",
         operator: "GTE",
         threshold: 70,
-        severityOnFail: "BLOCKER"
+        severityOnFail: "BLOCKER",
+        requirementTier: "REQUIRED"
       },
       {
         id: "zt-high-confidence",
@@ -13168,7 +14076,8 @@ var BUILTIN_QUALITY_GATES = [
         label: "Confian\xE7a da Evid\xEAncia (HIGH=3)",
         operator: "GTE",
         threshold: 3,
-        severityOnFail: "RESERVATION"
+        severityOnFail: "RESERVATION",
+        requirementTier: "REQUIRED"
       }
     ]
   },
@@ -13186,7 +14095,8 @@ var BUILTIN_QUALITY_GATES = [
         label: "Achados BLOCKER",
         operator: "EQ",
         threshold: 0,
-        severityOnFail: "BLOCKER"
+        severityOnFail: "BLOCKER",
+        requirementTier: "REQUIRED"
       },
       {
         id: "rel-min-score",
@@ -13194,7 +14104,8 @@ var BUILTIN_QUALITY_GATES = [
         label: "Nota T\xE9cnica Geral (0-5)",
         operator: "GTE",
         threshold: 3,
-        severityOnFail: "BLOCKER"
+        severityOnFail: "BLOCKER",
+        requirementTier: "REQUIRED"
       },
       {
         id: "rel-min-coverage",
@@ -13202,7 +14113,8 @@ var BUILTIN_QUALITY_GATES = [
         label: "Cobertura de Escopo (%)",
         operator: "GTE",
         threshold: 60,
-        severityOnFail: "RESERVATION"
+        severityOnFail: "RESERVATION",
+        requirementTier: "REQUIRED"
       }
     ]
   }
@@ -13308,9 +14220,45 @@ var QualityGateEngine = class _QualityGateEngine {
       evidence_confidence_score: confScore,
       overall_score: overallScore
     };
+    const reservations = [];
     const evaluatedConditions = gate.conditions.map((cond) => {
+      const tier = cond.requirementTier || "REQUIRED";
       const actual = metricsMap[cond.metricKey];
       if (actual === null || actual === void 0 || Number.isNaN(actual)) {
+        if (tier === "OPTIONAL") {
+          const msg = `M\xE9trica opcional "${cond.label}" n\xE3o aplic\xE1vel ou n\xE3o mensurada (NOT_MEASURED) \u2014 registrada como ressalva sem reprova\xE7\xE3o autom\xE1tica.`;
+          reservations.push(msg);
+          return {
+            id: cond.id,
+            metricKey: cond.metricKey,
+            label: cond.label,
+            operator: cond.operator,
+            threshold: cond.threshold,
+            actualValue: null,
+            passed: true,
+            inconclusive: false,
+            severityOnFail: cond.severityOnFail,
+            requirementTier: tier,
+            reason: msg
+          };
+        }
+        if (tier === "INFORMATIVE") {
+          const msg = `M\xE9trica informativa "${cond.label}" ausente (NOT_MEASURED) \u2014 nota informativa sem impacto bloqueante.`;
+          reservations.push(msg);
+          return {
+            id: cond.id,
+            metricKey: cond.metricKey,
+            label: cond.label,
+            operator: cond.operator,
+            threshold: cond.threshold,
+            actualValue: null,
+            passed: true,
+            inconclusive: false,
+            severityOnFail: "RESERVATION",
+            requirementTier: tier,
+            reason: msg
+          };
+        }
         return {
           id: cond.id,
           metricKey: cond.metricKey,
@@ -13321,10 +14269,28 @@ var QualityGateEngine = class _QualityGateEngine {
           passed: false,
           inconclusive: true,
           severityOnFail: cond.severityOnFail,
-          reason: `M\xE9trica "${cond.label}" n\xE3o foi mensurada (NOT_MEASURED).`
+          requirementTier: tier,
+          reason: `M\xE9trica obrigat\xF3ria "${cond.label}" n\xE3o foi mensurada (NOT_MEASURED).`
         };
       }
-      const passed = evaluateOperator(actual, cond.operator, cond.threshold);
+      const rawPassed = evaluateOperator(actual, cond.operator, cond.threshold);
+      if (!rawPassed && tier === "INFORMATIVE") {
+        const msg = `Condi\xE7\xE3o informativa "${cond.label}": ${actual} fora da faixa ${cond.operator} ${cond.threshold} (registrada como ressalva).`;
+        reservations.push(msg);
+        return {
+          id: cond.id,
+          metricKey: cond.metricKey,
+          label: cond.label,
+          operator: cond.operator,
+          threshold: cond.threshold,
+          actualValue: actual,
+          passed: false,
+          inconclusive: false,
+          severityOnFail: "RESERVATION",
+          requirementTier: tier,
+          reason: msg
+        };
+      }
       return {
         id: cond.id,
         metricKey: cond.metricKey,
@@ -13332,19 +14298,20 @@ var QualityGateEngine = class _QualityGateEngine {
         operator: cond.operator,
         threshold: cond.threshold,
         actualValue: actual,
-        passed,
+        passed: rawPassed,
         inconclusive: false,
         severityOnFail: cond.severityOnFail,
-        reason: passed ? `${cond.label}: ${actual} atende ${cond.operator} ${cond.threshold}.` : `${cond.label}: ${actual} viola ${cond.operator} ${cond.threshold}.`
+        requirementTier: tier,
+        reason: rawPassed ? `${cond.label}: ${actual} atende ${cond.operator} ${cond.threshold}.` : `${cond.label}: ${actual} viola ${cond.operator} ${cond.threshold}.`
       };
     });
     const conditionsMet = evaluatedConditions.filter((c) => c.passed).length;
     const conditionsFailed = evaluatedConditions.filter((c) => !c.passed && !c.inconclusive).length;
     const conditionsInconclusive = evaluatedConditions.filter((c) => c.inconclusive).length;
     const hasBlockerFailure = evaluatedConditions.some(
-      (c) => !c.passed && !c.inconclusive && c.severityOnFail === "BLOCKER"
+      (c) => !c.passed && !c.inconclusive && c.severityOnFail === "BLOCKER" && c.requirementTier !== "INFORMATIVE"
     );
-    const hasReservationFailure = evaluatedConditions.some(
+    const hasReservationFailure = reservations.length > 0 || evaluatedConditions.some(
       (c) => !c.passed && !c.inconclusive && c.severityOnFail === "RESERVATION"
     );
     let decision;
@@ -13373,6 +14340,7 @@ var QualityGateEngine = class _QualityGateEngine {
       conditionsFailed,
       conditionsInconclusive,
       conditions: evaluatedConditions,
+      reservations,
       summary: `Gate "${gate.name}" v${gate.version} => ${decision} (exit=${exitCodeNormalized}; ${conditionsMet}/${evaluatedConditions.length} condi\xE7\xF5es atendidas).`
     };
   }
@@ -22494,20 +23462,55 @@ function generateRecoveryCodesSet(count = 8) {
   }
   return { plaintextCodes, codeHashes };
 }
-function hashPassword(password) {
-  const salt = crypto18.randomBytes(16).toString("hex");
-  const derived = crypto18.scryptSync(password, salt, 64, { N: 16384, r: 8, p: 1 }).toString("hex");
-  return `scrypt:N=16384,r=8,p=1:${salt}:${derived}`;
+var CURRENT_SCRYPT_PARAMS = {
+  N: 32768,
+  r: 8,
+  p: 1,
+  maxmem: 64 * 1024 * 1024
+};
+function parseScryptParamsSpec(spec) {
+  const parsed = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
+  for (const token of (spec || "").split(",")) {
+    const [k, v] = token.split("=");
+    const num = Number.parseInt(v || "", 10);
+    if (!Number.isFinite(num) || num <= 0) continue;
+    if (k === "N") parsed.N = num;
+    if (k === "r") parsed.r = num;
+    if (k === "p") parsed.p = num;
+  }
+  parsed.maxmem = Math.max(64 * 1024 * 1024, 256 * parsed.N * parsed.r);
+  return parsed;
 }
-function verifyPassword(password, storedHash) {
-  const parts = storedHash.split(":");
+function hashPassword(credentialValue, costParams = CURRENT_SCRYPT_PARAMS) {
+  const N = costParams.N ?? CURRENT_SCRYPT_PARAMS.N;
+  const r = costParams.r ?? CURRENT_SCRYPT_PARAMS.r;
+  const p = costParams.p ?? CURRENT_SCRYPT_PARAMS.p;
+  const maxmem = Math.max(64 * 1024 * 1024, 256 * N * r);
+  const salt = crypto18.randomBytes(16).toString("hex");
+  const derived = crypto18.scryptSync(credentialValue, salt, 64, { N, r, p, maxmem }).toString("hex");
+  return `scrypt:N=${N},r=${r},p=${p}:${salt}:${derived}`;
+}
+function verifyPassword(credentialValue, storedHash) {
+  const parts = (storedHash || "").split(":");
   if (parts.length !== 4 || parts[0] !== "scrypt") return false;
+  const params = parseScryptParamsSpec(parts[1]);
   const salt = parts[2];
   const expectedHex = parts[3];
-  const derived = crypto18.scryptSync(password, salt, 64, { N: 16384, r: 8, p: 1 });
+  const derived = crypto18.scryptSync(credentialValue, salt, 64, {
+    N: params.N,
+    r: params.r,
+    p: params.p,
+    maxmem: params.maxmem
+  });
   const expectedBuf = Buffer.from(expectedHex, "hex");
   if (derived.length !== expectedBuf.length) return false;
   return crypto18.timingSafeEqual(derived, expectedBuf);
+}
+function needsPasswordRehash(storedHash) {
+  const parts = (storedHash || "").split(":");
+  if (parts.length !== 4 || parts[0] !== "scrypt") return true;
+  const params = parseScryptParamsSpec(parts[1]);
+  return params.N < CURRENT_SCRYPT_PARAMS.N || params.r < CURRENT_SCRYPT_PARAMS.r || params.p < CURRENT_SCRYPT_PARAMS.p;
 }
 function sha256(val) {
   return crypto18.createHash("sha256").update(val, "utf8").digest("hex");
@@ -22926,6 +23929,9 @@ ${rawToken}
     user.failedLoginAttempts = 0;
     user.lockedUntil = null;
     user.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    if (needsPasswordRehash(user.passwordHash)) {
+      user.passwordHash = hashPassword(params.password);
+    }
     if (user.totpSecretBase32 && !user.totpSecretBase32.startsWith("whvault:v1:")) {
       user.totpSecretBase32 = this.encryptSecretAtRest(user.totpSecretBase32);
     }
@@ -26726,12 +27732,259 @@ var GOLDEN_DATASET_CORPUS = [
     }
   }
 ];
+var INDEPENDENT_VALIDATION_VERSION = "WINHOOD-INDEPENDENT-BENCHMARK-v1.0.0";
+var INDEPENDENT_VALIDATION_ORIGIN_LABEL = "WINHOOD_INDEPENDENT_VALIDATION_BENCHMARK";
+var INDEPENDENT_VALIDATION_CORPUS = [
+  {
+    caseId: "IND-TS-SQLI-TP-01",
+    title: "Independent Benchmark: TypeScript SQLi em relat\xF3rio financeiro interpolado",
+    language: "TypeScript",
+    category: "SQL_INJECTION",
+    cwe: "CWE-89",
+    expectedVulnerable: true,
+    filesMap: {
+      "src/finance/ledgerDao.ts": [
+        "export function queryLedgerByAccount(conn: any, accountCode: string) {",
+        "  const queryText = `SELECT balance, currency FROM ledger WHERE account_code = '${accountCode}'`;",
+        "  return conn.query(queryText);",
+        "}"
+      ].join("\n")
+    }
+  },
+  {
+    caseId: "IND-TS-SQLI-TN-01",
+    title: "Independent Benchmark: TypeScript SQLi mitigado por convers\xE3o num\xE9rica Number()",
+    language: "TypeScript",
+    category: "SQL_INJECTION",
+    cwe: "CWE-89",
+    expectedVulnerable: false,
+    filesMap: {
+      "src/finance/ledgerSafeDao.ts": [
+        "export function queryLedgerByNumericId(conn: any, rawAccountId: string) {",
+        "  const numericId = Number(rawAccountId);",
+        '  return conn.query("SELECT balance FROM ledger WHERE id = $1", [numericId]);',
+        "}"
+      ].join("\n")
+    }
+  },
+  {
+    caseId: "IND-JS-CMDI-TP-02",
+    title: "Independent Benchmark: JavaScript Command Injection via child_process.exec",
+    language: "JavaScript",
+    category: "COMMAND_INJECTION",
+    cwe: "CWE-78",
+    expectedVulnerable: true,
+    filesMap: {
+      "src/ops/archiveWorker.js": [
+        'import { execSync } from "node:child_process";',
+        "export function compressFolder(targetFolder) {",
+        '  return execSync("tar -cf archive.tar " + targetFolder);',
+        "}"
+      ].join("\n")
+    }
+  },
+  {
+    caseId: "IND-JS-CMDI-TN-02",
+    title: "Independent Benchmark: JavaScript spawnSync seguro com shell: false",
+    language: "JavaScript",
+    category: "COMMAND_INJECTION",
+    cwe: "CWE-78",
+    expectedVulnerable: false,
+    filesMap: {
+      "src/ops/archiveWorkerSafe.js": [
+        'import { spawnSync } from "node:child_process";',
+        "export function compressFolderSafe(targetFolder) {",
+        '  return spawnSync("tar", ["-cf", "archive.tar", targetFolder], { shell: false });',
+        "}"
+      ].join("\n")
+    }
+  },
+  {
+    caseId: "IND-PY-SQLI-TP-03",
+    title: "Independent Benchmark: Python SQL Injection com concatena\xE7\xE3o em cursor.execute",
+    language: "Python",
+    category: "SQL_INJECTION",
+    cwe: "CWE-89",
+    expectedVulnerable: true,
+    filesMap: {
+      "app/orders_repo.py": [
+        "def fetch_order_by_code(cursor, order_code):",
+        `    stmt = "SELECT id, total FROM orders WHERE code = '" + order_code + "'"`,
+        "    cursor.execute(stmt)"
+      ].join("\n")
+    }
+  },
+  {
+    caseId: "IND-PY-SQLI-TN-03",
+    title: "Independent Benchmark: Python cursor.execute parametrizado",
+    language: "Python",
+    category: "SQL_INJECTION",
+    cwe: "CWE-89",
+    expectedVulnerable: false,
+    filesMap: {
+      "app/orders_repo_safe.py": [
+        "def fetch_order_by_code_safe(cursor, order_code):",
+        '    cursor.execute("SELECT id, total FROM orders WHERE code = %s", (order_code,))'
+      ].join("\n")
+    }
+  },
+  {
+    caseId: "IND-PY-CRYPTO-TP-04",
+    title: "Independent Benchmark: Python hashlib.sha1 para digest de credencial",
+    language: "Python",
+    category: "WEAK_CRYPTO",
+    cwe: "CWE-328",
+    expectedVulnerable: true,
+    filesMap: {
+      "app/legacy_hasher.py": [
+        "import hashlib",
+        "def compute_legacy_digest(payload_bytes):",
+        "    return hashlib.sha1(payload_bytes).hexdigest()"
+      ].join("\n")
+    }
+  },
+  {
+    caseId: "IND-PY-CRYPTO-TN-04",
+    title: "Independent Benchmark: Python hashlib.pbkdf2_hmac SHA-256 seguro",
+    language: "Python",
+    category: "WEAK_CRYPTO",
+    cwe: "CWE-328",
+    expectedVulnerable: false,
+    filesMap: {
+      "app/modern_hasher.py": [
+        "import hashlib",
+        "def compute_kdf_digest(payload_bytes, salt_bytes):",
+        '    return hashlib.pbkdf2_hmac("sha256", payload_bytes, salt_bytes, 600000)'
+      ].join("\n")
+    }
+  },
+  {
+    caseId: "IND-JAVA-SQLI-TP-05",
+    title: "Independent Benchmark: Java executeQuery com concatena\xE7\xE3o",
+    language: "Java",
+    category: "SQL_INJECTION",
+    cwe: "CWE-89",
+    expectedVulnerable: true,
+    filesMap: {
+      "src/main/java/InvoiceDao.java": [
+        "public class InvoiceDao {",
+        "  public void queryInvoice(Statement st, String code) throws Exception {",
+        `    st.executeQuery("SELECT id FROM invoices WHERE code = '" + code + "'");`,
+        "  }",
+        "}"
+      ].join("\n")
+    }
+  },
+  {
+    caseId: "IND-JAVA-SQLI-TN-05",
+    title: "Independent Benchmark: Java PreparedStatement seguro",
+    language: "Java",
+    category: "SQL_INJECTION",
+    cwe: "CWE-89",
+    expectedVulnerable: false,
+    filesMap: {
+      "src/main/java/InvoiceSafeDao.java": [
+        "public class InvoiceSafeDao {",
+        "  public void queryInvoiceSafe(Connection conn, String code) throws Exception {",
+        '    PreparedStatement ps = conn.prepareStatement("SELECT id FROM invoices WHERE code = ?");',
+        "  }",
+        "}"
+      ].join("\n")
+    }
+  },
+  {
+    caseId: "IND-SQL-DDL-TP-06",
+    title: "Independent Benchmark: SQL DELETE sem cl\xE1usula WHERE",
+    language: "SQL",
+    category: "SQL_SCHEMA",
+    cwe: "CWE-404",
+    expectedVulnerable: true,
+    filesMap: {
+      "db/cleanup.sql": [
+        "CREATE TABLE audit_events (id INT PRIMARY KEY, event_name VARCHAR(80));",
+        "DELETE FROM audit_events;"
+      ].join("\n")
+    }
+  },
+  {
+    caseId: "IND-SQL-DDL-TN-06",
+    title: "Independent Benchmark: SQL DELETE restrito por cl\xE1usula WHERE",
+    language: "SQL",
+    category: "SQL_SCHEMA",
+    cwe: "CWE-404",
+    expectedVulnerable: false,
+    filesMap: {
+      "db/cleanup_safe.sql": [
+        "CREATE TABLE audit_events (id INT PRIMARY KEY, event_name VARCHAR(80));",
+        "DELETE FROM audit_events WHERE id = 100;"
+      ].join("\n")
+    }
+  }
+];
 
 // src/validation/GoldenDatasetRunner.ts
-var GoldenDatasetRunner = class {
-  static runValidationSuite() {
-    const startMs = performance.now();
-    const memBefore = process.memoryUsage().rss;
+function computeWilson95ConfidenceInterval(successes, sampleSize) {
+  if (sampleSize <= 0) {
+    return {
+      pointEstimate: null,
+      lower: null,
+      upper: null,
+      sampleSize: 0
+    };
+  }
+  const z = 1.959963984540054;
+  const z2 = z * z;
+  const n = sampleSize;
+  const pHat = successes / n;
+  const denom = 1 + z2 / n;
+  const center = (pHat + z2 / (2 * n)) / denom;
+  const halfWidth = z * Math.sqrt(pHat * (1 - pHat) / n + z2 / (4 * n * n)) / denom;
+  const round3 = (v) => Math.max(0, Math.min(1, Math.round(v * 1e3) / 1e3));
+  return {
+    pointEstimate: round3(pHat),
+    lower: round3(center - halfWidth),
+    upper: round3(center + halfWidth),
+    sampleSize: n
+  };
+}
+function computeConfusionMetrics(c) {
+  const round3 = (v) => Math.round(v * 1e3) / 1e3;
+  const precision = c.tp + c.fp > 0 ? round3(c.tp / (c.tp + c.fp)) : null;
+  const recall = c.tp + c.fn > 0 ? round3(c.tp / (c.tp + c.fn)) : null;
+  const f1Score = precision !== null && recall !== null && precision + recall > 0 ? round3(2 * precision * recall / (precision + recall)) : null;
+  const truePositiveRate = recall;
+  const trueNegativeRate = c.tn + c.fp > 0 ? round3(c.tn / (c.tn + c.fp)) : null;
+  const falsePositiveRate = c.fp + c.tn > 0 ? round3(c.fp / (c.fp + c.tn)) : null;
+  const falseNegativeRate = c.fn + c.tp > 0 ? round3(c.fn / (c.fn + c.tp)) : null;
+  return {
+    precision,
+    recall,
+    f1Score,
+    truePositiveRate,
+    trueNegativeRate,
+    falsePositiveRate,
+    falseNegativeRate
+  };
+}
+function computeMacroAverage(groups) {
+  const meanNullable = (vals) => {
+    const valid = vals.filter((v) => v !== null && Number.isFinite(v));
+    if (valid.length === 0) return null;
+    const sum = valid.reduce((a, b) => a + b, 0);
+    return Math.round(sum / valid.length * 1e3) / 1e3;
+  };
+  return {
+    precision: meanNullable(groups.map((g) => g.precision)),
+    recall: meanNullable(groups.map((g) => g.recall)),
+    f1Score: meanNullable(groups.map((g) => g.f1Score)),
+    truePositiveRate: meanNullable(groups.map((g) => g.truePositiveRate)),
+    trueNegativeRate: meanNullable(groups.map((g) => g.trueNegativeRate)),
+    falsePositiveRate: meanNullable(groups.map((g) => g.falsePositiveRate)),
+    falseNegativeRate: meanNullable(groups.map((g) => g.falseNegativeRate))
+  };
+}
+var GoldenDatasetRunner = class _GoldenDatasetRunner {
+  static evaluateCorpusCases(corpus) {
     const cases = [];
     let tp = 0;
     let fp = 0;
@@ -26740,8 +27993,7 @@ var GoldenDatasetRunner = class {
     let inconclusiveCases = 0;
     const byLanguageAcc = {};
     const byCategoryAcc = {};
-    const datasetSha256 = crypto25.createHash("sha256").update(JSON.stringify(GOLDEN_DATASET_CORPUS), "utf8").digest("hex");
-    for (const item of GOLDEN_DATASET_CORPUS) {
+    for (const item of corpus) {
       const caseStart = performance.now();
       const result = AnalyzerRegistry.runNativeAstAndTaintPipeline({
         runId: `golden-${item.caseId}`,
@@ -26821,52 +28073,144 @@ var GoldenDatasetRunner = class {
         detectedRules: relevantFindings.map((f) => f.originalRuleId)
       });
     }
+    return {
+      cases,
+      tp,
+      fp,
+      tn,
+      fn,
+      inconclusiveCases,
+      byLanguageAcc,
+      byCategoryAcc
+    };
+  }
+  static runIndependentValidationSuite() {
+    return _GoldenDatasetRunner.runValidationSuite("INDEPENDENT_VALIDATION");
+  }
+  static runValidationSuite(datasetMode = "INTERNAL_CALIBRATION") {
+    const startMs = performance.now();
+    const memBefore = process.memoryUsage().rss;
+    const primaryCorpus = datasetMode === "INDEPENDENT_VALIDATION" ? INDEPENDENT_VALIDATION_CORPUS : GOLDEN_DATASET_CORPUS;
+    const primaryVersion = datasetMode === "INDEPENDENT_VALIDATION" ? INDEPENDENT_VALIDATION_VERSION : GOLDEN_DATASET_VERSION;
+    const primaryOriginLabel = datasetMode === "INDEPENDENT_VALIDATION" ? INDEPENDENT_VALIDATION_ORIGIN_LABEL : GOLDEN_DATASET_ORIGIN_LABEL;
+    const datasetSha256 = crypto25.createHash("sha256").update(JSON.stringify(primaryCorpus), "utf8").digest("hex");
+    const {
+      cases,
+      tp,
+      fp,
+      tn,
+      fn,
+      inconclusiveCases,
+      byLanguageAcc,
+      byCategoryAcc
+    } = _GoldenDatasetRunner.evaluateCorpusCases(primaryCorpus);
+    const independentEval = _GoldenDatasetRunner.evaluateCorpusCases(INDEPENDENT_VALIDATION_CORPUS);
+    const independentMetrics = computeConfusionMetrics({
+      tp: independentEval.tp,
+      fp: independentEval.fp,
+      tn: independentEval.tn,
+      fn: independentEval.fn
+    });
     const totalDurationMs = Math.max(1, Math.round(performance.now() - startMs));
     const memAfter = process.memoryUsage().rss;
     const memoryDeltaMb = Math.round((memAfter - memBefore) / (1024 * 1024) * 100) / 100;
-    const calcMetrics = (c) => {
-      const precision = c.tp + c.fp > 0 ? Math.round(c.tp / (c.tp + c.fp) * 1e3) / 1e3 : null;
-      const recall = c.tp + c.fn > 0 ? Math.round(c.tp / (c.tp + c.fn) * 1e3) / 1e3 : null;
-      const f1Score = precision !== null && recall !== null && precision + recall > 0 ? Math.round(2 * precision * recall / (precision + recall) * 1e3) / 1e3 : null;
-      return { precision, recall, f1Score };
-    };
-    const globalMetrics = calcMetrics({ tp, fp, tn, fn });
-    const fpr = fp + tn > 0 ? Math.round(fp / (fp + tn) * 1e3) / 1e3 : null;
-    const fnr = fn + tp > 0 ? Math.round(fn / (fn + tp) * 1e3) / 1e3 : null;
+    const microAverages = computeConfusionMetrics({ tp, fp, tn, fn });
     const byLanguage = {};
+    const langGroupMetrics = [];
     for (const [lang, acc] of Object.entries(byLanguageAcc)) {
-      byLanguage[lang] = { ...acc, ...calcMetrics(acc) };
+      const m = computeConfusionMetrics(acc);
+      langGroupMetrics.push(m);
+      byLanguage[lang] = {
+        ...acc,
+        precision: m.precision,
+        recall: m.recall,
+        f1Score: m.f1Score,
+        tpr: m.truePositiveRate,
+        tnr: m.trueNegativeRate,
+        fpr: m.falsePositiveRate,
+        fnr: m.falseNegativeRate,
+        precisionCi95: computeWilson95ConfidenceInterval(acc.tp, acc.tp + acc.fp),
+        recallCi95: computeWilson95ConfidenceInterval(acc.tp, acc.tp + acc.fn),
+        lowSampleWarning: acc.cases < 5
+      };
     }
     const byCategory = {};
+    const catGroupMetrics = [];
     for (const [cat, acc] of Object.entries(byCategoryAcc)) {
-      byCategory[cat] = { ...acc, ...calcMetrics(acc) };
+      const m = computeConfusionMetrics(acc);
+      catGroupMetrics.push(m);
+      byCategory[cat] = {
+        ...acc,
+        precision: m.precision,
+        recall: m.recall,
+        f1Score: m.f1Score,
+        tpr: m.truePositiveRate,
+        tnr: m.trueNegativeRate,
+        fpr: m.falsePositiveRate,
+        fnr: m.falseNegativeRate,
+        precisionCi95: computeWilson95ConfidenceInterval(acc.tp, acc.tp + acc.fp),
+        recallCi95: computeWilson95ConfidenceInterval(acc.tp, acc.tp + acc.fn),
+        lowSampleWarning: acc.cases < 5
+      };
     }
     const lowSampleLanguages = Object.entries(byLanguageAcc).filter(([, acc]) => acc.cases < 5).map(([lang, acc]) => `${lang}(n=${acc.cases})`);
-    const sampleWarning = GOLDEN_DATASET_CORPUS.length < 100 || lowSampleLanguages.length > 0 ? `Amostra de calibra\xE7\xE3o interna reduzida (N=${GOLDEN_DATASET_CORPUS.length}; subamostras <5 em: ${lowSampleLanguages.join(", ") || "categorias espec\xEDficas"}). N\xE3o representa o conjunto oficial OWASP Benchmark v1.2 (2.740+ casos).` : null;
+    const sampleWarning = primaryCorpus.length < 100 || lowSampleLanguages.length > 0 ? `Amostra reduzida (N=${primaryCorpus.length}; subamostras <5 em: ${lowSampleLanguages.join(", ") || "categorias espec\xEDficas"}). Intervalos de confian\xE7a de 95% (Wilson Score) reportados explicitamente; n\xE3o representa o conjunto oficial OWASP Benchmark v1.2 (2.740+ casos).` : null;
     const limitations = [
-      "Corpus interno WinHood (WINHOOD_INTERNAL_CALIBRATION_CORPUS), distinto do OWASP Benchmark oficial externo.",
-      "M\xE9tricas com denominador zero retornam null (n\xE3o avali\xE1vel estatisticamente) em vez de 100% ou 0% artificiais."
+      "Separa\xE7\xE3o estrita entre corpus interno de regress\xE3o (WINHOOD_INTERNAL_CALIBRATION_CORPUS) e benchmark independente (WINHOOD_INDEPENDENT_VALIDATION_BENCHMARK).",
+      "M\xE9tricas com denominador zero retornam null (n\xE3o avali\xE1vel estatisticamente) em vez de 100% ou 0% artificiais.",
+      "Intervalos de confian\xE7a de 95% calculados pelo m\xE9todo exato de Wilson Score (z = 1.96)."
     ];
     if (sampleWarning) limitations.push(sampleWarning);
+    const confidenceIntervals95 = {
+      precision: computeWilson95ConfidenceInterval(tp, tp + fp),
+      recall: computeWilson95ConfidenceInterval(tp, tp + fn),
+      truePositiveRate: computeWilson95ConfidenceInterval(tp, tp + fn),
+      trueNegativeRate: computeWilson95ConfidenceInterval(tn, tn + fp),
+      falsePositiveRate: computeWilson95ConfidenceInterval(fp, fp + tn),
+      falseNegativeRate: computeWilson95ConfidenceInterval(fn, fn + tp)
+    };
+    const macroAverages = {
+      byLanguage: computeMacroAverage(langGroupMetrics),
+      byCategory: computeMacroAverage(catGroupMetrics)
+    };
     const reportBody = {
       validationId: `golden-val-${Date.now()}`,
       executedAt: (/* @__PURE__ */ new Date()).toISOString(),
       engineVersion: "WINHOOD-AST-TAINT-v4.1.0",
-      datasetVersion: GOLDEN_DATASET_VERSION,
-      datasetOriginLabel: GOLDEN_DATASET_ORIGIN_LABEL,
+      datasetVersion: primaryVersion,
+      datasetOriginLabel: primaryOriginLabel,
       datasetSha256,
       sampleWarning,
-      totalCases: GOLDEN_DATASET_CORPUS.length,
+      totalCases: primaryCorpus.length,
       inconclusiveCases,
       truePositives: tp,
       falsePositives: fp,
       trueNegatives: tn,
       falseNegatives: fn,
-      precision: globalMetrics.precision,
-      recall: globalMetrics.recall,
-      f1Score: globalMetrics.f1Score,
-      falsePositiveRate: fpr,
-      falseNegativeRate: fnr,
+      precision: microAverages.precision,
+      recall: microAverages.recall,
+      f1Score: microAverages.f1Score,
+      truePositiveRate: microAverages.truePositiveRate,
+      trueNegativeRate: microAverages.trueNegativeRate,
+      falsePositiveRate: microAverages.falsePositiveRate,
+      falseNegativeRate: microAverages.falseNegativeRate,
+      confidenceIntervals95,
+      macroAverages,
+      microAverages,
+      independentValidationSummary: {
+        datasetVersion: INDEPENDENT_VALIDATION_VERSION,
+        datasetOriginLabel: INDEPENDENT_VALIDATION_ORIGIN_LABEL,
+        totalCases: INDEPENDENT_VALIDATION_CORPUS.length,
+        truePositives: independentEval.tp,
+        falsePositives: independentEval.fp,
+        trueNegatives: independentEval.tn,
+        falseNegatives: independentEval.fn,
+        precision: independentMetrics.precision,
+        recall: independentMetrics.recall,
+        f1Score: independentMetrics.f1Score,
+        falsePositiveRate: independentMetrics.falsePositiveRate,
+        falseNegativeRate: independentMetrics.falseNegativeRate
+      },
       totalDurationMs,
       memoryDeltaMb,
       limitations,

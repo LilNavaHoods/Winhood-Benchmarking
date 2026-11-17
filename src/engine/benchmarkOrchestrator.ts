@@ -172,8 +172,34 @@ export const DEFAULT_BENCHMARK_PROFILES: BenchmarkProfileConfig[] = [
   },
 ];
 
-export function buildToolAdaptersCatalog(): ToolAdapterInfo[] {
-  const nowIso = new Date().toISOString();
+export function classifyToolResultCompleteness(rec?: ToolExecutionRecord): import('../types/benchmark').ToolResultCompletenessState {
+  if (!rec || rec.exitCode === null || rec.executionMethod === 'NOT_EXECUTED') {
+    return 'NOT_EXECUTED';
+  }
+  if (
+    rec.exitCode !== 0 ||
+    rec.veracityStatus === 'EXECUTION_FAILED' ||
+    rec.veracityStatus === 'INVALID_OUTPUT' ||
+    rec.veracityStatus === 'PARSING_ERROR'
+  ) {
+    return 'INCONCLUSIVE';
+  }
+  if (rec.eligibleFilesCount === 0 || rec.analyzedFilesCount === 0) {
+    return 'EMPTY';
+  }
+  if (
+    rec.veracityStatus === 'PARTIAL' ||
+    rec.analyzedFilesCount < rec.eligibleFilesCount ||
+    (rec.errorFilesCount ?? 0) > 0 ||
+    rec.parsingErrorsCount > 0 ||
+    rec.coveragePercent < 100
+  ) {
+    return 'PARTIAL';
+  }
+  return 'COMPLETE';
+}
+
+export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]): ToolAdapterInfo[] {
   const isWin = os.platform() === 'win32';
   const probeSemgrep = ToolAvailabilityService.checkBinaryInPath('semgrep');
   const probeOpengrep = ToolAvailabilityService.checkBinaryInPath('opengrep');
@@ -186,27 +212,109 @@ export function buildToolAdaptersCatalog(): ToolAdapterInfo[] {
   const probeK6 = ToolAvailabilityService.checkBinaryInPath('k6');
   const probeNode = ToolAvailabilityService.checkBinaryInPath('node');
 
+  const findLatestExecution = (toolId: string): ToolExecutionRecord | undefined => {
+    if (!executedRecords || executedRecords.length === 0) return undefined;
+    for (let i = executedRecords.length - 1; i >= 0; i--) {
+      if (executedRecords[i].toolId === toolId) {
+        return executedRecords[i];
+      }
+    }
+    return undefined;
+  };
+
+  const resolveAdapterTelemetry = (
+    toolId: string,
+    opts: {
+      integrationType: 'NATIVE' | 'LOCAL_CLI' | 'REMOTE_API';
+      nativeAvailable: boolean;
+      externalBinaryDetected: boolean;
+      externalVersion: string | null;
+      configurationValid: boolean;
+      connectionState: 'VERIFIED' | 'NOT_CONNECTED' | 'NOT_APPLICABLE';
+    }
+  ) => {
+    const execRec = findLatestExecution(toolId);
+    const executionVerified = Boolean(execRec && execRec.exitCode !== null && execRec.rawOutputSha256);
+    const resultCompleteness = classifyToolResultCompleteness(execRec);
+
+    let adapterState: import('../types/benchmark').ToolAdapterVerifiableState;
+    if (execRec && execRec.exitCode !== null) {
+      if (execRec.exitCode !== 0) {
+        adapterState = 'EXECUTION_FAILED';
+      } else if (resultCompleteness === 'PARTIAL' || resultCompleteness === 'EMPTY') {
+        adapterState = 'PARTIAL';
+      } else if (opts.externalBinaryDetected || opts.connectionState === 'VERIFIED') {
+        adapterState = 'EXTERNAL_EXECUTION_VERIFIED';
+      } else {
+        adapterState = 'NATIVE_AVAILABLE';
+      }
+    } else if (opts.integrationType === 'REMOTE_API') {
+      if (!opts.configurationValid) {
+        adapterState = 'NOT_CONFIGURED';
+      } else if (opts.connectionState === 'VERIFIED') {
+        adapterState = 'EXTERNAL_CONNECTION_VERIFIED';
+      } else {
+        adapterState = 'NOT_CONNECTED';
+      }
+    } else if (opts.integrationType === 'LOCAL_CLI') {
+      if (opts.externalBinaryDetected) {
+        adapterState = opts.configurationValid ? 'EXTERNAL_CONFIGURED' : 'EXTERNAL_BINARY_DETECTED';
+      } else if (opts.nativeAvailable) {
+        adapterState = 'NATIVE_AVAILABLE';
+      } else {
+        adapterState = 'NOT_INSTALLED';
+      }
+    } else {
+      adapterState = opts.nativeAvailable ? 'NATIVE_AVAILABLE' : 'NOT_MEASURED';
+    }
+
+    return {
+      integrationType: opts.integrationType,
+      adapterState,
+      nativeAvailable: opts.nativeAvailable,
+      externalBinaryDetected: opts.externalBinaryDetected,
+      externalVersion: opts.externalVersion,
+      configurationValid: opts.configurationValid,
+      connectionState: opts.connectionState,
+      executionVerified,
+      resultCompleteness,
+      lastExecutionAt: execRec ? execRec.completedAt : null,
+      lastExitCode: execRec ? execRec.exitCode : null,
+    };
+  };
+
+  const sastExternalDetected = probeSemgrep.detected || probeOpengrep.detected;
+  const sastExternalVersion = probeSemgrep.versionOutput || probeOpengrep.versionOutput || null;
+  const scaExternalDetected = probeOsv.detected || probeGrype.detected || probeSyft.detected;
+  const scaExternalVersion = probeOsv.versionOutput || probeGrype.versionOutput || probeSyft.versionOutput || null;
+  const zapConfigured = Boolean(process.env.OWASP_ZAP_API_URL);
+
   return [
     {
       id: 'opengrep-sast',
       name: 'WinHood AST/Taint SAST + Semgrep/Opengrep Adapter',
       vendor: 'WinHood Security / Semgrep',
-      version: probeSemgrep.versionOutput || probeOpengrep.versionOutput || '4.1.0-native-ast',
+      version: sastExternalVersion || '4.1.0-native-ast',
       category: 'SECURITY_DEVSECOPS',
       analysisType: 'SAST AST & Cross-File Taint (SQLi, RCE, CWE Top 25)',
-      executionMethod: probeSemgrep.detected || probeOpengrep.detected ? 'CLI_BINARY' : 'NATIVE_AST_ENGINE',
+      executionMethod: sastExternalDetected ? 'CLI_BINARY' : 'NATIVE_AST_ENGINE',
       canonicalFormat: 'SARIF_2_1_0',
       status: 'OPERATIONAL',
-      binaryDetected: true,
+      binaryDetected: sastExternalDetected,
       configured: true,
-      signatureHash: computeSha256('winhood-ast-taint-4.1.0'),
-      description:
-        probeSemgrep.detected || probeOpengrep.detected
-          ? 'Binário CLI externo detectado no host e integrado ao pipeline AST nativo WinHood.'
-          : 'Motor AST Compiler nativo WinHood (TypeScript/Python/Java/SQL) operacional; CLI externo semgrep/opengrep não instalado no container.',
+      signatureHash: computeSha256(`winhood-ast-taint-4.1.0:ext=${sastExternalDetected}`),
+      description: sastExternalDetected
+        ? 'Binário CLI externo detectado no host e integrado ao pipeline AST nativo WinHood.'
+        : 'Motor AST Compiler nativo WinHood (TypeScript/Python/Java/SQL) operacional; CLI externo semgrep/opengrep não instalado no container.',
       supportedLanguages: ['TypeScript', 'JavaScript', 'Python', 'SQL', 'C#', 'Java', 'Go', 'Rust'],
-      lastExecutionAt: nowIso,
-      lastExitCode: 0,
+      ...resolveAdapterTelemetry('opengrep-sast', {
+        integrationType: sastExternalDetected ? 'LOCAL_CLI' : 'NATIVE',
+        nativeAvailable: true,
+        externalBinaryDetected: sastExternalDetected,
+        externalVersion: sastExternalVersion,
+        configurationValid: true,
+        connectionState: 'NOT_APPLICABLE',
+      }),
     },
     {
       id: 'gitleaks-secrets',
@@ -218,15 +326,21 @@ export function buildToolAdaptersCatalog(): ToolAdapterInfo[] {
       executionMethod: probeGitleaks.detected ? 'CLI_BINARY' : 'NATIVE_AST_ENGINE',
       canonicalFormat: 'SARIF_2_1_0',
       status: 'OPERATIONAL',
-      binaryDetected: true,
+      binaryDetected: probeGitleaks.detected,
       configured: true,
-      signatureHash: computeSha256('winhood-secret-scanner-4.1.0'),
+      signatureHash: computeSha256(`winhood-secret-scanner-4.1.0:ext=${probeGitleaks.detected}`),
       description: probeGitleaks.detected
         ? 'Binário Gitleaks CLI detectado no host com mascaramento automático de evidências.'
         : 'Detector nativo WinHood por AST e entropia ativo; binário gitleaks CLI não instalado neste host.',
       supportedLanguages: ['TypeScript', 'JavaScript', 'Python', 'JSON', 'YAML', 'SQL'],
-      lastExecutionAt: nowIso,
-      lastExitCode: 0,
+      ...resolveAdapterTelemetry('gitleaks-secrets', {
+        integrationType: probeGitleaks.detected ? 'LOCAL_CLI' : 'NATIVE',
+        nativeAvailable: true,
+        externalBinaryDetected: probeGitleaks.detected,
+        externalVersion: probeGitleaks.versionOutput || null,
+        configurationValid: true,
+        connectionState: 'NOT_APPLICABLE',
+      }),
     },
     {
       id: 'mqr-bridge-quality',
@@ -238,33 +352,45 @@ export function buildToolAdaptersCatalog(): ToolAdapterInfo[] {
       executionMethod: probeSonarScanner.detected ? 'CLI_BINARY' : 'NATIVE_AST_ENGINE',
       canonicalFormat: 'SARIF_2_1_0',
       status: 'OPERATIONAL',
-      binaryDetected: true,
+      binaryDetected: probeSonarScanner.detected,
       configured: true,
-      signatureHash: computeSha256('winhood-sonar-mqr-3.0.0'),
+      signatureHash: computeSha256(`winhood-sonar-mqr-3.0.0:ext=${probeSonarScanner.detected}`),
       description: probeSonarScanner.detected
         ? 'SonarScanner CLI detectado no host para submissão real à instância MqrBridge conectada.'
         : 'Cálculo estático nativo MQR ativo; conecte instância MqrBridge Server/Cloud ou instale sonar-scanner para métricas remotas nativas.',
       supportedLanguages: ['TypeScript', 'JavaScript', 'Python', 'Java', 'C#', 'Go', 'Rust'],
-      lastExecutionAt: nowIso,
-      lastExitCode: 0,
+      ...resolveAdapterTelemetry('mqr-bridge-quality', {
+        integrationType: probeSonarScanner.detected ? 'LOCAL_CLI' : 'NATIVE',
+        nativeAvailable: true,
+        externalBinaryDetected: probeSonarScanner.detected,
+        externalVersion: probeSonarScanner.versionOutput || null,
+        configurationValid: true,
+        connectionState: 'NOT_APPLICABLE',
+      }),
     },
     {
       id: 'syft-grype-sca',
       name: 'WinHood CycloneDX/SPDX SBOM & OSV/NVD/EPSS/KEV SCA',
       vendor: 'WinHood SCA / OSV / Anchore',
-      version: probeOsv.versionOutput || probeGrype.versionOutput || '4.1.0-native-sbom',
+      version: scaExternalVersion || '4.1.0-native-sbom',
       category: 'SECURITY_DEVSECOPS',
       analysisType: 'SCA & SBOM CycloneDX 1.5 / SPDX 2.3 (CVE, GHSA, EPSS, CISA KEV)',
-      executionMethod: probeOsv.detected || probeGrype.detected || probeSyft.detected ? 'CLI_BINARY' : 'NATIVE_AST_ENGINE',
+      executionMethod: scaExternalDetected ? 'CLI_BINARY' : 'NATIVE_AST_ENGINE',
       canonicalFormat: 'CYCLONEDX_1_5',
       status: 'OPERATIONAL',
-      binaryDetected: true,
+      binaryDetected: scaExternalDetected,
       configured: true,
-      signatureHash: computeSha256('winhood-sbom-sca-4.1.0'),
+      signatureHash: computeSha256(`winhood-sbom-sca-4.1.0:ext=${scaExternalDetected}`),
       description: 'Gerador real CycloneDX 1.5 e SPDX 2.3 a partir de lockfiles/manifestos + correlação OSV/NVD/EPSS/CISA KEV.',
       supportedLanguages: ['JSON', 'TypeScript', 'JavaScript', 'Python', 'Go', 'Rust', 'Java'],
-      lastExecutionAt: nowIso,
-      lastExitCode: 0,
+      ...resolveAdapterTelemetry('syft-grype-sca', {
+        integrationType: scaExternalDetected ? 'LOCAL_CLI' : 'NATIVE',
+        nativeAvailable: true,
+        externalBinaryDetected: scaExternalDetected,
+        externalVersion: scaExternalVersion,
+        configurationValid: true,
+        connectionState: 'NOT_APPLICABLE',
+      }),
     },
     {
       id: 'archunit-cruiser',
@@ -276,13 +402,19 @@ export function buildToolAdaptersCatalog(): ToolAdapterInfo[] {
       executionMethod: 'NATIVE_AST_ENGINE',
       canonicalFormat: 'ARCH_GRAPH_JSON',
       status: 'OPERATIONAL',
-      binaryDetected: true,
+      binaryDetected: false,
       configured: true,
       signatureHash: computeSha256('winhood-arch-graph-4.1.0'),
-      description: 'Mapeamento estrutural real de importações, detecção de ciclos e auditoria de camadas.',
+      description: 'Mapeamento estrutural real de importações, detecção de ciclos e auditoria de camadas (Motor Nativo WinHood).',
       supportedLanguages: ['TypeScript', 'JavaScript', 'Python'],
-      lastExecutionAt: nowIso,
-      lastExitCode: 0,
+      ...resolveAdapterTelemetry('archunit-cruiser', {
+        integrationType: 'NATIVE',
+        nativeAvailable: true,
+        externalBinaryDetected: false,
+        externalVersion: null,
+        configurationValid: true,
+        connectionState: 'NOT_APPLICABLE',
+      }),
     },
     {
       id: 'sqlfluff-db',
@@ -294,13 +426,19 @@ export function buildToolAdaptersCatalog(): ToolAdapterInfo[] {
       executionMethod: 'NATIVE_AST_ENGINE',
       canonicalFormat: 'SARIF_2_1_0',
       status: 'OPERATIONAL',
-      binaryDetected: true,
+      binaryDetected: false,
       configured: true,
       signatureHash: computeSha256('winhood-sql-auditor-4.1.0'),
-      description: 'Parser estrutural DDL/DML SQL, índices de chaves estrangeiras e proteção de colunas sensíveis.',
+      description: 'Parser estrutural DDL/DML SQL, índices de chaves estrangeiras e proteção de colunas sensíveis (Motor Nativo WinHood).',
       supportedLanguages: ['SQL'],
-      lastExecutionAt: nowIso,
-      lastExitCode: 0,
+      ...resolveAdapterTelemetry('sqlfluff-db', {
+        integrationType: 'NATIVE',
+        nativeAvailable: true,
+        externalBinaryDetected: false,
+        externalVersion: null,
+        configurationValid: true,
+        connectionState: 'NOT_APPLICABLE',
+      }),
     },
     {
       id: 'junit-functional',
@@ -317,8 +455,14 @@ export function buildToolAdaptersCatalog(): ToolAdapterInfo[] {
       signatureHash: computeSha256('winhood-test-cov-4.1.0'),
       description: 'Executa suítes reais em sandbox temporário e analisa LCOV/JaCoCo/Cobertura/Istanbul sem fabricar cobertura.',
       supportedLanguages: ['TypeScript', 'JavaScript', 'Python', 'Java'],
-      lastExecutionAt: null,
-      lastExitCode: null,
+      ...resolveAdapterTelemetry('junit-functional', {
+        integrationType: 'LOCAL_CLI',
+        nativeAvailable: true,
+        externalBinaryDetected: probeNode.detected,
+        externalVersion: probeNode.versionOutput || null,
+        configurationValid: probeNode.detected,
+        connectionState: 'NOT_APPLICABLE',
+      }),
     },
     {
       id: 'k6-perf-equivalent',
@@ -330,15 +474,21 @@ export function buildToolAdaptersCatalog(): ToolAdapterInfo[] {
       executionMethod: probeK6.detected ? 'CLI_BINARY' : 'SANDBOX_WORKER',
       canonicalFormat: 'OTLP_METRICS',
       status: 'OPERATIONAL',
-      binaryDetected: true,
+      binaryDetected: probeK6.detected,
       configured: true,
-      signatureHash: computeSha256('winhood-http-perf-4.1.0'),
+      signatureHash: computeSha256(`winhood-http-perf-4.1.0:k6=${probeK6.detected}`),
       description: probeK6.detected
         ? 'Binário k6 detectado no host para testes de carga.'
-        : 'Profiler HTTP controlado ativo via /api/execution/run-perf (análise estática não fabrica P95/RPS).',
+        : 'Profiler HTTP controlado ativo via /api/execution/run-perf; binário externo k6 não instalado neste host (análise estática não fabrica P95/RPS).',
       supportedLanguages: ['HTTP', 'API'],
-      lastExecutionAt: null,
-      lastExitCode: null,
+      ...resolveAdapterTelemetry('k6-perf-equivalent', {
+        integrationType: probeK6.detected ? 'LOCAL_CLI' : 'NATIVE',
+        nativeAvailable: true,
+        externalBinaryDetected: probeK6.detected,
+        externalVersion: probeK6.versionOutput || null,
+        configurationValid: true,
+        connectionState: 'NOT_APPLICABLE',
+      }),
     },
     {
       id: 'win-sandbox-snapshot',
@@ -357,8 +507,14 @@ export function buildToolAdaptersCatalog(): ToolAdapterInfo[] {
         ? 'Host Windows detectado para inspeção de instalação/registro.'
         : 'Sandbox Windows indisponível em host Linux; executa apenas inspeção estática de manifesto (STATIC_MANIFEST_INSPECTION).',
       supportedLanguages: ['Windows', 'Manifests'],
-      lastExecutionAt: null,
-      lastExitCode: null,
+      ...resolveAdapterTelemetry('win-sandbox-snapshot', {
+        integrationType: 'LOCAL_CLI',
+        nativeAvailable: true,
+        externalBinaryDetected: isWin,
+        externalVersion: isWin ? '2026.11' : null,
+        configurationValid: isWin,
+        connectionState: 'NOT_APPLICABLE',
+      }),
     },
     {
       id: 'owasp-zap-dast',
@@ -369,14 +525,20 @@ export function buildToolAdaptersCatalog(): ToolAdapterInfo[] {
       analysisType: 'DAST (Dynamic Application Security Testing sob autorização formal)',
       executionMethod: 'EXTERNAL_API',
       canonicalFormat: 'SARIF_2_1_0',
-      status: process.env.OWASP_ZAP_API_URL ? 'OPERATIONAL' : 'INTEGRAÇÃO NÃO CONFIGURADA',
-      binaryDetected: Boolean(process.env.OWASP_ZAP_API_URL),
-      configured: Boolean(process.env.OWASP_ZAP_API_URL),
-      signatureHash: computeSha256('owasp-zap-2.15.0'),
+      status: zapConfigured ? 'INTEGRAÇÃO CONFIGURADA' : 'INTEGRAÇÃO NÃO CONFIGURADA',
+      binaryDetected: false,
+      configured: zapConfigured,
+      signatureHash: zapConfigured ? computeSha256('owasp-zap-2.15.0') : null,
       description: 'Requer endpoint externo OWASP_ZAP_API_URL e autorização formal do proprietário do ambiente.',
       supportedLanguages: ['Web', 'API'],
-      lastExecutionAt: null,
-      lastExitCode: null,
+      ...resolveAdapterTelemetry('owasp-zap-dast', {
+        integrationType: 'REMOTE_API',
+        nativeAvailable: false,
+        externalBinaryDetected: false,
+        externalVersion: null,
+        configurationValid: zapConfigured,
+        connectionState: 'NOT_CONNECTED',
+      }),
     },
     {
       id: 'trivy-container-cli',
@@ -390,13 +552,19 @@ export function buildToolAdaptersCatalog(): ToolAdapterInfo[] {
       status: probeTrivy.detected ? 'OPERATIONAL' : 'FERRAMENTA NÃO INSTALADA',
       binaryDetected: probeTrivy.detected,
       configured: probeTrivy.detected,
-      signatureHash: computeSha256(`trivy-cli-${probeTrivy.detected}`),
+      signatureHash: probeTrivy.detected ? computeSha256(`trivy-cli-${probeTrivy.versionOutput}`) : null,
       description: probeTrivy.detected
         ? `Binário trivy detectado em ${probeTrivy.executablePath}.`
         : 'Binário nativo trivy ausente no container atual; análise SCA coberta pelo SbomGenerator/ScaCorrelator nativo.',
       supportedLanguages: ['Docker', 'Terraform', 'Kubernetes'],
-      lastExecutionAt: null,
-      lastExitCode: null,
+      ...resolveAdapterTelemetry('trivy-container-cli', {
+        integrationType: 'LOCAL_CLI',
+        nativeAvailable: false,
+        externalBinaryDetected: probeTrivy.detected,
+        externalVersion: probeTrivy.versionOutput || null,
+        configurationValid: probeTrivy.detected,
+        connectionState: 'NOT_APPLICABLE',
+      }),
     },
   ];
 }

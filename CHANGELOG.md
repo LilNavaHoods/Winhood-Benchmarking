@@ -4,7 +4,19 @@ Todas as mudanças notáveis da plataforma **WinHood Benchmarking** seguem **Ver
 
 ---
 
-## [4.4.0] - 2026-11-15 — Iteração de Fechamento (Posicionamento Independente, IDE, CI/CD, Transparência e Relatórios Assinados)
+## [4.4.0] - 2026-11-17 — Auditoria Multidisciplinar de Segurança, Criptografia por Envelope V2, Cobertura V8 Real e Validação Estatística
+
+### Segurança Criptográfica, Keystore Envelope V2 e Autenticação (Fases 1 & 4)
+- **Keystore Envelope Encryption V2 (`WINHOOD-ENVELOPE-V2`):** Geração de DEK CSPRNG de 256 bits cifrada com `AES-256-GCM` (nonce único de 96 bits + AAD contextual), protegida por KEK (Windows DPAPI, segredo externo ou KEK local com permissão `0600`), derivação segregada por finalidade via **HKDF-SHA256 (RFC 5869)**, contador monotônico anti-rollback (`.seq`) e **Trust Store Ed25519** com rotação e revogação verificadas por `verifyEvidenceChainAndManifest()`.
+- **Proteção de Senhas e Migração Transparente:** Evolução dos parâmetros Scrypt (`N=32768, r=8, p=1, maxmem=64MB`) com formato versionado e migração transparente (`needsPasswordRehash`) para contas existentes (`N=16384`).
+- **Higiene de Dependências e Supply Chain:** Padronização exclusiva em NPM (`package-lock.json` v3), remoção de `bun.lock` do repositório raiz, atualização de `electron@^45.3.3` e `electron-builder@^26.18.0`, overrides de segurança (`esbuild@^0.28.2`, `minimatch@^11.0.9`) com `npm audit` = **0 vulnerabilidades**, e GitHub Actions pinadas por commit SHA de 40 caracteres.
+
+### Cobertura Real V8 + SourceMap, Motores Analíticos, Comparabilidade e SCA (Fases 2, 3, 5, 6 & 7)
+- **Cobertura Convencional V8 + SourceMap (`scripts/run-coverage-gate.mjs`):** Substituição da estimativa heurística de bytes por projeção real de linhas, funções, branches e statements via `node:module` `SourceMap` nos **13 domínios oficiais** (`src/execution/CoverageDomainInventory.ts`), com separação estrita entre `testCoverage`, `ingestionCoverage` e `analysisCoverage`.
+- **Rastreabilidade de Ferramentas (`ToolAdapterInfo`):** Declaração explícita de `integrationType` (`NATIVE`, `LOCAL_CLI`, `REMOTE_API`), estados granulares de prontidão e `resultCompleteness` (`COMPLETE`, `PARTIAL`, `EMPTY`, `INCONCLUSIVE`, `NOT_EXECUTED`), mantendo `lastExecutionAt` e `lastExitCode` como `null` quando não executadas.
+- **Validação Estatística Independente (`GoldenDatasetRunner.ts`):** Separação entre corpus interno de regressão e `INDEPENDENT_VALIDATION_CORPUS`, calculando Precision, Recall, F1, TPR, TNR, FPR, FNR, **Intervalos de Confiança de 95% (Wilson Score)** e médias Macro/Micro por linguagem e categoria.
+- **Comparabilidade Bimodal & Quality Gates em 3 Níveis:** Suporte explícito a `SAME_ENGINE` e `CROSS_TOOL` (`STRICTLY_COMPARABLE`, `QUALIFIED_COMPARISON`, `NOT_COMPARABLE`) e condições de Quality Gate classificadas em `REQUIRED`, `OPTIONAL` e `INFORMATIVE`.
+- **SCA Multi-Lockfile & Proveniência Estrita de Licenças:** Suporte a projetos externos com `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lock` e `Cargo.lock`, uso de `NOASSERTION` quando a licença não é comprovada por manifesto e metadados de frescor dos feeds (`advisoryFeedMetadata`).
 
 ### Posicionamento Independente & Renomeações (Bloco A)
 - **Modo MQR (Modern Quality Regime) & Perfil de Qualidade Estrita:** Renomeado o antigo modo `"SonarQube MQR Mode"` para **`"Modo MQR (Modern Quality Regime)"`** e **`"Perfil de Qualidade Estrita"`**, mantendo 100% do comportamento funcional e retrocompatibilidade de chaves de configuração.

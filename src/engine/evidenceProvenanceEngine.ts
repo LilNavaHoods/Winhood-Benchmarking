@@ -527,24 +527,29 @@ export function verifyEvidenceChainAndManifest(
     }
 
     if (signedManifest.ed25519Signature) {
-      const pubPem =
-        (signedManifest.ed25519KeyId
-          ? KeyManagementService.getEd25519PublicKeyByKeyId(signedManifest.ed25519KeyId)
-          : null) || signedManifest.ed25519PublicKeyPem;
+      const trustCheck = KeyManagementService.verifyTrustedEd25519PublicKey(
+        signedManifest.ed25519KeyId ?? undefined,
+        signedManifest.ed25519PublicKeyPem ?? undefined,
+        signedManifest.generatedAt
+      );
 
-      if (!pubPem) {
+      if (!trustCheck.trusted || !trustCheck.publicKeyPem) {
         ed25519SignatureValid = false;
-        details.push('Chave pública Ed25519 indisponível para validar assinatura assimétrica.');
+        details.push(`Falha de confiança na chave Ed25519: ${trustCheck.reason}`);
       } else {
         try {
           ed25519SignatureValid = crypto.verify(
             null,
             Buffer.from(manifestPayloadSha256, 'utf8'),
-            pubPem,
+            trustCheck.publicKeyPem,
             Buffer.from(signedManifest.ed25519Signature, 'base64')
           );
+          if (!ed25519SignatureValid) {
+            details.push('Assinatura criptográfica Ed25519 inválida para o payload do manifesto.');
+          }
         } catch {
           ed25519SignatureValid = false;
+          details.push('Erro ao verificar assinatura Ed25519 com a chave pública registrada no Trust Store.');
         }
       }
     }

@@ -207,40 +207,140 @@ export class ParserRegistry {
     return 'Other';
   }
 
+  public static getLanguageAnalyticalCapabilities(): Array<{
+    language: SupportedAstLanguage;
+    parserKind: 'BABEL_AST' | 'STRUCTURAL_PARSER';
+    analyticalDepth: 'FULL_AST' | 'STRUCTURAL_AST';
+    parserEngine: string;
+    supportsCrossFileTaint: boolean;
+    supportsFullSyntaxTree: boolean;
+  }> {
+    return [
+      {
+        language: 'TypeScript',
+        parserKind: 'BABEL_AST',
+        analyticalDepth: 'FULL_AST',
+        parserEngine: '@babel/parser',
+        supportsCrossFileTaint: true,
+        supportsFullSyntaxTree: true,
+      },
+      {
+        language: 'JavaScript',
+        parserKind: 'BABEL_AST',
+        analyticalDepth: 'FULL_AST',
+        parserEngine: '@babel/parser',
+        supportsCrossFileTaint: true,
+        supportsFullSyntaxTree: true,
+      },
+      {
+        language: 'Python',
+        parserKind: 'STRUCTURAL_PARSER',
+        analyticalDepth: 'STRUCTURAL_AST',
+        parserEngine: 'winhood-python-token-ast-v1',
+        supportsCrossFileTaint: true,
+        supportsFullSyntaxTree: false,
+      },
+      {
+        language: 'Java',
+        parserKind: 'STRUCTURAL_PARSER',
+        analyticalDepth: 'STRUCTURAL_AST',
+        parserEngine: 'winhood-java-token-ast-v1',
+        supportsCrossFileTaint: true,
+        supportsFullSyntaxTree: false,
+      },
+      {
+        language: 'C#',
+        parserKind: 'STRUCTURAL_PARSER',
+        analyticalDepth: 'STRUCTURAL_AST',
+        parserEngine: 'winhood-csharp-token-ast-v1',
+        supportsCrossFileTaint: true,
+        supportsFullSyntaxTree: false,
+      },
+      {
+        language: 'Go',
+        parserKind: 'STRUCTURAL_PARSER',
+        analyticalDepth: 'STRUCTURAL_AST',
+        parserEngine: 'winhood-go-token-ast-v1',
+        supportsCrossFileTaint: true,
+        supportsFullSyntaxTree: false,
+      },
+      {
+        language: 'Rust',
+        parserKind: 'STRUCTURAL_PARSER',
+        analyticalDepth: 'STRUCTURAL_AST',
+        parserEngine: 'winhood-rust-token-ast-v1',
+        supportsCrossFileTaint: true,
+        supportsFullSyntaxTree: false,
+      },
+      {
+        language: 'SQL',
+        parserKind: 'STRUCTURAL_PARSER',
+        analyticalDepth: 'STRUCTURAL_AST',
+        parserEngine: 'winhood-sql-token-ast-v1',
+        supportsCrossFileTaint: false,
+        supportsFullSyntaxTree: false,
+      },
+    ];
+  }
+
   public static parseFile(filePath: string, content: string): AstParseResult {
     const language = ParserRegistry.detectLanguage(filePath);
+    let rawResult: AstParseResult;
     if (language === 'TypeScript' || language === 'JavaScript') {
-      return ParserRegistry.parseTypeScriptOrJsAst(filePath, content, language);
-    }
-    if (language === 'Python') {
-      return ParserRegistry.parsePythonStructuralAst(filePath, content);
-    }
-    if (language === 'Java' || language === 'C#' || language === 'Go' || language === 'Rust') {
-      return ParserRegistry.parseBraceLanguageStructuralAst(filePath, content, language);
-    }
-    if (language === 'SQL') {
-      return ParserRegistry.parseSqlAst(filePath, content);
+      rawResult = ParserRegistry.parseTypeScriptOrJsAst(filePath, content, language);
+    } else if (language === 'Python') {
+      rawResult = ParserRegistry.parsePythonStructuralAst(filePath, content);
+    } else if (language === 'Java' || language === 'C#' || language === 'Go' || language === 'Rust') {
+      rawResult = ParserRegistry.parseBraceLanguageStructuralAst(filePath, content, language);
+    } else if (language === 'SQL') {
+      rawResult = ParserRegistry.parseSqlAst(filePath, content);
+    } else {
+      const lines = content.split(/\r?\n/);
+      rawResult = {
+        filePath,
+        language,
+        astParsed: false,
+        parserKind: 'UNSUPPORTED',
+        analyticalDepth: 'UNSUPPORTED',
+        errorCount: 0,
+        parserEngine: 'UNSUPPORTED_EXTENSION',
+        loc: lines.filter((l) => l.trim().length > 0).length,
+        cyclomaticComplexity: 1,
+        cognitiveComplexity: 0,
+        imports: [],
+        functions: [],
+        callSites: [],
+        issues: [],
+        hasAuditSignals: false,
+        hasCryptoSignals: false,
+        hasWeakCryptoSignals: false,
+        hasPreparedStatementSignals: false,
+      };
     }
 
-    const lines = content.split(/\r?\n/);
+    const errCount = rawResult.errorCount ?? 0;
+    const analyticalDepth =
+      rawResult.parserKind === 'UNSUPPORTED' || !rawResult.astParsed
+        ? 'UNSUPPORTED'
+        : errCount > 0
+          ? 'PARTIAL_RECOVERY'
+          : rawResult.parserKind === 'BABEL_AST'
+            ? 'FULL_AST'
+            : 'STRUCTURAL_AST';
+
+    // When a file required partial syntax error recovery, calibrate issue confidence (never claim HIGH on partial recovery)
+    const calibratedIssues =
+      analyticalDepth === 'PARTIAL_RECOVERY'
+        ? rawResult.issues.map((iss) => ({
+            ...iss,
+            confidence: iss.confidence === 'HIGH' ? ('MEDIUM' as const) : iss.confidence,
+          }))
+        : rawResult.issues;
+
     return {
-      filePath,
-      language,
-      astParsed: false,
-      parserKind: 'UNSUPPORTED',
-      errorCount: 0,
-      parserEngine: 'UNSUPPORTED_EXTENSION',
-      loc: lines.filter((l) => l.trim().length > 0).length,
-      cyclomaticComplexity: 1,
-      cognitiveComplexity: 0,
-      imports: [],
-      functions: [],
-      callSites: [],
-      issues: [],
-      hasAuditSignals: false,
-      hasCryptoSignals: false,
-      hasWeakCryptoSignals: false,
-      hasPreparedStatementSignals: false,
+      ...rawResult,
+      analyticalDepth,
+      issues: calibratedIssues,
     };
   }
 
@@ -860,9 +960,20 @@ export class ParserRegistry {
             }
           }
 
-          // Direct SQL execution with unsafe argument
+          // Direct SQL execution with unsafe argument or bound interpolated SQL variable
           if (/^(query|execute|raw|exec)$/i.test(calleeBase) && args[0]) {
-            if (containsSqlConcat(args[0]) && !isNoSonarLine(lineNo)) {
+            const sqlVarBinding =
+              args[0].type === 'Identifier'
+                ? variableBindings.find((b) => b.varName === args[0].name)
+                : undefined;
+            const hasUnsafeSqlBinding = Boolean(
+              sqlVarBinding &&
+                !sqlVarBinding.isSanitized &&
+                sqlVarBinding.dependencies.length > 0 &&
+                /\b(SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)\b/i.test(sqlVarBinding.expressionText) &&
+                (sqlVarBinding.expressionText.includes('+') || sqlVarBinding.expressionText.includes('${'))
+            );
+            if ((containsSqlConcat(args[0]) || hasUnsafeSqlBinding) && !isNoSonarLine(lineNo)) {
               issues.push({
                 ruleId: 'ts:S3649',
                 title: 'Execução SQL com string concatenada/interpolada',
@@ -1307,14 +1418,19 @@ export class ParserRegistry {
       if (currentFn !== '<module>') {
         const lineIndent = getLineIndent(tok.line);
         const lineText = (lines[tok.line - 1] || '').trim();
-        if (lineText.length > 0 && lineIndent <= currentFnIndent && tok.value !== 'def') {
-          const prevFn = functions.find((f) => f.name === currentFn);
-          if (prevFn && prevFn.endLine < tok.line) prevFn.endLine = tok.line - 1;
+        const prevFn = functions.find((f) => f.name === currentFn);
+        if (
+          prevFn &&
+          tok.line > prevFn.startLine &&
+          lineText.length > 0 &&
+          lineIndent <= currentFnIndent &&
+          tok.value !== 'def'
+        ) {
+          if (prevFn.endLine < tok.line) prevFn.endLine = tok.line - 1;
           currentFn = '<module>';
           currentFnIndent = -1;
-        } else {
-          const prevFn = functions.find((f) => f.name === currentFn);
-          if (prevFn) prevFn.endLine = Math.max(prevFn.endLine, tok.line);
+        } else if (prevFn) {
+          prevFn.endLine = Math.max(prevFn.endLine, tok.line);
         }
       }
 
@@ -1416,7 +1532,7 @@ export class ParserRegistry {
               if (tokens[k]!.type === 'IDENT') deps.push(tokens[k]!.value);
               k += 1;
             }
-            const exprLine = (lines[tok.line - 1] || '').split('=')[1]?.trim() || '';
+            const exprLine = (lines[tok.line - 1] || '').split('=').slice(1).join('=').trim() || '';
             const san = detectSanitizerContextPy(exprLine);
             fnObj.variableBindings.push({
               varName: tok.value,
@@ -1543,7 +1659,27 @@ export class ParserRegistry {
             effortMinutes: 25,
           });
         }
-        if (tok.value === 'execute' && (site.snippet.includes('f"') || site.snippet.includes('f\'') || site.snippet.includes('+'))) {
+        const fnObj = functions.find((f) => f.name === currentFn);
+        const pyHasUnsafeSqlBinding = Boolean(
+          fnObj &&
+            site.argIdentifiers.some((argId) => {
+              const b = fnObj.variableBindings.find((vb) => vb.varName === argId);
+              return (
+                b &&
+                !b.isSanitized &&
+                b.dependencies.length > 0 &&
+                /\b(SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)\b/i.test(b.expressionText) &&
+                (b.expressionText.includes('+') || b.expressionText.includes('f"') || b.expressionText.includes("f'"))
+              );
+            })
+        );
+        if (
+          tok.value === 'execute' &&
+          (site.snippet.includes('f"') ||
+            site.snippet.includes("f'") ||
+            site.snippet.includes('+') ||
+            pyHasUnsafeSqlBinding)
+        ) {
           issues.push({
             ruleId: 'py:B608',
             title: 'SQL construído com f-string ou concatenação em cursor.execute()',
@@ -1565,7 +1701,6 @@ export class ParserRegistry {
         if (tok.value === 'execute' && (site.snippet.includes('?') || site.snippet.includes('%s'))) hasPrepared = true;
         if (/audit/i.test(prevIdent)) hasAudit = true;
 
-        const fnObj = functions.find((f) => f.name === currentFn);
         if (fnObj) fnObj.callsMade.push(site);
       }
     }

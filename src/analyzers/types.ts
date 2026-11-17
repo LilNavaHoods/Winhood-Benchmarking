@@ -81,11 +81,18 @@ export interface AstIssueCandidate {
   executionFlows?: CodeExecutionFlowStep[];
 }
 
+export type AstAnalyticalDepth =
+  | 'FULL_AST'
+  | 'STRUCTURAL_AST'
+  | 'PARTIAL_RECOVERY'
+  | 'UNSUPPORTED';
+
 export interface AstParseResult {
   filePath: string;
   language: SupportedAstLanguage;
   astParsed: boolean;
   parserKind: 'BABEL_AST' | 'STRUCTURAL_PARSER' | 'UNSUPPORTED';
+  analyticalDepth?: AstAnalyticalDepth;
   errorCount?: number;
   parserEngine: string;
   loc: number;

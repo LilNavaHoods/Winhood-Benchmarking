@@ -59,6 +59,10 @@ import {
   csrfFetch as fetch,
   setGlobalCsrfToken,
 } from './utils/csrfFetch';
+import {
+  DEFAULT_SECURITY_SUITE_FILTERS,
+  type SecuritySuiteFilterState,
+} from './utils/securityFindingsFilter';
 import QRCode from 'qrcode';
 
 // Lazy-loaded modules (Seção 11.7 — Otimização do frontend: Code Splitting & Lazy Loading sob demanda)
@@ -210,6 +214,9 @@ export default function App() {
   const [profiles, setProfiles] = useState<BenchmarkProfileConfig[]>([]);
   const [adapters, setAdapters] = useState<ToolAdapterInfo[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
+  const [securitySuiteFilters, setSecuritySuiteFilters] = useState<SecuritySuiteFilterState>(
+    DEFAULT_SECURITY_SUITE_FILTERS
+  );
 
   const [isUploadModalOpen, setIsUploadModalOpen] = useState<boolean>(false);
   const [isGitHubModalOpen, setIsGitHubModalOpen] = useState<boolean>(false);
@@ -523,6 +530,7 @@ export default function App() {
       setDashboardData(null);
       setProjects([]);
       setSoftwares([]);
+      setSecuritySuiteFilters(DEFAULT_SECURITY_SUITE_FILTERS);
       notify('Sessão encerrada com segurança.', 'success');
       await checkAuthSession();
     }
@@ -697,6 +705,7 @@ export default function App() {
         notify(data.message || data.error || 'Acesso negado.', 'error');
         return;
       }
+      setSecuritySuiteFilters(DEFAULT_SECURITY_SUITE_FILTERS);
       notify('Estado inicial vazio ativado (0 avaliações no backend).', 'success');
       await fetchAllBackendState();
     } catch {
@@ -1230,6 +1239,11 @@ export default function App() {
             {activeNav === 'security_suite' && (
               <SecurityAssessmentSuiteModule
                 latestRun={dashboardData?.latestRun || null}
+                softwares={softwares}
+                projects={projects}
+                securitySuiteFilters={securitySuiteFilters}
+                onSecuritySuiteFiltersChange={setSecuritySuiteFilters}
+                onRunUpdated={handleRunUpdated}
                 onRefresh={fetchAllBackendState}
                 onNotify={notify}
               />

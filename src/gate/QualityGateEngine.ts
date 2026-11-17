@@ -24,6 +24,8 @@ export type GateMetricKey =
   | 'evidence_confidence_score'
   | 'overall_score';
 
+export type GateConditionRequirementTier = 'REQUIRED' | 'OPTIONAL' | 'INFORMATIVE';
+
 export interface QualityGateConditionRule {
   id: string;
   metricKey: GateMetricKey;
@@ -31,6 +33,7 @@ export interface QualityGateConditionRule {
   operator: GateOperator;
   threshold: number;
   severityOnFail: 'BLOCKER' | 'RESERVATION';
+  requirementTier?: GateConditionRequirementTier;
 }
 
 export interface QualityGateDefinition {
@@ -53,6 +56,7 @@ export interface EvaluatedGateCondition {
   passed: boolean;
   inconclusive: boolean;
   severityOnFail: 'BLOCKER' | 'RESERVATION';
+  requirementTier?: GateConditionRequirementTier;
   reason: string;
 }
 
@@ -75,6 +79,7 @@ export interface QualityGateEvaluationResult {
   conditionsFailed: number;
   conditionsInconclusive: number;
   conditions: EvaluatedGateCondition[];
+  reservations?: string[];
   summary: string;
 }
 
@@ -95,6 +100,7 @@ export const BUILTIN_QUALITY_GATES: QualityGateDefinition[] = [
         operator: 'EQ',
         threshold: 0,
         severityOnFail: 'BLOCKER',
+        requirementTier: 'REQUIRED',
       },
       {
         id: 'cond-no-critical',
@@ -103,6 +109,7 @@ export const BUILTIN_QUALITY_GATES: QualityGateDefinition[] = [
         operator: 'EQ',
         threshold: 0,
         severityOnFail: 'BLOCKER',
+        requirementTier: 'REQUIRED',
       },
       {
         id: 'cond-no-secrets',
@@ -111,6 +118,7 @@ export const BUILTIN_QUALITY_GATES: QualityGateDefinition[] = [
         operator: 'EQ',
         threshold: 0,
         severityOnFail: 'BLOCKER',
+        requirementTier: 'REQUIRED',
       },
       {
         id: 'cond-min-coverage',
@@ -119,6 +127,7 @@ export const BUILTIN_QUALITY_GATES: QualityGateDefinition[] = [
         operator: 'GTE',
         threshold: 50,
         severityOnFail: 'RESERVATION',
+        requirementTier: 'REQUIRED',
       },
       {
         id: 'cond-min-confidence',
@@ -127,6 +136,7 @@ export const BUILTIN_QUALITY_GATES: QualityGateDefinition[] = [
         operator: 'GTE',
         threshold: 2,
         severityOnFail: 'RESERVATION',
+        requirementTier: 'REQUIRED',
       },
     ],
   },
@@ -146,6 +156,7 @@ export const BUILTIN_QUALITY_GATES: QualityGateDefinition[] = [
         operator: 'EQ',
         threshold: 0,
         severityOnFail: 'BLOCKER',
+        requirementTier: 'REQUIRED',
       },
       {
         id: 'zt-no-critical',
@@ -154,6 +165,7 @@ export const BUILTIN_QUALITY_GATES: QualityGateDefinition[] = [
         operator: 'EQ',
         threshold: 0,
         severityOnFail: 'BLOCKER',
+        requirementTier: 'REQUIRED',
       },
       {
         id: 'zt-max-high',
@@ -162,6 +174,7 @@ export const BUILTIN_QUALITY_GATES: QualityGateDefinition[] = [
         operator: 'LTE',
         threshold: 2,
         severityOnFail: 'BLOCKER',
+        requirementTier: 'REQUIRED',
       },
       {
         id: 'zt-no-secrets',
@@ -170,6 +183,7 @@ export const BUILTIN_QUALITY_GATES: QualityGateDefinition[] = [
         operator: 'EQ',
         threshold: 0,
         severityOnFail: 'BLOCKER',
+        requirementTier: 'REQUIRED',
       },
       {
         id: 'zt-no-iac-crit',
@@ -178,6 +192,7 @@ export const BUILTIN_QUALITY_GATES: QualityGateDefinition[] = [
         operator: 'EQ',
         threshold: 0,
         severityOnFail: 'BLOCKER',
+        requirementTier: 'REQUIRED',
       },
       {
         id: 'zt-min-coverage',
@@ -186,6 +201,7 @@ export const BUILTIN_QUALITY_GATES: QualityGateDefinition[] = [
         operator: 'GTE',
         threshold: 70,
         severityOnFail: 'BLOCKER',
+        requirementTier: 'REQUIRED',
       },
       {
         id: 'zt-high-confidence',
@@ -194,6 +210,7 @@ export const BUILTIN_QUALITY_GATES: QualityGateDefinition[] = [
         operator: 'GTE',
         threshold: 3,
         severityOnFail: 'RESERVATION',
+        requirementTier: 'REQUIRED',
       },
     ],
   },
@@ -213,6 +230,7 @@ export const BUILTIN_QUALITY_GATES: QualityGateDefinition[] = [
         operator: 'EQ',
         threshold: 0,
         severityOnFail: 'BLOCKER',
+        requirementTier: 'REQUIRED',
       },
       {
         id: 'rel-min-score',
@@ -221,6 +239,7 @@ export const BUILTIN_QUALITY_GATES: QualityGateDefinition[] = [
         operator: 'GTE',
         threshold: 3.0,
         severityOnFail: 'BLOCKER',
+        requirementTier: 'REQUIRED',
       },
       {
         id: 'rel-min-coverage',
@@ -229,6 +248,7 @@ export const BUILTIN_QUALITY_GATES: QualityGateDefinition[] = [
         operator: 'GTE',
         threshold: 60,
         severityOnFail: 'RESERVATION',
+        requirementTier: 'REQUIRED',
       },
     ],
   },
@@ -372,9 +392,46 @@ export class QualityGateEngine {
       overall_score: overallScore,
     };
 
+    const reservations: string[] = [];
+
     const evaluatedConditions: EvaluatedGateCondition[] = gate.conditions.map((cond) => {
+      const tier: GateConditionRequirementTier = cond.requirementTier || 'REQUIRED';
       const actual = metricsMap[cond.metricKey];
       if (actual === null || actual === undefined || Number.isNaN(actual)) {
+        if (tier === 'OPTIONAL') {
+          const msg = `Métrica opcional "${cond.label}" não aplicável ou não mensurada (NOT_MEASURED) — registrada como ressalva sem reprovação automática.`;
+          reservations.push(msg);
+          return {
+            id: cond.id,
+            metricKey: cond.metricKey,
+            label: cond.label,
+            operator: cond.operator,
+            threshold: cond.threshold,
+            actualValue: null,
+            passed: true,
+            inconclusive: false,
+            severityOnFail: cond.severityOnFail,
+            requirementTier: tier,
+            reason: msg,
+          };
+        }
+        if (tier === 'INFORMATIVE') {
+          const msg = `Métrica informativa "${cond.label}" ausente (NOT_MEASURED) — nota informativa sem impacto bloqueante.`;
+          reservations.push(msg);
+          return {
+            id: cond.id,
+            metricKey: cond.metricKey,
+            label: cond.label,
+            operator: cond.operator,
+            threshold: cond.threshold,
+            actualValue: null,
+            passed: true,
+            inconclusive: false,
+            severityOnFail: 'RESERVATION',
+            requirementTier: tier,
+            reason: msg,
+          };
+        }
         return {
           id: cond.id,
           metricKey: cond.metricKey,
@@ -385,10 +442,28 @@ export class QualityGateEngine {
           passed: false,
           inconclusive: true,
           severityOnFail: cond.severityOnFail,
-          reason: `Métrica "${cond.label}" não foi mensurada (NOT_MEASURED).`,
+          requirementTier: tier,
+          reason: `Métrica obrigatória "${cond.label}" não foi mensurada (NOT_MEASURED).`,
         };
       }
-      const passed = evaluateOperator(actual, cond.operator, cond.threshold);
+      const rawPassed = evaluateOperator(actual, cond.operator, cond.threshold);
+      if (!rawPassed && tier === 'INFORMATIVE') {
+        const msg = `Condição informativa "${cond.label}": ${actual} fora da faixa ${cond.operator} ${cond.threshold} (registrada como ressalva).`;
+        reservations.push(msg);
+        return {
+          id: cond.id,
+          metricKey: cond.metricKey,
+          label: cond.label,
+          operator: cond.operator,
+          threshold: cond.threshold,
+          actualValue: actual,
+          passed: false,
+          inconclusive: false,
+          severityOnFail: 'RESERVATION',
+          requirementTier: tier,
+          reason: msg,
+        };
+      }
       return {
         id: cond.id,
         metricKey: cond.metricKey,
@@ -396,10 +471,11 @@ export class QualityGateEngine {
         operator: cond.operator,
         threshold: cond.threshold,
         actualValue: actual,
-        passed,
+        passed: rawPassed,
         inconclusive: false,
         severityOnFail: cond.severityOnFail,
-        reason: passed
+        requirementTier: tier,
+        reason: rawPassed
           ? `${cond.label}: ${actual} atende ${cond.operator} ${cond.threshold}.`
           : `${cond.label}: ${actual} viola ${cond.operator} ${cond.threshold}.`,
       };
@@ -410,11 +486,17 @@ export class QualityGateEngine {
     const conditionsInconclusive = evaluatedConditions.filter((c) => c.inconclusive).length;
 
     const hasBlockerFailure = evaluatedConditions.some(
-      (c) => !c.passed && !c.inconclusive && c.severityOnFail === 'BLOCKER'
+      (c) =>
+        !c.passed &&
+        !c.inconclusive &&
+        c.severityOnFail === 'BLOCKER' &&
+        c.requirementTier !== 'INFORMATIVE'
     );
-    const hasReservationFailure = evaluatedConditions.some(
-      (c) => !c.passed && !c.inconclusive && c.severityOnFail === 'RESERVATION'
-    );
+    const hasReservationFailure =
+      reservations.length > 0 ||
+      evaluatedConditions.some(
+        (c) => !c.passed && !c.inconclusive && c.severityOnFail === 'RESERVATION'
+      );
 
     let decision: CanonicalGateDecision;
     if (gate.requireVerifiedEvidence && params.evidenceVerified === false) {
@@ -444,6 +526,7 @@ export class QualityGateEngine {
       conditionsFailed,
       conditionsInconclusive,
       conditions: evaluatedConditions,
+      reservations,
       summary: `Gate "${gate.name}" v${gate.version} => ${decision} (exit=${exitCodeNormalized}; ${conditionsMet}/${evaluatedConditions.length} condições atendidas).`,
     };
   }

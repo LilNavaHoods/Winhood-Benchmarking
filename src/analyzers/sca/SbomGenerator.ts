@@ -5,6 +5,7 @@ import { KeyManagementService } from '../../security/KeyManagementService';
 import type {
   SbomComponentRecord,
   SbomDocumentBundle,
+  SbomLicenseProvenance,
   SbomSignatureRecord,
   Software,
 } from '../../types/benchmark';
@@ -62,28 +63,24 @@ export const KNOWN_OSS_PACKAGE_LICENSES: Readonly<Record<string, string>> = {
 
 const nodeModulesLicenseCache = new Map<string, string>();
 
-export function resolvePackageSpdxLicense(
+export function resolvePackageSpdxLicenseWithProvenance(
   pkgName: string,
   explicitLicense?: string,
-  rootManifestLicense?: string
-): string {
+  rootManifestLicense?: string,
+  options?: { strictProvenance?: boolean }
+): { license: string; provenance: SbomLicenseProvenance } {
   const cleanExplicit = (explicitLicense || '').trim();
   if (cleanExplicit && cleanExplicit !== 'UNKNOWN' && cleanExplicit !== 'NOASSERTION') {
-    return cleanExplicit;
+    return { license: cleanExplicit, provenance: 'LOCKFILE_DECLARED' };
   }
   const normalizedName = pkgName.trim();
   const lowerName = normalizedName.toLowerCase();
-  if (KNOWN_OSS_PACKAGE_LICENSES[normalizedName]) {
-    return KNOWN_OSS_PACKAGE_LICENSES[normalizedName]!;
-  }
-  if (KNOWN_OSS_PACKAGE_LICENSES[lowerName]) {
-    return KNOWN_OSS_PACKAGE_LICENSES[lowerName]!;
-  }
-  if (normalizedName.startsWith('@types/')) {
-    return 'MIT';
-  }
+
+  // Check verifiable local node_modules/package.json first
   const cached = nodeModulesLicenseCache.get(normalizedName);
-  if (cached) return cached;
+  if (cached) {
+    return { license: cached, provenance: 'NODE_MODULES_DECLARED' };
+  }
   try {
     const nmPkgPath = path.resolve(process.cwd(), 'node_modules', normalizedName, 'package.json');
     if (fs.existsSync(nmPkgPath)) {
@@ -96,17 +93,53 @@ export function resolvePackageSpdxLicense(
             : '';
       if (lic) {
         nodeModulesLicenseCache.set(normalizedName, lic);
-        return lic;
+        return { license: lic, provenance: 'NODE_MODULES_DECLARED' };
       }
     }
   } catch {
     // Ignore local node_modules read failures
   }
+
+  // If strictProvenance is enabled, never infer license from package name or root project manifest
+  if (options?.strictProvenance) {
+    return { license: 'NOASSERTION', provenance: 'UNVERIFIED' };
+  }
+
+  if (KNOWN_OSS_PACKAGE_LICENSES[normalizedName]) {
+    return {
+      license: KNOWN_OSS_PACKAGE_LICENSES[normalizedName]!,
+      provenance: 'KNOWN_ECOSYSTEM_REGISTRY',
+    };
+  }
+  if (KNOWN_OSS_PACKAGE_LICENSES[lowerName]) {
+    return {
+      license: KNOWN_OSS_PACKAGE_LICENSES[lowerName]!,
+      provenance: 'KNOWN_ECOSYSTEM_REGISTRY',
+    };
+  }
+  if (normalizedName.startsWith('@types/')) {
+    return { license: 'MIT', provenance: 'KNOWN_ECOSYSTEM_REGISTRY' };
+  }
+
   const cleanRoot = (rootManifestLicense || '').trim();
   if (cleanRoot && cleanRoot !== 'UNKNOWN' && cleanRoot !== 'NOASSERTION') {
-    return cleanRoot;
+    return { license: cleanRoot, provenance: 'MANIFEST_DECLARED' };
   }
-  return 'NOASSERTION';
+  return { license: 'NOASSERTION', provenance: 'UNVERIFIED' };
+}
+
+export function resolvePackageSpdxLicense(
+  pkgName: string,
+  explicitLicense?: string,
+  rootManifestLicense?: string,
+  options?: { strictProvenance?: boolean }
+): string {
+  return resolvePackageSpdxLicenseWithProvenance(
+    pkgName,
+    explicitLicense,
+    rootManifestLicense,
+    options
+  ).license;
 }
 
 function deterministicUuidFromSeed(seed: string): string {
@@ -115,25 +148,80 @@ function deterministicUuidFromSeed(seed: string): string {
 }
 
 /**
- * SbomGenerator (P1 + Cryptographic Signing + Per-Component SHA-256 + Deterministic Mode)
+ * SbomGenerator (Multi-Lockfile + Verifiable SPDX Provenance + CycloneDX 1.5 & SPDX 2.3 Validation)
  * Generates CycloneDX 1.5 and SPDX 2.3 SBOM documents directly from package manifests and lockfiles:
- * package.json, package-lock.json, requirements.txt, pyproject.toml, pom.xml, go.mod, Cargo.toml, *.csproj
+ * package.json, package-lock.json, npm-shrinkwrap.json, yarn.lock, pnpm-lock.yaml, bun.lock,
+ * requirements.txt, pyproject.toml, pom.xml, go.mod, Cargo.toml, Cargo.lock, *.csproj
  */
 export class SbomGenerator {
+  public static validateSbomBundle(bundle: SbomDocumentBundle): {
+    cyclonedxValid: boolean;
+    spdxValid: boolean;
+    errors: string[];
+  } {
+    const errors: string[] = [];
+    const cdx = bundle.cyclonedx15Json as Record<string, any> | undefined;
+    if (!cdx) {
+      errors.push('CycloneDX 1.5 JSON document missing.');
+    } else {
+      if (cdx.bomFormat !== 'CycloneDX') errors.push('CycloneDX bomFormat must be "CycloneDX".');
+      if (cdx.specVersion !== '1.5') errors.push('CycloneDX specVersion must be "1.5".');
+      if (typeof cdx.serialNumber !== 'string' || !cdx.serialNumber.startsWith('urn:uuid:')) {
+        errors.push('CycloneDX serialNumber must be a valid urn:uuid.');
+      }
+      if (!cdx.metadata?.timestamp || !cdx.metadata?.component?.name) {
+        errors.push('CycloneDX metadata.timestamp and metadata.component.name are required.');
+      }
+      if (!Array.isArray(cdx.components)) {
+        errors.push('CycloneDX components must be an array.');
+      }
+    }
+
+    const spdx = bundle.spdx23Json as Record<string, any> | undefined;
+    if (!spdx) {
+      errors.push('SPDX 2.3 JSON document missing.');
+    } else {
+      if (spdx.spdxVersion !== 'SPDX-2.3') errors.push('SPDX spdxVersion must be "SPDX-2.3".');
+      if (spdx.dataLicense !== 'CC0-1.0') errors.push('SPDX dataLicense must be "CC0-1.0".');
+      if (spdx.SPDXID !== 'SPDXRef-DOCUMENT') errors.push('SPDX SPDXID must be "SPDXRef-DOCUMENT".');
+      if (typeof spdx.documentNamespace !== 'string' || !spdx.documentNamespace.startsWith('https://')) {
+        errors.push('SPDX documentNamespace must be a valid URI.');
+      }
+      if (!spdx.creationInfo?.created || !Array.isArray(spdx.creationInfo?.creators)) {
+        errors.push('SPDX creationInfo.created and creators are required.');
+      }
+      if (!Array.isArray(spdx.packages)) {
+        errors.push('SPDX packages must be an array.');
+      }
+    }
+
+    const cyclonedxValid = !errors.some((e) => e.startsWith('CycloneDX'));
+    const spdxValid = !errors.some((e) => e.startsWith('SPDX'));
+    return { cyclonedxValid, spdxValid, errors };
+  }
+
   public static generateFromSoftware(
     software: Software,
     options?: {
       deterministicTimestamp?: string;
       signSbom?: boolean;
+      strictLicenseProvenance?: boolean;
     }
   ): SbomDocumentBundle {
     const filesMap = software.sourceFilesContent || {};
-    const components = SbomGenerator.extractComponents(filesMap);
+    const { components, lockfilesDetected, transitiveCoverageComplete } =
+      SbomGenerator.extractComponentsWithMetadata(filesMap, {
+        strictLicenseProvenance: options?.strictLicenseProvenance,
+      });
     const deterministicMode = Boolean(options?.deterministicTimestamp);
     const generatedAt = options?.deterministicTimestamp || new Date().toISOString();
 
-    const directCount = components.filter((c) => c.dependencyScope === 'DIRECT').length;
+    const directCount = components.filter(
+      (c) => c.dependencyScope === 'DIRECT' || c.dependencyScope === 'DEV' || c.dependencyScope === 'OPTIONAL'
+    ).length;
     const transitiveCount = components.filter((c) => c.dependencyScope === 'TRANSITIVE').length;
+    const devCount = components.filter((c) => c.dependencyScope === 'DEV').length;
+    const optionalCount = components.filter((c) => c.dependencyScope === 'OPTIONAL').length;
     const serialSeed = JSON.stringify({
       softwareId: software.id,
       version: software.version,
@@ -152,7 +240,7 @@ export class SbomGenerator {
           {
             vendor: 'WinHood',
             name: 'WinHood SBOM Generator',
-            version: '4.3.0',
+            version: '4.4.0',
           },
         ],
         component: {
@@ -161,6 +249,16 @@ export class SbomGenerator {
           version: software.version,
           'bom-ref': `app:${software.id}@${software.version}`,
         },
+        properties: [
+          {
+            name: 'winhood:transitiveCoverageComplete',
+            value: String(transitiveCoverageComplete),
+          },
+          {
+            name: 'winhood:lockfilesDetected',
+            value: lockfilesDetected.join(', ') || 'NONE',
+          },
+        ],
       },
       components: components.map((c) => ({
         type: 'library',
@@ -168,11 +266,17 @@ export class SbomGenerator {
         name: c.name,
         version: c.version,
         purl: c.purl,
-        scope: c.dependencyScope === 'DIRECT' ? 'required' : 'optional',
+        scope:
+          c.dependencyScope === 'DIRECT'
+            ? 'required'
+            : c.dependencyScope === 'OPTIONAL'
+              ? 'optional'
+              : 'optional',
         hashes: c.sha256 ? [{ alg: 'SHA-256', content: c.sha256 }] : [],
         licenses: c.license && c.license !== 'UNKNOWN' ? [{ license: { id: c.license } }] : [],
         properties: [
           { name: 'winhood:dependencyScope', value: c.dependencyScope },
+          { name: 'winhood:licenseProvenance', value: c.licenseProvenance || 'UNVERIFIED' },
           { name: 'winhood:manifestFile', value: c.manifestFile },
           { name: 'winhood:ecosystem', value: c.ecosystem },
         ],
@@ -187,7 +291,7 @@ export class SbomGenerator {
       documentNamespace: `https://winhood.local/spdx/${software.id}/${docUuid}`,
       creationInfo: {
         created: generatedAt,
-        creators: ['Tool: WinHood SBOM Generator-4.3.0'],
+        creators: ['Tool: WinHood SBOM Generator-4.4.0'],
       },
       packages: components.map((c, idx) => ({
         SPDXID: `SPDXRef-Package-${idx + 1}`,
@@ -196,7 +300,7 @@ export class SbomGenerator {
         downloadLocation: 'NOASSERTION',
         filesAnalyzed: false,
         checksums: c.sha256 ? [{ algorithm: 'SHA256', checksumValue: c.sha256 }] : [],
-        licenseDeclared: c.license || 'NOASSERTION',
+        licenseDeclared: c.license && c.license !== 'UNKNOWN' ? c.license : 'NOASSERTION',
         externalRefs: [
           {
             referenceCategory: 'PACKAGE-MANAGER',
@@ -204,7 +308,7 @@ export class SbomGenerator {
             referenceLocator: c.purl,
           },
         ],
-        comment: `dependencyScope=${c.dependencyScope}; manifest=${c.manifestFile}`,
+        comment: `dependencyScope=${c.dependencyScope}; licenseProvenance=${c.licenseProvenance || 'UNVERIFIED'}; manifest=${c.manifestFile}`,
       })),
     };
 
@@ -226,6 +330,10 @@ export class SbomGenerator {
       componentsCount: components.length,
       directCount,
       transitiveCount,
+      devCount,
+      optionalCount,
+      transitiveCoverageComplete,
+      lockfilesDetected,
       components,
       cyclonedx15Json,
       spdx23Json,
@@ -233,6 +341,8 @@ export class SbomGenerator {
       spdxSha256,
       deterministicMode,
     };
+
+    bundle.structuralValidation = SbomGenerator.validateSbomBundle(bundle);
 
     if (options?.signSbom !== false) {
       bundle.signature = SbomGenerator.signSbomBundle(bundle, generatedAt);
@@ -330,13 +440,13 @@ export class SbomGenerator {
       return { valid: false, reason: 'SBOM_PAYLOAD_HASH_MISMATCH', ed25519Valid: null };
     }
 
-    const secret = KeyManagementService.getEvidenceSecretByKeyId(bundle.signature.signingKeyId);
-    if (!secret) {
+    const hmacSecret = KeyManagementService.getEvidenceSecretByKeyId(bundle.signature.signingKeyId);
+    if (!hmacSecret) {
       return { valid: false, reason: 'SBOM_HMAC_KEY_NOT_FOUND', ed25519Valid: null };
     }
 
     const expectedHmac = crypto
-      .createHmac('sha256', secret)
+      .createHmac('sha256', hmacSecret)
       .update(expectedPayloadSha, 'utf8')
       .digest('hex');
     const a = Buffer.from(expectedHmac, 'hex');
@@ -348,17 +458,18 @@ export class SbomGenerator {
 
     let ed25519Valid: boolean | null = null;
     if (bundle.signature.ed25519Signature) {
-      const pubPem =
-        (bundle.signature.ed25519KeyId
-          ? KeyManagementService.getEd25519PublicKeyByKeyId(bundle.signature.ed25519KeyId)
-          : null) || bundle.signature.ed25519PublicKeyPem;
-      if (!pubPem) {
+      const trustCheck = KeyManagementService.verifyTrustedEd25519PublicKey(
+        bundle.signature.ed25519KeyId,
+        bundle.signature.ed25519PublicKeyPem,
+        bundle.signature.signedAt
+      );
+      if (!trustCheck.trusted || !trustCheck.publicKeyPem) {
         return { valid: false, reason: 'SBOM_ED25519_KEY_NOT_FOUND', ed25519Valid: false };
       }
       ed25519Valid = crypto.verify(
         null,
         Buffer.from(expectedPayloadSha, 'utf8'),
-        pubPem,
+        trustCheck.publicKeyPem,
         Buffer.from(bundle.signature.ed25519Signature, 'base64')
       );
       if (!ed25519Valid) {
@@ -369,10 +480,26 @@ export class SbomGenerator {
     return { valid: true, reason: 'SBOM_SIGNATURE_VERIFIED', ed25519Valid };
   }
 
-  public static extractComponents(filesMap: Record<string, string>): SbomComponentRecord[] {
+  public static extractComponents(
+    filesMap: Record<string, string>,
+    options?: { strictLicenseProvenance?: boolean }
+  ): SbomComponentRecord[] {
+    return SbomGenerator.extractComponentsWithMetadata(filesMap, options).components;
+  }
+
+  public static extractComponentsWithMetadata(
+    filesMap: Record<string, string>,
+    options?: { strictLicenseProvenance?: boolean }
+  ): {
+    components: SbomComponentRecord[];
+    lockfilesDetected: string[];
+    transitiveCoverageComplete: boolean;
+  } {
     const components: SbomComponentRecord[] = [];
     const seen = new Set<string>();
+    const lockfilesDetected: string[] = [];
     const sortedEntries = Object.entries(filesMap).sort(([a], [b]) => a.localeCompare(b));
+    const strictProvenance = Boolean(options?.strictLicenseProvenance);
 
     const computeComponentDigest = (
       ecosystem: string,
@@ -381,7 +508,7 @@ export class SbomGenerator {
       manifestDigest: string,
       integrityRaw?: string
     ): string => {
-      if (integrityRaw && /^sha512-/i.test(integrityRaw)) {
+      if (integrityRaw && /^sha(512|256)-/i.test(integrityRaw)) {
         return crypto.createHash('sha256').update(integrityRaw, 'utf8').digest('hex');
       }
       return crypto
@@ -397,32 +524,43 @@ export class SbomGenerator {
       components.push(rec);
     };
 
-    // 1. package.json & package-lock.json (extracts both direct and transitive dependencies when present)
-    const directNpmNames = new Set<string>();
+    // 1. package.json (direct, dev, and optional dependencies)
+    const directNpmScopes = new Map<string, 'DIRECT' | 'DEV' | 'OPTIONAL'>();
+    let hasManifestWithoutLockfile = false;
     for (const [filePath, content] of sortedEntries) {
       if (filePath.endsWith('package.json')) {
+        hasManifestWithoutLockfile = true;
         const manifestDigest = crypto.createHash('sha256').update(content, 'utf8').digest('hex').slice(0, 16);
         try {
           const pkg = JSON.parse(content);
           const rootLicense = typeof pkg.license === 'string' ? pkg.license : 'UNKNOWN';
-          const allDirect = {
-            ...(pkg.dependencies || {}),
-            ...(pkg.devDependencies || {}),
-          };
-          for (const [name, rawVer] of Object.entries(allDirect).sort(([a], [b]) => a.localeCompare(b))) {
-            directNpmNames.add(name);
-            const ver = String(rawVer).replace(/^[\^~>=< ]+/, '') || '0.0.0';
-            addComponent({
-              bomRef: `pkg:npm/${name}@${ver}`,
-              name,
-              version: ver,
-              purl: `pkg:npm/${name.replace('@', '%40')}@${ver}`,
-              ecosystem: 'npm',
-              license: resolvePackageSpdxLicense(name, undefined, rootLicense),
-              dependencyScope: 'DIRECT',
-              manifestFile: filePath,
-              sha256: computeComponentDigest('npm', name, ver, manifestDigest),
-            });
+          const depGroups: Array<{ map: Record<string, unknown>; scope: 'DIRECT' | 'DEV' | 'OPTIONAL' }> = [
+            { map: pkg.dependencies || {}, scope: 'DIRECT' },
+            { map: pkg.optionalDependencies || {}, scope: 'OPTIONAL' },
+            { map: pkg.devDependencies || {}, scope: 'DEV' },
+          ];
+          for (const grp of depGroups) {
+            for (const [name, rawVer] of Object.entries(grp.map).sort(([a], [b]) => a.localeCompare(b))) {
+              if (!directNpmScopes.has(name)) {
+                directNpmScopes.set(name, grp.scope);
+              }
+              const ver = String(rawVer).replace(/^[\^~>=< ]+/, '') || '0.0.0';
+              const licInfo = resolvePackageSpdxLicenseWithProvenance(name, undefined, rootLicense, {
+                strictProvenance,
+              });
+              addComponent({
+                bomRef: `pkg:npm/${name}@${ver}`,
+                name,
+                version: ver,
+                purl: `pkg:npm/${name.replace('@', '%40')}@${ver}`,
+                ecosystem: 'npm',
+                license: licInfo.license,
+                licenseProvenance: licInfo.provenance,
+                dependencyScope: grp.scope === 'DEV' || grp.scope === 'OPTIONAL' ? 'DIRECT' : grp.scope,
+                manifestFile: filePath,
+                sha256: computeComponentDigest('npm', name, ver, manifestDigest),
+              });
+            }
           }
         } catch {
           // Ignore malformed package.json
@@ -430,8 +568,10 @@ export class SbomGenerator {
       }
     }
 
+    // 2. npm package-lock.json & npm-shrinkwrap.json
     for (const [filePath, content] of sortedEntries) {
-      if (filePath.endsWith('package-lock.json')) {
+      if (filePath.endsWith('package-lock.json') || filePath.endsWith('npm-shrinkwrap.json')) {
+        lockfilesDetected.push(filePath);
         const manifestDigest = crypto.createHash('sha256').update(content, 'utf8').digest('hex').slice(0, 16);
         try {
           const lock = JSON.parse(content);
@@ -440,18 +580,21 @@ export class SbomGenerator {
               if (!pkgPath || pkgPath === '') continue;
               const name = pkgPath.replace(/^.*node_modules\//, '');
               const ver = String(meta?.version || '0.0.0');
-              const license = resolvePackageSpdxLicense(
+              const licInfo = resolvePackageSpdxLicenseWithProvenance(
                 name,
-                typeof meta?.license === 'string' ? meta.license : undefined
+                typeof meta?.license === 'string' ? meta.license : undefined,
+                undefined,
+                { strictProvenance }
               );
-              const scope = directNpmNames.has(name) ? 'DIRECT' : 'TRANSITIVE';
+              const scope = directNpmScopes.has(name) ? 'DIRECT' : 'TRANSITIVE';
               const existingIdx = components.findIndex(
                 (c) => c.ecosystem === 'npm' && c.name === name && c.version === ver
               );
               const computedSha = computeComponentDigest('npm', name, ver, manifestDigest, meta?.integrity);
               if (existingIdx >= 0) {
-                if (license !== 'UNKNOWN' && license !== 'NOASSERTION') {
-                  components[existingIdx]!.license = license;
+                if (licInfo.license !== 'UNKNOWN' && licInfo.license !== 'NOASSERTION') {
+                  components[existingIdx]!.license = licInfo.license;
+                  components[existingIdx]!.licenseProvenance = licInfo.provenance;
                 }
                 components[existingIdx]!.sha256 = computedSha;
                 continue;
@@ -462,7 +605,8 @@ export class SbomGenerator {
                 version: ver,
                 purl: `pkg:npm/${name.replace('@', '%40')}@${ver}`,
                 ecosystem: 'npm',
-                license,
+                license: licInfo.license,
+                licenseProvenance: licInfo.provenance,
                 dependencyScope: scope,
                 manifestFile: filePath,
                 sha256: computedSha,
@@ -470,16 +614,121 @@ export class SbomGenerator {
             }
           }
         } catch {
-          // Ignore malformed package-lock.json
+          // Ignore malformed lockfile
+        }
+      }
+
+      // 3. yarn.lock (Classic v1 & Berry v2+)
+      if (filePath.endsWith('yarn.lock')) {
+        lockfilesDetected.push(filePath);
+        const manifestDigest = crypto.createHash('sha256').update(content, 'utf8').digest('hex').slice(0, 16);
+        const blocks = content.split(/\r?\n\r?\n+/);
+        for (const block of blocks) {
+          const lines = block.split(/\r?\n/).map((l) => l.trim());
+          const header = lines.find((l) => l && !l.startsWith('#') && l.endsWith(':'));
+          if (!header) continue;
+          const firstSpec = header.replace(/:$/, '').split(',')[0]!.replace(/^["']|["']$/g, '').trim();
+          const atIdx = firstSpec.lastIndexOf('@');
+          if (atIdx <= 0) continue;
+          const name = firstSpec.slice(0, atIdx).replace(/@npm$/, '');
+          const verLine = lines.find((l) => /^version[:\s]/i.test(l));
+          if (!verLine) continue;
+          const verMatch = verLine.match(/version[:\s]+["']?([0-9a-zA-Z._+-]+)["']?/i);
+          if (!verMatch) continue;
+          const ver = verMatch[1]!;
+          const intLine = lines.find((l) => /^(integrity|checksum)[:\s]/i.test(l));
+          const integrity = intLine ? intLine.split(/[:\s]+/).slice(1).join('').replace(/["']/g, '') : undefined;
+          const licInfo = resolvePackageSpdxLicenseWithProvenance(name, undefined, undefined, {
+            strictProvenance,
+          });
+          addComponent({
+            bomRef: `pkg:npm/${name}@${ver}`,
+            name,
+            version: ver,
+            purl: `pkg:npm/${name.replace('@', '%40')}@${ver}`,
+            ecosystem: 'npm',
+            license: licInfo.license,
+            licenseProvenance: licInfo.provenance,
+            dependencyScope: directNpmScopes.has(name) ? 'DIRECT' : 'TRANSITIVE',
+            manifestFile: filePath,
+            sha256: computeComponentDigest('npm', name, ver, manifestDigest, integrity),
+          });
+        }
+      }
+
+      // 4. pnpm-lock.yaml (v6/v9 package entries)
+      if (filePath.endsWith('pnpm-lock.yaml')) {
+        lockfilesDetected.push(filePath);
+        const manifestDigest = crypto.createHash('sha256').update(content, 'utf8').digest('hex').slice(0, 16);
+        for (const rawLine of content.split(/\r?\n/)) {
+          const trimmed = rawLine.trim();
+          // Matches '/lodash@4.17.21:' or 'lodash@4.17.21:' or "'@babel/parser@7.26.0':"
+          const m = trimmed.match(/^['"]?\/?(@?[a-zA-Z0-9._/-]+)@([0-9]+\.[0-9]+\.[0-9]+[^('":\s]*)/);
+          if (m && m[1] && m[2]) {
+            const name = m[1];
+            const ver = m[2];
+            const licInfo = resolvePackageSpdxLicenseWithProvenance(name, undefined, undefined, {
+              strictProvenance,
+            });
+            addComponent({
+              bomRef: `pkg:npm/${name}@${ver}`,
+              name,
+              version: ver,
+              purl: `pkg:npm/${name.replace('@', '%40')}@${ver}`,
+              ecosystem: 'npm',
+              license: licInfo.license,
+              licenseProvenance: licInfo.provenance,
+              dependencyScope: directNpmScopes.has(name) ? 'DIRECT' : 'TRANSITIVE',
+              manifestFile: filePath,
+              sha256: computeComponentDigest('npm', name, ver, manifestDigest),
+            });
+          }
+        }
+      }
+
+      // 5. bun.lock (JSONC lockfile in analyzed external projects)
+      if (filePath.endsWith('bun.lock')) {
+        lockfilesDetected.push(filePath);
+        const manifestDigest = crypto.createHash('sha256').update(content, 'utf8').digest('hex').slice(0, 16);
+        try {
+          const cleanJson = content.replace(/,\s*([\]}])/g, '$1');
+          const parsedBun = JSON.parse(cleanJson);
+          if (parsedBun?.packages && typeof parsedBun.packages === 'object') {
+            for (const [pkgKey, arr] of Object.entries<any>(parsedBun.packages)) {
+              const firstTuple = Array.isArray(arr) && typeof arr[0] === 'string' ? arr[0] : '';
+              const atIdx = firstTuple.lastIndexOf('@');
+              const name = atIdx > 0 ? firstTuple.slice(0, atIdx) : pkgKey;
+              const ver = atIdx > 0 ? firstTuple.slice(atIdx + 1) : '0.0.0';
+              const integrity = Array.isArray(arr) && typeof arr[3] === 'string' ? arr[3] : undefined;
+              const licInfo = resolvePackageSpdxLicenseWithProvenance(name, undefined, undefined, {
+                strictProvenance,
+              });
+              addComponent({
+                bomRef: `pkg:npm/${name}@${ver}`,
+                name,
+                version: ver,
+                purl: `pkg:npm/${name.replace('@', '%40')}@${ver}`,
+                ecosystem: 'npm',
+                license: licInfo.license,
+                licenseProvenance: licInfo.provenance,
+                dependencyScope: directNpmScopes.has(name) ? 'DIRECT' : 'TRANSITIVE',
+                manifestFile: filePath,
+                sha256: computeComponentDigest('npm', name, ver, manifestDigest, integrity),
+              });
+            }
+          }
+        } catch {
+          // Ignore malformed bun.lock
         }
       }
     }
 
-    // 2. Python requirements.txt & pyproject.toml
+    // 6. Python, Go, Rust, Maven, NuGet
     for (const [filePath, content] of sortedEntries) {
       const manifestDigest = crypto.createHash('sha256').update(content, 'utf8').digest('hex').slice(0, 16);
 
       if (filePath.endsWith('requirements.txt')) {
+        lockfilesDetected.push(filePath);
         for (const rawLine of content.split(/\r?\n/)) {
           const line = rawLine.trim();
           if (!line || line.startsWith('#') || line.startsWith('-')) continue;
@@ -493,7 +742,8 @@ export class SbomGenerator {
               version: ver,
               purl: `pkg:pypi/${name}@${ver}`,
               ecosystem: 'pypi',
-              license: 'UNKNOWN',
+              license: 'NOASSERTION',
+              licenseProvenance: 'UNVERIFIED',
               dependencyScope: 'DIRECT',
               manifestFile: filePath,
               sha256: computeComponentDigest('pypi', name, ver, manifestDigest),
@@ -503,6 +753,7 @@ export class SbomGenerator {
       }
 
       if (filePath.endsWith('pyproject.toml')) {
+        hasManifestWithoutLockfile = true;
         const depMatch = content.match(/dependencies\s*=\s*\[([\s\S]*?)\]/);
         if (depMatch) {
           for (const rawItem of depMatch[1]!.split(',')) {
@@ -517,7 +768,8 @@ export class SbomGenerator {
                 version: ver,
                 purl: `pkg:pypi/${name}@${ver}`,
                 ecosystem: 'pypi',
-                license: 'UNKNOWN',
+                license: 'NOASSERTION',
+                licenseProvenance: 'UNVERIFIED',
                 dependencyScope: 'DIRECT',
                 manifestFile: filePath,
                 sha256: computeComponentDigest('pypi', name, ver, manifestDigest),
@@ -527,8 +779,8 @@ export class SbomGenerator {
         }
       }
 
-      // 3. Go go.mod
       if (filePath.endsWith('go.mod')) {
+        lockfilesDetected.push(filePath);
         for (const rawLine of content.split(/\r?\n/)) {
           const line = rawLine.trim();
           const m = line.match(/^([^\s/]+\/[^\s]+)\s+(v[0-9.]+[^\s]*)(?:\s+\/\/\s*(indirect))?/);
@@ -542,7 +794,8 @@ export class SbomGenerator {
               version: ver,
               purl: `pkg:golang/${name}@${ver}`,
               ecosystem: 'golang',
-              license: 'UNKNOWN',
+              license: 'NOASSERTION',
+              licenseProvenance: 'UNVERIFIED',
               dependencyScope: isIndirect ? 'TRANSITIVE' : 'DIRECT',
               manifestFile: filePath,
               sha256: computeComponentDigest('golang', name, ver, manifestDigest),
@@ -551,8 +804,8 @@ export class SbomGenerator {
         }
       }
 
-      // 4. Rust Cargo.toml
       if (filePath.endsWith('Cargo.toml')) {
+        hasManifestWithoutLockfile = true;
         let inDeps = false;
         for (const rawLine of content.split(/\r?\n/)) {
           const line = rawLine.trim();
@@ -571,7 +824,8 @@ export class SbomGenerator {
                 version: ver,
                 purl: `pkg:cargo/${name}@${ver}`,
                 ecosystem: 'cargo',
-                license: 'UNKNOWN',
+                license: 'NOASSERTION',
+                licenseProvenance: 'UNVERIFIED',
                 dependencyScope: 'DIRECT',
                 manifestFile: filePath,
                 sha256: computeComponentDigest('cargo', name, ver, manifestDigest),
@@ -581,8 +835,34 @@ export class SbomGenerator {
         }
       }
 
-      // 5. Java pom.xml
+      if (filePath.endsWith('Cargo.lock')) {
+        lockfilesDetected.push(filePath);
+        const pkgBlocks = content.split(/\[\[package\]\]/);
+        for (const block of pkgBlocks.slice(1)) {
+          const nameM = block.match(/name\s*=\s*"([^"]+)"/);
+          const verM = block.match(/version\s*=\s*"([^"]+)"/);
+          const chkM = block.match(/checksum\s*=\s*"([^"]+)"/);
+          if (nameM && verM) {
+            const name = nameM[1]!;
+            const ver = verM[1]!;
+            addComponent({
+              bomRef: `pkg:cargo/${name}@${ver}`,
+              name,
+              version: ver,
+              purl: `pkg:cargo/${name}@${ver}`,
+              ecosystem: 'cargo',
+              license: 'NOASSERTION',
+              licenseProvenance: 'UNVERIFIED',
+              dependencyScope: 'TRANSITIVE',
+              manifestFile: filePath,
+              sha256: chkM?.[1] || computeComponentDigest('cargo', name, ver, manifestDigest),
+            });
+          }
+        }
+      }
+
       if (filePath.endsWith('pom.xml')) {
+        hasManifestWithoutLockfile = true;
         const depRegex = /<dependency>[\s\S]*?<groupId>([^<]+)<\/groupId>[\s\S]*?<artifactId>([^<]+)<\/artifactId>(?:[\s\S]*?<version>([^<]+)<\/version>)?[\s\S]*?<\/dependency>/g;
         for (const m of content.matchAll(depRegex)) {
           const name = `${m[1]!.trim()}:${m[2]!.trim()}`;
@@ -593,7 +873,8 @@ export class SbomGenerator {
             version: ver,
             purl: `pkg:maven/${m[1]!.trim()}/${m[2]!.trim()}@${ver}`,
             ecosystem: 'maven',
-            license: 'UNKNOWN',
+            license: 'NOASSERTION',
+            licenseProvenance: 'UNVERIFIED',
             dependencyScope: 'DIRECT',
             manifestFile: filePath,
             sha256: computeComponentDigest('maven', name, ver, manifestDigest),
@@ -601,8 +882,8 @@ export class SbomGenerator {
         }
       }
 
-      // 6. .NET *.csproj
       if (filePath.toLowerCase().endsWith('.csproj')) {
+        hasManifestWithoutLockfile = true;
         const pkgRef = /<PackageReference\s+Include="([^"]+)"\s+Version="([^"]+)"/g;
         for (const m of content.matchAll(pkgRef)) {
           const name = m[1]!;
@@ -613,7 +894,8 @@ export class SbomGenerator {
             version: ver,
             purl: `pkg:nuget/${name}@${ver}`,
             ecosystem: 'nuget',
-            license: 'UNKNOWN',
+            license: 'NOASSERTION',
+            licenseProvenance: 'UNVERIFIED',
             dependencyScope: 'DIRECT',
             manifestFile: filePath,
             sha256: computeComponentDigest('nuget', name, ver, manifestDigest),
@@ -623,6 +905,13 @@ export class SbomGenerator {
     }
 
     components.sort((a, b) => a.bomRef.localeCompare(b.bomRef));
-    return components;
+    const transitiveCoverageComplete =
+      lockfilesDetected.length > 0 || !hasManifestWithoutLockfile;
+
+    return {
+      components,
+      lockfilesDetected,
+      transitiveCoverageComplete,
+    };
   }
 }

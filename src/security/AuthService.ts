@@ -487,21 +487,73 @@ function generateRecoveryCodesSet(count = 8): {
   return { plaintextCodes, codeHashes };
 }
 
-export function hashPassword(password: string): string {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const derived = crypto.scryptSync(password, salt, 64, { N: 16384, r: 8, p: 1 }).toString('hex');
-  return `scrypt:N=16384,r=8,p=1:${salt}:${derived}`;
+export interface ScryptCostParams {
+  N: number;
+  r: number;
+  p: number;
+  maxmem: number;
 }
 
-export function verifyPassword(password: string, storedHash: string): boolean {
-  const parts = storedHash.split(':');
+export const CURRENT_SCRYPT_PARAMS: ScryptCostParams = {
+  N: 32768,
+  r: 8,
+  p: 1,
+  maxmem: 64 * 1024 * 1024,
+};
+
+function parseScryptParamsSpec(spec: string): ScryptCostParams {
+  const parsed: ScryptCostParams = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
+  for (const token of (spec || '').split(',')) {
+    const [k, v] = token.split('=');
+    const num = Number.parseInt(v || '', 10);
+    if (!Number.isFinite(num) || num <= 0) continue;
+    if (k === 'N') parsed.N = num;
+    if (k === 'r') parsed.r = num;
+    if (k === 'p') parsed.p = num;
+  }
+  parsed.maxmem = Math.max(64 * 1024 * 1024, 256 * parsed.N * parsed.r);
+  return parsed;
+}
+
+export function hashPassword(
+  credentialValue: string,
+  costParams: Partial<ScryptCostParams> = CURRENT_SCRYPT_PARAMS
+): string {
+  const N = costParams.N ?? CURRENT_SCRYPT_PARAMS.N;
+  const r = costParams.r ?? CURRENT_SCRYPT_PARAMS.r;
+  const p = costParams.p ?? CURRENT_SCRYPT_PARAMS.p;
+  const maxmem = Math.max(64 * 1024 * 1024, 256 * N * r);
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(credentialValue, salt, 64, { N, r, p, maxmem }).toString('hex');
+  return `scrypt:N=${N},r=${r},p=${p}:${salt}:${derived}`;
+}
+
+export function verifyPassword(credentialValue: string, storedHash: string): boolean {
+  const parts = (storedHash || '').split(':');
   if (parts.length !== 4 || parts[0] !== 'scrypt') return false;
+  const params = parseScryptParamsSpec(parts[1]!);
   const salt = parts[2]!;
   const expectedHex = parts[3]!;
-  const derived = crypto.scryptSync(password, salt, 64, { N: 16384, r: 8, p: 1 });
+  const derived = crypto.scryptSync(credentialValue, salt, 64, {
+    N: params.N,
+    r: params.r,
+    p: params.p,
+    maxmem: params.maxmem,
+  });
   const expectedBuf = Buffer.from(expectedHex, 'hex');
   if (derived.length !== expectedBuf.length) return false;
   return crypto.timingSafeEqual(derived, expectedBuf);
+}
+
+export function needsPasswordRehash(storedHash: string): boolean {
+  const parts = (storedHash || '').split(':');
+  if (parts.length !== 4 || parts[0] !== 'scrypt') return true;
+  const params = parseScryptParamsSpec(parts[1]!);
+  return (
+    params.N < CURRENT_SCRYPT_PARAMS.N ||
+    params.r < CURRENT_SCRYPT_PARAMS.r ||
+    params.p < CURRENT_SCRYPT_PARAMS.p
+  );
 }
 
 function sha256(val: string): string {
@@ -1024,6 +1076,10 @@ export class AuthService {
     user.failedLoginAttempts = 0;
     user.lockedUntil = null;
     user.updatedAt = new Date().toISOString();
+    // Transparently upgrade legacy password hash cost parameters on successful login
+    if (needsPasswordRehash(user.passwordHash)) {
+      user.passwordHash = hashPassword(params.password);
+    }
     // Transparently upgrade legacy plaintext secret at rest
     if (user.totpSecretBase32 && !user.totpSecretBase32.startsWith('whvault:v1:')) {
       user.totpSecretBase32 = this.encryptSecretAtRest(user.totpSecretBase32);

@@ -1742,5 +1742,337 @@ test('WinHood self-evaluation passes Quality Gate (APROVADO), achieves >= 4.0/5.
   assert.equal(run.sandboxDiffs[0]?.cleanUninstall, true);
 });
 
+test('Phase 2 & 3: Official 13-domain coverage inventory, 3-way coverage separation, and truthful ToolAdapterInfo telemetry', async () => {
+  const {
+    OFFICIAL_13_COVERAGE_DOMAINS,
+    scanOfficial13DomainsInventory,
+    computeThreeWaySeparatedCoverage,
+  } = await import('../execution/CoverageDomainInventory');
+  const { buildToolAdaptersCatalog, classifyToolResultCompleteness } = await import(
+    './benchmarkOrchestrator'
+  );
+
+  assert.equal(OFFICIAL_13_COVERAGE_DOMAINS.length, 13);
+  const inv = scanOfficial13DomainsInventory(process.cwd());
+  assert.equal(inv.length, 13);
+  const totalEligibleFiles = inv.reduce((sum, d) => sum + d.eligibleFiles.length, 0);
+  assert.ok(totalEligibleFiles > 50);
+
+  const threeWay = computeThreeWaySeparatedCoverage({
+    discoveredFilesCount: 25,
+    eligibleFilesCount: 20,
+    ingestedFilesCount: 18,
+    analyzedFilesCount: 20,
+    testCoverage: null,
+  });
+  assert.equal(threeWay.testCoverage.indicatorType, 'TEST_COVERAGE');
+  assert.equal(threeWay.testCoverage.lines.pct, null);
+  assert.equal(threeWay.ingestionCoverage.ingestionCoveragePct, 90);
+  assert.equal(threeWay.analysisCoverage.analysisCoveragePct, 100);
+
+  // Without execution records, buildToolAdaptersCatalog must NEVER populate synthetic lastExecutionAt or lastExitCode
+  const adapters = buildToolAdaptersCatalog();
+  for (const adp of adapters) {
+    assert.equal(adp.lastExecutionAt, null, `Adapter ${adp.id} must have null lastExecutionAt before execution`);
+    assert.equal(adp.lastExitCode, null, `Adapter ${adp.id} must have null lastExitCode before execution`);
+    assert.ok(['NATIVE', 'LOCAL_CLI', 'REMOTE_API'].includes(adp.integrationType || ''));
+    assert.equal(adp.resultCompleteness, 'NOT_EXECUTED');
+  }
+
+  assert.equal(classifyToolResultCompleteness(undefined), 'NOT_EXECUTED');
+});
+
+test('Phase 4: KeyManagementService Envelope Encryption V2, HKDF purpose isolation, monotonic rollback detection, Ed25519 Trust Store, and Scrypt transparent migration', async () => {
+  const fsMod = await import('node:fs');
+  const osMod = await import('node:os');
+  const pathMod = await import('node:path');
+  const {
+    KeyManagementService,
+    deriveHkdfPurposeKey,
+    encryptWithAes256GcmEnvelope,
+    decryptWithAes256GcmEnvelope,
+  } = await import('../security/KeyManagementService');
+  const {
+    buildVerifiableEvidenceChain,
+    signEvidenceManifestHmacSha256,
+    verifyEvidenceChainAndManifest,
+  } = await import('./evidenceProvenanceEngine');
+  const {
+    hashPassword,
+    verifyPassword,
+    needsPasswordRehash,
+    CURRENT_SCRYPT_PARAMS,
+  } = await import('../security/AuthService');
+
+  const tmpDir = fsMod.mkdtempSync(pathMod.join(osMod.tmpdir(), 'wh-env-v2-'));
+  const customStorePath = pathMod.join(tmpDir, 'keystore.json');
+
+  try {
+    // 1. HKDF purpose separation produces distinct 32-byte keys from identical IKM
+    const ikm = Buffer.alloc(32, 7);
+    const k1 = deriveHkdfPurposeKey(ikm, '00112233445566778899aabbccddeeff', 'winhood:purpose:a');
+    const k2 = deriveHkdfPurposeKey(ikm, '00112233445566778899aabbccddeeff', 'winhood:purpose:b');
+    assert.equal(k1.length, 32);
+    assert.equal(k2.length, 32);
+    assert.notEqual(k1.toString('hex'), k2.toString('hex'));
+
+    // 2. AES-256-GCM envelope with unique 96-bit nonce and AAD context
+    const enc1 = encryptWithAes256GcmEnvelope('payload-alpha', k1, 'ctx:alpha');
+    const enc2 = encryptWithAes256GcmEnvelope('payload-alpha', k1, 'ctx:alpha');
+    assert.notEqual(enc1.nonceHex, enc2.nonceHex, 'Nonces must be unique per encryption');
+    assert.equal(decryptWithAes256GcmEnvelope(enc1, k1, 'ctx:alpha'), 'payload-alpha');
+    assert.throws(() => decryptWithAes256GcmEnvelope(enc1, k1, 'ctx:wrong'), /AAD_MISMATCH/);
+
+    // 3. Keystore Envelope V2 initialization, rotation, and Trust Store verification
+    const status0 = KeyManagementService.getStatus(customStorePath);
+    assert.equal(status0.envelopeVersion, 'WINHOOD-ENVELOPE-V2');
+    assert.equal(status0.integrityVerified, true);
+    assert.equal(status0.rollbackProtectionVerified, true);
+    assert.ok(status0.trustedPublicKeysCount >= 1);
+
+    const activeEd = KeyManagementService.getActiveEvidenceEd25519Key(customStorePath);
+    const trustOk = KeyManagementService.verifyTrustedEd25519PublicKey(
+      activeEd.keyId,
+      activeEd.publicKeyPem,
+      new Date().toISOString(),
+      customStorePath
+    );
+    assert.equal(trustOk.trusted, true);
+    assert.equal(trustOk.status, 'ACTIVE');
+
+    // Revoking key invalidates Trust Store verification
+    KeyManagementService.revokeKey(activeEd.keyId, 'Test key revocation', customStorePath);
+    const trustRevoked = KeyManagementService.verifyTrustedEd25519PublicKey(
+      activeEd.keyId,
+      activeEd.publicKeyPem,
+      new Date().toISOString(),
+      customStorePath
+    );
+    assert.equal(trustRevoked.trusted, false);
+    assert.equal(trustRevoked.status, 'REVOKED');
+
+    // Untrusted keyId is rejected even if a valid self-signed publicKeyPem is attached
+    const chain = buildVerifiableEvidenceChain({
+      runId: 'run-trust-01',
+      softwares: [],
+      toolExecutions: [],
+      findings: [],
+      veracityResults: [],
+    });
+    const manifest = signEvidenceManifestHmacSha256({
+      runId: 'run-trust-01',
+      algorithmVersion: '4.4.0',
+      evidenceChain: chain,
+    });
+    const forgedManifest = {
+      ...manifest,
+      ed25519KeyId: 'wh-ed25519-untrusted-forged-key',
+    };
+    const verForged = verifyEvidenceChainAndManifest(chain, forgedManifest);
+    assert.equal(verForged.ed25519SignatureValid, false);
+    assert.equal(verForged.valid, false);
+
+    // 4. Scrypt cost parameter upgrade & backward compatibility
+    const legacyHash = hashPassword('ValidPass#2026!', { N: 16384, r: 8, p: 1 });
+    assert.ok(legacyHash.startsWith('scrypt:N=16384,r=8,p=1:'));
+    assert.equal(verifyPassword('ValidPass#2026!', legacyHash), true);
+    assert.equal(needsPasswordRehash(legacyHash), true);
+
+    const modernHash = hashPassword('ValidPass#2026!');
+    assert.ok(modernHash.startsWith(`scrypt:N=${CURRENT_SCRYPT_PARAMS.N},r=8,p=1:`));
+    assert.equal(verifyPassword('ValidPass#2026!', modernHash), true);
+    assert.equal(needsPasswordRehash(modernHash), false);
+  } finally {
+    fsMod.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('Phase 5, 6 & 7: Independent Validation Corpus + Wilson 95% CI, Bimodal Comparability, Tiered Quality Gates, and Multi-Lockfile SBOM/SCA', async () => {
+  const { GoldenDatasetRunner, computeWilson95ConfidenceInterval } = await import(
+    '../validation/GoldenDatasetRunner'
+  );
+  const { validatePairComparability } = await import('../comparability');
+  const { QualityGateEngine } = await import('../gate/QualityGateEngine');
+  const { SbomGenerator, resolvePackageSpdxLicense } = await import(
+    '../analyzers/sca/SbomGenerator'
+  );
+
+  // 1. Wilson 95% CI and Independent Validation Suite
+  const ciZero = computeWilson95ConfidenceInterval(0, 0);
+  assert.equal(ciZero.pointEstimate, null);
+  const ciFull = computeWilson95ConfidenceInterval(12, 12);
+  assert.equal(ciFull.pointEstimate, 1);
+  assert.ok((ciFull.lower ?? 0) > 0.7 && (ciFull.upper ?? 0) <= 1);
+
+  const indReport = GoldenDatasetRunner.runIndependentValidationSuite();
+  assert.equal(indReport.datasetOriginLabel, 'WINHOOD_INDEPENDENT_VALIDATION_BENCHMARK');
+  assert.ok(indReport.totalCases >= 12);
+  assert.equal(indReport.precision, 1);
+  assert.equal(indReport.recall, 1);
+  assert.equal(indReport.falsePositiveRate, 0);
+  assert.ok(indReport.confidenceIntervals95?.precision.lower !== null);
+  assert.ok(indReport.macroAverages?.byLanguage.f1Score !== null);
+
+  // 2. Bimodal Comparability (SAME_ENGINE vs CROSS_TOOL)
+  const sameEngineComp = validatePairComparability(
+    {
+      softwareId: 'sw-a',
+      engineVersion: '4.4.0',
+      ruleCatalogSha256: 'abc',
+      scopeCoveragePercent: 95,
+      evidenceConfidence: 'HIGH',
+      functionalCategory: 'API_SERVICE',
+    },
+    {
+      softwareId: 'sw-b',
+      engineVersion: '4.4.0',
+      ruleCatalogSha256: 'abc',
+      scopeCoveragePercent: 92,
+      evidenceConfidence: 'HIGH',
+      functionalCategory: 'API_SERVICE',
+    }
+  );
+  assert.equal(sameEngineComp.comparabilityClassification, 'STRICTLY_COMPARABLE');
+
+  const crossToolComp = validatePairComparability(
+    {
+      softwareId: 'sw-a',
+      engineVersion: 'WINHOOD-4.4.0',
+      ruleCatalogSha256: 'cat-1',
+      scopeCoveragePercent: 95,
+      evidenceConfidence: 'MEDIUM',
+      functionalCategory: 'API_SERVICE',
+      commitHash: 'deadbeef1234',
+    },
+    {
+      softwareId: 'sw-a-ext',
+      engineVersion: 'MQR-BRIDGE-10.4',
+      ruleCatalogSha256: 'cat-2',
+      scopeCoveragePercent: 80,
+      evidenceConfidence: 'HIGH',
+      functionalCategory: 'API_SERVICE',
+      commitHash: 'deadbeef1234',
+    },
+    { modality: 'CROSS_TOOL' }
+  );
+  assert.equal(crossToolComp.comparable, true);
+  assert.equal(crossToolComp.comparabilityClassification, 'QUALIFIED_COMPARISON');
+
+  const crossToolIncomp = validatePairComparability(
+    {
+      softwareId: 'sw-a',
+      engineVersion: 'WINHOOD-4.4.0',
+      ruleCatalogSha256: 'cat-1',
+      scopeCoveragePercent: 95,
+      evidenceConfidence: 'HIGH',
+      functionalCategory: 'API_SERVICE',
+      commitHash: 'commit-1',
+    },
+    {
+      softwareId: 'sw-b',
+      engineVersion: 'MQR-BRIDGE-10.4',
+      ruleCatalogSha256: 'cat-2',
+      scopeCoveragePercent: 90,
+      evidenceConfidence: 'HIGH',
+      functionalCategory: 'API_SERVICE',
+      commitHash: 'commit-2',
+    },
+    { modality: 'CROSS_TOOL', normalizedTaxonomyApplied: false }
+  );
+  assert.equal(crossToolIncomp.comparable, false);
+  assert.equal(crossToolIncomp.comparabilityClassification, 'NOT_COMPARABLE');
+
+  // 3. Quality Gate requirement tiers (REQUIRED vs OPTIONAL vs INFORMATIVE on NOT_MEASURED)
+  const customGate = QualityGateEngine.registerGate({
+    id: 'test-tiered-gate',
+    name: 'Tiered Gate Test',
+    version: '1.0.0',
+    description: 'Tests REQUIRED vs OPTIONAL vs INFORMATIVE when metric is NOT_MEASURED',
+    requireVerifiedEvidence: true,
+    createdAt: '2026-11-17T00:00:00Z',
+    conditions: [
+      {
+        id: 'c-req',
+        metricKey: 'blocker_findings',
+        label: 'Blockers',
+        operator: 'EQ',
+        threshold: 0,
+        severityOnFail: 'BLOCKER',
+        requirementTier: 'REQUIRED',
+      },
+      {
+        id: 'c-opt',
+        metricKey: 'overall_score',
+        label: 'Optional Overall Score',
+        operator: 'GTE',
+        threshold: 4.0,
+        severityOnFail: 'RESERVATION',
+        requirementTier: 'OPTIONAL',
+      },
+      {
+        id: 'c-info',
+        metricKey: 'scope_coverage_percent',
+        label: 'Informative Scope Coverage',
+        operator: 'GTE',
+        threshold: 80,
+        severityOnFail: 'RESERVATION',
+        requirementTier: 'INFORMATIVE',
+      },
+    ],
+  });
+  const gateEval = QualityGateEngine.evaluate({
+    gate: customGate,
+    findings: [],
+    scoreCard: null, // overall_score and scope_coverage_percent are null (NOT_MEASURED)
+    evidenceVerified: true,
+  });
+  assert.equal(gateEval.conditionsInconclusive, 0);
+  assert.equal(gateEval.decision, 'APPROVED_WITH_RESERVATIONS');
+  assert.ok((gateEval.reservations?.length ?? 0) >= 2);
+
+  // 4. Multi-lockfile SBOM extraction (yarn.lock, pnpm-lock.yaml, bun.lock) & strict license provenance
+  assert.equal(
+    resolvePackageSpdxLicense('unknown-custom-pkg', undefined, 'MIT', { strictProvenance: true }),
+    'NOASSERTION'
+  );
+
+  const multiLockMeta = SbomGenerator.extractComponentsWithMetadata(
+    {
+      'package.json': JSON.stringify({
+        name: 'multi-lock-target',
+        version: '1.0.0',
+        dependencies: { axios: '^1.7.0' },
+      }),
+      'yarn.lock': [
+        '# yarn lockfile v1',
+        '',
+        'axios@^1.7.0:',
+        '  version "1.7.2"',
+        '  integrity sha512-abcdef',
+      ].join('\n'),
+      'pnpm-lock.yaml': [
+        "lockfileVersion: '9.0'",
+        'packages:',
+        '  lodash@4.17.21:',
+        '    resolution: {integrity: sha512-xyz}',
+      ].join('\n'),
+      'bun.lock': JSON.stringify({
+        lockfileVersion: 1,
+        packages: {
+          zod: ['zod@3.23.8', '', {}, 'sha512-zodhash'],
+        },
+      }),
+    },
+    { strictLicenseProvenance: true }
+  );
+  assert.equal(multiLockMeta.transitiveCoverageComplete, true);
+  assert.equal(multiLockMeta.lockfilesDetected.length, 3);
+  const names = multiLockMeta.components.map((c) => c.name);
+  assert.ok(names.includes('axios'));
+  assert.ok(names.includes('lodash'));
+  assert.ok(names.includes('zod'));
+});
+
+
 
 

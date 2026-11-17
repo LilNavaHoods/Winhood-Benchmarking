@@ -4,18 +4,102 @@ import {
   GOLDEN_DATASET_CORPUS,
   GOLDEN_DATASET_ORIGIN_LABEL,
   GOLDEN_DATASET_VERSION,
+  INDEPENDENT_VALIDATION_CORPUS,
+  INDEPENDENT_VALIDATION_ORIGIN_LABEL,
+  INDEPENDENT_VALIDATION_VERSION,
+  type GoldenDatasetCase,
 } from '../intelligence/datasets/GoldenDatasetCorpus';
 import type {
   GoldenValidationCaseResult,
   GoldenValidationSuiteReport,
+  StatisticalAggregateMetrics,
+  WilsonConfidenceInterval95,
 } from '../types/benchmark';
 
-export class GoldenDatasetRunner {
-  public static runValidationSuite(): GoldenValidationSuiteReport {
-    const startMs = performance.now();
-    const memBefore = process.memoryUsage().rss;
-    const cases: GoldenValidationCaseResult[] = [];
+/**
+ * Computes the Wilson Score 95% Confidence Interval (z = 1.96) for a binomial proportion.
+ * Returns null bounds when sampleSize === 0 (never fabricates 0% or 100% on empty denominator).
+ */
+export function computeWilson95ConfidenceInterval(
+  successes: number,
+  sampleSize: number
+): WilsonConfidenceInterval95 {
+  if (sampleSize <= 0) {
+    return {
+      pointEstimate: null,
+      lower: null,
+      upper: null,
+      sampleSize: 0,
+    };
+  }
+  const z = 1.959963984540054; // 95% two-sided normal quantile
+  const z2 = z * z;
+  const n = sampleSize;
+  const pHat = successes / n;
+  const denom = 1 + z2 / n;
+  const center = (pHat + z2 / (2 * n)) / denom;
+  const halfWidth =
+    (z * Math.sqrt((pHat * (1 - pHat)) / n + z2 / (4 * n * n))) / denom;
 
+  const round3 = (v: number) => Math.max(0, Math.min(1, Math.round(v * 1000) / 1000));
+  return {
+    pointEstimate: round3(pHat),
+    lower: round3(center - halfWidth),
+    upper: round3(center + halfWidth),
+    sampleSize: n,
+  };
+}
+
+function computeConfusionMetrics(c: {
+  tp: number;
+  fp: number;
+  tn: number;
+  fn: number;
+}): StatisticalAggregateMetrics {
+  const round3 = (v: number) => Math.round(v * 1000) / 1000;
+  const precision = c.tp + c.fp > 0 ? round3(c.tp / (c.tp + c.fp)) : null;
+  const recall = c.tp + c.fn > 0 ? round3(c.tp / (c.tp + c.fn)) : null;
+  const f1Score =
+    precision !== null && recall !== null && precision + recall > 0
+      ? round3((2 * precision * recall) / (precision + recall))
+      : null;
+  const truePositiveRate = recall;
+  const trueNegativeRate = c.tn + c.fp > 0 ? round3(c.tn / (c.tn + c.fp)) : null;
+  const falsePositiveRate = c.fp + c.tn > 0 ? round3(c.fp / (c.fp + c.tn)) : null;
+  const falseNegativeRate = c.fn + c.tp > 0 ? round3(c.fn / (c.fn + c.tp)) : null;
+
+  return {
+    precision,
+    recall,
+    f1Score,
+    truePositiveRate,
+    trueNegativeRate,
+    falsePositiveRate,
+    falseNegativeRate,
+  };
+}
+
+function computeMacroAverage(groups: StatisticalAggregateMetrics[]): StatisticalAggregateMetrics {
+  const meanNullable = (vals: Array<number | null>): number | null => {
+    const valid = vals.filter((v): v is number => v !== null && Number.isFinite(v));
+    if (valid.length === 0) return null;
+    const sum = valid.reduce((a, b) => a + b, 0);
+    return Math.round((sum / valid.length) * 1000) / 1000;
+  };
+  return {
+    precision: meanNullable(groups.map((g) => g.precision)),
+    recall: meanNullable(groups.map((g) => g.recall)),
+    f1Score: meanNullable(groups.map((g) => g.f1Score)),
+    truePositiveRate: meanNullable(groups.map((g) => g.truePositiveRate)),
+    trueNegativeRate: meanNullable(groups.map((g) => g.trueNegativeRate)),
+    falsePositiveRate: meanNullable(groups.map((g) => g.falsePositiveRate)),
+    falseNegativeRate: meanNullable(groups.map((g) => g.falseNegativeRate)),
+  };
+}
+
+export class GoldenDatasetRunner {
+  private static evaluateCorpusCases(corpus: GoldenDatasetCase[]) {
+    const cases: GoldenValidationCaseResult[] = [];
     let tp = 0;
     let fp = 0;
     let tn = 0;
@@ -25,12 +109,7 @@ export class GoldenDatasetRunner {
     const byLanguageAcc: Record<string, { cases: number; tp: number; fp: number; tn: number; fn: number }> = {};
     const byCategoryAcc: Record<string, { cases: number; tp: number; fp: number; tn: number; fn: number }> = {};
 
-    const datasetSha256 = crypto
-      .createHash('sha256')
-      .update(JSON.stringify(GOLDEN_DATASET_CORPUS), 'utf8')
-      .digest('hex');
-
-    for (const item of GOLDEN_DATASET_CORPUS) {
+    for (const item of corpus) {
       const caseStart = performance.now();
       const result = AnalyzerRegistry.runNativeAstAndTaintPipeline({
         runId: `golden-${item.caseId}`,
@@ -134,33 +213,110 @@ export class GoldenDatasetRunner {
       });
     }
 
+    return {
+      cases,
+      tp,
+      fp,
+      tn,
+      fn,
+      inconclusiveCases,
+      byLanguageAcc,
+      byCategoryAcc,
+    };
+  }
+
+  public static runIndependentValidationSuite(): GoldenValidationSuiteReport {
+    return GoldenDatasetRunner.runValidationSuite('INDEPENDENT_VALIDATION');
+  }
+
+  public static runValidationSuite(
+    datasetMode: 'INTERNAL_CALIBRATION' | 'INDEPENDENT_VALIDATION' = 'INTERNAL_CALIBRATION'
+  ): GoldenValidationSuiteReport {
+    const startMs = performance.now();
+    const memBefore = process.memoryUsage().rss;
+
+    const primaryCorpus =
+      datasetMode === 'INDEPENDENT_VALIDATION'
+        ? INDEPENDENT_VALIDATION_CORPUS
+        : GOLDEN_DATASET_CORPUS;
+    const primaryVersion =
+      datasetMode === 'INDEPENDENT_VALIDATION'
+        ? INDEPENDENT_VALIDATION_VERSION
+        : GOLDEN_DATASET_VERSION;
+    const primaryOriginLabel =
+      datasetMode === 'INDEPENDENT_VALIDATION'
+        ? INDEPENDENT_VALIDATION_ORIGIN_LABEL
+        : GOLDEN_DATASET_ORIGIN_LABEL;
+
+    const datasetSha256 = crypto
+      .createHash('sha256')
+      .update(JSON.stringify(primaryCorpus), 'utf8')
+      .digest('hex');
+
+    const {
+      cases,
+      tp,
+      fp,
+      tn,
+      fn,
+      inconclusiveCases,
+      byLanguageAcc,
+      byCategoryAcc,
+    } = GoldenDatasetRunner.evaluateCorpusCases(primaryCorpus);
+
+    // Also evaluate the independent validation corpus when running the primary suite so both are reported transparently
+    const independentEval = GoldenDatasetRunner.evaluateCorpusCases(INDEPENDENT_VALIDATION_CORPUS);
+    const independentMetrics = computeConfusionMetrics({
+      tp: independentEval.tp,
+      fp: independentEval.fp,
+      tn: independentEval.tn,
+      fn: independentEval.fn,
+    });
+
     const totalDurationMs = Math.max(1, Math.round(performance.now() - startMs));
     const memAfter = process.memoryUsage().rss;
     const memoryDeltaMb = Math.round(((memAfter - memBefore) / (1024 * 1024)) * 100) / 100;
 
-    // Never return synthetic 1 or 0 when a metric denominator is 0 — return null!
-    const calcMetrics = (c: { tp: number; fp: number; tn: number; fn: number }) => {
-      const precision = c.tp + c.fp > 0 ? Math.round((c.tp / (c.tp + c.fp)) * 1000) / 1000 : null;
-      const recall = c.tp + c.fn > 0 ? Math.round((c.tp / (c.tp + c.fn)) * 1000) / 1000 : null;
-      const f1Score =
-        precision !== null && recall !== null && precision + recall > 0
-          ? Math.round(((2 * precision * recall) / (precision + recall)) * 1000) / 1000
-          : null;
-      return { precision, recall, f1Score };
-    };
-
-    const globalMetrics = calcMetrics({ tp, fp, tn, fn });
-    const fpr = fp + tn > 0 ? Math.round((fp / (fp + tn)) * 1000) / 1000 : null;
-    const fnr = fn + tp > 0 ? Math.round((fn / (fn + tp)) * 1000) / 1000 : null;
+    const microAverages = computeConfusionMetrics({ tp, fp, tn, fn });
 
     const byLanguage: GoldenValidationSuiteReport['byLanguage'] = {};
+    const langGroupMetrics: StatisticalAggregateMetrics[] = [];
     for (const [lang, acc] of Object.entries(byLanguageAcc)) {
-      byLanguage[lang] = { ...acc, ...calcMetrics(acc) };
+      const m = computeConfusionMetrics(acc);
+      langGroupMetrics.push(m);
+      byLanguage[lang] = {
+        ...acc,
+        precision: m.precision,
+        recall: m.recall,
+        f1Score: m.f1Score,
+        tpr: m.truePositiveRate,
+        tnr: m.trueNegativeRate,
+        fpr: m.falsePositiveRate,
+        fnr: m.falseNegativeRate,
+        precisionCi95: computeWilson95ConfidenceInterval(acc.tp, acc.tp + acc.fp),
+        recallCi95: computeWilson95ConfidenceInterval(acc.tp, acc.tp + acc.fn),
+        lowSampleWarning: acc.cases < 5,
+      };
     }
 
     const byCategory: GoldenValidationSuiteReport['byCategory'] = {};
+    const catGroupMetrics: StatisticalAggregateMetrics[] = [];
     for (const [cat, acc] of Object.entries(byCategoryAcc)) {
-      byCategory[cat] = { ...acc, ...calcMetrics(acc) };
+      const m = computeConfusionMetrics(acc);
+      catGroupMetrics.push(m);
+      byCategory[cat] = {
+        ...acc,
+        precision: m.precision,
+        recall: m.recall,
+        f1Score: m.f1Score,
+        tpr: m.truePositiveRate,
+        tnr: m.trueNegativeRate,
+        fpr: m.falsePositiveRate,
+        fnr: m.falseNegativeRate,
+        precisionCi95: computeWilson95ConfidenceInterval(acc.tp, acc.tp + acc.fp),
+        recallCi95: computeWilson95ConfidenceInterval(acc.tp, acc.tp + acc.fn),
+        lowSampleWarning: acc.cases < 5,
+      };
     }
 
     const lowSampleLanguages = Object.entries(byLanguageAcc)
@@ -168,35 +324,69 @@ export class GoldenDatasetRunner {
       .map(([lang, acc]) => `${lang}(n=${acc.cases})`);
 
     const sampleWarning =
-      GOLDEN_DATASET_CORPUS.length < 100 || lowSampleLanguages.length > 0
-        ? `Amostra de calibração interna reduzida (N=${GOLDEN_DATASET_CORPUS.length}; subamostras <5 em: ${lowSampleLanguages.join(', ') || 'categorias específicas'}). Não representa o conjunto oficial OWASP Benchmark v1.2 (2.740+ casos).`
+      primaryCorpus.length < 100 || lowSampleLanguages.length > 0
+        ? `Amostra reduzida (N=${primaryCorpus.length}; subamostras <5 em: ${lowSampleLanguages.join(', ') || 'categorias específicas'}). Intervalos de confiança de 95% (Wilson Score) reportados explicitamente; não representa o conjunto oficial OWASP Benchmark v1.2 (2.740+ casos).`
         : null;
 
     const limitations: string[] = [
-      'Corpus interno WinHood (WINHOOD_INTERNAL_CALIBRATION_CORPUS), distinto do OWASP Benchmark oficial externo.',
+      'Separação estrita entre corpus interno de regressão (WINHOOD_INTERNAL_CALIBRATION_CORPUS) e benchmark independente (WINHOOD_INDEPENDENT_VALIDATION_BENCHMARK).',
       'Métricas com denominador zero retornam null (não avaliável estatisticamente) em vez de 100% ou 0% artificiais.',
+      'Intervalos de confiança de 95% calculados pelo método exato de Wilson Score (z = 1.96).',
     ];
     if (sampleWarning) limitations.push(sampleWarning);
+
+    const confidenceIntervals95 = {
+      precision: computeWilson95ConfidenceInterval(tp, tp + fp),
+      recall: computeWilson95ConfidenceInterval(tp, tp + fn),
+      truePositiveRate: computeWilson95ConfidenceInterval(tp, tp + fn),
+      trueNegativeRate: computeWilson95ConfidenceInterval(tn, tn + fp),
+      falsePositiveRate: computeWilson95ConfidenceInterval(fp, fp + tn),
+      falseNegativeRate: computeWilson95ConfidenceInterval(fn, fn + tp),
+    };
+
+    const macroAverages = {
+      byLanguage: computeMacroAverage(langGroupMetrics),
+      byCategory: computeMacroAverage(catGroupMetrics),
+    };
 
     const reportBody = {
       validationId: `golden-val-${Date.now()}`,
       executedAt: new Date().toISOString(),
       engineVersion: 'WINHOOD-AST-TAINT-v4.1.0',
-      datasetVersion: GOLDEN_DATASET_VERSION,
-      datasetOriginLabel: GOLDEN_DATASET_ORIGIN_LABEL,
+      datasetVersion: primaryVersion,
+      datasetOriginLabel: primaryOriginLabel,
       datasetSha256,
       sampleWarning,
-      totalCases: GOLDEN_DATASET_CORPUS.length,
+      totalCases: primaryCorpus.length,
       inconclusiveCases,
       truePositives: tp,
       falsePositives: fp,
       trueNegatives: tn,
       falseNegatives: fn,
-      precision: globalMetrics.precision,
-      recall: globalMetrics.recall,
-      f1Score: globalMetrics.f1Score,
-      falsePositiveRate: fpr,
-      falseNegativeRate: fnr,
+      precision: microAverages.precision,
+      recall: microAverages.recall,
+      f1Score: microAverages.f1Score,
+      truePositiveRate: microAverages.truePositiveRate,
+      trueNegativeRate: microAverages.trueNegativeRate,
+      falsePositiveRate: microAverages.falsePositiveRate,
+      falseNegativeRate: microAverages.falseNegativeRate,
+      confidenceIntervals95,
+      macroAverages,
+      microAverages,
+      independentValidationSummary: {
+        datasetVersion: INDEPENDENT_VALIDATION_VERSION,
+        datasetOriginLabel: INDEPENDENT_VALIDATION_ORIGIN_LABEL,
+        totalCases: INDEPENDENT_VALIDATION_CORPUS.length,
+        truePositives: independentEval.tp,
+        falsePositives: independentEval.fp,
+        trueNegatives: independentEval.tn,
+        falseNegatives: independentEval.fn,
+        precision: independentMetrics.precision,
+        recall: independentMetrics.recall,
+        f1Score: independentMetrics.f1Score,
+        falsePositiveRate: independentMetrics.falsePositiveRate,
+        falseNegativeRate: independentMetrics.falseNegativeRate,
+      },
       totalDurationMs,
       memoryDeltaMb,
       limitations,

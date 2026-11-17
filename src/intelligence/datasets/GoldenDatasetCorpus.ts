@@ -368,3 +368,200 @@ export const GOLDEN_DATASET_CORPUS: GoldenDatasetCase[] = [
     },
   },
 ];
+
+export const INDEPENDENT_VALIDATION_VERSION = 'WINHOOD-INDEPENDENT-BENCHMARK-v1.0.0';
+export const INDEPENDENT_VALIDATION_ORIGIN_LABEL = 'WINHOOD_INDEPENDENT_VALIDATION_BENCHMARK' as const;
+
+/**
+ * Conjunto de validação independente (separado do corpus interno de regressão GOLDEN_DATASET_CORPUS),
+ * composto por cenários distintos de fluxo de dados, sanitização contextual, SQL, execução de comandos,
+ * criptografia e DDL relacional.
+ */
+export const INDEPENDENT_VALIDATION_CORPUS: GoldenDatasetCase[] = [
+  {
+    caseId: 'IND-TS-SQLI-TP-01',
+    title: 'Independent Benchmark: TypeScript SQLi em relatório financeiro interpolado',
+    language: 'TypeScript',
+    category: 'SQL_INJECTION',
+    cwe: 'CWE-89',
+    expectedVulnerable: true,
+    filesMap: {
+      'src/finance/ledgerDao.ts': [
+        'export function queryLedgerByAccount(conn: any, accountCode: string) {',
+        '  const queryText = `SELECT balance, currency FROM ledger WHERE account_code = \'${accountCode}\'`;',
+        '  return conn.query(queryText);',
+        '}',
+      ].join('\n'),
+    },
+  },
+  {
+    caseId: 'IND-TS-SQLI-TN-01',
+    title: 'Independent Benchmark: TypeScript SQLi mitigado por conversão numérica Number()',
+    language: 'TypeScript',
+    category: 'SQL_INJECTION',
+    cwe: 'CWE-89',
+    expectedVulnerable: false,
+    filesMap: {
+      'src/finance/ledgerSafeDao.ts': [
+        'export function queryLedgerByNumericId(conn: any, rawAccountId: string) {',
+        '  const numericId = Number(rawAccountId);',
+        '  return conn.query("SELECT balance FROM ledger WHERE id = $1", [numericId]);',
+        '}',
+      ].join('\n'),
+    },
+  },
+  {
+    caseId: 'IND-JS-CMDI-TP-02',
+    title: 'Independent Benchmark: JavaScript Command Injection via child_process.exec',
+    language: 'JavaScript',
+    category: 'COMMAND_INJECTION',
+    cwe: 'CWE-78',
+    expectedVulnerable: true,
+    filesMap: {
+      'src/ops/archiveWorker.js': [
+        'import { execSync } from "node:child_process";',
+        'export function compressFolder(targetFolder) {',
+        '  return execSync("tar -cf archive.tar " + targetFolder);',
+        '}',
+      ].join('\n'),
+    },
+  },
+  {
+    caseId: 'IND-JS-CMDI-TN-02',
+    title: 'Independent Benchmark: JavaScript spawnSync seguro com shell: false',
+    language: 'JavaScript',
+    category: 'COMMAND_INJECTION',
+    cwe: 'CWE-78',
+    expectedVulnerable: false,
+    filesMap: {
+      'src/ops/archiveWorkerSafe.js': [
+        'import { spawnSync } from "node:child_process";',
+        'export function compressFolderSafe(targetFolder) {',
+        '  return spawnSync("tar", ["-cf", "archive.tar", targetFolder], { shell: false });',
+        '}',
+      ].join('\n'),
+    },
+  },
+  {
+    caseId: 'IND-PY-SQLI-TP-03',
+    title: 'Independent Benchmark: Python SQL Injection com concatenação em cursor.execute',
+    language: 'Python',
+    category: 'SQL_INJECTION',
+    cwe: 'CWE-89',
+    expectedVulnerable: true,
+    filesMap: {
+      'app/orders_repo.py': [
+        'def fetch_order_by_code(cursor, order_code):',
+        '    stmt = "SELECT id, total FROM orders WHERE code = \'" + order_code + "\'"',
+        '    cursor.execute(stmt)',
+      ].join('\n'),
+    },
+  },
+  {
+    caseId: 'IND-PY-SQLI-TN-03',
+    title: 'Independent Benchmark: Python cursor.execute parametrizado',
+    language: 'Python',
+    category: 'SQL_INJECTION',
+    cwe: 'CWE-89',
+    expectedVulnerable: false,
+    filesMap: {
+      'app/orders_repo_safe.py': [
+        'def fetch_order_by_code_safe(cursor, order_code):',
+        '    cursor.execute("SELECT id, total FROM orders WHERE code = %s", (order_code,))',
+      ].join('\n'),
+    },
+  },
+  {
+    caseId: 'IND-PY-CRYPTO-TP-04',
+    title: 'Independent Benchmark: Python hashlib.sha1 para digest de credencial',
+    language: 'Python',
+    category: 'WEAK_CRYPTO',
+    cwe: 'CWE-328',
+    expectedVulnerable: true,
+    filesMap: {
+      'app/legacy_hasher.py': [
+        'import hashlib',
+        'def compute_legacy_digest(payload_bytes):',
+        '    return hashlib.sha1(payload_bytes).hexdigest()',
+      ].join('\n'),
+    },
+  },
+  {
+    caseId: 'IND-PY-CRYPTO-TN-04',
+    title: 'Independent Benchmark: Python hashlib.pbkdf2_hmac SHA-256 seguro',
+    language: 'Python',
+    category: 'WEAK_CRYPTO',
+    cwe: 'CWE-328',
+    expectedVulnerable: false,
+    filesMap: {
+      'app/modern_hasher.py': [
+        'import hashlib',
+        'def compute_kdf_digest(payload_bytes, salt_bytes):',
+        '    return hashlib.pbkdf2_hmac("sha256", payload_bytes, salt_bytes, 600000)',
+      ].join('\n'),
+    },
+  },
+  {
+    caseId: 'IND-JAVA-SQLI-TP-05',
+    title: 'Independent Benchmark: Java executeQuery com concatenação',
+    language: 'Java',
+    category: 'SQL_INJECTION',
+    cwe: 'CWE-89',
+    expectedVulnerable: true,
+    filesMap: {
+      'src/main/java/InvoiceDao.java': [
+        'public class InvoiceDao {',
+        '  public void queryInvoice(Statement st, String code) throws Exception {',
+        '    st.executeQuery("SELECT id FROM invoices WHERE code = \'" + code + "\'");',
+        '  }',
+        '}',
+      ].join('\n'),
+    },
+  },
+  {
+    caseId: 'IND-JAVA-SQLI-TN-05',
+    title: 'Independent Benchmark: Java PreparedStatement seguro',
+    language: 'Java',
+    category: 'SQL_INJECTION',
+    cwe: 'CWE-89',
+    expectedVulnerable: false,
+    filesMap: {
+      'src/main/java/InvoiceSafeDao.java': [
+        'public class InvoiceSafeDao {',
+        '  public void queryInvoiceSafe(Connection conn, String code) throws Exception {',
+        '    PreparedStatement ps = conn.prepareStatement("SELECT id FROM invoices WHERE code = ?");',
+        '  }',
+        '}',
+      ].join('\n'),
+    },
+  },
+  {
+    caseId: 'IND-SQL-DDL-TP-06',
+    title: 'Independent Benchmark: SQL DELETE sem cláusula WHERE',
+    language: 'SQL',
+    category: 'SQL_SCHEMA',
+    cwe: 'CWE-404',
+    expectedVulnerable: true,
+    filesMap: {
+      'db/cleanup.sql': [
+        'CREATE TABLE audit_events (id INT PRIMARY KEY, event_name VARCHAR(80));',
+        'DELETE FROM audit_events;',
+      ].join('\n'),
+    },
+  },
+  {
+    caseId: 'IND-SQL-DDL-TN-06',
+    title: 'Independent Benchmark: SQL DELETE restrito por cláusula WHERE',
+    language: 'SQL',
+    category: 'SQL_SCHEMA',
+    cwe: 'CWE-404',
+    expectedVulnerable: false,
+    filesMap: {
+      'db/cleanup_safe.sql': [
+        'CREATE TABLE audit_events (id INT PRIMARY KEY, event_name VARCHAR(80));',
+        'DELETE FROM audit_events WHERE id = 100;',
+      ].join('\n'),
+    },
+  },
+];
+

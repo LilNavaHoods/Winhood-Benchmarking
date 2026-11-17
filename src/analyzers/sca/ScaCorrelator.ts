@@ -163,6 +163,19 @@ export class ScaCorrelator {
     correlations: ScaVulnerabilityCorrelation[];
     findings: NormalizedFinding[];
     toolsAvailability: ReturnType<typeof ScaCorrelator.getScaToolsAvailability>;
+    advisoryFeedMetadata: {
+      dbVersion: string;
+      cacheMode: 'LIVE_SYNCED_CACHE' | 'OFFLINE_VERIFIED_SNAPSHOT';
+      lastSyncedAt: string;
+      isStale: boolean;
+      feeds: Array<{
+        source: string;
+        snapshotVersion: string;
+        lastUpdated: string;
+        recordsCount: number;
+        isStale: boolean;
+      }>;
+    };
   } {
     const {
       software,
@@ -457,7 +470,50 @@ export class ScaCorrelator {
       findings.push(...licEval.findings);
     }
 
-    return { correlations, findings, toolsAvailability };
+    const hasLiveSync = Boolean(syncedBundle.updatedAt && syncedBundle.advisories.length > 0);
+    const snapshotTimestamp = syncedBundle.updatedAt || '2026-11-14T00:00:00Z';
+    const ageMs = Math.max(0, Date.parse(nowIso) - Date.parse(snapshotTimestamp));
+    const isStale = ageMs > 30 * 24 * 60 * 60 * 1000; // > 30 days
+    const advisoryFeedMetadata = {
+      dbVersion,
+      cacheMode: hasLiveSync ? ('LIVE_SYNCED_CACHE' as const) : ('OFFLINE_VERIFIED_SNAPSHOT' as const),
+      lastSyncedAt: snapshotTimestamp,
+      isStale,
+      feeds: [
+        {
+          source: 'OSV.dev',
+          snapshotVersion: dbVersion,
+          lastUpdated: snapshotTimestamp,
+          recordsCount: hasLiveSync ? syncedBundle.advisories.length : ADVISORY_INTELLIGENCE_DB.length,
+          isStale,
+        },
+        {
+          source: 'NVD',
+          snapshotVersion: dbVersion,
+          lastUpdated: snapshotTimestamp,
+          recordsCount: Object.keys(syncedBundle.nvdByCve).length || ADVISORY_INTELLIGENCE_DB.length,
+          isStale,
+        },
+        {
+          source: 'FIRST_EPSS',
+          snapshotVersion: dbVersion,
+          lastUpdated: snapshotTimestamp,
+          recordsCount: Object.keys(syncedBundle.epssByCve).length || ADVISORY_INTELLIGENCE_DB.length,
+          isStale,
+        },
+        {
+          source: 'CISA_KEV',
+          snapshotVersion: dbVersion,
+          lastUpdated: snapshotTimestamp,
+          recordsCount:
+            syncedBundle.kevCveIds.length ||
+            ADVISORY_INTELLIGENCE_DB.filter((a) => a.cisaKev).length,
+          isStale,
+        },
+      ],
+    };
+
+    return { correlations, findings, toolsAvailability, advisoryFeedMetadata };
   }
 
   public static evaluateLicensePolicy(params: {
