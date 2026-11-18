@@ -462,7 +462,54 @@ test('Critical motors (src/scoring, src/evidence, src/comparability) achieve >=9
   });
   assert.equal(confLowScope.level, 'LOW');
 
+  const {
+    buildComparabilityManifest,
+    CANONICAL_TAXONOMY_MAPPING_SHA256,
+    sha256Canonical,
+  } = await import('../comparability/index');
+
+  const manifestA = buildComparabilityManifest({
+    projectId: 'proj-vault',
+    sourceRepository: 'https://github.com/org/vault',
+    commitSha: 'deadbeef1234',
+    workingTreeClean: true,
+    configHashSha256: sha256Canonical({ cfg: 1 }),
+    analyticalProfile: 'vault-sec',
+    engineVersion: '4.4.0',
+    ruleCatalogSha256: 'hash1',
+    weightsHashSha256: sha256Canonical({ w: 1 }),
+    eligibleFilesScopeHash: sha256Canonical(['src/a.ts']),
+    evidenceIntegrityVerified: true,
+  });
+  const manifestB = { ...manifestA };
+
   const compOk = validatePairComparability(
+    {
+      softwareId: 'a',
+      engineVersion: '4.4.0',
+      ruleCatalogSha256: 'hash1',
+      scopeCoveragePercent: 92,
+      evidenceConfidence: 'HIGH',
+      functionalCategory: 'vault',
+      manifest: manifestA,
+    },
+    {
+      softwareId: 'b',
+      engineVersion: '4.4.0',
+      ruleCatalogSha256: 'hash1',
+      scopeCoveragePercent: 88,
+      evidenceConfidence: 'HIGH',
+      functionalCategory: 'vault',
+      manifest: manifestB,
+    }
+  );
+  assert.equal(compOk.comparable, true);
+  assert.equal(compOk.status, 'COMPATIBLE');
+  assert.equal(compOk.comparabilityClassification, 'STRICTLY_COMPARABLE');
+  assert.equal(compOk.manifestsVerified, true);
+
+  // Bare call without manifest MUST be rejected as NOT_COMPARABLE
+  const missingManifest = validatePairComparability(
     {
       softwareId: 'a',
       engineVersion: '4.4.0',
@@ -475,13 +522,13 @@ test('Critical motors (src/scoring, src/evidence, src/comparability) achieve >=9
       softwareId: 'b',
       engineVersion: '4.4.0',
       ruleCatalogSha256: 'hash1',
-      scopeCoveragePercent: 88,
+      scopeCoveragePercent: 92,
       evidenceConfidence: 'HIGH',
       functionalCategory: 'vault',
     }
   );
-  assert.equal(compOk.comparable, true);
-  assert.equal(compOk.status, 'COMPATIBLE');
+  assert.equal(missingManifest.comparable, false);
+  assert.equal(missingManifest.comparabilityClassification, 'NOT_COMPARABLE');
 
   const compInconclusive = validatePairComparability(
     {
@@ -491,6 +538,7 @@ test('Critical motors (src/scoring, src/evidence, src/comparability) achieve >=9
       scopeCoveragePercent: 90,
       evidenceConfidence: 'LOW',
       functionalCategory: 'vault',
+      manifest: manifestA,
     },
     {
       softwareId: 'b',
@@ -499,10 +547,12 @@ test('Critical motors (src/scoring, src/evidence, src/comparability) achieve >=9
       scopeCoveragePercent: 88,
       evidenceConfidence: 'HIGH',
       functionalCategory: 'vault',
+      manifest: manifestB,
     }
   );
   assert.equal(compInconclusive.comparable, false);
   assert.equal(compInconclusive.status, 'INCONCLUSIVE');
+  assert.equal(compInconclusive.comparabilityClassification, 'NOT_COMPARABLE');
 
   const compIncompatible = validatePairComparability(
     {
@@ -512,6 +562,7 @@ test('Critical motors (src/scoring, src/evidence, src/comparability) achieve >=9
       scopeCoveragePercent: 95,
       evidenceConfidence: 'HIGH',
       functionalCategory: 'vault',
+      manifest: manifestA,
     },
     {
       softwareId: 'b',
@@ -520,10 +571,466 @@ test('Critical motors (src/scoring, src/evidence, src/comparability) achieve >=9
       scopeCoveragePercent: 40,
       evidenceConfidence: 'HIGH',
       functionalCategory: 'crm',
+      manifest: {
+        ...manifestB,
+        projectId: 'proj-other',
+        engineVersion: '4.4.0',
+        analyticalProfile: 'other-prof',
+        weightsHashSha256: sha256Canonical({ w: 2 }),
+        configHashSha256: sha256Canonical({ cfg: 2 }),
+        evidenceIntegrityVerified: false,
+      },
     }
   );
   assert.equal(compIncompatible.comparable, false);
   assert.equal(compIncompatible.status, 'INCOMPATIBLE_SCOPE');
-  assert.equal(compIncompatible.reasons.length, 4);
+  assert.equal(compIncompatible.comparabilityClassification, 'NOT_COMPARABLE');
+  assert.ok(compIncompatible.reasons.length >= 4);
+
+  // SAME_ENGINE qualified (dirty workingTree, different runtime, coverage delta 15%)
+  const compQualified = validatePairComparability(
+    {
+      softwareId: 'a',
+      engineVersion: '4.4.0',
+      ruleCatalogSha256: 'hash1',
+      scopeCoveragePercent: 95,
+      evidenceConfidence: 'HIGH',
+      functionalCategory: 'vault',
+      manifest: { ...manifestA, workingTreeClean: false, osPlatform: 'linux', analyticalDepth: 'FULL_AST' },
+    },
+    {
+      softwareId: 'b',
+      engineVersion: '4.4.0',
+      ruleCatalogSha256: 'hash1',
+      scopeCoveragePercent: 80,
+      evidenceConfidence: 'HIGH',
+      functionalCategory: 'vault',
+      manifest: {
+        ...manifestB,
+        osPlatform: 'win32',
+        analyticalDepth: 'STRUCTURAL_AST',
+        commitSha: 'cafebabe5678',
+        eligibleFilesScopeHash: sha256Canonical(['src/b.ts']),
+      },
+    }
+  );
+  assert.equal(compQualified.comparable, true);
+  assert.equal(compQualified.comparabilityClassification, 'QUALIFIED_COMPARISON');
+
+  // CROSS_TOOL with invalid manifest digests & anti-bypass check
+  const crossBypassRejected = validatePairComparability(
+    {
+      softwareId: 'a',
+      engineVersion: 'WINHOOD-4.4.0',
+      ruleCatalogSha256: 'hash1',
+      scopeCoveragePercent: 95,
+      evidenceConfidence: 'HIGH',
+      functionalCategory: 'vault',
+      toolExecuted: false,
+      manifest: { ...manifestA, taxonomyMappingSha256: '', commitSha: 'abc', configHashSha256: 'bad', weightsHashSha256: 'bad', eligibleFilesScopeHash: 'bad' },
+    },
+    {
+      softwareId: 'b',
+      engineVersion: 'EXT-TOOL-1.0',
+      ruleCatalogSha256: 'hash2',
+      scopeCoveragePercent: 90,
+      evidenceConfidence: 'HIGH',
+      functionalCategory: 'vault',
+      manifest: { ...manifestB, projectId: '', analyticalProfile: '', taxonomyMappingSha256: CANONICAL_TAXONOMY_MAPPING_SHA256 },
+    },
+    { modality: 'CROSS_TOOL', sameCommitVerified: true, normalizedTaxonomyApplied: true }
+  );
+  assert.equal(crossBypassRejected.comparable, false);
+  assert.equal(crossBypassRejected.comparabilityClassification, 'NOT_COMPARABLE');
+
+  const crossMismatch = validatePairComparability(
+    {
+      softwareId: 'a',
+      engineVersion: 'WINHOOD-4.4.0',
+      ruleCatalogSha256: 'hash1',
+      scopeCoveragePercent: 95,
+      evidenceConfidence: 'HIGH',
+      functionalCategory: 'vault',
+      manifest: { ...manifestA, taxonomyMappingSha256: CANONICAL_TAXONOMY_MAPPING_SHA256 },
+    },
+    {
+      softwareId: 'b',
+      engineVersion: 'EXT-TOOL-1.0',
+      ruleCatalogSha256: 'hash2',
+      scopeCoveragePercent: 92,
+      evidenceConfidence: 'HIGH',
+      functionalCategory: 'vault',
+      manifest: {
+        ...manifestB,
+        projectId: 'proj-different',
+        commitSha: 'different999',
+        eligibleFilesScopeHash: sha256Canonical(['other.ts']),
+        taxonomyMappingSha256: sha256Canonical({ altTax: true }),
+      },
+    },
+    { modality: 'CROSS_TOOL' }
+  );
+  assert.equal(crossMismatch.comparable, false);
+  assert.equal(crossMismatch.comparabilityClassification, 'NOT_COMPARABLE');
+
+  // Exercise remaining branches in src/comparability/index.ts:
+  // 1) sha256Canonical with string input & buildComparabilityManifest with minimal vs explicit fields
+  assert.equal(sha256Canonical('canonical-raw-string').length, 64);
+  const minimalManifest = buildComparabilityManifest({
+    projectId: 'proj-min',
+    commitSha: '1234567890ab',
+    engineVersion: '4.4.0',
+    ruleCatalogSha256: 'hash-min',
+    analyticalProfile: 'min-profile',
+  });
+  const explicitManifest = buildComparabilityManifest({
+    projectId: 'proj-min',
+    commitSha: '1234567890ab',
+    engineVersion: '4.4.0',
+    ruleCatalogSha256: 'hash-min',
+    analyticalProfile: 'min-profile',
+    analyticalDepth: 'FULL_AST',
+    osPlatform: 'linux',
+    cpuArch: 'x64',
+    runtimeVersion: 'v22.0.0',
+    taxonomyVersion: 'WINHOOD-CWE-MQR-TAXONOMY-v1.0.0',
+    taxonomyMappingSha256: CANONICAL_TAXONOMY_MAPPING_SHA256,
+    executedAt: '2026-11-17T00:00:00.000Z',
+  });
+
+  // 2) CROSS_TOOL valid QUALIFIED_COMPARISON with verified matching commitSha & taxonomyMappingSha256
+  const crossQualified = validatePairComparability(
+    {
+      softwareId: 'a',
+      engineVersion: 'WINHOOD-4.4.0',
+      ruleCatalogSha256: 'hash-min',
+      scopeCoveragePercent: 90,
+      evidenceConfidence: 'MEDIUM',
+      functionalCategory: 'vault',
+      toolExecuted: true,
+      manifest: minimalManifest,
+    },
+    {
+      softwareId: 'b',
+      engineVersion: 'EXT-SCANNER-2.1',
+      ruleCatalogSha256: 'hash-ext',
+      scopeCoveragePercent: 90,
+      evidenceConfidence: 'HIGH',
+      functionalCategory: 'vault',
+      toolExecuted: true,
+      manifest: explicitManifest,
+    },
+    { modality: 'CROSS_TOOL', sameCommitVerified: true, normalizedTaxonomyApplied: true }
+  );
+  assert.equal(crossQualified.comparable, true);
+  assert.equal(crossQualified.comparabilityClassification, 'QUALIFIED_COMPARISON');
+
+  // 3) CROSS_TOOL with normalizedTaxonomyApplied=false, same engineVersion, candidateB.toolExecuted=false, candidateB LOW, and invalid candidateB taxonomy
+  const crossDenied = validatePairComparability(
+    {
+      softwareId: 'a',
+      engineVersion: 'EXT-1.0',
+      ruleCatalogSha256: 'hash1',
+      scopeCoveragePercent: 90,
+      evidenceConfidence: 'HIGH',
+      functionalCategory: 'vault',
+      manifest: minimalManifest,
+    },
+    {
+      softwareId: 'b',
+      engineVersion: 'EXT-1.0',
+      ruleCatalogSha256: 'hash2',
+      scopeCoveragePercent: 90,
+      evidenceConfidence: 'LOW',
+      functionalCategory: 'vault',
+      toolExecuted: false,
+      manifest: { ...explicitManifest, taxonomyMappingSha256: 'bad-digest' },
+    },
+    { modality: 'CROSS_TOOL', normalizedTaxonomyApplied: false }
+  );
+  assert.equal(crossDenied.comparable, false);
+  assert.equal(crossDenied.status, 'INCONCLUSIVE');
+
+  // 4) SAME_ENGINE with candidateB MEDIUM confidence, workingTreeClean=false on B, distinct cpuArch/runtimeVersion, and allowDistinctRepositoriesInSameProject=true
+  const sameEngineQualB = validatePairComparability(
+    {
+      softwareId: 'a',
+      engineVersion: '4.4.0',
+      ruleCatalogSha256: 'hash-min',
+      scopeCoveragePercent: 90,
+      evidenceConfidence: 'HIGH',
+      functionalCategory: 'vault',
+      manifest: explicitManifest,
+    },
+    {
+      softwareId: 'b',
+      engineVersion: '4.4.0',
+      ruleCatalogSha256: 'hash-min',
+      scopeCoveragePercent: 85,
+      evidenceConfidence: 'MEDIUM',
+      functionalCategory: 'vault',
+      manifest: {
+        ...explicitManifest,
+        workingTreeClean: false,
+        cpuArch: 'arm64',
+        runtimeVersion: 'v20.0.0',
+        commitSha: 'othercommit99',
+      },
+    },
+    { modality: 'SAME_ENGINE', allowDistinctRepositoriesInSameProject: true }
+  );
+  assert.equal(sameEngineQualB.comparable, true);
+  assert.equal(sameEngineQualB.comparabilityClassification, 'QUALIFIED_COMPARISON');
 });
+
+test('Phase 3 P0 Unified Quality Gate Contract: 9 mandatory scenarios without Fudge Factor suppression', async () => {
+  const { calculateDeterministicScoreCard, DEFAULT_CATEGORY_WEIGHTS, ALL_BENCHMARK_CATEGORIES } = await import(
+    '../engine/scoringEngine'
+  );
+
+  const baseMetrics = {
+    bugs: 0,
+    codeSmells: 0,
+    vulnerabilities: 0,
+    criticalVulns: 0,
+    highVulns: 0,
+    mediumVulns: 0,
+    lowVulns: 0,
+    secretsExposed: 0,
+    duplicatedLinesPercent: 0,
+    deadCodeSymbols: 0,
+    avgCyclomaticComplexity: 1,
+    avgCognitiveComplexity: 1,
+    technicalDebtMinutes: 0,
+    testCoveragePercent: 0,
+    circularDependencies: 0,
+    couplingIndex: 0.1,
+    cohesionIndex: 0.9,
+    dbSchemaIssues: 0,
+    functionalTestsTotal: 1,
+    functionalTestsPassed: 1,
+    functionalTestsFailed: 0,
+    p50LatencyMs: 0,
+    p95LatencyMs: 0,
+    p99LatencyMs: 0,
+    throughputRps: 0,
+    memoryMb: 0,
+    cpuPercent: 0,
+    startupTimeMs: 0,
+  };
+
+  const baseInput = {
+    softwareId: 'sw-qg',
+    softwareName: 'GateApp',
+    softwareVersion: '1.0.0',
+    veracityClassification: 'SUCCESS_VALIDATED' as const,
+    coveragePercent: 95,
+    essentialFeaturesMissing: 0,
+    visualOnlyFeaturesCount: 0,
+    hasEncryptionAtRest: true,
+    hasAuditTrail: true,
+    hasCleanSandboxUninstall: true,
+    hasCompleteDocumentation: true,
+    environmentEquivalent: true,
+    enabledCategories: [...ALL_BENCHMARK_CATEGORIES],
+    findings: [],
+    metrics: baseMetrics,
+  };
+
+  // Scenario 1: Project < 20 lines without coverage -> INCONCLUSIVE (never APPROVED via Fudge Factor)
+  const cardShortNoCov = calculateDeterministicScoreCard(
+    {
+      ...baseInput,
+      newCodeLinesCount: 10,
+      staticMetrics: {
+        loc: 10,
+        cyclomaticComplexity: 1,
+        cognitiveComplexity: 1,
+        duplicatedLinesPercent: 0,
+        couplingIndex: 0.1,
+        cohesionIndex: 0.9,
+        circularDependenciesCount: 0,
+        layerViolationsCount: 0,
+        riskIndicators: [],
+      },
+    },
+    DEFAULT_CATEGORY_WEIGHTS,
+    true
+  );
+  assert.equal(cardShortNoCov.qualityGate?.fudgeFactorApplied, false);
+  assert.equal(cardShortNoCov.qualityGate?.status, 'INCONCLUSIVE');
+  assert.equal(cardShortNoCov.qualityGate?.executiveDecision, 'INCONCLUSIVE');
+
+  // Scenario 2: Project >= 20 lines without coverage -> INCONCLUSIVE
+  const cardLongNoCov = calculateDeterministicScoreCard(
+    {
+      ...baseInput,
+      newCodeLinesCount: 250,
+      staticMetrics: {
+        loc: 250,
+        cyclomaticComplexity: 3,
+        cognitiveComplexity: 3,
+        duplicatedLinesPercent: 0,
+        couplingIndex: 0.1,
+        cohesionIndex: 0.9,
+        circularDependenciesCount: 0,
+        layerViolationsCount: 0,
+        riskIndicators: [],
+      },
+    },
+    DEFAULT_CATEGORY_WEIGHTS,
+    true
+  );
+  assert.equal(cardLongNoCov.qualityGate?.status, 'INCONCLUSIVE');
+  assert.equal(cardLongNoCov.qualityGate?.executiveDecision, 'INCONCLUSIVE');
+
+  // Scenario 3: Project with measured coverage below threshold (65% < 80%) -> FAILED (never PASSED)
+  const cardLowCov = calculateDeterministicScoreCard(
+    {
+      ...baseInput,
+      newCodeLinesCount: 12,
+      metrics: { ...baseMetrics, testCoveragePercent: 65, criticalVulns: 1 },
+      staticMetrics: {
+        loc: 12,
+        cyclomaticComplexity: 1,
+        cognitiveComplexity: 1,
+        duplicatedLinesPercent: 0,
+        couplingIndex: 0.1,
+        cohesionIndex: 0.9,
+        circularDependenciesCount: 0,
+        layerViolationsCount: 0,
+        riskIndicators: [],
+      },
+    },
+    DEFAULT_CATEGORY_WEIGHTS,
+    true
+  );
+  assert.equal(cardLowCov.qualityGate?.status, 'FAILED');
+  assert.equal(cardLowCov.qualityGate?.executiveDecision, 'REPROVADO');
+
+  // Scenario 4: Project with measured coverage above threshold (88% >= 80%) -> PASSED / APROVADO
+  const cardHighCov = calculateDeterministicScoreCard(
+    {
+      ...baseInput,
+      newCodeLinesCount: 12,
+      metrics: { ...baseMetrics, testCoveragePercent: 88 },
+      staticMetrics: {
+        loc: 12,
+        cyclomaticComplexity: 1,
+        cognitiveComplexity: 1,
+        duplicatedLinesPercent: 0,
+        couplingIndex: 0.1,
+        cohesionIndex: 0.9,
+        circularDependenciesCount: 0,
+        layerViolationsCount: 0,
+        riskIndicators: [],
+      },
+    },
+    DEFAULT_CATEGORY_WEIGHTS,
+    true
+  );
+  assert.equal(cardHighCov.qualityGate?.status, 'PASSED');
+  assert.equal(cardHighCov.qualityGate?.executiveDecision, 'APROVADO');
+
+  // Scenario 5: REQUIRED metric absent -> INCONCLUSIVE in QualityGateEngine
+  const qgReqAbsent = QualityGateEngine.evaluate({
+    gateId: 'winhood-standard-v2',
+    findings: [],
+    scopeCoveragePercent: null,
+    evidenceConfidence: 'HIGH',
+    evidenceVerified: true,
+  });
+  assert.equal(qgReqAbsent.decision, 'INCONCLUSIVE');
+
+  // Scenario 6: OPTIONAL metric absent -> APPROVED_WITH_RESERVATIONS
+  const customOptGate = QualityGateEngine.registerGate({
+    id: 'custom-opt-gate',
+    name: 'Custom Optional Gate',
+    version: '1.0.0',
+    description: 'Optional coverage test',
+    requireVerifiedEvidence: true,
+    createdAt: '2026-11-17T00:00:00Z',
+    conditions: [
+      {
+        id: 'opt-cov',
+        metricKey: 'scope_coverage_percent',
+        label: 'Optional Scope Coverage',
+        operator: 'GTE',
+        threshold: 80,
+        severityOnFail: 'RESERVATION',
+        requirementTier: 'OPTIONAL',
+      },
+    ],
+  });
+  const qgOptAbsent = QualityGateEngine.evaluate({
+    gate: customOptGate,
+    findings: [],
+    scopeCoveragePercent: null,
+    evidenceConfidence: 'HIGH',
+    evidenceVerified: true,
+  });
+  assert.equal(qgOptAbsent.decision, 'APPROVED_WITH_RESERVATIONS');
+
+  // Scenario 7: INFORMATIVE metric absent -> APPROVED_WITH_RESERVATIONS (non-blocking note)
+  const customInfoGate = QualityGateEngine.registerGate({
+    id: 'custom-info-gate',
+    name: 'Custom Informative Gate',
+    version: '1.0.0',
+    description: 'Informative metric test',
+    requireVerifiedEvidence: true,
+    createdAt: '2026-11-17T00:00:00Z',
+    conditions: [
+      {
+        id: 'info-score',
+        metricKey: 'overall_score',
+        label: 'Informative Score',
+        operator: 'GTE',
+        threshold: 4.5,
+        severityOnFail: 'BLOCKER',
+        requirementTier: 'INFORMATIVE',
+      },
+    ],
+  });
+  const qgInfoAbsent = QualityGateEngine.evaluate({
+    gate: customInfoGate,
+    findings: [],
+    scopeCoveragePercent: 90,
+    evidenceConfidence: 'HIGH',
+    evidenceVerified: true,
+  });
+  assert.equal(qgInfoAbsent.decision, 'APPROVED_WITH_RESERVATIONS');
+
+  // Scenario 8: Custom profile evaluation consistency between evaluateSharedContract and QualityGateEngine
+  const sharedOpt = QualityGateEngine.evaluateSharedContract({
+    eligibleForScoring: true,
+    criticalVulns: 0,
+    secretsExposed: 0,
+    bugs: 0,
+    securityRating: 'A',
+    reliabilityRating: 'A',
+    duplicatedLinesPercent: 0,
+    hasMeasuredCoverage: false,
+    testCoveragePercent: 0,
+    scopeCoveragePercent: 90,
+    coverageRequirementTier: 'OPTIONAL',
+  });
+  assert.equal(sharedOpt.canonicalDecision, 'APPROVED_WITH_RESERVATIONS');
+
+  // Scenario 9: Partial evidence (< 50% scope coverage) -> INCONCLUSIVE
+  const sharedPartial = QualityGateEngine.evaluateSharedContract({
+    eligibleForScoring: true,
+    criticalVulns: 0,
+    secretsExposed: 0,
+    bugs: 0,
+    securityRating: 'A',
+    reliabilityRating: 'A',
+    duplicatedLinesPercent: 0,
+    hasMeasuredCoverage: true,
+    testCoveragePercent: 95,
+    scopeCoveragePercent: 35,
+  });
+  assert.equal(sharedPartial.canonicalDecision, 'INCONCLUSIVE');
+  assert.equal(sharedPartial.executiveDecision, 'INCONCLUSIVE');
+});
+
 

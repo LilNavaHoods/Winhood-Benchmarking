@@ -1,38 +1,27 @@
 # Relatório de Validação de Qualidade de Software e Motores Analíticos (`QUALITY_VALIDATION_REPORT.md`)
 
-**Data de Execução:** 2026-11-17  
-**Versão:** `4.4.0`
+- **Versão do WinHood:** `4.4.0`
+- **Commit base / Estado:** `d382a4e96a0481cba80f005790ab65100dfc5ae4` + unificação de Quality Gate e Comparabilidade
+- **Ambiente:** Linux x64, `Node.js v22.23.2`
+- **Comandos executados:** `npm test` (`102/102 PASS`), `npm run test:golden` (`7/7 PASS`), `npm run test:coverage` (`111/111 PASS`)
+- **Estado de validação:** `VALIDATED`
 
 ---
 
-## 1. Validação dos Motores Analíticos (SAST, Taint, AST, Segredos e SCA)
+## 1. Validação dos Motores Analíticos e Contratos Críticos
 
-| Motor Analítico | Escopo Validado | Evidência Técnica | Estado |
+| Motor / Subsistema | Implementação e Evidência Verificada | Cobertura c8 (`all: true`) | Estado |
 |---|---|---|---|
-| **ParserRegistry Multi-Linguagem** | Distinção explícita entre `FULL_AST` (TS/JS/TSX/JSX), `STRUCTURAL_AST` (Python, Java, Go, Rust, C#, SQL) e `PARTIAL_RECOVERY`. | `src/analyzers/ParserRegistry.ts` (`getLanguageAnalyticalCapabilities`) e rebaixamento automático de confiança `HIGH` para `MEDIUM` em `PARTIAL_RECOVERY`. | **VALIDADO** |
-| **TaintAnalyzer Contextual** | Rastreamento Fonte → Propagação → Sanitização Contextual → Sink em SQL (`CWE-89`), Comando (`CWE-78`), XSS (`CWE-79`), Path Traversal (`CWE-22`), SSRF (`CWE-918`) e Deserialização (`CWE-502`). | `src/analyzers/taint/TaintAnalyzer.ts`: `encodeURIComponent` não neutraliza SQL Injection, mas `parseInt`/`Number`/prepared statements neutralizam. | **VALIDADO** |
-| **SecretDetector** | Detecção determinística por prefixo criptográfico, entropia de Shannon $\ge 4.15$, exclusão de placeholders (`EXAMPLE`, `YOUR_API_KEY`, `<token>`) e redação obrigatória (`redactSecret`). | `src/analyzers/secrets/SecretDetector.ts` validado contra falsos positivos em arquivos `.env.example` e documentação. | **VALIDADO** |
-| **SCA & Multi-Lockfile SBOM** | Extração direta e transitiva em `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lock` e `Cargo.lock`; exportação CycloneDX 1.5 e SPDX 2.3; proveniência estrita de licenças (`NOASSERTION`). | `src/analyzers/sca/SbomGenerator.ts` e `src/analyzers/sca/ScaCorrelator.ts` (`validateSbomBundle` e `advisoryFeedMetadata`). | **VALIDADO** |
+| **Scoring Determinístico (`src/scoring/index.ts`)** | Normalização proporcional sobre dimensões efetivamente medidas (`MEASURED` / `STATIC_DERIVED`), exclusão de `NOT_MEASURED` sem fabricar zero, e kill-switch em `2.20` quando há achado crítico confirmado ou segredo exposto. | `100% L / 100% F / 100% B` | `VALIDATED` |
+| **Proveniência e Confiança de Evidência (`src/evidence/`)** | Cadeia de hashes SHA-256, assinatura Ed25519 verificada contra `trust-store.json` externo e rebaixamento automático para `LOW` / `INCONCLUSIVE` se a assinatura falhar. | `100% L / 100% F / 100% B` | `VALIDATED` |
+| **Comparabilidade A/B (`src/comparability/index.ts`)** | Exige `ComparabilityManifest` completo com digests SHA-256 (`configHashSha256`, `weightsHashSha256`, `eligibleFilesScopeHash`, `taxonomyMappingSha256`); rejeita flags booleanas soltas (`sameCommitVerified` / `normalizedTaxonomyApplied`) sem prova documental no manifesto. | `100% L / 100% F / 98.08% B` | `VALIDATED` |
+| **Quality Gate Unificado (`src/gate/QualityGateEngine.ts` & `scoringEngine.ts`)** | Remoção integral de `fudgeFactorApplied` para changesets `<20` linhas; contrato compartilhado entre `QualityGateEngine.evaluate()`, `evaluateFromRun()` e `calculateDeterministicScoreCard()` validado nos 9 cenários obrigatórios. | `89.93% L / 93.75% F / 98.28% B` | `VALIDATED` |
+| **Analyzers SAST, Taint, Segredos, IaC & SCA (`src/analyzers/`)** | `ParserRegistry` (`FULL_AST`, `STRUCTURAL_AST`, `PARTIAL_RECOVERY`), `TaintAnalyzer` contextual, `SecretDetector` (entropia $\ge 4.15$ + redação), `SbomGenerator` (7 formatos de lockfile + `NOASSERTION`). | `86.34% L / 89.87% F / 97.47% B` | `VALIDATED` |
+| **Exportador de Relatórios (`src/reports/`)** | Exportação determinística em PDF 1.4 assinado, SARIF 2.1.0, HTML5 offline (CSP estrito, zero URLs externas) e JSON assinado. | `96.21% L / 100% F / 99.20% B` | `VALIDATED` |
 
 ---
 
-## 2. Validação de Reprodutibilidade Determinística e Comparabilidade
+## 2. Determinismo Bit-a-Bit e Dogfooding Local
 
-1. **Determinismo Bit-a-Bit:**
-   - Execuções repetidas com o mesmo `deterministicTimestamp` sobre os mesmos artefatos de entrada produzem `ScoreCard`, `EvidenceChain` e `SignedEvidenceManifest` idênticos.
-2. **Comparabilidade Bimodal (`SAME_ENGINE` e `CROSS_TOOL`):**
-   - Pares intraclasse de mesma categoria e cobertura compatível recebem `STRICTLY_COMPARABLE`.
-   - Pares avaliados por motores distintos sobre o mesmo commit recebem `QUALIFIED_COMPARISON` com ressalvas explícitas.
-   - Pares com categorias incompatíveis ou cobertura insuficiente recebem `NOT_COMPARABLE` e bloqueiam a proclamação de vencedor (`winnerSoftwareId = null`).
-3. **Quality Gates com Três Níveis (`REQUIRED`, `OPTIONAL`, `INFORMATIVE`):**
-   - Condições `REQUIRED` com métrica `NOT_MEASURED` resultam em `INCONCLUSIVE`.
-   - Condições `OPTIONAL` com métrica `NOT_MEASURED` registram ressalva (`APPROVED_WITH_RESERVATIONS`) sem invalidar o Gate.
-
----
-
-## 3. Autoauditoria do Próprio Repositório WinHood
-
-O WinHood executa sua própria suíte de análise estática, segredos, acoplamento arquitetural e proveniência sobre seu código-fonte de produção (`src/`, `server.ts`, `package.json`, `README.md`):
-- **Achados `BLOCKER` ou `CRITICAL`:** `0`
-- **Score Global Auditado:** $\ge 4.40 / 5.00$
-- **Decisão do Quality Gate:** `APPROVED` (Evidências assinadas e verificadas pelo Trust Store Ed25519).
+- **Determinismo CLI:** Duas execuções consecutivas de `./node_modules/.bin/tsx cli/winhood-cli.ts analyze --path ./src/analyzers --deterministic --name WinHoodAnalyzers` produzem saída idêntica byte a byte.
+- **Extensão VS Code (`packages/vscode-extension`):** Suíte de integração `extension.integration.test.ts` (`2/2 PASS`) valida diagnósticos SARIF, Hover Markdown, Quick Fix determinístico e fallback automático para CLI offline.

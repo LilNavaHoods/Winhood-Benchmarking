@@ -2551,6 +2551,42 @@ export async function createWinHoodApp(options?: {
     }
   });
 
+  app.post(['/api/auth/mfa/disable', '/api/auth/totp/disable'], (req, res) => {
+    const actor = getRequestActor(req, res);
+    if (actor.id === 'usr-anonymous') {
+      return res.status(401).json({ error: 'AUTH_REQUIRED' });
+    }
+    const { password, totpCode, recoveryCode } = (req.body || {}) as {
+      password?: string;
+      totpCode?: string;
+      recoveryCode?: string;
+    };
+    const sessionToken = extractSessionTokenFromRequest(req).token || undefined;
+    try {
+      const updatedUser = authService.disableMfaForUser(
+        actor.id,
+        { password, totpCode, recoveryCode },
+        sessionToken
+      );
+      appendAuditLog(
+        db,
+        'AUTH_MFA_DISABLED',
+        'AUTH',
+        actor.id,
+        `Autenticação TOTP MFA removida para ${actor.email}.`,
+        updatedUser
+      );
+      saveDatabase(db);
+      return res.json({ ok: true, user: updatedUser });
+    } catch (err: any) {
+      const msg = err?.message || 'Falha ao desabilitar MFA.';
+      const status =
+        msg.startsWith('AUTH_INVALID_') || msg.startsWith('AUTH_TOTP_REPLAY') ? 401 : 400;
+      const code = msg.includes(':') ? msg.split(':')[0].trim() : 'MFA_DISABLE_FAILED';
+      return res.status(status).json({ error: msg, code });
+    }
+  });
+
   app.post('/api/auth/totp/authenticate', (req, res) => {
     const { preAuthToken, totpCode, recoveryCode, trustDevice } = (req.body || {}) as {
       preAuthToken?: string;

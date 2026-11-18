@@ -40,7 +40,7 @@ export const SemicircularHealthGaugeSvg: React.FC<{
   softwareName: string;
   qualityGateStatus?: string;
   classificationLabel?: string;
-}> = ({ score, softwareName, qualityGateStatus = 'PASSED', classificationLabel = 'Avaliado' }) => {
+}> = ({ score, softwareName, qualityGateStatus = 'NOT_MEASURED', classificationLabel = 'Não Avaliado' }) => {
   const clamped = score === null ? 0 : Math.max(0, Math.min(5, score));
   const ratio = clamped / 5;
   const radius = 72;
@@ -63,9 +63,11 @@ export const SemicircularHealthGaugeSvg: React.FC<{
           className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold ${
             qualityGateStatus === 'PASSED' || qualityGateStatus === 'APPROVED' || qualityGateStatus === 'APROVADO'
               ? 'bg-emerald-500/15 text-emerald-500 border border-emerald-500/30'
-              : qualityGateStatus === 'WARN'
+              : qualityGateStatus === 'WARN' || qualityGateStatus === 'APPROVED_WITH_RESERVATIONS' || qualityGateStatus === 'PARTIAL'
                 ? 'bg-amber-500/15 text-amber-500 border border-amber-500/30'
-                : 'bg-rose-500/15 text-rose-500 border border-rose-500/30'
+                : qualityGateStatus === 'NOT_MEASURED' || qualityGateStatus === 'INCONCLUSIVE'
+                  ? 'bg-slate-500/15 text-slate-400 border border-slate-500/30'
+                  : 'bg-rose-500/15 text-rose-500 border border-rose-500/30'
           }`}
         >
           QG: {qualityGateStatus}
@@ -490,7 +492,10 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
             {
               label: 'Criptografia & IAM',
               sub: latestRun
-                ? `Score Seg.: ${(latestRun.scoreCards[0]?.groupedScores?.securityScore ?? 0).toFixed(2)}/5.00`
+                ? latestRun.scoreCards[0]?.categoryScores?.security === null ||
+                  latestRun.scoreCards[0]?.groupedScores?.securityScore === undefined
+                  ? 'Seg.: NÃO MEDIDO'
+                  : `Score Seg.: ${latestRun.scoreCards[0].groupedScores.securityScore.toFixed(2)}/5.00`
                 : 'Aguardando auditoria IAM',
               type: 'padlock' as const,
               color: '#a855f7',
@@ -926,7 +931,7 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                     qualityGateStatus={
                       sc.qualityGate?.status ||
                       sc.separatedIndicators?.qualityGateDecision ||
-                      'PASSED'
+                      'INCONCLUSIVE'
                     }
                     classificationLabel={sc.classificationLabel}
                   />
@@ -1086,7 +1091,18 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                       </div>
                       <div className="p-2 rounded border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10]">
                         <div className="text-[10px] text-slate-400 font-sans">5. Veracidade</div>
-                        <div className="font-bold text-emerald-500 truncate" title={sep.veracityState}>
+                        <div
+                          className={`font-bold truncate ${
+                            sep.veracityState === 'SUCCESS_VALIDATED'
+                              ? 'text-emerald-500'
+                              : sep.veracityState === 'PARTIAL' ||
+                                  sep.veracityState === 'SUCCESS_WITH_WARNINGS' ||
+                                  sep.veracityState === 'INCOMPLETE_COVERAGE'
+                                ? 'text-amber-500'
+                                : 'text-rose-500'
+                          }`}
+                          title={sep.veracityState}
+                        >
                           {sep.veracityState}
                         </div>
                       </div>
@@ -1184,33 +1200,36 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                         isNotMeasured: false,
                       },
                     ].map((row) => {
-                      const pct = row.isNotMeasured
+                      const isMissing =
+                        row.isNotMeasured || typeof row.val !== 'number' || !Number.isFinite(row.val);
+                      const numericVal = !isMissing ? (row.val as number) : 0;
+                      const pct = isMissing
                         ? 0
-                        : Math.max(2, Math.min(100, (row.val / 5) * 100));
+                        : Math.max(2, Math.min(100, (numericVal / 5) * 100));
                       return (
                         <div key={row.label}>
                           <div className="flex items-center justify-between text-xs mb-1">
                             <span className="text-slate-700 dark:text-slate-300 font-medium">
                               {row.label}
                             </span>
-                            {row.isNotMeasured ? (
+                            {isMissing ? (
                               <span className="font-mono text-[11px] font-semibold text-slate-500 dark:text-slate-400">
                                 NOT_MEASURED (N/A)
                               </span>
                             ) : (
                               <span className="font-mono tabular-nums font-semibold text-slate-900 dark:text-slate-100">
-                                {row.val.toFixed(2)} / 5.00
+                                {numericVal.toFixed(2)} / 5.00
                               </span>
                             )}
                           </div>
                           <div className="h-2 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
                             <div
                               className={`h-full rounded-full ${
-                                row.isNotMeasured
+                                isMissing
                                   ? 'bg-slate-400/30'
-                                  : row.val >= 4.0
+                                  : numericVal >= 4.0
                                     ? 'bg-[#31d6c4]'
-                                    : row.val >= 3.0
+                                    : numericVal >= 3.0
                                       ? 'bg-amber-500'
                                       : 'bg-rose-500'
                               }`}
@@ -1223,32 +1242,39 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                   </div>
 
                   {/* Penalty Caps Triggered */}
-                  <div className="mt-5 pt-4 border-t border-slate-200 dark:border-slate-800">
-                    <div className="text-xs font-semibold text-slate-700 dark:text-slate-300 mb-2">
-                      Travas Matemáticas (Penalty Caps / Kill Switches):{' '}
-                      <span className="font-mono tabular-nums">
-                        {sc.penaltyCapsTriggered.length}
-                      </span>
-                    </div>
-                    {sc.penaltyCapsTriggered.length === 0 ? (
-                      <div className="text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
-                        <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-                        <span>Nenhuma trava de penalidade acionada. Todas as categorias cumpriram os requisitos mínimos.</span>
+                  {(() => {
+                    const capsTriggered = Array.isArray(sc.penaltyCapsTriggered)
+                      ? sc.penaltyCapsTriggered
+                      : [];
+                    return (
+                      <div className="mt-5 pt-4 border-t border-slate-200 dark:border-slate-800">
+                        <div className="text-xs font-semibold text-slate-700 dark:text-slate-300 mb-2">
+                          Travas Matemáticas (Penalty Caps / Kill Switches):{' '}
+                          <span className="font-mono tabular-nums">
+                            {capsTriggered.length}
+                          </span>
+                        </div>
+                        {capsTriggered.length === 0 ? (
+                          <div className="text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
+                            <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                            <span>Nenhuma trava de penalidade acionada. Todas as categorias cumpriram os requisitos mínimos.</span>
+                          </div>
+                        ) : (
+                          <ul className="space-y-1.5 text-xs text-rose-600 dark:text-rose-400">
+                            {capsTriggered.map((cap, idx) => (
+                              <li key={`${cap.ruleId}-${idx}`} className="flex items-start gap-2">
+                                <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                                <span>
+                                  <strong className="font-mono">{cap.ruleId}</strong> ({cap.category}):{' '}
+                                  {cap.reason} [Teto aplicado: {cap.maxAllowedScore.toFixed(2)}]
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
                       </div>
-                    ) : (
-                      <ul className="space-y-1.5 text-xs text-rose-600 dark:text-rose-400">
-                        {sc.penaltyCapsTriggered.map((cap, idx) => (
-                          <li key={`${cap.ruleId}-${idx}`} className="flex items-start gap-2">
-                            <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-                            <span>
-                              <strong className="font-mono">{cap.ruleId}</strong> ({cap.category}):{' '}
-                              {cap.reason} [Teto aplicado: {cap.maxAllowedScore.toFixed(2)}]
-                            </span>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
+                    );
+                  })()}
                 </div>
               );
             })}
@@ -1285,15 +1311,25 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                   <tbody className="divide-y divide-slate-200/60 dark:divide-slate-800/60 font-mono tabular-nums">
                     {(Object.keys(CATEGORY_LABELS) as BenchmarkCategoryKey[]).map((catKey) => {
                       const weight = latestRun.weightsUsed[catKey] ?? 0;
-                      const s0 = latestRun.scoreCards[0]?.categoryScores[catKey] ?? 0;
-                      const s1 = latestRun.scoreCards[1]?.categoryScores[catKey] ?? 0;
-                      const delta = s1 - s0;
+                      const rawS0 = latestRun.scoreCards[0]?.categoryScores?.[catKey];
+                      const rawS1 = latestRun.scoreCards[1]?.categoryScores?.[catKey];
+                      const s0 = typeof rawS0 === 'number' && Number.isFinite(rawS0) ? rawS0 : null;
+                      const s1 = typeof rawS1 === 'number' && Number.isFinite(rawS1) ? rawS1 : null;
+                      const delta = s0 !== null && s1 !== null ? s1 - s0 : null;
                       const isSelectedCat = selectedDrillCategory === catKey;
                       return (
                         <tr
                           key={catKey}
+                          tabIndex={0}
+                          aria-selected={isSelectedCat}
                           onClick={() => setSelectedDrillCategory(catKey)}
-                          className={`cursor-pointer transition-colors ${
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              setSelectedDrillCategory(catKey);
+                            }
+                          }}
+                          className={`cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#31d6c4] ${
                             isSelectedCat
                               ? 'bg-[#31d6c4]/10'
                               : 'hover:bg-slate-50 dark:hover:bg-slate-800/30'
@@ -1311,7 +1347,8 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                             {weight}%
                           </td>
                           {latestRun.scoreCards.map((sc) => {
-                            const val = sc.categoryScores[catKey];
+                            const rawVal = sc.categoryScores?.[catKey];
+                            const val = typeof rawVal === 'number' && Number.isFinite(rawVal) ? rawVal : null;
                             const reasonsCount =
                               sc.categoryDetails?.[catKey]?.evaluationReasons?.length || 0;
                             const mState = sc.categoryDetails?.[catKey]?.measurementState;
@@ -1345,11 +1382,13 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                             );
                           })}
                           <td className="py-2.5 pl-3 text-right text-slate-600 dark:text-slate-300">
-                            {delta === 0
-                              ? '0.00'
-                              : delta > 0
-                                ? `+${delta.toFixed(2)} (${latestRun.scoreCards[1]?.softwareName.split(' ')[0]})`
-                                : `+${Math.abs(delta).toFixed(2)} (${latestRun.scoreCards[0]?.softwareName.split(' ')[0]})`}
+                            {delta === null
+                              ? 'N/A (Não Medido)'
+                              : delta === 0
+                                ? '0.00'
+                                : delta > 0
+                                  ? `+${delta.toFixed(2)} (${latestRun.scoreCards[1]?.softwareName.split(' ')[0]})`
+                                  : `+${Math.abs(delta).toFixed(2)} (${latestRun.scoreCards[0]?.softwareName.split(' ')[0]})`}
                           </td>
                         </tr>
                       );
@@ -1542,11 +1581,21 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                         ) : (
                           <span className="text-amber-600 dark:text-amber-400 font-sans">
                             Cobertura Testes: <strong>NÃO MEDIDO</strong> (Ingestão/Análise:{' '}
-                            {sc.veracity?.coverageBreakdown?.analysis?.percent ?? 100}%)
+                            {sc.veracity?.coverageBreakdown?.analysis?.percent !== null &&
+                            sc.veracity?.coverageBreakdown?.analysis?.percent !== undefined
+                              ? `${sc.veracity.coverageBreakdown.analysis.percent}%`
+                              : 'NOT_MEASURED'}
+                            )
                           </span>
                         )}
                         <span className="mx-1.5">·</span>
-                        <span>Dívida: {sc.metricsSummary.technicalDebtMinutes} min</span>
+                        <span>
+                          Dívida:{' '}
+                          {sc.metricsSummary.technicalDebtMinutes !== null &&
+                          sc.metricsSummary.technicalDebtMinutes !== undefined
+                            ? `${sc.metricsSummary.technicalDebtMinutes} min`
+                            : 'NOT_MEASURED'}
+                        </span>
                       </div>
                     </div>
                   ))}

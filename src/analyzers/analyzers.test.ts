@@ -295,3 +295,184 @@ test('TaintAnalyzer enforces sink-aware sanitization (encodeURIComponent/parseIn
   assert.ok(twoHopTaints.some((i) => i.cwe === 'CWE-89'));
 });
 
+test('Phase 6: SbomGenerator CycloneDX 1.5/1.7 & SPDX 2.3/3.0.1 schema validation, negative rejection, and multi-lockfile parsing', async () => {
+  const { SbomGenerator, resolvePackageSpdxLicense } = await import('./sca/SbomGenerator');
+
+  assert.equal(resolvePackageSpdxLicense('unlisted-internal-lib', undefined, 'MIT', { strictProvenance: true }), 'NOASSERTION');
+
+  const sbomBundle = SbomGenerator.generateFromSoftware(
+    {
+      id: 'sw-phase6-sbom',
+      name: 'PolyglotSupplyChain',
+      version: '2.1.0',
+      languages: ['TypeScript', 'Python', 'Go', 'Rust', 'Java', 'C#'],
+      sourceFilesContent: {
+        'package.json': JSON.stringify({
+          name: 'polyglot-app',
+          version: '2.1.0',
+          dependencies: { express: '^4.21.2', 'crypto-js': '4.1.1' },
+          optionalDependencies: { fsevents: '2.3.3' },
+          devDependencies: { typescript: '5.9.3' },
+        }),
+        'npm-shrinkwrap.json': JSON.stringify({
+          lockfileVersion: 3,
+          packages: {
+            'node_modules/express': { version: '4.21.2', license: 'MIT', integrity: 'sha512-abc' },
+            'node_modules/crypto-js': { version: '4.1.1', license: 'MIT', integrity: 'sha512-def' },
+          },
+        }),
+        'requirements.txt': 'PyYAML==5.3.1\nrequests>=2.31.0',
+        'pyproject.toml': 'dependencies = ["fastapi==0.115.0"]',
+        'go.mod': 'require (\n  github.com/gin-gonic/gin v1.10.0\n  golang.org/x/net v0.25.0 // indirect\n)',
+        'Cargo.toml': '[dependencies]\nserde = "1.0.210"',
+        'Cargo.lock': '[[package]]\nname = "tokio"\nversion = "1.40.0"\nchecksum = "a'.repeat(1).concat('0'.repeat(63)) + '"',
+        'pom.xml': '<dependency><groupId>org.apache.logging.log4j</groupId><artifactId>log4j-core</artifactId><version>2.14.1</version></dependency>',
+        'App.csproj': '<Project><ItemGroup><PackageReference Include="Newtonsoft.Json" Version="13.0.3" /></ItemGroup></Project>',
+      },
+    } as any,
+    {
+      deterministicTimestamp: '2026-11-17T12:00:00.000Z',
+      strictLicenseProvenance: true,
+    }
+  );
+
+  assert.ok(sbomBundle.componentsCount >= 10);
+  assert.ok(sbomBundle.supportedFormats?.includes('cyclonedx-1.7'));
+  assert.ok(sbomBundle.supportedFormats?.includes('spdx-3.0'));
+  assert.equal(sbomBundle.structuralValidation?.cyclonedxValid, true);
+  assert.equal(sbomBundle.structuralValidation?.cyclonedx17Valid, true);
+  assert.equal(sbomBundle.structuralValidation?.spdxValid, true);
+  assert.equal(sbomBundle.structuralValidation?.spdx30Valid, true);
+  assert.deepEqual(sbomBundle.structuralValidation?.errors, []);
+
+  // Verify NOASSERTION for unknown pypi/go/cargo/maven/nuget licenses under strict provenance
+  const pyyaml = sbomBundle.components.find((c) => c.name === 'PyYAML');
+  assert.equal(pyyaml?.license, 'NOASSERTION');
+
+  // Verify signature verification passes and rejects tampered bundles
+  const sigOk = SbomGenerator.verifySbomSignature(sbomBundle);
+  assert.equal(sigOk.valid, true);
+
+  const brokenCdx = structuredClone(sbomBundle.cyclonedx15Json) as any;
+  brokenCdx.components[0].version = '';
+  brokenCdx.dependencies.push({ ref: 'app:ghost', dependsOn: ['pkg:npm/missing@0.0.0'] });
+  const badCdxRes = SbomGenerator.validateCycloneDxSchema(brokenCdx, '1.5');
+  assert.equal(badCdxRes.valid, false);
+  assert.ok(badCdxRes.errors.some((e) => e.includes('version must be a non-empty string')));
+  assert.ok(badCdxRes.errors.some((e) => e.includes('dangling')));
+
+  const brokenSpdx30 = structuredClone(sbomBundle.spdx30Json) as any;
+  brokenSpdx30['@graph'].push({
+    type: 'Relationship',
+    spdxId: 'bad-rel',
+    from: 'missing-node',
+    to: ['dangling-pkg'],
+  });
+  const badSpdx30Res = SbomGenerator.validateSpdx30JsonLdSchema(brokenSpdx30);
+  assert.equal(badSpdx30Res.valid, false);
+  assert.ok(badSpdx30Res.errors.some((e) => e.includes('dangling')));
+});
+
+test('Phase 6: ScaCorrelator offline snapshot vs live-synced cache provenance & AnalyzerRegistry binary discovery', async () => {
+  const fsMod = await import('node:fs');
+  const osMod = await import('node:os');
+  const pathMod = await import('node:path');
+  const { SbomGenerator } = await import('./sca/SbomGenerator');
+  const { ScaCorrelator, DEFAULT_ENTERPRISE_LICENSE_POLICY } = await import('./sca/ScaCorrelator');
+  const { AnalyzerRegistry } = await import('./AnalyzerRegistry');
+  const { RuleRegistry } = await import('./RuleRegistry');
+  const { SecretScanner } = await import('./SecretsCatalog');
+  const { SarifCodec } = await import('./SarifCodec');
+
+  const sw = {
+    id: 'sw-sca-phase6',
+    name: 'ScaTarget',
+    version: '1.0.0',
+    sourceFilesContent: {
+      'package.json': JSON.stringify({
+        name: 'sca-target',
+        version: '1.0.0',
+        dependencies: { 'crypto-js': '4.1.1', lodash: '4.17.20' },
+      }),
+      'requirements.txt': 'pyyaml==5.3.1',
+      'pom.xml': '<dependency><groupId>org.apache.logging.log4j</groupId><artifactId>log4j-core</artifactId><version>2.14.1</version></dependency>',
+    },
+  } as any;
+
+  const sbom = SbomGenerator.generateFromSoftware(sw, { deterministicTimestamp: '2026-11-17T12:00:00.000Z' });
+  const tmpData = fsMod.mkdtempSync(pathMod.join(osMod.tmpdir(), 'wh-sca-p6-'));
+
+  try {
+    const offlineCor = ScaCorrelator.correlateSbom({
+      software: sw,
+      sbom,
+      dataDir: tmpData,
+      licensePolicy: { ...DEFAULT_ENTERPRISE_LICENSE_POLICY, failOnUnknownLicense: true },
+      deterministicTimestamp: '2026-11-17T12:00:00.000Z',
+    });
+    assert.equal(offlineCor.advisoryFeedMetadata.cacheMode, 'OFFLINE_VERIFIED_SNAPSHOT');
+    assert.ok(offlineCor.correlations.some((c) => c.cveId === 'CVE-2023-46233'));
+    assert.ok(offlineCor.correlations.some((c) => c.cveId === 'CVE-2021-44228' && c.cisaKev === true));
+
+    // Seed live-synced cache file in tmpData to verify LIVE_SYNCED_CACHE provenance differentiation
+    const refDir = pathMod.join(tmpData, 'reference_snapshots');
+    fsMod.mkdirSync(refDir, { recursive: true });
+    fsMod.writeFileSync(
+      pathMod.join(refDir, 'synced_advisories.json'),
+      JSON.stringify({
+        updatedAt: '2026-11-17T11:30:00.000Z',
+        advisories: [
+          {
+            packageName: 'lodash',
+            affectedVersionRange: '== 4.17.20',
+            cveId: 'CVE-2021-23337',
+            ghsaId: 'GHSA-35jh-r3h4-6jhm',
+            cvssScore: 7.2,
+            epssScore: 0.625,
+            epssPercentile: 0.98,
+            cisaKev: false,
+            fixedVersion: '4.17.21',
+            cweIds: ['CWE-94'],
+            syncedAt: '2026-11-17T11:30:00.000Z',
+            summary: 'Synced OSV advisory',
+          },
+        ],
+        kevCveIds: ['CVE-2021-44228'],
+        epssByCve: {},
+        nvdByCve: {},
+      }),
+      'utf8'
+    );
+    const liveCor = ScaCorrelator.correlateSbom({
+      software: sw,
+      sbom,
+      dataDir: tmpData,
+      deterministicTimestamp: '2026-11-17T12:00:00.000Z',
+    });
+    assert.equal(liveCor.advisoryFeedMetadata.cacheMode, 'LIVE_SYNCED_CACHE');
+
+    // RuleRegistry, SecretScanner, SarifCodec, and AnalyzerRegistry binary availability
+    assert.ok(RuleRegistry.getRulesForLanguage('TypeScript').length > 0);
+    assert.ok(RuleRegistry.findRule('ts:S3649'));
+    assert.ok(SecretScanner.getCatalogMetadata().patternsCount > 0);
+    const sarifOut = SarifCodec.exportSarif210(offlineCor.findings);
+    assert.equal((sarifOut.runs as unknown[]).length, 1);
+    const sarifParsed = SarifCodec.importSarif210(sarifOut, {
+      runId: 'test-run-sarif',
+      softwareId: sw.id,
+      softwareName: sw.name,
+      softwareVersion: sw.version,
+    });
+    assert.equal(sarifParsed.valid, true);
+    assert.ok(sarifParsed.importedToolNames.length >= 1);
+    assert.equal(sarifParsed.findings.length, offlineCor.findings.length);
+
+    const extAvail = AnalyzerRegistry.discoverExternalEngineAvailability();
+    assert.ok(Array.isArray(extAvail));
+    assert.ok(AnalyzerRegistry.listNativePlugins().length >= 1);
+  } finally {
+    fsMod.rmSync(tmpData, { recursive: true, force: true });
+  }
+});
+
+

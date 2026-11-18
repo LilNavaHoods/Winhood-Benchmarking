@@ -1,59 +1,48 @@
 # Especificação da Arquitetura Criptográfica do Keystore (`KEYSTORE_SECURITY_DESIGN.md`)
 
-**Versão do Formato:** `WINHOOD-ENVELOPE-V2`  
-**Implementação Principal:** `src/security/KeyManagementService.ts` e `src/engine/evidenceProvenanceEngine.ts`
+- **Versão do WinHood:** `4.4.0` (`WINHOOD-ENVELOPE-V2`)
+- **Commit base / Estado:** `d382a4e96a0481cba80f005790ab65100dfc5ae4` + endurecimento `PRODUCTION_SECURE` fail-closed
+- **Ambiente:** Linux x64, `Node.js v22.23.2`
+- **Implementação Principal:** `src/security/KeyManagementService.ts` e `src/engine/evidenceProvenanceEngine.ts`
+- **Comando de verificação:** `npm run test:security` (`23/23 PASS`)
+- **Estado de validação:** `PARTIALLY_VALIDATED` *(`HKDF_EXTERNAL_ENV`, Linux/macOS fallback detection, fail-closed `PRODUCTION_SECURE`, Trust Store externo e migração legada `VALIDATED`; provedores nativos Windows DPAPI e macOS Keychain exigem execução nos respectivos sistemas operacionais)*
 
 ---
 
-## 1. Visão Geral da Criptografia por Envelope (Envelope Encryption)
+## 1. Arquitetura de Criptografia por Envelope (`WINHOOD-ENVELOPE-V2`)
 
-O `KeyManagementService` substitui chaves derivadas de atributos previsíveis da máquina por uma arquitetura formal de **Criptografia por Envelope**:
-
-1. **DEK (Data Encryption Key):**
-   - Gerada via CSPRNG (`crypto.randomBytes(32)` — 256 bits de entropia pura), sem qualquer dependência de `hostname`, `username` ou identificadores estáticos de hardware.
-2. **Proteção da DEK pela KEK (Key Encryption Key):**
-   - A DEK nunca é persistida em texto claro. Ela é cifrada com `AES-256-GCM` (nonce CSPRNG de 96 bits + AAD vinculando versão do envelope e modo operacional) sob uma `KEK_WRAP` derivada via **HKDF-SHA256 (RFC 5869)**.
-   - Fontes de material de chave mestre (IKM) para a KEK, em ordem de precedência:
-     - **Windows DPAPI (`DPAPI_PROTECTED`):** Quando em Windows (`win32`), o blob de entropia mestre de 256 bits é protegido por `System.Security.Cryptography.ProtectedData::Protect(..., CurrentUser)` em `.keystore.dpapi.bin`.
-     - **Segredo Externo Explícito (`EXTERNAL_SECRET_HKDF`):** Quando configurado via variável de ambiente `WINHOOD_MASTER_KEY_SECRET` (mínimo de 16 caracteres) em pipelines CI/CD ou servidores dedicados.
-     - **Chave Local Persistida com Permissão Restrita (`OS_KEYRING_OR_LOCAL_KEK`):** Em ambientes Linux/macOS locais, um arquivo de entropia CSPRNG de 256 bits (`.keystore.kek.bin`) é gerado com permissão `0600` (somente leitura/escrita pelo proprietário do processo).
-
----
-
-## 2. Segregação de Chaves por Finalidade via HKDF (RFC 5869)
-
-É proibido reutilizar a mesma chave criptográfica para cifragem, autenticação e proteção de integridade. A partir da DEK e do IKM mestre, o método `deriveHkdfPurposeKey(ikm, saltHex, purposeInfo)` deriva subchaves independentes de 256 bits usando contextos `info` distintos:
-
-- `winhood:kms:v2:kek-wrap`: Exclusiva para cifrar/decifrar o envelope da DEK com AES-256-GCM.
-- `winhood:kms:v2:dek-secret-encryption`: Exclusiva para cifrar segredos individuais do cofre (`evidenceSecrets`, chaves privadas Ed25519 e credenciais de conectores) com AES-256-GCM.
-- `winhood:kms:v2:store-metadata-integrity`: Exclusiva para assinar o cabeçalho estrutural e o contador monotônico do cofre.
+1. **DEK (Data Encryption Key):** 256 bits (`crypto.randomBytes(32)`) gerados por CSPRNG, sem qualquer dependência de atributos da máquina (`hostname`, `username` ou serial de disco).
+2. **Modos Operacionais (`KeystoreOperatingMode`):**
+   - `PRODUCTION_SECURE` (padrão quando `NODE_ENV=production` ou `WINHOOD_KEYSTORE_MODE=PRODUCTION_SECURE`): **Fail-Closed**. Exige obrigatoriamente um provedor seguro de SO ou segredo mestre explícito:
+     - `WINDOWS_DPAPI` (`System.Security.Cryptography.ProtectedData::Protect`, escopo `CurrentUser`, invocado via `spawnSync` com `shell: false`);
+     - `MACOS_KEYCHAIN` (`/usr/bin/security` com `shell: false`);
+     - `LINUX_SECRET_SERVICE` (`secret-tool` sobre sessão D-Bus ativa com `shell: false`);
+     - `HKDF_EXTERNAL_ENV` (`WINHOOD_KEYSTORE_MASTER_SECRET` com $\ge 16$ caracteres).
+     - **Proibição de Fallback `.kek` em Produção:** Se nenhum dos 4 provedores acima estiver disponível em `PRODUCTION_SECURE`, o serviço lança erro `KEYSTORE_PRODUCTION_PROVIDER_REQUIRED` ou `KEYSTORE_PRODUCTION_LOCAL_KEK_REJECTED` e recusa inicializar ou ler um arquivo `.kek` local.
+   - `DEVELOPMENT` / `RECOVERY`: Permite `HKDF_LOCAL_KEK_FILE` (`.keystore.kek.bin` com permissão `0600`) apenas fora de `PRODUCTION_SECURE`, emitindo alerta explícito em `securityWarnings`.
 
 ---
 
-## 3. Autenticação AES-256-GCM e Ausência de HMAC Redundante
+## 2. Segregação Estrita de Domínio de Segredos e Derivação HKDF (RFC 5869)
 
-- Cada segredo armazenado no cofre utiliza `encryptWithAes256GcmEnvelope(plaintext, subKey, aadContext)`:
-  - Algoritmo: `aes-256-gcm`
-  - Nonce (IV): 12 bytes (96 bits) gerados exclusivamente via `crypto.randomBytes(12)` a cada operação.
-  - AAD (Additional Authenticated Data): vincula `keyId`, finalidade e versão do formato (`v2:secret:<keyId>` ou `v2:ed25519-priv:<keyId>`).
-  - Tag de Autenticação GCM: 16 bytes (128 bits) validados obrigatoriamente antes de disponibilizar qualquer byte decifrado.
-- Não se utiliza HMAC genérico como substituto da autenticação nativa do modo Galois/Counter (GCM).
-
----
-
-## 4. Proteção contra Rollback e Corrupção
-
-- O arquivo do cofre inclui o contador monotônico `monotonicSequence`, incrementado a cada mutação (criação, rotação de chave, revogação ou gravação de segredo) e espelhado no arquivo auxiliar `.seq` com permissão `0600`.
-- Na leitura, se `store.monotonicSequence < persistedFloorSeq`, o cofre sinaliza violação de rollback (`rollbackProtectionVerified = false`).
-- Em modo `PRODUCTION_SECURE`, qualquer adulteração de tag GCM, violação de AAD ou corrupção estrutural falha de forma fechada (*fail-closed*), bloqueando o uso de dados corrompidos.
+1. **Variáveis de Ambiente Segregadas (`assertSecretDomainSeparation`):**
+   - `WINHOOD_KEYSTORE_MASTER_SECRET`: Segredo mestre exclusivo para derivar a KEK do Keystore.
+   - `WINHOOD_EVIDENCE_HMAC_SECRET`: Segredo exclusivo para assinatura HMAC de evidências.
+   - `WINHOOD_VAULT_SECRET`: Segredo exclusivo para cifragem do cofre de credenciais.
+   - `SONAR_SECRET_SALT`: Reservado **exclusivamente** para descriptografia retrocompatível de registros legados (`ENV-VAULT-KEY`). É bloqueado (`KEYSTORE_SECRET_DOMAIN_VIOLATION`) se reutilizado como `WINHOOD_KEYSTORE_MASTER_SECRET` ou substituto ativo de `WINHOOD_VAULT_SECRET`.
+   - `WINHOOD_MASTER_KEY_SECRET`: Aceito apenas como alias legado de leitura/migração, emitindo aviso de deprecação.
+2. **Subchaves Derivadas via HKDF-SHA256 (`deriveHkdfPurposeKey`):**
+   - `winhood:kms:v2:kek-wrap`: Cifragem/decifragem AES-256-GCM do envelope da DEK.
+   - `winhood:kms:v2:dek-secret-encryption`: Cifragem AES-256-GCM dos segredos e chaves privadas Ed25519 (nonce CSPRNG de 96 bits + AAD `v2:secret:<keyId>` / `v2:ed25519-priv:<keyId>`).
+   - `winhood:kms:v2:store-metadata-integrity`: Autenticação de integridade estrutural vinculada à KEK (`kekBoundIntegrityMacHex`).
+   - `winhood:kms:v2:trust-store-integrity`: Autenticação independente do arquivo externo `trust-store.json`.
 
 ---
 
-## 5. Trust Store Ed25519 e Ciclo de Vida de Chaves
+## 3. Trust Store Ed25519 Fisicamente Separado e Limitações de Rollback
 
-- O cofre mantém o registro `trustedPublicKeys` contendo chaves públicas Ed25519 autorizadas (`keyId`, `publicKeyPem`, `fingerprintSha256`, `status`: `ACTIVE` | `ROTATED_RETIRED` | `REVOKED`, `createdAt`, `rotatedAt`, `revokedAt`).
-- Durante `verifyEvidenceChainAndManifest()`, o motor de proveniência não confia cegamente na chave pública embutida no manifesto recebido: ele consulta `KeyManagementService.verifyTrustedEd25519PublicKey(keyId, publicKeyPem, signedAt)` para garantir que:
-  1. O `keyId` existe no Trust Store;
-  2. O `fingerprintSha256` da chave pública coincide exatamente com o registro confiável;
-  3. A chave não foi revogada (`REVOKED`);
-  4. A assinatura foi gerada dentro da janela de validade da chave.
+1. **Trust Store Separado (`trust-store.json`):**
+   - As chaves públicas Ed25519 confiáveis (`ACTIVE`, `ROTATED_VERIFY_ONLY`, `REVOKED`) e o fingerprint âncora raiz (`rootAnchorFingerprintSha256`) são persistidos em `trust-store.json` separado de `keystore.json` (`trustStoreSeparated: true`), autenticado por chave derivada da KEK.
+2. **Limitações Arquiteturais Declaradas contra Rollback Local:**
+   - O contador monotônico (`monotonicSequence` + arquivo `.seq`) e o MAC vinculado à KEK detectam corrupção parcial ou restauração desalinhada entre `keystore.json`, `.seq` e `trust-store.json`.
+   - **Limitação real:** Como não há TPM 2.0 nem serviço remoto de transparência (`hardwareTpmOrRemoteAnchorAvailable: false`), um atacante com acesso privilegiado de escrita ao sistema de arquivos local pode fazer snapshot e restaurar **simultaneamente** todos os arquivos locais (`keystore.json`, `.seq`, `trust-store.json`) para um estado anterior válido. Proteção absoluta contra rollback físico exige âncora em hardware (TPM NV Index) ou log remoto imutável.

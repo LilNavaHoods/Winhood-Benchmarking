@@ -790,6 +790,12 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex flex-col lg:flex-row bg-slate-50 text-slate-900 dark:bg-[#080b10] dark:text-slate-100">
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50 focus:px-3 focus:py-2 focus:rounded-lg focus:bg-[#31d6c4] focus:text-slate-950 focus:font-bold focus:text-xs"
+      >
+        Pular para o conteúdo principal
+      </a>
       {/* Sidebar Navigation (WinHood Architecture - Collapsible w-64 / w-16) */}
       <aside
         className={`w-full ${
@@ -881,6 +887,7 @@ export default function App() {
                       key={item.id}
                       type="button"
                       onClick={() => setActiveNav(item.id)}
+                      aria-current={isActive ? 'page' : undefined}
                       title={
                         item.stepBadge ? `[P${item.stepBadge}] ${item.label}` : item.label
                       }
@@ -929,6 +936,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={handleLogout}
+                  aria-label="Encerrar Sessão"
                   title="Encerrar Sessão"
                   className="p-1 rounded border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-rose-500 hover:border-rose-400 cursor-pointer shrink-0"
                 >
@@ -1155,7 +1163,7 @@ export default function App() {
         )}
 
         {/* Active Module Viewport (Lazy-Loaded via Suspense + ModuleErrorBoundary) */}
-        <main className="flex-1 p-6 lg:p-8 max-w-[1440px] w-full mx-auto">
+        <main id="main-content" tabIndex={-1} className="flex-1 p-6 lg:p-8 max-w-[1440px] w-full mx-auto focus:outline-none">
           {/* Contextual Help Banner for the Active Screen */}
           <ContextualScreenHelpBanner
             activeNav={activeNav}

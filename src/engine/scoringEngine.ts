@@ -18,6 +18,7 @@ import type {
   SoftwareScoreCard,
   VeracityClassification,
 } from '../types/benchmark';
+import { QualityGateEngine } from '../gate/QualityGateEngine';
 
 export const ALGORITHM_VERSION = 'WINHOOD-SONAR-MQR-v3.0.0';
 
@@ -1595,8 +1596,8 @@ export function calculateDeterministicScoreCard(
     m.duplicatedLinesPercent
   );
 
-  const newCodeLines = input.newCodeLinesCount ?? loc;
-  const fudgeFactorApplied = newCodeLines < 20;
+  // Strict Quality Gate policy: Fudge Factor (< 20 lines) NEVER suppresses REQUIRED conditions
+  const fudgeFactorApplied = false;
 
   const qgConditions: QualityGateConditionDetail[] = [
     {
@@ -1644,15 +1645,11 @@ export function calculateDeterministicScoreCard(
       status: !isEligibleForScoring
         ? 'NOT_EVALUATED'
         : m.duplicatedLinesPercent > 5.0
-          ? fudgeFactorApplied
-            ? 'WARN_FUDGE_FACTOR'
-            : 'FAILED'
+          ? 'FAILED'
           : 'PASSED',
       failureReason:
         m.duplicatedLinesPercent > 5.0
-          ? fudgeFactorApplied
-            ? `Fudge Factor MqrBridge ativo (< 20 linhas novas): falha de duplicação (${m.duplicatedLinesPercent.toFixed(1)}%) suprimida.`
-            : `Densidade de duplicação (${m.duplicatedLinesPercent.toFixed(1)}%) excede o limite de 5.0%.`
+          ? `Densidade de duplicação (${m.duplicatedLinesPercent.toFixed(1)}%) excede o limite de 5.0%.`
           : undefined,
     },
     {
@@ -1667,66 +1664,35 @@ export function calculateDeterministicScoreCard(
       status: !isEligibleForScoring
         ? 'NOT_EVALUATED'
         : !hasMeasuredCoverage
-          ? fudgeFactorApplied
-            ? 'WARN_FUDGE_FACTOR'
-            : 'NOT_EVALUATED'
+          ? 'NOT_EVALUATED'
           : m.testCoveragePercent < 80.0
-            ? fudgeFactorApplied
-              ? 'WARN_FUDGE_FACTOR'
-              : 'FAILED'
+            ? 'FAILED'
             : 'PASSED',
       failureReason: !hasMeasuredCoverage
-        ? fudgeFactorApplied
-          ? 'Fudge Factor MqrBridge ativo (< 20 linhas novas): ausência de relatório de cobertura suprimida.'
-          : 'Relatório real de cobertura de testes ausente (NOT_MEASURED) — condição obrigatória não avaliada.'
+        ? 'Relatório real de cobertura de testes ausente (NOT_MEASURED) — condição obrigatória não avaliada.'
         : m.testCoveragePercent < 80.0
-          ? fudgeFactorApplied
-            ? `Fudge Factor MqrBridge ativo (< 20 linhas novas): falha de cobertura (${m.testCoveragePercent.toFixed(1)}%) suprimida.`
-            : `Cobertura de testes (${m.testCoveragePercent.toFixed(1)}%) abaixo do mínimo exigido pelo Quality Gate Sonar way (80.0%).`
+          ? `Cobertura de testes (${m.testCoveragePercent.toFixed(1)}%) abaixo do mínimo exigido pelo Quality Gate (80.0%).`
           : undefined,
     },
   ];
 
-  const failedConditions: string[] = [];
-  const unmeasuredMandatoryConditions: string[] = [];
-  if (isEligibleForScoring) {
-    if (m.criticalVulns > 0) failedConditions.push(`Vulnerabilidades Críticas: ${m.criticalVulns} > 0`);
-    if (m.secretsExposed > 0) failedConditions.push(`Segredos Hardcoded Expostos: ${m.secretsExposed} > 0`);
-    if (m.bugs > 3) failedConditions.push(`Bugs Confiabilidade: ${m.bugs} > 3`);
-    if (m.duplicatedLinesPercent > 5 && !fudgeFactorApplied) {
-      failedConditions.push(`Duplicação de Código: ${m.duplicatedLinesPercent}% > 5.0%`);
-    }
-    if (securityRating === 'D' || securityRating === 'E') {
-      failedConditions.push(`Security Rating reprovado (${securityRating})`);
-    }
-    if (!hasMeasuredCoverage && !fudgeFactorApplied) {
-      unmeasuredMandatoryConditions.push('Cobertura de Testes: NOT_MEASURED (obrigatório relatório LCOV/JaCoCo/Cobertura/Istanbul >= 80%)');
-    } else if (hasMeasuredCoverage && m.testCoveragePercent < 80 && !fudgeFactorApplied) {
-      failedConditions.push(`Cobertura de Testes: ${m.testCoveragePercent.toFixed(1)}% < 80.0%`);
-    }
-  }
+  const sharedGateEval = QualityGateEngine.evaluateSharedContract({
+    eligibleForScoring: isEligibleForScoring,
+    criticalVulns: m.criticalVulns,
+    secretsExposed: m.secretsExposed,
+    bugs: m.bugs,
+    securityRating,
+    reliabilityRating,
+    duplicatedLinesPercent: m.duplicatedLinesPercent,
+    hasMeasuredCoverage,
+    testCoveragePercent: m.testCoveragePercent,
+    scopeCoveragePercent: input.coveragePercent,
+  });
 
-  const qualityGateStatus: 'PASSED' | 'FAILED' | 'WARN' | 'INCONCLUSIVE' | 'NOT_EVALUATED' =
-    !isEligibleForScoring
-      ? 'NOT_EVALUATED'
-      : failedConditions.length === 0 && unmeasuredMandatoryConditions.length === 0
-      ? 'PASSED'
-      : unmeasuredMandatoryConditions.length > 0 && failedConditions.length === 0
-      ? 'INCONCLUSIVE'
-      : failedConditions.length === 1 && m.criticalVulns === 0 && m.secretsExposed === 0 && unmeasuredMandatoryConditions.length === 0
-      ? 'WARN'
-      : 'FAILED';
-
-  const executiveDecision: import('../types/benchmark').ExecutiveQualityGateDecision =
-    !isEligibleForScoring || qualityGateStatus === 'INCONCLUSIVE'
-      ? 'INCONCLUSIVE'
-      : input.coveragePercent < 50
-      ? 'INCONCLUSIVE'
-      : qualityGateStatus === 'PASSED'
-      ? 'APROVADO'
-      : qualityGateStatus === 'WARN'
-      ? 'APROVADO COM RESSALVAS'
-      : 'REPROVADO';
+  const failedConditions = sharedGateEval.failedConditions;
+  const unmeasuredMandatoryConditions = sharedGateEval.unmeasuredMandatoryConditions;
+  const qualityGateStatus = sharedGateEval.qualityGateStatus;
+  const executiveDecision = sharedGateEval.executiveDecision;
 
   const sumEffort = (cat: BenchmarkCategoryKey) =>
     reasonsByCat[cat].reduce((acc, r) => acc + (r.remediationEffortMinutes || 0), 0);

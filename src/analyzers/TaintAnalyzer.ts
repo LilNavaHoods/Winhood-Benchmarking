@@ -41,7 +41,7 @@ export const SINK_RULES: Array<{
 }> = [
   {
     calleePattern:
-      /^(?:execSync|exec|execFile|system|popen|Popen|check_output|Command|CommandContext)$|^(?:os|subprocess|exec|Runtime\.getRuntime\(\))\.(?:system|popen|run|Popen|call|check_output|exec|Command|CommandContext)$/i,
+      /^(?:execSync|exec|execFile|execFileSync|system|popen|Popen|check_output)$|^(?:os|subprocess|exec|child_process|Runtime\.getRuntime\(\))\.(?:system|popen|run|Popen|call|check_output|exec|execSync|execFile|Command|CommandContext)$/,
     ruleId: 'taint:S2076',
     title: 'Fluxo Taint interprocedural até execução de comando OS (CWE-78)',
     cwe: 'CWE-78',

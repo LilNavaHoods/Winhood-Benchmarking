@@ -180,8 +180,17 @@ export async function runCli(argv: string[]): Promise<CliResult> {
       });
 
       if (command === 'sbom') {
-        const format = argsMap.get('format') || 'cyclonedx';
-        const out = format === 'spdx' ? sbom.spdx23Json : format === 'bundle' ? sbom : sbom.cyclonedx15Json;
+        const format = (argsMap.get('format') || argsMap.get('sbom-format') || 'cyclonedx').toLowerCase();
+        const out =
+          format === 'cyclonedx-1.7'
+            ? sbom.cyclonedx17Json
+            : format === 'spdx' || format === 'spdx-2.3'
+              ? sbom.spdx23Json
+              : format === 'spdx-3.0'
+                ? sbom.spdx30Json
+                : format === 'bundle'
+                  ? sbom
+                  : sbom.cyclonedx15Json;
         if (argsMap.get('out')) {
           fs.writeFileSync(argsMap.get('out')!, JSON.stringify(out, null, 2), 'utf8');
         }

@@ -12,7 +12,6 @@ import {
   normalizeSarifFindings,
   resolveGateStatusBarStyle,
 } from '../src/extension';
-import { createWinHoodApp } from '../../../server';
 
 test('VS Code Extension MVP: normalizes SARIF findings, builds Hover Markdown, computes deterministic Quick Fix, and maps Gate StatusBar colors', () => {
   const findings = normalizeSarifFindings([
@@ -55,6 +54,7 @@ test('VS Code Extension MVP: normalizes SARIF findings, builds Hover Markdown, c
 });
 
 test('VS Code Extension MVP: integrates with live WinHood API and automatically falls back to offline embedded CLI when API is unreachable', async () => {
+  const { createWinHoodApp } = await import('../../../server');
   const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'winhood-vscode-ext-api-'));
   let server: http.Server | null = null;
   try {

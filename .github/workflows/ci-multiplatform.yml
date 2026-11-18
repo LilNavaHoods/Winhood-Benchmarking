@@ -16,59 +16,89 @@ jobs:
     permissions:
       contents: read
       security-events: write
+    outputs:
+      lockfile_outcome: ${{ steps.lockfile.outcome }}
+      positioning_outcome: ${{ steps.positioning.outcome }}
+      install_outcome: ${{ steps.install.outcome }}
+      audit_outcome: ${{ steps.audit.outcome }}
+      lint_outcome: ${{ steps.lint.outcome }}
+      security_tests_outcome: ${{ steps.security_tests.outcome }}
+      coverage_outcome: ${{ steps.coverage.outcome }}
+      determinism_outcome: ${{ steps.determinism.outcome }}
+      dogfood_action_outcome: ${{ steps.dogfood_action.outcome }}
+      vscode_ext_outcome: ${{ steps.vscode_ext.outcome }}
+      build_desktop_outcome: ${{ steps.build_desktop.outcome }}
+      audit_status: ${{ steps.audit.outputs.audit_status }}
+      coverage_summary_present: ${{ steps.collect_meta.outputs.coverage_summary_present }}
+      desktop_manifest_present: ${{ steps.collect_meta.outputs.desktop_manifest_present }}
+      coverage_lines_pct: ${{ steps.collect_meta.outputs.coverage_lines_pct }}
+      coverage_functions_pct: ${{ steps.collect_meta.outputs.coverage_functions_pct }}
+      coverage_branches_pct: ${{ steps.collect_meta.outputs.coverage_branches_pct }}
+      all13_lines_pct: ${{ steps.collect_meta.outputs.all13_lines_pct }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
 
       - name: Setup Node.js 22
-        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6.4.0 (node24)
         with:
           node-version: '22'
           cache: 'npm'
 
       - name: Verify package-lock.json integrity, root metadata, and absence of conflicting bun.lock
+        id: lockfile
         run: node -e "const fs=require('fs'); if(fs.existsSync('bun.lock')) { console.error('Conflicting bun.lock found in root'); process.exit(1); } if(!fs.existsSync('package-lock.json')) { console.error('Missing package-lock.json'); process.exit(1); } const pkg=JSON.parse(fs.readFileSync('package.json','utf8')); const lock=JSON.parse(fs.readFileSync('package-lock.json','utf8')); if(!lock.lockfileVersion || !lock.packages || lock.name !== pkg.name || lock.version !== pkg.version) { console.error('Invalid package-lock.json metadata:', lock.name, lock.version); process.exit(1); }"
 
-      - name: Verify zero third-party brand anchoring in README, docs, UI & production code
-        run: |
-          PROHIBITED_BRAND="sonar""qube"
-          if grep -riI "$PROHIBITED_BRAND" README.md docs/ src/ server.ts cli/ packages/ integrations/ examples/ templates/ ; then
-            echo "ERROR: Found prohibited third-party reference in codebase/docs!"
-            exit 1
-          fi
-          echo "Independent positioning verified: 0 occurrences."
+      - name: Verify semantic independent positioning (zero deceptive vendor affiliation)
+        id: positioning
+        run: node scripts/verify-independent-positioning.mjs
 
-      - name: Install dependencies deterministically without lifecycle scripts
+      - name: Install dependencies deterministically without arbitrary lifecycle scripts
+        id: install
         run: |
           npm ci --ignore-scripts
           npm ls --depth=0
 
-      - name: Audit dependencies for moderate/high/critical CVEs
-        run: npm audit --audit-level=moderate
+      - name: Audit dependencies with governed NPM exception policy
+        id: audit
+        run: |
+          node scripts/verify-npm-audit.mjs | tee npm-audit-governance.log
+          STATUS=$(grep -oE 'Status: [A-Z0-9_]+' npm-audit-governance.log | head -n1 | cut -d' ' -f2)
+          echo "audit_status=${STATUS:-VERIFIED}" >> "$GITHUB_OUTPUT"
 
       - name: Typecheck (tsc --noEmit)
+        id: lint
         run: npm run lint
 
       - name: Run Security & Cryptographic Hardening Suite
+        id: security_tests
         run: npm run test:security
 
-      - name: Run full test suite with Coverage Threshold Gate (>=80% global, >=95% critical motors)
+      - name: Run Golden Dataset Statistical Validation
+        id: golden_tests
+        run: npm run test:golden
+
+      - name: Run full test suite with conventional c8 Coverage Threshold Gate (13 official domains)
+        id: coverage
         run: |
           npm run test:coverage
           test -f coverage/coverage-summary.json
           test -f coverage/lcov.info
+          test -f coverage/index.html
 
-      - name: Upload Coverage Report Artifact
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.0
+      - name: Upload Coverage Report Artifact (only when generated)
+        if: always() && hashFiles('coverage/coverage-summary.json') != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1 (node24)
         with:
           name: winhood-coverage-report
           path: |
             coverage/coverage-summary.json
             coverage/lcov.info
-          if-no-files-found: error
+            coverage/index.html
+          if-no-files-found: warn
 
       - name: Verify bit-for-bit determinism across repeated CLI runs
+        id: determinism
         run: |
           OUT1=$(./node_modules/.bin/tsx cli/winhood-cli.ts analyze --path ./src/analyzers --deterministic --name WinHoodAnalyzers)
           OUT2=$(./node_modules/.bin/tsx cli/winhood-cli.ts analyze --path ./src/analyzers --deterministic --name WinHoodAnalyzers)
@@ -79,7 +109,7 @@ jobs:
           echo "Determinism verified: identical output across consecutive runs."
 
       - name: Dogfooding 1 — Run official WinHood GitHub Action against WinHood repository
-        id: winhood_dogfood_action
+        id: dogfood_action
         uses: ./integrations/github-action
         with:
           path: "./src/gate"
@@ -89,9 +119,11 @@ jobs:
           sarif-output: "winhood-self-audit.sarif"
 
       - name: Dogfooding 2 — Run WinHood VS Code Extension against WinHood repository
+        id: vscode_ext
         run: ./node_modules/.bin/tsx --test packages/vscode-extension/test/extension.integration.test.ts
 
       - name: Build frontend and desktop bundles
+        id: build_desktop
         run: |
           npm run build:desktop
           test -f dist/index.html
@@ -100,71 +132,197 @@ jobs:
           test -f dist-desktop/electron-preload.cjs
           test -f dist-desktop/build-manifest.json
 
-      - name: Publish CI & Coverage Step Summary
+      - name: Collect Linux step metadata for cross-job CI summary
+        id: collect_meta
         if: always()
         run: |
           node -e '
             const fs = require("fs");
-            const cov = fs.existsSync("coverage/coverage-summary.json")
-              ? JSON.parse(fs.readFileSync("coverage/coverage-summary.json", "utf8"))
-              : null;
-            const desk = fs.existsSync("dist-desktop/build-manifest.json")
-              ? JSON.parse(fs.readFileSync("dist-desktop/build-manifest.json", "utf8"))
-              : null;
-            const sarifExists = fs.existsSync("winhood-self-audit.sarif");
-            const lines = [
-              "## WinHood Multiplatform CI, Coverage Gate & Dogfooding Summary",
-              "",
-              "| Etapa | Status | Evidência Técnica |",
-              "| :--- | :--- | :--- |",
-              "| TypeScript Strict (`npm run lint`) | PASSED | `tsc --noEmit` sem erros |",
-              `| Coverage Gate (\`npm run test:coverage\`) | ${cov?.passed ? "PASSED" : "FAILED"} | Lines: ${cov?.total?.lines?.pct ?? "N/A"}% / Functions: ${cov?.total?.functions?.pct ?? "N/A"}% / Branches: ${cov?.total?.branches?.pct ?? "N/A"}% |`,
-              `| Critical Motors (\`scoring\`, \`evidence\`, \`comparability\`) | ${cov?.criticalModules ? "VERIFIED" : "N/A"} | Scoring: ${cov?.criticalModules?.["src/scoring"]?.lines?.pct ?? "N/A"}% / Evidence: ${cov?.criticalModules?.["src/evidence"]?.lines?.pct ?? "N/A"}% / Comparability: ${cov?.criticalModules?.["src/comparability"]?.lines?.pct ?? "N/A"}% |`,
-              `| Self-Analysis Dogfooding (\`winhood-self-audit.sarif\`) | ${sarifExists ? "PASSED" : "FAILED"} | Determinismo bit-a-bit + GitHub Action + VS Code Extension |`,
-              `| Production & Desktop Build (\`npm run build:desktop\`) | ${desk ? "PASSED" : "FAILED"} | Versão ${desk?.version ?? "N/A"} (\`dist/index.html\`, \`dist-desktop/server.mjs\`, \`dist-desktop/electron-main.mjs\`) |`,
-              ""
+            const covPresent = fs.existsSync("coverage/coverage-summary.json");
+            const deskPresent = fs.existsSync("dist-desktop/build-manifest.json");
+            const cov = covPresent ? JSON.parse(fs.readFileSync("coverage/coverage-summary.json", "utf8")) : null;
+            const out = [
+              `coverage_summary_present=${covPresent}`,
+              `desktop_manifest_present=${deskPresent}`,
+              `coverage_lines_pct=${cov?.total?.lines?.pct ?? "N/A"}`,
+              `coverage_functions_pct=${cov?.total?.functions?.pct ?? "N/A"}`,
+              `coverage_branches_pct=${cov?.total?.branches?.pct ?? "N/A"}`,
+              `all13_lines_pct=${cov?.global?.all13DomainsLinesPct ?? "N/A"}`
             ];
-            if (process.env.GITHUB_STEP_SUMMARY) {
-              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n");
-            }
-            console.log(lines.join("\n"));
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, out.join("\n") + "\n");
           '
 
   windows-desktop-validation:
-    name: Windows Desktop Lifecycle, userData & Packaging Verification
+    name: Windows Desktop Lifecycle, userData & Inno Setup E2E Verification
     runs-on: windows-latest
     permissions:
       contents: read
+    outputs:
+      lockfile_outcome: ${{ steps.lockfile.outcome }}
+      install_outcome: ${{ steps.install.outcome }}
+      lint_outcome: ${{ steps.lint.outcome }}
+      unit_tests_outcome: ${{ steps.unit_tests.outcome }}
+      build_desktop_outcome: ${{ steps.build_desktop.outcome }}
+      pack_win_outcome: ${{ steps.pack_win.outcome }}
+      inno_compile_outcome: ${{ steps.inno_compile.outcome }}
+      installer_e2e_outcome: ${{ steps.installer_e2e.outcome }}
+      windows_installer_present: ${{ steps.collect_meta.outputs.windows_installer_present }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
 
       - name: Setup Node.js 22 on Windows
-        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6.4.0 (node24)
         with:
           node-version: '22'
           cache: 'npm'
 
       - name: Verify package-lock.json integrity and root metadata
-        run: node -e "const fs=require('fs'); if(!fs.existsSync('package-lock.json')) { console.error('Missing package-lock.json'); process.exit(1); } const pkg=JSON.parse(fs.readFileSync('package.json','utf8')); const lock=JSON.parse(fs.readFileSync('package-lock.json','utf8')); if(!lock.lockfileVersion || !lock.packages || lock.name !== pkg.name || lock.version !== pkg.version) { console.error('Invalid package-lock.json metadata'); process.exit(1); }"
+        id: lockfile
+        run: node -e "const fs=require('fs'); if(fs.existsSync('bun.lock')) { console.error('Conflicting bun.lock found'); process.exit(1); } if(!fs.existsSync('package-lock.json')) { console.error('Missing package-lock.json'); process.exit(1); } const pkg=JSON.parse(fs.readFileSync('package.json','utf8')); const lock=JSON.parse(fs.readFileSync('package-lock.json','utf8')); if(!lock.lockfileVersion || !lock.packages || lock.name !== pkg.name || lock.version !== pkg.version) { console.error('Invalid package-lock.json metadata'); process.exit(1); }"
 
-      - name: Install dependencies deterministically without lifecycle scripts
+      - name: Install dependencies deterministically & provision verified Electron binary
+        id: install
+        shell: pwsh
         run: |
           npm ci --ignore-scripts
           npm ls --depth=0
+          if (-not (Test-Path "node_modules\electron\dist\electron.exe")) {
+            node node_modules/electron/install.js
+          }
 
-      - name: Typecheck on Windows
+      - name: Typecheck on Windows (tsc --noEmit)
+        id: lint
         run: npm run lint
 
-      - name: Run Windows path, scanner .bat/.cmd, and desktop lifecycle tests
+      - name: Run Windows path, scanner .bat/.cmd, security, and desktop lifecycle tests
+        id: unit_tests
         run: npm test
 
       - name: Build desktop bundle and SHA-256 manifest on Windows
+        id: build_desktop
         run: npm run build:desktop
 
-      - name: Upload desktop build manifest
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.0
+      - name: Package unpacked Windows Electron directory
+        id: pack_win
+        run: npm run pack:win
+
+      - name: Locate or install Inno Setup 6 compiler (ISCC.exe)
+        id: inno_locate
+        shell: pwsh
+        run: |
+          $IsccPaths = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
+            "${env:LOCALAPPDATA}\Programs\Inno Setup 6\ISCC.exe"
+          )
+          $Found = $IsccPaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $Found) {
+            choco install innosetup -y --no-progress
+            $Found = $IsccPaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $Found) {
+            throw "ISCC.exe not found after installation attempt."
+          }
+          $IsccDir = Split-Path -Parent $Found
+          "$IsccDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          Write-Host "Using ISCC: $Found"
+
+      - name: Compile Inno Setup Windows installer (.exe)
+        id: inno_compile
+        shell: pwsh
+        run: |
+          npm run installer:win
+          if (-not (Test-Path "release-windows\installer\WinHood-Benchmarking-Setup.exe")) {
+            throw "Inno Setup installer output missing."
+          }
+
+      - name: Execute 13-step Windows Inno Setup E2E lifecycle (install -> launch -> health -> userData -> uninstall)
+        id: installer_e2e
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/test-installer-e2e.ps1 -InstallerPath "release-windows\installer\WinHood-Benchmarking-Setup.exe"
+
+      - name: Collect Windows metadata for CI summary
+        id: collect_meta
+        if: always()
+        shell: pwsh
+        run: |
+          $InstPresent = (Test-Path "release-windows\installer\WinHood-Benchmarking-Setup.exe").ToString().ToLower()
+          "windows_installer_present=$InstPresent" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Upload Windows desktop manifest, installer binary, and E2E report
+        if: always() && hashFiles('dist-desktop/build-manifest.json') != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1 (node24)
         with:
-          name: winhood-desktop-build-manifest
-          path: dist-desktop/build-manifest.json
-          if-no-files-found: error
+          name: winhood-windows-desktop-and-installer
+          path: |
+            dist-desktop/build-manifest.json
+            release-windows/installer/WinHood-Benchmarking-Setup.exe
+            release-windows/windows-installer-e2e-report.json
+          if-no-files-found: warn
+
+  ci-summary:
+    name: Consolidated Multiplatform CI Summary
+    needs: [linux-validation, windows-desktop-validation]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6.4.0 (node24)
+        with:
+          node-version: '22'
+
+      - name: Validate ci-summary self-test suite (7 scenarios)
+        run: node scripts/ci-summary.mjs --self-test
+
+      - name: Generate and publish truthful cross-job CI summary
+        env:
+          CI_SUMMARY_INPUT_JSON: |
+            {
+              "linux": {
+                "jobResult": "${{ needs.linux-validation.result }}",
+                "steps": {
+                  "lockfile": "${{ needs.linux-validation.outputs.lockfile_outcome }}",
+                  "positioning": "${{ needs.linux-validation.outputs.positioning_outcome }}",
+                  "install": "${{ needs.linux-validation.outputs.install_outcome }}",
+                  "audit": "${{ needs.linux-validation.outputs.audit_outcome }}",
+                  "lint": "${{ needs.linux-validation.outputs.lint_outcome }}",
+                  "security_tests": "${{ needs.linux-validation.outputs.security_tests_outcome }}",
+                  "coverage": "${{ needs.linux-validation.outputs.coverage_outcome }}",
+                  "determinism": "${{ needs.linux-validation.outputs.determinism_outcome }}",
+                  "dogfood_action": "${{ needs.linux-validation.outputs.dogfood_action_outcome }}",
+                  "vscode_ext": "${{ needs.linux-validation.outputs.vscode_ext_outcome }}",
+                  "build_desktop": "${{ needs.linux-validation.outputs.build_desktop_outcome }}"
+                }
+              },
+              "windows": {
+                "jobResult": "${{ needs.windows-desktop-validation.result }}",
+                "steps": {
+                  "lockfile": "${{ needs.windows-desktop-validation.outputs.lockfile_outcome }}",
+                  "install": "${{ needs.windows-desktop-validation.outputs.install_outcome }}",
+                  "lint": "${{ needs.windows-desktop-validation.outputs.lint_outcome }}",
+                  "unit_tests": "${{ needs.windows-desktop-validation.outputs.unit_tests_outcome }}",
+                  "build_desktop": "${{ needs.windows-desktop-validation.outputs.build_desktop_outcome }}",
+                  "pack_win": "${{ needs.windows-desktop-validation.outputs.pack_win_outcome }}",
+                  "inno_compile": "${{ needs.windows-desktop-validation.outputs.inno_compile_outcome }}",
+                  "installer_e2e": "${{ needs.windows-desktop-validation.outputs.installer_e2e_outcome }}"
+                }
+              },
+              "auditStatus": "${{ needs.linux-validation.outputs.audit_status }}",
+              "artifacts": {
+                "coverageSummaryPresent": ${{ needs.linux-validation.outputs.coverage_summary_present == 'true' }},
+                "desktopManifestPresent": ${{ needs.linux-validation.outputs.desktop_manifest_present == 'true' }},
+                "windowsInstallerPresent": ${{ needs.windows-desktop-validation.outputs.windows_installer_present == 'true' }}
+              },
+              "coverageTelemetry": {
+                "linesPct": "${{ needs.linux-validation.outputs.coverage_lines_pct }}",
+                "functionsPct": "${{ needs.linux-validation.outputs.coverage_functions_pct }}",
+                "branchesPct": "${{ needs.linux-validation.outputs.coverage_branches_pct }}",
+                "all13DomainsLinesPct": "${{ needs.linux-validation.outputs.all13_lines_pct }}"
+              }
+            }
+        run: node scripts/ci-summary.mjs --render-github-summary

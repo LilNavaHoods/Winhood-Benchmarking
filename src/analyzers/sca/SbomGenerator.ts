@@ -147,57 +147,269 @@ function deterministicUuidFromSeed(seed: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
+const UUID_V4_URN_REGEX = /^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const PURL_REGEX = /^pkg:[a-z0-9.+-]+\/.+@.+$/i;
+const SHA256_HEX_REGEX = /^[0-9a-f]{64}$/i;
+const ISO_TIMESTAMP_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
+
 /**
- * SbomGenerator (Multi-Lockfile + Verifiable SPDX Provenance + CycloneDX 1.5 & SPDX 2.3 Validation)
- * Generates CycloneDX 1.5 and SPDX 2.3 SBOM documents directly from package manifests and lockfiles:
+ * SbomGenerator (Multi-Lockfile + Verifiable SPDX Provenance + CycloneDX 1.5/1.7 & SPDX 2.3/3.0.1 Schema Validation)
+ * Generates CycloneDX 1.5 (default compatible), CycloneDX 1.7, SPDX 2.3 (default compatible), and SPDX 3.0.1 JSON-LD
+ * documents directly from package manifests and lockfiles:
  * package.json, package-lock.json, npm-shrinkwrap.json, yarn.lock, pnpm-lock.yaml, bun.lock,
  * requirements.txt, pyproject.toml, pom.xml, go.mod, Cargo.toml, Cargo.lock, *.csproj
  */
 export class SbomGenerator {
-  public static validateSbomBundle(bundle: SbomDocumentBundle): {
-    cyclonedxValid: boolean;
-    spdxValid: boolean;
+  public static validateCycloneDxSchema(
+    cdx: Record<string, any> | undefined,
+    expectedSpecVersion: '1.5' | '1.7'
+  ): { valid: boolean; errors: string[] } {
+    const errors: string[] = [];
+    const prefix = `CycloneDX ${expectedSpecVersion}`;
+    if (!cdx || typeof cdx !== 'object') {
+      return { valid: false, errors: [`${prefix} JSON document missing.`] };
+    }
+    if (cdx.bomFormat !== 'CycloneDX') errors.push(`${prefix} bomFormat must be "CycloneDX".`);
+    if (cdx.specVersion !== expectedSpecVersion) {
+      errors.push(`${prefix} specVersion must be "${expectedSpecVersion}".`);
+    }
+    if (typeof cdx.serialNumber !== 'string' || !UUID_V4_URN_REGEX.test(cdx.serialNumber)) {
+      errors.push(`${prefix} serialNumber must match urn:uuid:<UUID>.`);
+    }
+    if (typeof cdx.version !== 'number' || !Number.isInteger(cdx.version) || cdx.version < 1) {
+      errors.push(`${prefix} version must be an integer >= 1.`);
+    }
+    if (typeof cdx.metadata?.timestamp !== 'string' || !ISO_TIMESTAMP_REGEX.test(cdx.metadata.timestamp)) {
+      errors.push(`${prefix} metadata.timestamp must be a valid ISO-8601 UTC timestamp.`);
+    }
+    if (
+      !cdx.metadata?.component ||
+      typeof cdx.metadata.component.name !== 'string' ||
+      !cdx.metadata.component.name.trim() ||
+      typeof cdx.metadata.component.type !== 'string'
+    ) {
+      errors.push(`${prefix} metadata.component.name and type are required.`);
+    }
+    if (!Array.isArray(cdx.components)) {
+      errors.push(`${prefix} components must be an array.`);
+      return { valid: false, errors };
+    }
+
+    const knownRefs = new Set<string>();
+    if (typeof cdx.metadata?.component?.['bom-ref'] === 'string') {
+      knownRefs.add(cdx.metadata.component['bom-ref']);
+    }
+
+    for (let i = 0; i < cdx.components.length; i++) {
+      const comp = cdx.components[i];
+      if (!comp || typeof comp !== 'object') {
+        errors.push(`${prefix} components[${i}] must be an object.`);
+        continue;
+      }
+      if (typeof comp.name !== 'string' || !comp.name.trim()) {
+        errors.push(`${prefix} components[${i}].name must be a non-empty string.`);
+      }
+      if (typeof comp.version !== 'string' || !comp.version.trim()) {
+        errors.push(`${prefix} components[${i}].version must be a non-empty string.`);
+      }
+      const bomRef = comp['bom-ref'];
+      if (typeof bomRef !== 'string' || !bomRef.trim()) {
+        errors.push(`${prefix} components[${i}].bom-ref is required.`);
+      } else if (knownRefs.has(bomRef)) {
+        errors.push(`${prefix} duplicate bom-ref "${bomRef}".`);
+      } else {
+        knownRefs.add(bomRef);
+      }
+      if (comp.purl !== undefined && (typeof comp.purl !== 'string' || !PURL_REGEX.test(comp.purl))) {
+        errors.push(`${prefix} components[${i}].purl invalid: "${comp.purl}".`);
+      }
+      if (Array.isArray(comp.hashes)) {
+        for (const h of comp.hashes) {
+          if (h?.alg === 'SHA-256' && !SHA256_HEX_REGEX.test(String(h?.content || ''))) {
+            errors.push(`${prefix} components[${i}] has invalid SHA-256 digest.`);
+          }
+        }
+      }
+    }
+
+    if (!Array.isArray(cdx.dependencies)) {
+      errors.push(`${prefix} dependencies graph array is required.`);
+    } else {
+      for (const dep of cdx.dependencies) {
+        if (!dep || typeof dep.ref !== 'string' || !knownRefs.has(dep.ref)) {
+          errors.push(`${prefix} dependencies contains unknown ref "${dep?.ref}".`);
+        }
+        if (Array.isArray(dep?.dependsOn)) {
+          for (const target of dep.dependsOn) {
+            if (typeof target !== 'string' || !knownRefs.has(target)) {
+              errors.push(`${prefix} dependency target "${target}" is dangling/missing from components.`);
+            }
+          }
+        }
+      }
+    }
+
+    return { valid: errors.length === 0, errors };
+  }
+
+  public static validateSpdx23Schema(spdx: Record<string, any> | undefined): {
+    valid: boolean;
     errors: string[];
   } {
     const errors: string[] = [];
-    const cdx = bundle.cyclonedx15Json as Record<string, any> | undefined;
-    if (!cdx) {
-      errors.push('CycloneDX 1.5 JSON document missing.');
-    } else {
-      if (cdx.bomFormat !== 'CycloneDX') errors.push('CycloneDX bomFormat must be "CycloneDX".');
-      if (cdx.specVersion !== '1.5') errors.push('CycloneDX specVersion must be "1.5".');
-      if (typeof cdx.serialNumber !== 'string' || !cdx.serialNumber.startsWith('urn:uuid:')) {
-        errors.push('CycloneDX serialNumber must be a valid urn:uuid.');
+    if (!spdx || typeof spdx !== 'object') {
+      return { valid: false, errors: ['SPDX 2.3 JSON document missing.'] };
+    }
+    if (spdx.spdxVersion !== 'SPDX-2.3') errors.push('SPDX 2.3 spdxVersion must be "SPDX-2.3".');
+    if (spdx.dataLicense !== 'CC0-1.0') errors.push('SPDX 2.3 dataLicense must be "CC0-1.0".');
+    if (spdx.SPDXID !== 'SPDXRef-DOCUMENT') errors.push('SPDX 2.3 SPDXID must be "SPDXRef-DOCUMENT".');
+    if (typeof spdx.documentNamespace !== 'string' || !/^https?:\/\/.+/.test(spdx.documentNamespace)) {
+      errors.push('SPDX 2.3 documentNamespace must be a valid URI.');
+    }
+    if (
+      !spdx.creationInfo?.created ||
+      !ISO_TIMESTAMP_REGEX.test(String(spdx.creationInfo.created)) ||
+      !Array.isArray(spdx.creationInfo?.creators) ||
+      spdx.creationInfo.creators.length === 0
+    ) {
+      errors.push('SPDX 2.3 creationInfo.created (ISO-8601) and non-empty creators are required.');
+    }
+    if (!Array.isArray(spdx.packages)) {
+      errors.push('SPDX 2.3 packages must be an array.');
+      return { valid: false, errors };
+    }
+    const pkgIds = new Set<string>();
+    for (let i = 0; i < spdx.packages.length; i++) {
+      const p = spdx.packages[i];
+      if (!p || typeof p.SPDXID !== 'string' || !p.SPDXID.startsWith('SPDXRef-')) {
+        errors.push(`SPDX 2.3 packages[${i}].SPDXID invalid.`);
+      } else if (pkgIds.has(p.SPDXID)) {
+        errors.push(`SPDX 2.3 duplicate SPDXID "${p.SPDXID}".`);
+      } else {
+        pkgIds.add(p.SPDXID);
       }
-      if (!cdx.metadata?.timestamp || !cdx.metadata?.component?.name) {
-        errors.push('CycloneDX metadata.timestamp and metadata.component.name are required.');
+      if (typeof p.name !== 'string' || !p.name.trim()) {
+        errors.push(`SPDX 2.3 packages[${i}].name must be non-empty.`);
       }
-      if (!Array.isArray(cdx.components)) {
-        errors.push('CycloneDX components must be an array.');
+      if (typeof p.versionInfo !== 'string' || !p.versionInfo.trim()) {
+        errors.push(`SPDX 2.3 packages[${i}].versionInfo must be non-empty.`);
+      }
+      if (typeof p.licenseDeclared !== 'string' || !p.licenseDeclared.trim()) {
+        errors.push(`SPDX 2.3 packages[${i}].licenseDeclared must be a valid expression or NOASSERTION.`);
+      }
+      if (Array.isArray(p.checksums)) {
+        for (const c of p.checksums) {
+          if (c?.algorithm === 'SHA256' && !SHA256_HEX_REGEX.test(String(c?.checksumValue || ''))) {
+            errors.push(`SPDX 2.3 packages[${i}] has invalid SHA256 checksumValue.`);
+          }
+        }
+      }
+    }
+    return { valid: errors.length === 0, errors };
+  }
+
+  public static validateSpdx30JsonLdSchema(spdx30: Record<string, any> | undefined): {
+    valid: boolean;
+    errors: string[];
+  } {
+    const errors: string[] = [];
+    if (!spdx30 || typeof spdx30 !== 'object') {
+      return { valid: false, errors: ['SPDX 3.0 JSON-LD document missing.'] };
+    }
+    if (spdx30['@context'] !== 'https://spdx.org/rdf/3.0.1/spdx-context.jsonld') {
+      errors.push('SPDX 3.0 @context must reference official SPDX 3.0.1 JSON-LD context.');
+    }
+    if (!Array.isArray(spdx30['@graph']) || spdx30['@graph'].length === 0) {
+      errors.push('SPDX 3.0 @graph must be a non-empty array.');
+      return { valid: false, errors };
+    }
+
+    const graphNodes = new Map<string, any>();
+    let hasDocument = false;
+    let hasCreationInfo = false;
+    for (const node of spdx30['@graph']) {
+      if (!node || typeof node !== 'object') {
+        errors.push('SPDX 3.0 @graph contains non-object element.');
+        continue;
+      }
+      if (node.type === 'SpdxDocument') hasDocument = true;
+      if (node.type === 'CreationInfo') hasCreationInfo = true;
+      if (typeof node.spdxId === 'string') {
+        graphNodes.set(node.spdxId, node);
+      }
+      if (node.type === 'software_Package') {
+        if (typeof node.name !== 'string' || !node.name.trim()) {
+          errors.push(`SPDX 3.0 software_Package "${node.spdxId}" missing name.`);
+        }
+        if (typeof node.software_packageVersion !== 'string' || !node.software_packageVersion.trim()) {
+          errors.push(`SPDX 3.0 software_Package "${node.spdxId}" missing software_packageVersion.`);
+        }
+        if (
+          typeof node.software_packageUrl !== 'string' ||
+          !PURL_REGEX.test(node.software_packageUrl)
+        ) {
+          errors.push(`SPDX 3.0 software_Package "${node.spdxId}" has invalid PURL.`);
+        }
+      }
+    }
+    if (!hasDocument) errors.push('SPDX 3.0 @graph missing SpdxDocument element.');
+    if (!hasCreationInfo) errors.push('SPDX 3.0 @graph missing CreationInfo element.');
+
+    for (const node of spdx30['@graph']) {
+      if (node?.type === 'Relationship') {
+        if (!graphNodes.has(node.from)) {
+          errors.push(`SPDX 3.0 Relationship missing "from" target "${node.from}".`);
+        }
+        if (Array.isArray(node.to)) {
+          for (const target of node.to) {
+            if (!graphNodes.has(target)) {
+              errors.push(`SPDX 3.0 Relationship dangling "to" target "${target}".`);
+            }
+          }
+        }
       }
     }
 
-    const spdx = bundle.spdx23Json as Record<string, any> | undefined;
-    if (!spdx) {
-      errors.push('SPDX 2.3 JSON document missing.');
-    } else {
-      if (spdx.spdxVersion !== 'SPDX-2.3') errors.push('SPDX spdxVersion must be "SPDX-2.3".');
-      if (spdx.dataLicense !== 'CC0-1.0') errors.push('SPDX dataLicense must be "CC0-1.0".');
-      if (spdx.SPDXID !== 'SPDXRef-DOCUMENT') errors.push('SPDX SPDXID must be "SPDXRef-DOCUMENT".');
-      if (typeof spdx.documentNamespace !== 'string' || !spdx.documentNamespace.startsWith('https://')) {
-        errors.push('SPDX documentNamespace must be a valid URI.');
-      }
-      if (!spdx.creationInfo?.created || !Array.isArray(spdx.creationInfo?.creators)) {
-        errors.push('SPDX creationInfo.created and creators are required.');
-      }
-      if (!Array.isArray(spdx.packages)) {
-        errors.push('SPDX packages must be an array.');
-      }
-    }
+    return { valid: errors.length === 0, errors };
+  }
 
-    const cyclonedxValid = !errors.some((e) => e.startsWith('CycloneDX'));
-    const spdxValid = !errors.some((e) => e.startsWith('SPDX'));
-    return { cyclonedxValid, spdxValid, errors };
+  public static validateSbomBundle(bundle: SbomDocumentBundle): {
+    cyclonedxValid: boolean;
+    spdxValid: boolean;
+    cyclonedx17Valid: boolean;
+    spdx30Valid: boolean;
+    schemaVersionValidated: string[];
+    errors: string[];
+  } {
+    const cdx15 = SbomGenerator.validateCycloneDxSchema(
+      bundle.cyclonedx15Json as Record<string, any> | undefined,
+      '1.5'
+    );
+    const spdx23 = SbomGenerator.validateSpdx23Schema(
+      bundle.spdx23Json as Record<string, any> | undefined
+    );
+    const cdx17 = bundle.cyclonedx17Json
+      ? SbomGenerator.validateCycloneDxSchema(bundle.cyclonedx17Json as Record<string, any>, '1.7')
+      : { valid: true, errors: [] };
+    const spdx30 = bundle.spdx30Json
+      ? SbomGenerator.validateSpdx30JsonLdSchema(bundle.spdx30Json as Record<string, any>)
+      : { valid: true, errors: [] };
+
+    const errors = [...cdx15.errors, ...spdx23.errors, ...cdx17.errors, ...spdx30.errors];
+    const schemaVersionValidated: string[] = [];
+    if (cdx15.valid) schemaVersionValidated.push('CycloneDX-1.5');
+    if (cdx17.valid && bundle.cyclonedx17Json) schemaVersionValidated.push('CycloneDX-1.7');
+    if (spdx23.valid) schemaVersionValidated.push('SPDX-2.3');
+    if (spdx30.valid && bundle.spdx30Json) schemaVersionValidated.push('SPDX-3.0.1');
+
+    return {
+      cyclonedxValid: cdx15.valid,
+      spdxValid: spdx23.valid,
+      cyclonedx17Valid: cdx17.valid,
+      spdx30Valid: spdx30.valid,
+      schemaVersionValidated,
+      errors,
+    };
   }
 
   public static generateFromSoftware(
@@ -228,8 +440,48 @@ export class SbomGenerator {
       components: components.map((c) => `${c.bomRef}:${c.sha256 || ''}`),
     });
     const docUuid = deterministicMode ? deterministicUuidFromSeed(serialSeed) : crypto.randomUUID();
+    const appBomRef = `app:${software.id}@${software.version}`;
+    const directRefs = components.filter((c) => c.dependencyScope !== 'TRANSITIVE').map((c) => c.bomRef);
+    const transitiveRefs = components.filter((c) => c.dependencyScope === 'TRANSITIVE').map((c) => c.bomRef);
+
+    const mappedComponents = components.map((c) => ({
+      type: 'library',
+      'bom-ref': c.bomRef,
+      name: c.name,
+      version: c.version,
+      purl: c.purl,
+      scope:
+        c.dependencyScope === 'DIRECT'
+          ? 'required'
+          : c.dependencyScope === 'OPTIONAL'
+            ? 'optional'
+            : 'optional',
+      hashes: c.sha256 ? [{ alg: 'SHA-256', content: c.sha256 }] : [],
+      licenses: c.license && c.license !== 'UNKNOWN' && c.license !== 'NOASSERTION'
+        ? [{ license: { id: c.license } }]
+        : [],
+      properties: [
+        { name: 'winhood:dependencyScope', value: c.dependencyScope },
+        { name: 'winhood:licenseProvenance', value: c.licenseProvenance || 'UNVERIFIED' },
+        { name: 'winhood:manifestFile', value: c.manifestFile },
+        { name: 'winhood:ecosystem', value: c.ecosystem },
+        ...(c.license === 'NOASSERTION' ? [{ name: 'winhood:spdxLicenseConclusion', value: 'NOASSERTION' }] : []),
+      ],
+    }));
+
+    const cyclonedxDependencies = [
+      {
+        ref: appBomRef,
+        dependsOn: directRefs.length > 0 ? directRefs : transitiveRefs,
+      },
+      ...components.map((c) => ({
+        ref: c.bomRef,
+        dependsOn: [] as string[],
+      })),
+    ];
 
     const cyclonedx15Json: Record<string, unknown> = {
+      $schema: 'http://cyclonedx.org/schema/bom-1.5.schema.json',
       bomFormat: 'CycloneDX',
       specVersion: '1.5',
       serialNumber: `urn:uuid:${docUuid}`,
@@ -247,7 +499,7 @@ export class SbomGenerator {
           type: 'application',
           name: software.name,
           version: software.version,
-          'bom-ref': `app:${software.id}@${software.version}`,
+          'bom-ref': appBomRef,
         },
         properties: [
           {
@@ -260,27 +512,47 @@ export class SbomGenerator {
           },
         ],
       },
-      components: components.map((c) => ({
-        type: 'library',
-        'bom-ref': c.bomRef,
-        name: c.name,
-        version: c.version,
-        purl: c.purl,
-        scope:
-          c.dependencyScope === 'DIRECT'
-            ? 'required'
-            : c.dependencyScope === 'OPTIONAL'
-              ? 'optional'
-              : 'optional',
-        hashes: c.sha256 ? [{ alg: 'SHA-256', content: c.sha256 }] : [],
-        licenses: c.license && c.license !== 'UNKNOWN' ? [{ license: { id: c.license } }] : [],
+      components: mappedComponents,
+      dependencies: cyclonedxDependencies,
+    };
+
+    const cyclonedx17Json: Record<string, unknown> = {
+      $schema: 'http://cyclonedx.org/schema/bom-1.7.schema.json',
+      bomFormat: 'CycloneDX',
+      specVersion: '1.7',
+      serialNumber: `urn:uuid:${docUuid}`,
+      version: 1,
+      metadata: {
+        timestamp: generatedAt,
+        tools: {
+          components: [
+            {
+              type: 'application',
+              publisher: 'WinHood Engineering',
+              name: 'WinHood SBOM Generator',
+              version: '4.4.0',
+            },
+          ],
+        },
+        component: {
+          type: 'application',
+          name: software.name,
+          version: software.version,
+          'bom-ref': appBomRef,
+        },
         properties: [
-          { name: 'winhood:dependencyScope', value: c.dependencyScope },
-          { name: 'winhood:licenseProvenance', value: c.licenseProvenance || 'UNVERIFIED' },
-          { name: 'winhood:manifestFile', value: c.manifestFile },
-          { name: 'winhood:ecosystem', value: c.ecosystem },
+          {
+            name: 'winhood:transitiveCoverageComplete',
+            value: String(transitiveCoverageComplete),
+          },
+          {
+            name: 'winhood:lockfilesDetected',
+            value: lockfilesDetected.join(', ') || 'NONE',
+          },
         ],
-      })),
+      },
+      components: mappedComponents,
+      dependencies: cyclonedxDependencies,
     };
 
     const spdx23Json: Record<string, unknown> = {
@@ -293,6 +565,7 @@ export class SbomGenerator {
         created: generatedAt,
         creators: ['Tool: WinHood SBOM Generator-4.4.0'],
       },
+      documentDescribes: components.map((_, idx) => `SPDXRef-Package-${idx + 1}`),
       packages: components.map((c, idx) => ({
         SPDXID: `SPDXRef-Package-${idx + 1}`,
         name: c.name,
@@ -312,13 +585,78 @@ export class SbomGenerator {
       })),
     };
 
+    const spdx30BaseUri = `https://winhood.local/spdx3/${software.id}/${docUuid}`;
+    const spdx30CreationInfoId = `${spdx30BaseUri}/CreationInfo`;
+    const spdx30DocId = `${spdx30BaseUri}/SpdxDocument`;
+    const spdx30PkgIds = components.map((_, idx) => `${spdx30BaseUri}/Package/${idx + 1}`);
+    const spdx30Json: Record<string, unknown> = {
+      '@context': 'https://spdx.org/rdf/3.0.1/spdx-context.jsonld',
+      '@graph': [
+        {
+          type: 'CreationInfo',
+          spdxId: spdx30CreationInfoId,
+          created: generatedAt,
+          createdBy: [`${spdx30BaseUri}/Tool/WinHood-4.4.0`],
+          specVersion: '3.0.1',
+        },
+        {
+          type: 'SpdxDocument',
+          spdxId: spdx30DocId,
+          name: `${software.name}-${software.version}-sbom`,
+          creationInfo: spdx30CreationInfoId,
+          rootElement: spdx30PkgIds,
+        },
+        ...components.map((c, idx) => ({
+          type: 'software_Package',
+          spdxId: spdx30PkgIds[idx],
+          creationInfo: spdx30CreationInfoId,
+          name: c.name,
+          software_packageVersion: c.version,
+          software_packageUrl: c.purl,
+          software_downloadLocation: 'NOASSERTION',
+          ...(c.sha256
+            ? {
+                verifiedUsing: [
+                  {
+                    type: 'Hash',
+                    algorithm: 'sha256',
+                    hashValue: c.sha256,
+                  },
+                ],
+              }
+            : {}),
+          comment: `declaredLicense=${c.license && c.license !== 'UNKNOWN' ? c.license : 'NOASSERTION'}; dependencyScope=${c.dependencyScope}; licenseProvenance=${c.licenseProvenance || 'UNVERIFIED'}`,
+        })),
+        ...(spdx30PkgIds.length > 0
+          ? [
+              {
+                type: 'Relationship',
+                spdxId: `${spdx30BaseUri}/Relationship/Contains`,
+                creationInfo: spdx30CreationInfoId,
+                relationshipType: 'contains',
+                from: spdx30DocId,
+                to: spdx30PkgIds,
+              },
+            ]
+          : []),
+      ],
+    };
+
     const cyclonedxSha256 = crypto
       .createHash('sha256')
       .update(JSON.stringify(cyclonedx15Json))
       .digest('hex');
+    const cyclonedx17Sha256 = crypto
+      .createHash('sha256')
+      .update(JSON.stringify(cyclonedx17Json))
+      .digest('hex');
     const spdxSha256 = crypto
       .createHash('sha256')
       .update(JSON.stringify(spdx23Json))
+      .digest('hex');
+    const spdx30Sha256 = crypto
+      .createHash('sha256')
+      .update(JSON.stringify(spdx30Json))
       .digest('hex');
 
     const bundle: SbomDocumentBundle = {
@@ -334,11 +672,16 @@ export class SbomGenerator {
       optionalCount,
       transitiveCoverageComplete,
       lockfilesDetected,
+      supportedFormats: ['cyclonedx-1.5', 'cyclonedx-1.7', 'spdx-2.3', 'spdx-3.0'],
       components,
       cyclonedx15Json,
+      cyclonedx17Json,
       spdx23Json,
+      spdx30Json,
       cyclonedxSha256,
+      cyclonedx17Sha256,
       spdxSha256,
+      spdx30Sha256,
       deterministicMode,
     };
 

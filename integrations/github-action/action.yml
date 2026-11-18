@@ -39,5 +39,5 @@ outputs:
   report-path:
     description: "Resolved path to the generated SARIF 2.1.0 report"
 runs:
-  using: "node20"
+  using: "node24"
   main: "entrypoint.mjs"

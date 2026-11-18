@@ -4,45 +4,24 @@ Todas as mudanças notáveis da plataforma **WinHood Benchmarking** seguem **Ver
 
 ---
 
-## [4.4.0] - 2026-11-17 — Auditoria Multidisciplinar de Segurança, Criptografia por Envelope V2, Cobertura V8 Real e Validação Estatística
+## [4.4.0] - 2026-11-18 — Remediação Pós-Auditoria CI (`44141919950`), Governança NPM, Cobertura `c8` + `v8-to-istanbul`, Keystore Fail-Closed e UI Honesta
 
-### Segurança Criptográfica, Keystore Envelope V2 e Autenticação (Fases 1 & 4)
-- **Keystore Envelope Encryption V2 (`WINHOOD-ENVELOPE-V2`):** Geração de DEK CSPRNG de 256 bits cifrada com `AES-256-GCM` (nonce único de 96 bits + AAD contextual), protegida por KEK (Windows DPAPI, segredo externo ou KEK local com permissão `0600`), derivação segregada por finalidade via **HKDF-SHA256 (RFC 5869)**, contador monotônico anti-rollback (`.seq`) e **Trust Store Ed25519** com rotação e revogação verificadas por `verifyEvidenceChainAndManifest()`.
-- **Proteção de Senhas e Migração Transparente:** Evolução dos parâmetros Scrypt (`N=32768, r=8, p=1, maxmem=64MB`) com formato versionado e migração transparente (`needsPasswordRehash`) para contas existentes (`N=16384`).
-- **Higiene de Dependências e Supply Chain:** Padronização exclusiva em NPM (`package-lock.json` v3), remoção de `bun.lock` do repositório raiz, atualização de `electron@^45.3.3` e `electron-builder@^26.18.0`, overrides de segurança (`esbuild@^0.28.2`, `minimatch@^11.0.9`) com `npm audit` = **0 vulnerabilidades**, e GitHub Actions pinadas por commit SHA de 40 caracteres.
+### Desbloqueio Multiplataforma de CI/CD e Governança de Dependências (Fases 1, 2 & 8)
+- **Resolução do erro Windows `@typescript/typescript-win32-x64`:** Padronização em `typescript@5.9.3` (JavaScript puro multiplataforma) e `npm ci --ignore-scripts` com `package-lock.json` v3 único (zero `bun.lock`).
+- **Verificador Semântico de Posicionamento Independente (`scripts/verify-independent-positioning.mjs`):** Permite referências técnicas legítimas e avisos de consentimento do usuário (`PrivacyAndTermsModal.tsx`), bloqueando apenas alegações falsas de parceria comercial, certificação oficial ou propriedade de terceiros (5/5 cenários de autoteste verificados).
+- **Governança de Vulnerabilidades NPM (`scripts/verify-npm-audit.mjs` & `security/npm-audit-exceptions.json`):** Eliminação permanente de 6 advisories na cadeia `electron-builder`/`node-gyp` e governança formal com prazo de validade (`2027-02-17`) e controles compensatórios para os 5 advisories build-time remanescentes de `picomatch <= 4.0.7` (`GHSA-fc5q-39xc-vjpf`).
+- **Agregador Causal de CI (`scripts/ci-summary.mjs`) & Actions Node 24:** Pinagem por SHA de 40 caracteres (`actions/checkout@3d3c42e...`, `actions/setup-node@949feb2...`, `actions/upload-artifact@cf430e0...`), guarda `hashFiles(...) != ''` nos uploads e sumário multi-job validado em 7 cenários.
 
-### Cobertura Real V8 + SourceMap, Motores Analíticos, Comparabilidade e SCA (Fases 2, 3, 5, 6 & 7)
-- **Cobertura Convencional V8 + SourceMap (`scripts/run-coverage-gate.mjs`):** Substituição da estimativa heurística de bytes por projeção real de linhas, funções, branches e statements via `node:module` `SourceMap` nos **13 domínios oficiais** (`src/execution/CoverageDomainInventory.ts`), com separação estrita entre `testCoverage`, `ingestionCoverage` e `analysisCoverage`.
-- **Rastreabilidade de Ferramentas (`ToolAdapterInfo`):** Declaração explícita de `integrationType` (`NATIVE`, `LOCAL_CLI`, `REMOTE_API`), estados granulares de prontidão e `resultCompleteness` (`COMPLETE`, `PARTIAL`, `EMPTY`, `INCONCLUSIVE`, `NOT_EXECUTED`), mantendo `lastExecutionAt` e `lastExitCode` como `null` quando não executadas.
-- **Validação Estatística Independente (`GoldenDatasetRunner.ts`):** Separação entre corpus interno de regressão e `INDEPENDENT_VALIDATION_CORPUS`, calculando Precision, Recall, F1, TPR, TNR, FPR, FNR, **Intervalos de Confiança de 95% (Wilson Score)** e médias Macro/Micro por linguagem e categoria.
-- **Comparabilidade Bimodal & Quality Gates em 3 Níveis:** Suporte explícito a `SAME_ENGINE` e `CROSS_TOOL` (`STRICTLY_COMPARABLE`, `QUALIFIED_COMPARISON`, `NOT_COMPARABLE`) e condições de Quality Gate classificadas em `REQUIRED`, `OPTIONAL` e `INFORMATIVE`.
-- **SCA Multi-Lockfile & Proveniência Estrita de Licenças:** Suporte a projetos externos com `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lock` e `Cargo.lock`, uso de `NOASSERTION` quando a licença não é comprovada por manifesto e metadados de frescor dos feeds (`advisoryFeedMetadata`).
+### Cobertura Convencional `c8` + `v8-to-istanbul` (`all: true`) (Fase 4)
+- **Motor Oficial `c8@10.1.3` (`scripts/coverage-runner-core.mjs` & `scripts/run-coverage-gate.mjs`):** Conversão AST real V8 -> Istanbul com `all: true` e validação estrita de `SourceMap` derivada de uma única fonte (`OFFICIAL_13_COVERAGE_DOMAINS` em `src/execution/CoverageDomainInventory.ts`).
+- **Calibração Matemática (`src/execution/coverageEngine.test.ts`):** Validada contra 11 microprojetos de referência (100%, 0% não importado, ~50% linhas, `if/else`, ternário, switch, curto-circuito `&&`/`||`/`??`, funções declaradas vs invocadas, tipos TS, SourceMap corrompido e múltiplos domínios).
 
-### Posicionamento Independente & Renomeações (Bloco A)
-- **Modo MQR (Modern Quality Regime) & Perfil de Qualidade Estrita:** Renomeado o antigo modo `"SonarQube MQR Mode"` para **`"Modo MQR (Modern Quality Regime)"`** e **`"Perfil de Qualidade Estrita"`**, mantendo 100% do comportamento funcional e retrocompatibilidade de chaves de configuração.
-- **Documentação Neutra de Contratos:** Renomeados os documentos com prefixo legado `SONARQUBE_*` para `API_REFERENCE.md`, `IDE_INTEGRATION.md`, `EXTERNAL_INTEGRATION.md`, `MQR_METHODOLOGY.md` e `AUTONOMOUS_REMEDIATION.md`, descrevendo exclusivamente os contratos do WinHood e padrões abertos (**SARIF 2.1.0, CWE, OWASP Top 10, CVSS, CycloneDX 1.5, SPDX 2.3**).
-- **Glossário Oficial (`GLOSSARY.md`):** Publicado glossário canônico definindo Modo MQR, Motor de Veracidade, Comparabilidade, Confiança da Evidência, Estados de Quality Gate e Trilha Criptográfica de Evidências.
+### Keystore `PRODUCTION_SECURE` Fail-Closed, Quality Gate Unificado e Comparabilidade (Fases 3, 5, 6 & 10)
+- **Keystore `WINHOOD-ENVELOPE-V2` Fail-Closed (`src/security/KeyManagementService.ts`):** Exige Windows DPAPI, macOS Keychain, Linux Secret Service ou `WINHOOD_KEYSTORE_MASTER_SECRET` em `PRODUCTION_SECURE`, bloqueando fallback para arquivo `.kek` local; separa `trust-store.json` de `keystore.json` e impede reutilização de `SONAR_SECRET_SALT`.
+- **Quality Gate sem Fudge Factor (`src/gate/QualityGateEngine.ts` & `src/engine/scoringEngine.ts`):** Remoção da supressão de achados em changesets `< 20` linhas e unificação da lógica de decisão entre motor de score e Quality Gate (9 cenários validados).
+- **Comparabilidade A/B com Manifesto Verificável (`src/comparability/index.ts`):** Rejeição de flags booleanas soltas sem `ComparabilityManifest` completo e hashes SHA-256 verificados.
+- **Matriz Auth/TOTP/Scrypt (`src/security/security.test.ts`):** Validação E2E de QR Code PNG offline, persistência em restart, disable/reconfiguração TOTP, migração `N=16384 -> N=32768` e proteção contra downgrade.
 
-### Extensão de IDE — VS Code MVP (Bloco B)
-- **Novo pacote `packages/vscode-extension` (`winhood-vscode` v4.4.0):**
-  - Comandos `Winhood: Analisar arquivo atual` (`winhood.analyzeCurrentFile`) e `Winhood: Analisar workspace` (`winhood.analyzeWorkspace`).
-  - Hover contextual rico com descrição, regra, `CWE`, `OWASP Top 10`, remediação sugerida e link para `RULE_CATALOG.md`.
-  - `CodeActionProvider` (`Quick Fix`) para correções automáticas determinísticas.
-  - Item na barra de status com cores semafóricas correspondentes ao gate (`APPROVED`, `APPROVED_WITH_RESERVATIONS`, `BLOCKED`, `INCONCLUSIVE`, `REJECTED`).
-  - Modo offline automático com fallback para o CLI embarcado.
-  - Publicados `packages/vscode-extension/PRIVACY.md`, `packages/vscode-extension/CHANGELOG.md` e suíte de testes de integração (`packages/vscode-extension/test/extension.integration.test.ts`).
-
-### Ação Oficial de CI/CD e Conectores (Bloco C)
-- **GitHub Action Oficial (`integrations/github-action/action.yml`):** Suporte aos inputs `gate`, `profile`, `fail-on` e outputs `decision`, `exit-code`, `report-path`, PR decoration automática e integração com `github/codeql-action/upload-sarif`.
-- **GitLab CI Component (`templates/winhood.gitlab-ci.yml`) & Exemplos (`examples/.gitlab-ci.yml`):** Bloqueio automático de Merge Requests quando o gate retorna `BLOCKED`.
-- **Jenkins Shared Library (`integrations/jenkins/vars/winhoodAnalyze.groovy`, `winhoodGate.groovy`) & `examples/Jenkinsfile`.**
-- **Documentação `docs/CI_INTEGRATION.md`:** Especificação canônica de exit codes (`0=APPROVED`, `1=APPROVED_WITH_RESERVATIONS`, `2=BLOCKED`, `3=INCONCLUSIVE`, `4=EXECUTION_ERROR`) e validação de webhooks assinados (`HMAC-SHA256`) em Node.js, Python e Go.
-
-### Transparência Ativa e Cobertura Verificada (Bloco D)
-- Publicados `docs/LIMITATIONS.md`, `docs/BIASES.md` e `docs/CONFIDENCE_MODEL.md`.
-- Configurados thresholds estritos de cobertura em `package.json` e `scripts/run-coverage-gate.mjs` (`lines >= 80%`, `functions >= 80%`, `branches >= 75%` globalmente e `>= 95%` nos motores críticos `src/scoring`, `src/evidence` e `src/comparability`), gerando artefato HTML (`coverage/index.html`) no CI.
-
-### Relatórios Completos e Assinados nos 4 Formatos (Bloco E)
-- Implementado subcomando `winhood report --format=pdf|html|sarif|json` e classe `ReportExporter` (`src/reports/ReportExporter.ts`).
-- Geração de HTML5 autocontido (CSS inline, zero requisições externas) e PDF 1.4 binário assinado (`Report-SHA256` + `Report-HMAC-SHA256`) com rodapé completo de proveniência (`engineVersion`, `ruleCatalogVersion`, `ruleCatalogSha256`, `codeHashSha256`, `artifactHashes`, `appliedGateVersion`).
-- Publicados exemplos de referência em `examples/reports/` (`sample-report.sarif`, `sample-report.json`, `sample-report.html`, `sample-report.pdf`).
+### Split de 3 Conjuntos no Golden Dataset e Honestidade da UI (Fases 7, 11 & 12)
+- **Golden Dataset em 3 Conjuntos (`DEVELOPMENT`, `REGRESSION`, `INTERNAL_HOLDOUT`):** Cobertura das 8 linguagens declaradas, IC 95% de Wilson, alerta operacional `n < 30` e declaração explícita de autoria interna.
+- **UI Honesta & Suíte E2E de 10 Fluxos (`src/components/uiAndE2e.test.ts`):** Remoção de fallbacks numéricos fabricados em `DashboardModule.tsx`, `SonarDockerCloudHubModule.tsx`, `ToolsAndIntegrationsModule.tsx` e `HardwareAndDisplayBenchmarkModule.tsx` em favor de `NOT_MEASURED` / `N/A`, validada por auditoria DOM SSR e 10 fluxos HTTP reais.

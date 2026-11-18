@@ -1505,17 +1505,28 @@ export function buildPreAnalysisSummary(
   weightsArg?: Record<BenchmarkCategoryKey, number>,
   profileIdArg?: string
 ): PreAnalysisSummary {
-  const isObjectCall =
-    typeof paramsOrSoftware === 'object' &&
-    paramsOrSoftware !== null &&
-    'software' in paramsOrSoftware;
+  const isObjectCall = (
+    val:
+      | {
+          software: Software;
+          profile?: BenchmarkProfileConfig;
+          adapters?: ToolAdapterInfo[];
+        }
+      | Software
+  ): val is {
+    software: Software;
+    profile?: BenchmarkProfileConfig;
+    adapters?: ToolAdapterInfo[];
+  } => typeof val === 'object' && val !== null && 'software' in val;
 
-  const software: Software = isObjectCall ? paramsOrSoftware.software : paramsOrSoftware;
+  const software: Software = isObjectCall(paramsOrSoftware)
+    ? paramsOrSoftware.software
+    : paramsOrSoftware;
   const matchedProfile = getProfileByIdOrDomain(
-    isObjectCall ? paramsOrSoftware.profile?.id : profileIdArg,
+    isObjectCall(paramsOrSoftware) ? paramsOrSoftware.profile?.id : profileIdArg,
     software.functionalDomain
   );
-  const profile: Partial<BenchmarkProfileConfig> = isObjectCall
+  const profile: Partial<BenchmarkProfileConfig> = isObjectCall(paramsOrSoftware)
     ? paramsOrSoftware.profile || {}
     : {
         id: profileIdArg || matchedProfile?.id || 'custom-profile',
@@ -1524,7 +1535,9 @@ export function buildPreAnalysisSummary(
         notApplicableCategories: matchedProfile?.notApplicableCategories || [],
         weights: weightsArg || matchedProfile?.weights,
       };
-  const adapters: ToolAdapterInfo[] = isObjectCall ? paramsOrSoftware.adapters || [] : [];
+  const adapters: ToolAdapterInfo[] = isObjectCall(paramsOrSoftware)
+    ? paramsOrSoftware.adapters || []
+    : [];
 
   const ingestionState = determineSourceIngestionState(software);
   const sourceAvailability = determineSourceAvailability(software);

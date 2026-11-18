@@ -44,6 +44,7 @@ export interface WrappedDekEnvelope {
   hkdfSaltHex: string;
   hkdfInfo: string;
   dpapiProtectedBlobB64?: string;
+  osKeyringAccount?: string;
   aesGcmWrappedDek?: AesGcmEnvelopeCiphertext;
   createdAt: string;
   rotatedAt: string | null;
@@ -58,6 +59,15 @@ export interface TrustedEd25519PublicKeyEntry {
   revokedAt: string | null;
   revocationReason: string | null;
   status: 'ACTIVE' | 'ROTATED_VERIFY_ONLY' | 'REVOKED';
+}
+
+export interface PersistedTrustStore {
+  version: number;
+  rootAnchorFingerprintSha256: string | null;
+  monotonicSequence: number;
+  updatedAt: string;
+  trustedPublicKeys: Record<string, TrustedEd25519PublicKeyEntry>;
+  integrityMacHex?: string;
 }
 
 export interface KeyRotationAuditEntry {
@@ -109,17 +119,23 @@ interface PersistedKeyStore {
   trustedPublicKeys?: Record<string, TrustedEd25519PublicKeyEntry>;
   rotationHistory?: KeyRotationAuditEntry[];
   adminTokenSha256: string | null;
+  kekBoundIntegrityMacHex?: string;
 }
 
 export interface KeyManagementStatus {
   keystorePath: string;
+  trustStorePath: string;
   integrityVerified: boolean;
+  trustStoreSeparated: boolean;
+  hardwareTpmOrRemoteAnchorAvailable: boolean;
   envelopeVersion: string;
   operatingMode: KeystoreOperatingMode;
   kekProtectionMechanism: KekProtectionMechanism;
   monotonicSequence: number;
   rollbackProtectionVerified: boolean;
   dpapiSupported: boolean;
+  macosKeychainAvailable: boolean;
+  linuxSecretServiceAvailable: boolean;
   keyOrigin: 'ENV_EXTERNAL' | 'HOST_CSPRNG_KEYSTORE';
   productionEnvSecretConfigured: boolean;
   securityWarnings: string[];
@@ -168,7 +184,7 @@ function resolvePowerShellExecutable(): { exePath: string; safeEnv: NodeJS.Proce
 }
 
 function tryDpapiProtectBytes(rawBytes: Buffer): { protectedB64: string; usedDpapi: boolean } {
-  if (os.platform() !== 'win32') {
+  if (process.env.WINHOOD_SIMULATE_DPAPI_UNAVAILABLE === 'true' || os.platform() !== 'win32') {
     return { protectedB64: '', usedDpapi: false };
   }
   try {
@@ -190,12 +206,15 @@ function tryDpapiProtectBytes(rawBytes: Buffer): { protectedB64: string; usedDpa
       return { protectedB64: res.stdout.trim(), usedDpapi: true };
     }
   } catch {
-    // Explicit fallback when DPAPI is unavailable
+    // Explicit failure handled by caller according to operating mode
   }
   return { protectedB64: '', usedDpapi: false };
 }
 
 function tryDpapiUnprotectBytes(cipherB64: string): Buffer {
+  if (process.env.WINHOOD_SIMULATE_DPAPI_UNAVAILABLE === 'true') {
+    throw new Error('KEYSTORE_DPAPI_UNAVAILABLE: Windows DPAPI indisponível ou bloqueado.');
+  }
   const ps = [
     'Add-Type -AssemblyName System.Security;',
     `$bytes = [Convert]::FromBase64String('${cipherB64}');`,
@@ -236,6 +255,75 @@ function tryDpapiUnprotectUtf8Legacy(cipherB64OrPlain: string, wasProtected?: bo
     throw new Error('KEYSTORE_DPAPI_UNPROTECT_FAILED: Falha ao descriptografar chave legada via Windows DPAPI.');
   }
   return res.stdout.trim();
+}
+
+/**
+ * macOS Keychain integration via `/usr/bin/security` (execFile/spawnSync with shell: false).
+ */
+function tryMacosKeychainStoreOrLoadKek(accountName: string): { seedBuffer: Buffer | null; available: boolean } {
+  if (process.env.WINHOOD_SIMULATE_KEYRING_UNAVAILABLE === 'true' || os.platform() !== 'darwin') {
+    return { seedBuffer: null, available: false };
+  }
+  const securityBin = '/usr/bin/security';
+  if (!fs.existsSync(securityBin)) {
+    return { seedBuffer: null, available: false };
+  }
+  try {
+    const findRes = spawnSync(
+      securityBin,
+      ['find-generic-password', '-a', accountName, '-s', 'winhood-keystore-kek', '-w'],
+      { shell: false, encoding: 'utf8', timeout: 4000 }
+    );
+    if (findRes.status === 0 && findRes.stdout && findRes.stdout.trim().length >= 64) {
+      return { seedBuffer: Buffer.from(findRes.stdout.trim(), 'hex'), available: true };
+    }
+    const newSeedHex = crypto.randomBytes(32).toString('hex');
+    const addRes = spawnSync(
+      securityBin,
+      ['add-generic-password', '-U', '-a', accountName, '-s', 'winhood-keystore-kek', '-w', newSeedHex],
+      { shell: false, encoding: 'utf8', timeout: 4000 }
+    );
+    if (addRes.status === 0) {
+      return { seedBuffer: Buffer.from(newSeedHex, 'hex'), available: true };
+    }
+  } catch {
+    // Handled by caller
+  }
+  return { seedBuffer: null, available: false };
+}
+
+/**
+ * Linux Secret Service integration via `secret-tool` (D-Bus org.freedesktop.secrets, shell: false).
+ */
+function tryLinuxSecretServiceStoreOrLoadKek(accountName: string): { seedBuffer: Buffer | null; available: boolean } {
+  if (process.env.WINHOOD_SIMULATE_KEYRING_UNAVAILABLE === 'true' || os.platform() !== 'linux') {
+    return { seedBuffer: null, available: false };
+  }
+  if (!process.env.DBUS_SESSION_BUS_ADDRESS) {
+    return { seedBuffer: null, available: false };
+  }
+  try {
+    const lookupRes = spawnSync(
+      'secret-tool',
+      ['lookup', 'application', 'winhood-benchmarking', 'account', accountName],
+      { shell: false, encoding: 'utf8', timeout: 3000 }
+    );
+    if (lookupRes.status === 0 && lookupRes.stdout && lookupRes.stdout.trim().length >= 64) {
+      return { seedBuffer: Buffer.from(lookupRes.stdout.trim(), 'hex'), available: true };
+    }
+    const newSeedHex = crypto.randomBytes(32).toString('hex');
+    const storeRes = spawnSync(
+      'secret-tool',
+      ['store', '--label=WinHood Keystore KEK', 'application', 'winhood-benchmarking', 'account', accountName],
+      { shell: false, input: newSeedHex, encoding: 'utf8', timeout: 3000 }
+    );
+    if (storeRes.status === 0) {
+      return { seedBuffer: Buffer.from(newSeedHex, 'hex'), available: true };
+    }
+  } catch {
+    // Handled by caller
+  }
+  return { seedBuffer: null, available: false };
 }
 
 /**
@@ -327,6 +415,14 @@ export class KeyManagementService {
     return customPath || process.env.WINHOOD_KEYSTORE_PATH || KeyManagementService.DEFAULT_STORE_PATH;
   }
 
+  public static getTrustStorePath(customStorePath?: string): string {
+    if (process.env.WINHOOD_TRUST_STORE_PATH && !customStorePath) {
+      return process.env.WINHOOD_TRUST_STORE_PATH;
+    }
+    const baseStore = KeyManagementService.getStorePath(customStorePath);
+    return path.join(path.dirname(baseStore), 'trust-store.json');
+  }
+
   public static resolveOperatingMode(): KeystoreOperatingMode {
     const explicitMode = (process.env.WINHOOD_KEYSTORE_MODE || '').trim().toUpperCase();
     if (explicitMode === 'PRODUCTION_SECURE' || explicitMode === 'DEVELOPMENT' || explicitMode === 'RECOVERY') {
@@ -343,16 +439,62 @@ export class KeyManagementService {
   }
 
   /**
+   * Validates strict domain separation across secret environment variables.
+   * Rejects reuse of identical secret strings across different cryptographic purposes
+   * and forbids SONAR_SECRET_SALT from acting as a keystore master secret.
+   */
+  public static assertSecretDomainSeparation(): void {
+    const masterSecret = (process.env.WINHOOD_KEYSTORE_MASTER_SECRET || '').trim();
+    const hmacSecret = (process.env.WINHOOD_EVIDENCE_HMAC_SECRET || '').trim();
+    const vaultSecret = (process.env.WINHOOD_VAULT_SECRET || '').trim();
+    const sonarSalt = (process.env.SONAR_SECRET_SALT || '').trim();
+
+    if (masterSecret.length > 0 && sonarSalt.length > 0 && masterSecret === sonarSalt) {
+      throw new Error(
+        'KEYSTORE_SECRET_DOMAIN_VIOLATION: SONAR_SECRET_SALT é exclusivo de integração/migração legada e não pode ser reutilizado como WINHOOD_KEYSTORE_MASTER_SECRET.'
+      );
+    }
+    if (masterSecret.length > 0 && hmacSecret.length > 0 && masterSecret === hmacSecret) {
+      throw new Error(
+        'KEYSTORE_SECRET_DOMAIN_VIOLATION: WINHOOD_KEYSTORE_MASTER_SECRET e WINHOOD_EVIDENCE_HMAC_SECRET devem ser segredos independentes.'
+      );
+    }
+    if (masterSecret.length > 0 && vaultSecret.length > 0 && masterSecret === vaultSecret) {
+      throw new Error(
+        'KEYSTORE_SECRET_DOMAIN_VIOLATION: WINHOOD_KEYSTORE_MASTER_SECRET e WINHOOD_VAULT_SECRET devem ser segredos independentes.'
+      );
+    }
+    if (hmacSecret.length > 0 && vaultSecret.length > 0 && hmacSecret === vaultSecret) {
+      throw new Error(
+        'KEYSTORE_SECRET_DOMAIN_VIOLATION: WINHOOD_EVIDENCE_HMAC_SECRET e WINHOOD_VAULT_SECRET devem ser segredos independentes.'
+      );
+    }
+  }
+
+  /**
    * Resolves the Key Encryption Key (KEK) used exclusively to wrap/unwrap the random Data Encryption Key (DEK).
-   * Never uses predictable machine traits (hostname, username, platform, arch).
+   * Enforces fail-closed behavior in PRODUCTION_SECURE: never falls back to local .kek file in PRODUCTION_SECURE.
    */
   private static resolveKekForStore(
     storePath: string,
     hkdfSaltHex: string,
-    hkdfInfo: string
+    hkdfInfo: string,
+    expectedMechanism?: KekProtectionMechanism
   ): { kekBuffer: Buffer; mechanism: KekProtectionMechanism } {
-    const extMasterEnv = (process.env.WINHOOD_KEYSTORE_MASTER_SECRET || '').trim();
-    if (extMasterEnv.length >= 16) {
+    KeyManagementService.assertSecretDomainSeparation();
+    const operatingMode = KeyManagementService.resolveOperatingMode();
+    const accountId = KeyManagementService.computeSha256(storePath).slice(0, 16);
+
+    // 1. Check canonical external master secret (or legacy WINHOOD_MASTER_KEY_SECRET alias for read/migration only)
+    const canonicalMasterEnv = (process.env.WINHOOD_KEYSTORE_MASTER_SECRET || '').trim();
+    const legacyMasterAlias = (process.env.WINHOOD_MASTER_KEY_SECRET || '').trim();
+    const extMasterEnv = canonicalMasterEnv || legacyMasterAlias;
+    const externalExplicitlyEnabled =
+      process.env.WINHOOD_KEYSTORE_EXTERNAL_SECRET_ENABLED === 'true' ||
+      operatingMode !== 'PRODUCTION_SECURE' ||
+      canonicalMasterEnv.length >= 16;
+
+    if (extMasterEnv.length >= 16 && externalExplicitlyEnabled) {
       const ikm = Buffer.from(extMasterEnv, 'utf8');
       return {
         kekBuffer: deriveHkdfPurposeKey(ikm, hkdfSaltHex, hkdfInfo),
@@ -360,6 +502,35 @@ export class KeyManagementService {
       };
     }
 
+    // 2. Check OS-native providers on macOS and Linux
+    if (!expectedMechanism || expectedMechanism === 'MACOS_KEYCHAIN') {
+      const macos = tryMacosKeychainStoreOrLoadKek(accountId);
+      if (macos.available && macos.seedBuffer) {
+        return {
+          kekBuffer: deriveHkdfPurposeKey(macos.seedBuffer, hkdfSaltHex, hkdfInfo),
+          mechanism: 'MACOS_KEYCHAIN',
+        };
+      }
+    }
+
+    if (!expectedMechanism || expectedMechanism === 'LINUX_SECRET_SERVICE') {
+      const linuxSecret = tryLinuxSecretServiceStoreOrLoadKek(accountId);
+      if (linuxSecret.available && linuxSecret.seedBuffer) {
+        return {
+          kekBuffer: deriveHkdfPurposeKey(linuxSecret.seedBuffer, hkdfSaltHex, hkdfInfo),
+          mechanism: 'LINUX_SECRET_SERVICE',
+        };
+      }
+    }
+
+    // 3. In PRODUCTION_SECURE, strictly fail-closed before touching local .kek file
+    if (operatingMode === 'PRODUCTION_SECURE') {
+      throw new Error(
+        'KEYSTORE_PRODUCTION_PROVIDER_REQUIRED: Modo PRODUCTION_SECURE exige Windows DPAPI, macOS Keychain, Linux Secret Service ou WINHOOD_KEYSTORE_MASTER_SECRET (>= 16 caracteres). Fallback para arquivo .kek local é proibido em produção.'
+      );
+    }
+
+    // 4. DEVELOPMENT / RECOVERY local .kek file fallback
     const kekFilePath = `${storePath}.kek`;
     let rawKekSeed: Buffer;
     if (fs.existsSync(kekFilePath)) {
@@ -390,24 +561,34 @@ export class KeyManagementService {
   }
 
   /**
-   * Wraps a random 256-bit DEK using OS DPAPI (when on Windows) or HKDF-derived KEK with AES-256-GCM.
+   * Wraps a random 256-bit DEK using OS DPAPI (when on Windows), macOS Keychain, Linux Secret Service,
+   * or HKDF-derived KEK with AES-256-GCM.
    */
   private static wrapDekBuffer(dekBuffer: Buffer, storePath: string): WrappedDekEnvelope {
+    KeyManagementService.assertSecretDomainSeparation();
+    const operatingMode = KeyManagementService.resolveOperatingMode();
     const now = new Date().toISOString();
     const hkdfSaltHex = crypto.randomBytes(16).toString('hex');
     const hkdfInfo = 'winhood:keystore:kek-envelope:v2';
 
-    const dpapiAttempt = tryDpapiProtectBytes(dekBuffer);
-    if (dpapiAttempt.usedDpapi) {
-      return {
-        envelopeVersion: 'WINHOOD-ENVELOPE-V2',
-        kekMechanism: 'WINDOWS_DPAPI',
-        hkdfSaltHex,
-        hkdfInfo,
-        dpapiProtectedBlobB64: dpapiAttempt.protectedB64,
-        createdAt: now,
-        rotatedAt: null,
-      };
+    if (os.platform() === 'win32' && !(process.env.WINHOOD_KEYSTORE_MASTER_SECRET || '').trim()) {
+      const dpapiAttempt = tryDpapiProtectBytes(dekBuffer);
+      if (dpapiAttempt.usedDpapi) {
+        return {
+          envelopeVersion: 'WINHOOD-ENVELOPE-V2',
+          kekMechanism: 'WINDOWS_DPAPI',
+          hkdfSaltHex,
+          hkdfInfo,
+          dpapiProtectedBlobB64: dpapiAttempt.protectedB64,
+          createdAt: now,
+          rotatedAt: null,
+        };
+      }
+      if (operatingMode === 'PRODUCTION_SECURE') {
+        throw new Error(
+          'KEYSTORE_DPAPI_REQUIRED_IN_PRODUCTION: Windows DPAPI falhou ou está indisponível em PRODUCTION_SECURE e WINHOOD_KEYSTORE_MASTER_SECRET não foi definido.'
+        );
+      }
     }
 
     const { kekBuffer, mechanism } = KeyManagementService.resolveKekForStore(
@@ -425,6 +606,10 @@ export class KeyManagementService {
       kekMechanism: mechanism,
       hkdfSaltHex,
       hkdfInfo,
+      osKeyringAccount:
+        mechanism === 'MACOS_KEYCHAIN' || mechanism === 'LINUX_SECRET_SERVICE'
+          ? KeyManagementService.computeSha256(storePath).slice(0, 16)
+          : undefined,
       aesGcmWrappedDek: wrappedCipher,
       createdAt: now,
       rotatedAt: null,
@@ -435,16 +620,33 @@ export class KeyManagementService {
    * Unwraps the 256-bit DEK from the keystore envelope.
    */
   private static unwrapDekBuffer(wrappedDek: WrappedDekEnvelope, storePath: string): Buffer {
-    if (wrappedDek.kekMechanism === 'WINDOWS_DPAPI' && wrappedDek.dpapiProtectedBlobB64) {
+    KeyManagementService.assertSecretDomainSeparation();
+    const operatingMode = KeyManagementService.resolveOperatingMode();
+
+    if (wrappedDek.kekMechanism === 'WINDOWS_DPAPI') {
+      if (!wrappedDek.dpapiProtectedBlobB64) {
+        throw new Error('KEYSTORE_DPAPI_BLOB_MISSING: Blob DPAPI ausente no envelope.');
+      }
       return tryDpapiUnprotectBytes(wrappedDek.dpapiProtectedBlobB64);
     }
+
+    if (operatingMode === 'PRODUCTION_SECURE' && wrappedDek.kekMechanism === 'HKDF_LOCAL_KEK_FILE') {
+      const hasExternalMaster = (process.env.WINHOOD_KEYSTORE_MASTER_SECRET || '').trim().length >= 16;
+      if (!hasExternalMaster) {
+        throw new Error(
+          'KEYSTORE_PRODUCTION_LOCAL_KEK_REJECTED: Keystore protegido por arquivo .kek local não é aceito em PRODUCTION_SECURE sem migração para provedor seguro ou WINHOOD_KEYSTORE_MASTER_SECRET.'
+        );
+      }
+    }
+
     if (!wrappedDek.aesGcmWrappedDek) {
       throw new Error('KEYSTORE_DEK_ENVELOPE_MISSING: Envelope AES-256-GCM da DEK ausente.');
     }
     const { kekBuffer } = KeyManagementService.resolveKekForStore(
       storePath,
       wrappedDek.hkdfSaltHex,
-      wrappedDek.hkdfInfo
+      wrappedDek.hkdfInfo,
+      wrappedDek.kekMechanism
     );
     const dekHex = decryptWithAes256GcmEnvelope(
       wrappedDek.aesGcmWrappedDek,
@@ -452,6 +654,126 @@ export class KeyManagementService {
       'winhood:dek:wrap:v2'
     );
     return Buffer.from(dekHex, 'hex');
+  }
+
+  /**
+   *Persists and verifies the separated Ed25519 Trust Store (`trust-store.json`).
+   */
+  private static persistSeparatedTrustStore(
+    storePath: string,
+    trustedPublicKeys: Record<string, TrustedEd25519PublicKeyEntry>,
+    monotonicSequence: number
+  ): void {
+    const trustStorePath = KeyManagementService.getTrustStorePath(storePath);
+    fs.mkdirSync(path.dirname(trustStorePath), { recursive: true });
+    const entries = Object.values(trustedPublicKeys);
+    const firstActive = entries.find((e) => e.status === 'ACTIVE') || entries[0];
+    const rootAnchor =
+      (process.env.WINHOOD_TRUST_ROOT_FINGERPRINT_SHA256 || '').trim() ||
+      firstActive?.fingerprintSha256 ||
+      null;
+
+    const trustPayload: PersistedTrustStore = {
+      version: 2,
+      rootAnchorFingerprintSha256: rootAnchor,
+      monotonicSequence,
+      updatedAt: new Date().toISOString(),
+      trustedPublicKeys,
+    };
+
+    const canonicalBody = JSON.stringify({
+      version: trustPayload.version,
+      rootAnchorFingerprintSha256: trustPayload.rootAnchorFingerprintSha256,
+      monotonicSequence: trustPayload.monotonicSequence,
+      trustedPublicKeys: trustPayload.trustedPublicKeys,
+    });
+
+    const masterEnv = (process.env.WINHOOD_KEYSTORE_MASTER_SECRET || '').trim();
+    const macKey =
+      masterEnv.length >= 16
+        ? deriveHkdfPurposeKey(
+            Buffer.from(masterEnv, 'utf8'),
+            '77696e686f6f642d74727573742d7374',
+            'winhood:purpose:trust-store-mac:v2'
+          )
+        : Buffer.from(KeyManagementService.computeSha256(`winhood-trust-anchor:${storePath}`), 'hex');
+
+    trustPayload.integrityMacHex = crypto
+      .createHmac('sha256', macKey)
+      .update(canonicalBody, 'utf8')
+      .digest('hex');
+
+    const json = JSON.stringify(trustPayload, null, 2);
+    const tmpPath = `${trustStorePath}.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+    const fd = fs.openSync(tmpPath, 'w', 0o600);
+    try {
+      fs.writeFileSync(fd, json, 'utf8');
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmpPath, trustStorePath);
+    fs.chmodSync(trustStorePath, 0o600);
+  }
+
+  private static readSeparatedTrustStore(
+    storePath: string
+  ): Record<string, TrustedEd25519PublicKeyEntry> | null {
+    const trustStorePath = KeyManagementService.getTrustStorePath(storePath);
+    if (!fs.existsSync(trustStorePath)) return null;
+
+    const raw = fs.readFileSync(trustStorePath, 'utf8');
+    let parsed: PersistedTrustStore;
+    try {
+      parsed = JSON.parse(raw) as PersistedTrustStore;
+    } catch {
+      throw new Error(`TRUST_STORE_CORRUPTED: JSON inválido em ${trustStorePath}.`);
+    }
+    if (!parsed || !parsed.trustedPublicKeys || typeof parsed.trustedPublicKeys !== 'object') {
+      throw new Error(`TRUST_STORE_INVALID_SCHEMA: Estrutura de chaves públicas inválida em ${trustStorePath}.`);
+    }
+
+    const canonicalBody = JSON.stringify({
+      version: parsed.version,
+      rootAnchorFingerprintSha256: parsed.rootAnchorFingerprintSha256,
+      monotonicSequence: parsed.monotonicSequence,
+      trustedPublicKeys: parsed.trustedPublicKeys,
+    });
+    const masterEnv = (process.env.WINHOOD_KEYSTORE_MASTER_SECRET || '').trim();
+    const macKey =
+      masterEnv.length >= 16
+        ? deriveHkdfPurposeKey(
+            Buffer.from(masterEnv, 'utf8'),
+            '77696e686f6f642d74727573742d7374',
+            'winhood:purpose:trust-store-mac:v2'
+          )
+        : Buffer.from(KeyManagementService.computeSha256(`winhood-trust-anchor:${storePath}`), 'hex');
+    const expectedMac = crypto.createHmac('sha256', macKey).update(canonicalBody, 'utf8').digest('hex');
+
+    if (parsed.integrityMacHex && parsed.integrityMacHex !== expectedMac) {
+      throw new Error(
+        `TRUST_STORE_INTEGRITY_VIOLATION: Assinatura de integridade do Trust Store (${trustStorePath}) inválida ou adulterada.`
+      );
+    }
+
+    // Verify each entry's publicKeyPem matches its recorded fingerprintSha256
+    for (const [kId, entry] of Object.entries(parsed.trustedPublicKeys)) {
+      const actualFp = KeyManagementService.computeSha256(entry.publicKeyPem);
+      if (actualFp !== entry.fingerprintSha256) {
+        throw new Error(
+          `TRUST_STORE_FINGERPRINT_MISMATCH: Chave pública ${kId} no Trust Store não corresponde ao fingerprint SHA-256 registrado.`
+        );
+      }
+    }
+
+    const pinnedRootFp = (process.env.WINHOOD_TRUST_ROOT_FINGERPRINT_SHA256 || '').trim();
+    if (pinnedRootFp && parsed.rootAnchorFingerprintSha256 !== pinnedRootFp) {
+      throw new Error(
+        'TRUST_STORE_ROOT_ANCHOR_MISMATCH: Fingerprint raiz do Trust Store diverge de WINHOOD_TRUST_ROOT_FINGERPRINT_SHA256.'
+      );
+    }
+
+    return parsed.trustedPublicKeys;
   }
 
   private static writeAtomicWithChecksum(
@@ -524,7 +846,7 @@ export class KeyManagementService {
       const actualSha = KeyManagementService.computeSha256(raw);
       if (expectedSha !== actualSha) {
         const backupPath = `${storePath}.bak`;
-        if (fs.existsSync(backupPath)) {
+        if (fs.existsSync(backupPath) && KeyManagementService.resolveOperatingMode() !== 'PRODUCTION_SECURE') {
           const bakRaw = fs.readFileSync(backupPath, 'utf8');
           const bakParsed = JSON.parse(bakRaw) as PersistedKeyStore;
           if (bakParsed && bakParsed.keysHex && bakParsed.activeEvidenceKeyId && bakParsed.activeVaultKeyId) {
@@ -555,9 +877,37 @@ export class KeyManagementService {
 
     let upgraded = false;
 
-    // Upgrade legacy v1/v2 keystore to Envelope Encryption V2 + Trusted Public Key Registry
-    if (!parsed.wrappedDek || parsed.envelopeVersion !== 'WINHOOD-ENVELOPE-V2') {
-      const dekBuffer = crypto.randomBytes(32);
+    // Upgrade legacy v1/v2 keystore or re-wrap DEK when migrating from local .kek to external master secret
+    if (
+      !parsed.wrappedDek ||
+      parsed.envelopeVersion !== 'WINHOOD-ENVELOPE-V2' ||
+      (parsed.wrappedDek.kekMechanism === 'HKDF_LOCAL_KEK_FILE' &&
+        (process.env.WINHOOD_KEYSTORE_MASTER_SECRET || '').trim().length >= 16)
+    ) {
+      let dekBuffer: Buffer;
+      if (parsed.wrappedDek && parsed.envelopeVersion === 'WINHOOD-ENVELOPE-V2') {
+        // Migrate existing DEK from local .kek file to external/OS KEK
+        const kekFilePath = `${storePath}.kek`;
+        if (fs.existsSync(kekFilePath) && parsed.wrappedDek.aesGcmWrappedDek) {
+          const rawKekSeed = Buffer.from(fs.readFileSync(kekFilePath, 'utf8').trim(), 'hex');
+          const oldKek = deriveHkdfPurposeKey(
+            rawKekSeed,
+            parsed.wrappedDek.hkdfSaltHex,
+            parsed.wrappedDek.hkdfInfo
+          );
+          const dekHex = decryptWithAes256GcmEnvelope(
+            parsed.wrappedDek.aesGcmWrappedDek,
+            oldKek,
+            'winhood:dek:wrap:v2'
+          );
+          dekBuffer = Buffer.from(dekHex, 'hex');
+        } else {
+          dekBuffer = crypto.randomBytes(32);
+        }
+      } else {
+        dekBuffer = crypto.randomBytes(32);
+      }
+
       parsed.wrappedDek = KeyManagementService.wrapDekBuffer(dekBuffer, storePath);
       parsed.envelopeVersion = 'WINHOOD-ENVELOPE-V2';
       parsed.operatingMode = KeyManagementService.resolveOperatingMode();
@@ -640,6 +990,21 @@ export class KeyManagementService {
       }
     }
 
+    // Synchronize or verify separated Trust Store
+    const trustStorePath = KeyManagementService.getTrustStorePath(storePath);
+    if (!fs.existsSync(trustStorePath)) {
+      KeyManagementService.persistSeparatedTrustStore(
+        storePath,
+        parsed.trustedPublicKeys,
+        parsed.monotonicSequence || 1
+      );
+    } else {
+      const separatedKeys = KeyManagementService.readSeparatedTrustStore(storePath);
+      if (separatedKeys) {
+        parsed.trustedPublicKeys = separatedKeys;
+      }
+    }
+
     if (!parsed.rotationHistory) {
       parsed.rotationHistory = [];
       upgraded = true;
@@ -657,6 +1022,7 @@ export class KeyManagementService {
     integrityVerified: boolean;
     rollbackVerified: boolean;
   } {
+    KeyManagementService.assertSecretDomainSeparation();
     const storePath = KeyManagementService.getStorePath(customPath);
     const existing = KeyManagementService.readVerifiedStoreFile(storePath);
     if (existing) {
@@ -808,6 +1174,9 @@ export class KeyManagementService {
     store.monotonicSequence = seq;
     try {
       KeyManagementService.writeAtomicWithChecksum(storePath, JSON.stringify(store, null, 2), seq);
+      if (store.trustedPublicKeys) {
+        KeyManagementService.persistSeparatedTrustStore(storePath, store.trustedPublicKeys, seq);
+      }
     } catch (err: any) {
       throw new Error(
         `KEYSTORE_PERSISTENCE_FAILED: Não foi possível persistir o keystore de forma segura em ${storePath}: ${err?.message || String(err)}`
@@ -820,9 +1189,9 @@ export class KeyManagementService {
     secret: string;
     origin: 'ENV_EXTERNAL' | 'HOST_CSPRNG_KEYSTORE';
   } {
+    KeyManagementService.assertSecretDomainSeparation();
     const envVal = process.env.WINHOOD_EVIDENCE_HMAC_SECRET;
     if (envVal && envVal.trim().length >= 16) {
-      // Derive purpose-bound HMAC key via HKDF-SHA256 from external env secret
       const derived = deriveHkdfPurposeKey(
         Buffer.from(envVal.trim(), 'utf8'),
         '77696e686f6f642d65766964656e6365',
@@ -851,6 +1220,7 @@ export class KeyManagementService {
   }
 
   public static getEvidenceSecretByKeyId(keyId: string, customPath?: string): string | null {
+    KeyManagementService.assertSecretDomainSeparation();
     const envVal = process.env.WINHOOD_EVIDENCE_HMAC_SECRET;
     const envKeyId = process.env.WINHOOD_EVIDENCE_KEY_ID || 'ENV-HMAC-KEY';
     if (envVal && envVal.trim().length >= 16 && keyId === envKeyId) {
@@ -890,8 +1260,10 @@ export class KeyManagementService {
   }
 
   public static getEd25519PublicKeyByKeyId(keyId: string, customPath?: string): string | null {
+    const storePath = KeyManagementService.getStorePath(customPath);
     const { store } = KeyManagementService.loadOrInitializeStore(customPath);
-    const trusted = store.trustedPublicKeys?.[keyId];
+    const separatedTrust = KeyManagementService.readSeparatedTrustStore(storePath);
+    const trusted = separatedTrust?.[keyId] || store.trustedPublicKeys?.[keyId];
     if (trusted) {
       if (trusted.status === 'REVOKED' || trusted.revokedAt) {
         return null;
@@ -904,8 +1276,8 @@ export class KeyManagementService {
   }
 
   /**
-   * Verifies an Ed25519 public key against the Trusted Public Key Registry (Trust Store),
-   * preventing a tampered manifest from substituting its own self-signed public key.
+   * Verifies an Ed25519 public key against the separated Trusted Public Key Registry (`trust-store.json`),
+   * preventing a tampered manifest or keystore from substituting its own self-signed public key.
    */
   public static verifyTrustedEd25519PublicKey(
     keyId: string | undefined,
@@ -913,7 +1285,26 @@ export class KeyManagementService {
     signedAtIso?: string,
     customPath?: string
   ): TrustedPublicKeyVerificationResult {
-    const { store } = KeyManagementService.loadOrInitializeStore(customPath);
+    const storePath = KeyManagementService.getStorePath(customPath);
+    let trustMap: Record<string, TrustedEd25519PublicKeyEntry>;
+    try {
+      const separated = KeyManagementService.readSeparatedTrustStore(storePath);
+      if (separated) {
+        trustMap = separated;
+      } else {
+        const { store } = KeyManagementService.loadOrInitializeStore(customPath);
+        trustMap = KeyManagementService.readSeparatedTrustStore(storePath) || store.trustedPublicKeys || {};
+      }
+    } catch (err: any) {
+      return {
+        trusted: false,
+        keyId: keyId || null,
+        publicKeyPem: null,
+        status: 'UNTRUSTED',
+        reason: err?.message || 'Falha de integridade no Trust Store separado.',
+      };
+    }
+
     if (!keyId) {
       return {
         trusted: false,
@@ -924,7 +1315,7 @@ export class KeyManagementService {
       };
     }
 
-    const trustedEntry = store.trustedPublicKeys?.[keyId];
+    const trustedEntry = trustMap[keyId];
     if (!trustedEntry) {
       return {
         trusted: false,
@@ -974,7 +1365,7 @@ export class KeyManagementService {
       keyId,
       publicKeyPem: trustedEntry.publicKeyPem,
       status: trustedEntry.status,
-      reason: `Chave Ed25519 ${keyId} verificada no Trust Store (${trustedEntry.status}).`,
+      reason: `Chave Ed25519 ${keyId} verificada no Trust Store separado (${trustedEntry.status}).`,
     };
   }
 
@@ -1004,16 +1395,21 @@ export class KeyManagementService {
     KeyManagementService.persistStore(store, storePath);
   }
 
+  /**
+   * Returns the active 256-bit AES-GCM Vault Key.
+   * Strict Secret Policy: ONLY `WINHOOD_VAULT_SECRET` is accepted as an external vault secret for active encryption.
+   * `SONAR_SECRET_SALT` is strictly forbidden as an active vault encryption secret (reserved for legacy decrypt-only migration).
+   */
   public static getActiveVaultAesKey(customPath?: string): {
     keyId: string;
     keyBuffer: Buffer;
     origin: 'ENV_EXTERNAL' | 'HOST_CSPRNG_KEYSTORE';
   } {
-    const envVaultVal = process.env.SONAR_SECRET_SALT || process.env.WINHOOD_VAULT_SECRET;
-    if (envVaultVal && envVaultVal.trim().length >= 16) {
-      // Derive purpose-isolated 256-bit AES key via HKDF-SHA256 (never raw SHA-256 shared across purposes)
+    KeyManagementService.assertSecretDomainSeparation();
+    const envVaultVal = (process.env.WINHOOD_VAULT_SECRET || '').trim();
+    if (envVaultVal.length >= 16) {
       const derivedKey = deriveHkdfPurposeKey(
-        Buffer.from(envVaultVal.trim(), 'utf8'),
+        Buffer.from(envVaultVal, 'utf8'),
         '77696e686f6f642d7661756c742d6165',
         'winhood:purpose:token-vault-aes256:v2'
       );
@@ -1026,7 +1422,7 @@ export class KeyManagementService {
 
     if (process.env.WINHOOD_REQUIRE_ENV_SECRETS === 'true') {
       throw new Error(
-        'KEY_MANAGEMENT_ENV_SECRET_REQUIRED: Defina WINHOOD_VAULT_SECRET ou SONAR_SECRET_SALT (>= 16 caracteres) quando WINHOOD_REQUIRE_ENV_SECRETS=true.'
+        'KEY_MANAGEMENT_ENV_SECRET_REQUIRED: Defina WINHOOD_VAULT_SECRET (>= 16 caracteres) quando WINHOOD_REQUIRE_ENV_SECRETS=true. SONAR_SECRET_SALT não é aceito como substituto de WINHOOD_VAULT_SECRET.'
       );
     }
 
@@ -1040,12 +1436,37 @@ export class KeyManagementService {
     };
   }
 
+  /**
+   * Resolves a vault key by keyId for decryption.
+   * Supports controlled read-only backward compatibility for legacy `ENV-VAULT-KEY` records encrypted under `SONAR_SECRET_SALT`.
+   */
   public static getVaultKeyBufferByKeyId(keyId: string, customPath?: string): Buffer | null {
+    KeyManagementService.assertSecretDomainSeparation();
     if (keyId === 'ENV-VAULT-KEY') {
-      const envVaultVal = process.env.SONAR_SECRET_SALT || process.env.WINHOOD_VAULT_SECRET;
-      if (envVaultVal && envVaultVal.trim().length >= 16) {
+      const envVaultVal = (process.env.WINHOOD_VAULT_SECRET || '').trim();
+      if (envVaultVal.length >= 16) {
         return deriveHkdfPurposeKey(
-          Buffer.from(envVaultVal.trim(), 'utf8'),
+          Buffer.from(envVaultVal, 'utf8'),
+          '77696e686f6f642d7661756c742d6165',
+          'winhood:purpose:token-vault-aes256:v2'
+        );
+      }
+      const legacySonarSalt = (process.env.SONAR_SECRET_SALT || '').trim();
+      if (legacySonarSalt.length >= 16) {
+        return deriveHkdfPurposeKey(
+          Buffer.from(legacySonarSalt, 'utf8'),
+          '77696e686f6f642d7661756c742d6165',
+          'winhood:purpose:token-vault-aes256:v2'
+        );
+      }
+      return null;
+    }
+
+    if (keyId === 'LEGACY-SONAR-SALT-KEY') {
+      const legacySonarSalt = (process.env.SONAR_SECRET_SALT || '').trim();
+      if (legacySonarSalt.length >= 16) {
+        return deriveHkdfPurposeKey(
+          Buffer.from(legacySonarSalt, 'utf8'),
           '77696e686f6f642d7661756c742d6165',
           'winhood:purpose:token-vault-aes256:v2'
         );
@@ -1116,7 +1537,7 @@ export class KeyManagementService {
         purpose: 'EVIDENCE_ED25519',
         previousKeyId: prevKeyId,
         newKeyId,
-        reason: 'Rotação programada de par assimétrico Ed25519 com preservação no Trust Store',
+        reason: 'Rotação programada de par assimétrico Ed25519 com preservação no Trust Store separado',
         monotonicSequence: (store.monotonicSequence || 0) + 1,
       });
       KeyManagementService.persistStore(store, customPath);
@@ -1220,13 +1641,15 @@ export class KeyManagementService {
   }
 
   public static getStatus(customPath?: string): KeyManagementStatus {
+    const storePath = KeyManagementService.getStorePath(customPath);
+    const trustStorePath = KeyManagementService.getTrustStorePath(customPath);
     const { store, integrityVerified, rollbackVerified } =
       KeyManagementService.loadOrInitializeStore(customPath);
     const hasEnvEvidence = Boolean(
       process.env.WINHOOD_EVIDENCE_HMAC_SECRET && process.env.WINHOOD_EVIDENCE_HMAC_SECRET.trim().length >= 16
     );
     const hasEnvVault = Boolean(
-      (process.env.SONAR_SECRET_SALT || process.env.WINHOOD_VAULT_SECRET || '').trim().length >= 16
+      process.env.WINHOOD_VAULT_SECRET && process.env.WINHOOD_VAULT_SECRET.trim().length >= 16
     );
 
     const symKeys: ManagedKeyRecord[] = Object.entries(store.keysHex).map(([keyId, info]) => {
@@ -1262,6 +1685,16 @@ export class KeyManagementService {
     const kekMechanism = store.wrappedDek?.kekMechanism || 'HKDF_LOCAL_KEK_FILE';
 
     const securityWarnings: string[] = [];
+    if ((process.env.WINHOOD_MASTER_KEY_SECRET || '').trim().length >= 16) {
+      securityWarnings.push(
+        'Alias legado WINHOOD_MASTER_KEY_SECRET detectado; migre para o nome canônico WINHOOD_KEYSTORE_MASTER_SECRET.'
+      );
+    }
+    if ((process.env.SONAR_SECRET_SALT || '').trim().length >= 16 && !hasEnvVault) {
+      securityWarnings.push(
+        'SONAR_SECRET_SALT detectado apenas para leitura retrocompatível; configure WINHOOD_VAULT_SECRET para cifragem ativa.'
+      );
+    }
     if (process.env.NODE_ENV === 'production' || operatingMode === 'PRODUCTION_SECURE') {
       if (!hasEnvEvidence) {
         securityWarnings.push(
@@ -1270,25 +1703,28 @@ export class KeyManagementService {
       }
       if (!hasEnvVault) {
         securityWarnings.push(
-          'Produção utilizando keystore local para cofre AES-256; configure WINHOOD_VAULT_SECRET ou SONAR_SECRET_SALT.'
-        );
-      }
-      if (kekMechanism === 'HKDF_LOCAL_KEK_FILE') {
-        securityWarnings.push(
-          'DEK protegida por KEK local derivada via HKDF; em produção sem DPAPI/Keychain, recomenda-se definir WINHOOD_KEYSTORE_MASTER_SECRET.'
+          'Produção utilizando keystore local para cofre AES-256; configure WINHOOD_VAULT_SECRET.'
         );
       }
     }
+    securityWarnings.push(
+      'Limitação física local: sem TPM ou âncora remota independente, um atacante com escrita administrativa total no diretório local pode substituir simultaneamente keystore.json, .sha256, .seq e trust-store.json.'
+    );
 
     return {
-      keystorePath: KeyManagementService.getStorePath(customPath),
+      keystorePath: storePath,
+      trustStorePath,
       integrityVerified,
+      trustStoreSeparated: fs.existsSync(trustStorePath),
+      hardwareTpmOrRemoteAnchorAvailable: Boolean(process.env.WINHOOD_TRUST_ROOT_FINGERPRINT_SHA256),
       envelopeVersion: store.envelopeVersion || 'WINHOOD-ENVELOPE-V2',
       operatingMode,
       kekProtectionMechanism: kekMechanism,
       monotonicSequence: store.monotonicSequence || 1,
       rollbackProtectionVerified: rollbackVerified,
       dpapiSupported: os.platform() === 'win32',
+      macosKeychainAvailable: os.platform() === 'darwin' && fs.existsSync('/usr/bin/security'),
+      linuxSecretServiceAvailable: os.platform() === 'linux' && Boolean(process.env.DBUS_SESSION_BUS_ADDRESS),
       keyOrigin: hasEnvEvidence || hasEnvVault ? 'ENV_EXTERNAL' : 'HOST_CSPRNG_KEYSTORE',
       productionEnvSecretConfigured: hasEnvEvidence && hasEnvVault,
       securityWarnings,

@@ -105,8 +105,8 @@ export interface UserAccountRecord {
   name: string;
   email: string;
   role: RbacRole;
-  passwordHash: string; // scrypt:N=16384,r=8,p=1:<saltHex>:<hashHex>
-  pinHash?: string | null; // scrypt:N=16384,r=8,p=1:<saltHex>:<hashHex>
+  passwordHash: string; // scrypt:N=32768,r=8,p=1:<saltHex>:<hashHex> (legado N=16384 migrado transparentemente)
+  pinHash?: string | null; // scrypt:N=32768,r=8,p=1:<saltHex>:<hashHex>
   pinEnabled?: boolean;
   webauthnCredentials?: WebAuthnCredentialRecord[];
   mfaEnabled: boolean;
@@ -494,6 +494,14 @@ export interface ScryptCostParams {
   maxmem: number;
 }
 
+/**
+ * Avaliação arquitetural Scrypt vs Argon2id (Fase 10):
+ * - Node.js 22 (`node:crypto`) oferece `crypto.scryptSync` nativo (OpenSSL C) sem módulos nativos
+ *   externos ou bindings WASM, preservando portabilidade e empacotamento determinístico Electron (Win/Linux).
+ * - Parâmetros vigentes: N=32768, r=8, p=1 (~32 MiB memory-hard por derivação).
+ * - O formato versionado `scrypt:N=...,r=...,p=...` garante agilidade criptográfica para futura adoção
+ *   de `argon2id` quando suportado nativamente pelo runtime Node.js sem quebrar hashes legados.
+ */
 export const CURRENT_SCRYPT_PARAMS: ScryptCostParams = {
   N: 32768,
   r: 8,
@@ -513,6 +521,42 @@ function parseScryptParamsSpec(spec: string): ScryptCostParams {
   }
   parsed.maxmem = Math.max(64 * 1024 * 1024, 256 * parsed.N * parsed.r);
   return parsed;
+}
+
+export function extractScryptParams(storedHash: string): ScryptCostParams | null {
+  const parts = (storedHash || '').split(':');
+  if (parts.length !== 4 || parts[0] !== 'scrypt') return null;
+  return parseScryptParamsSpec(parts[1]!);
+}
+
+export function assertNoKdfDowngrade(
+  previousHash: string | null | undefined,
+  candidateHash: string
+): void {
+  const nextParams = extractScryptParams(candidateHash);
+  if (!nextParams) {
+    throw new Error('AUTH_KDF_DOWNGRADE_REJECTED: Formato de hash KDF candidato inválido.');
+  }
+  if (
+    nextParams.N < CURRENT_SCRYPT_PARAMS.N ||
+    nextParams.r < CURRENT_SCRYPT_PARAMS.r ||
+    nextParams.p < CURRENT_SCRYPT_PARAMS.p
+  ) {
+    throw new Error(
+      `AUTH_KDF_DOWNGRADE_REJECTED: Parâmetros KDF (N=${nextParams.N},r=${nextParams.r},p=${nextParams.p}) inferiores ao padrão mínimo N=${CURRENT_SCRYPT_PARAMS.N}.`
+    );
+  }
+  if (previousHash) {
+    const prevParams = extractScryptParams(previousHash);
+    if (
+      prevParams &&
+      (nextParams.N < prevParams.N || nextParams.r < prevParams.r || nextParams.p < prevParams.p)
+    ) {
+      throw new Error(
+        `AUTH_KDF_DOWNGRADE_REJECTED: Downgrade KDF bloqueado (${prevParams.N} -> ${nextParams.N}).`
+      );
+    }
+  }
 }
 
 export function hashPassword(
@@ -1073,12 +1117,19 @@ export class AuthService {
       mfaVerified = true;
     }
 
+    const prevPasswordHash = user.passwordHash;
+    const prevTotpSecret = user.totpSecretBase32;
+    const prevUpdatedAt = user.updatedAt;
+    const prevSessionsSnapshot = [...this.db.sessions];
+
     user.failedLoginAttempts = 0;
     user.lockedUntil = null;
     user.updatedAt = new Date().toISOString();
     // Transparently upgrade legacy password hash cost parameters on successful login
     if (needsPasswordRehash(user.passwordHash)) {
-      user.passwordHash = hashPassword(params.password);
+      const upgradedHash = hashPassword(params.password);
+      assertNoKdfDowngrade(user.passwordHash, upgradedHash);
+      user.passwordHash = upgradedHash;
     }
     // Transparently upgrade legacy plaintext secret at rest
     if (user.totpSecretBase32 && !user.totpSecretBase32.startsWith('whvault:v1:')) {
@@ -1093,7 +1144,16 @@ export class AuthService {
       params.userAgent || 'unknown',
       { trustDevice }
     );
-    this.save();
+    try {
+      this.save();
+    } catch (persistErr) {
+      // Preserve pre-migration account integrity in memory if disk persistence fails
+      user.passwordHash = prevPasswordHash;
+      user.totpSecretBase32 = prevTotpSecret;
+      user.updatedAt = prevUpdatedAt;
+      this.db.sessions = prevSessionsSnapshot;
+      throw persistErr;
+    }
 
     const mfaRequired = user.mfaEnabled && !mfaVerified;
     return {
@@ -1194,9 +1254,18 @@ export class AuthService {
       mfaVerified = true;
     }
 
+    const prevPinHash = user.pinHash;
+    const prevUpdatedAt = user.updatedAt;
+    const prevSessionsSnapshot = [...this.db.sessions];
+
     user.failedLoginAttempts = 0;
     user.lockedUntil = null;
     user.updatedAt = new Date().toISOString();
+    if (user.pinHash && needsPasswordRehash(user.pinHash)) {
+      const upgradedPinHash = hashPassword(candidatePin);
+      assertNoKdfDowngrade(user.pinHash, upgradedPinHash);
+      user.pinHash = upgradedPinHash;
+    }
 
     const trustDevice = Boolean(params.trustDevice);
     const { sessionId, session } = this.createSessionRecord(
@@ -1206,7 +1275,14 @@ export class AuthService {
       params.userAgent || 'unknown',
       { trustDevice }
     );
-    this.save();
+    try {
+      this.save();
+    } catch (persistErr) {
+      user.pinHash = prevPinHash;
+      user.updatedAt = prevUpdatedAt;
+      this.db.sessions = prevSessionsSnapshot;
+      throw persistErr;
+    }
 
     const mfaRequired = user.mfaEnabled && !mfaVerified;
     return {
@@ -1441,6 +1517,80 @@ export class AuthService {
       mfaVerified: true,
       recoveryCodes: plaintextCodes,
     };
+  }
+
+  public disableMfaForUser(
+    userId: string,
+    verification: {
+      password?: string;
+      totpCode?: string;
+      recoveryCode?: string;
+    },
+    currentSessionId?: string
+  ): PublicUserView {
+    const user = this.db.users.find((u) => u.id === userId);
+    if (!user || user.disabled) {
+      throw new Error('USER_NOT_FOUND: Usuário não encontrado.');
+    }
+    if (!user.mfaEnabled) {
+      throw new Error('AUTH_MFA_NOT_ENABLED: Autenticação TOTP já está desabilitada para esta conta.');
+    }
+
+    const rawTotp = (verification?.totpCode || '').trim();
+    const rawRecovery = (verification?.recoveryCode || '').trim();
+    const rawPassword = verification?.password || '';
+
+    let verified = false;
+    if (rawTotp) {
+      const plainSecret = this.decryptSecretAtRest(user.totpSecretBase32);
+      if (!plainSecret) {
+        throw new Error('AUTH_INVALID_MFA: Segredo TOTP não encontrado no cofre.');
+      }
+      const check = verifyTotpCodeWithStep(plainSecret, rawTotp, user.lastAcceptedTotpStep);
+      if (check.replayRejected) {
+        throw new Error(
+          'AUTH_TOTP_REPLAY: Código TOTP já utilizado nesta janela de 30s. Aguarde o próximo token.'
+        );
+      }
+      if (!check.valid) {
+        throw new Error('AUTH_INVALID_MFA: Código TOTP inválido.');
+      }
+      verified = true;
+    } else if (rawRecovery) {
+      if (!this.tryConsumeRecoveryCode(user, rawRecovery)) {
+        throw new Error('AUTH_INVALID_RECOVERY_CODE: Código de recuperação inválido ou já utilizado.');
+      }
+      verified = true;
+    } else if (rawPassword) {
+      if (!verifyPassword(rawPassword, user.passwordHash)) {
+        throw new Error('AUTH_INVALID_CREDENTIALS: Senha de confirmação inválida.');
+      }
+      verified = true;
+    }
+
+    if (!verified) {
+      throw new Error(
+        'AUTH_MFA_VERIFICATION_REQUIRED: Confirme a senha atual, código TOTP ou código de recuperação para remover o 2FA.'
+      );
+    }
+
+    user.mfaEnabled = false;
+    user.totpSecretBase32 = null;
+    user.pendingTotpSecretBase32 = null;
+    user.recoveryCodeHashes = [];
+    user.lastAcceptedTotpStep = null;
+    user.updatedAt = new Date().toISOString();
+
+    if (currentSessionId) {
+      const targetHash = sha256(currentSessionId);
+      const sess = this.db.sessions.find((s) => s.sessionIdHash === targetHash);
+      if (sess && sess.userId === user.id) {
+        sess.mfaVerified = true;
+      }
+    }
+
+    this.save();
+    return this.toPublicUserView(user, true);
   }
 
   private createSessionRecord(
@@ -2715,7 +2865,9 @@ export class AuthService {
     if ((params.newPassword || '').length < 10) {
       throw new Error('Nova senha deve possuir pelo menos 10 caracteres.');
     }
-    user.passwordHash = hashPassword(params.newPassword);
+    const nextHash = hashPassword(params.newPassword);
+    assertNoKdfDowngrade(null, nextHash);
+    user.passwordHash = nextHash;
     user.recoveryTokenSha256 = null;
     user.recoveryExpiresAt = null;
     user.failedLoginAttempts = 0;

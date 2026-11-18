@@ -1,30 +1,44 @@
 # Relatório de Validação do Empacotamento Desktop e Instalador Windows (`INSTALLER_VALIDATION_REPORT.md`)
 
-**Data de Execução:** 2026-11-17  
-**Arquitetura Desktop:** Electron `45.3.3` + `electron-builder` `26.18.0` + Inno Setup (`installer/WinHoodBenchmarking.iss`)
+- **Versão do WinHood:** `4.4.0`
+- **Commit base / Estado:** `d382a4e96a0481cba80f005790ab65100dfc5ae4` + rebuild de artefatos finais
+- **Ambiente local:** Container Linux (`linux x64`), `Node.js v22.23.2`
+- **Ferramentas:** `vite@8.3.8`, `esbuild@0.28.2`, `scripts/build-desktop.mjs`, `src/desktop/desktop.test.ts`, `installer/WinHoodBenchmarking.iss`, `scripts/windows/test-installer-e2e.ps1`
+- **Comandos executados localmente:** `npm run build:desktop` e `npm run test:desktop`
+- **Estado de validação:** `PARTIALLY_VALIDATED` *(bundles desktop, manifesto SHA-256 e suíte de ciclo de vida Electron/porta/caminhos `VALIDATED` em Linux; compilação `ISCC.exe` e execução E2E do instalador `.exe` em Windows permanecem `NOT_VALIDATED` neste container)*
 
 ---
 
-## 1. Verificações Executadas e Confirmadas no Ambiente Atual (Linux Container)
+## 1. Artefatos Compilados e Verificados Localmente (`dist-desktop/build-manifest.json`)
 
-| Item Verificado | Evidência / Artefato | Resultado | Classificação |
+Gerado em `2026-11-18T00:37:58.572Z` (`Node v22.23.2`, `linux x64`):
+
+| Artefato | Tamanho (Bytes) | SHA-256 Verificado | Estado Local |
 |---|---|---|---|
-| **Compilação do Frontend React 19 (`dist/`)** | `vite build` (`dist/index.html` e bundles JS/CSS hashados) | Compilado sem erros | **VALIDADO** |
-| **Compilação do Processo Principal Electron (`dist-desktop/electron-main.mjs`)** | `esbuild` bundle ESM Node 20 com inicialização sequencial do servidor local e isolamento de diretórios | Compilado e verificado | **VALIDADO** |
-| **Compilação da Ponte Preload Segura (`dist-desktop/electron-preload.cjs`)** | `contextBridge.exposeInMainWorld('winhoodDesktop', ...)` com `contextIsolation: true` e `nodeIntegration: false` | Compilado e verificado | **VALIDADO** |
-| **Compilação do Servidor Express Embarcado (`dist-desktop/server.mjs`)** | Servidor HTTP `127.0.0.1` com fallback dinâmico de porta e healthcheck `/api/health` | Compilado e verificado | **VALIDADO** |
-| **Manifesto de Integridade SHA-256 (`dist-desktop/build-manifest.json`)** | Hashes SHA-256 gerados para `electron-main.mjs`, `electron-preload.cjs`, `server.mjs` e `dist/index.html` | Gerado e validado | **VALIDADO** |
-| **Script Inno Setup (`installer/WinHoodBenchmarking.iss`)** | `PrivilegesRequired=lowest`, `PrivilegesRequiredOverridesAllowed=dialog`, `{autopf}\{#MyAppName}`, `{localappdata}\WinHoodBenchmarking`, `[UninstallDelete]` limpo | Sintaxe e diretivas verificadas | **VALIDADO** |
-| **Isolamento de Dados do Usuário (`src/storage/AppPaths.ts`)** | Bloqueio estrito contra gravação em `C:\Program Files` ou diretório do binário; redirecionamento para `%LOCALAPPDATA%\WinHoodBenchmarking` e `%APPDATA%\WinHoodBenchmarking` | Testado em unidade | **VALIDADO** |
+| `dist/index.html` | `1,851` | `811dd965625bfae6a0a4594c9741ce75447112b4a225717c489f4c159b3d88b7` | `VALIDATED` |
+| `dist-desktop/server.mjs` | `1,690,196` | `0e748f1deb64339166db508c09f874eb3192881be8d4dedd327e3889e536ca0b` | `VALIDATED` |
+| `dist-desktop/electron-main.mjs` | `1,700,427` | `3d97c6c75b3e66f0ae94e7ad2a3968ca36d12abd26942adb66895701f3f956ef` | `VALIDATED` |
+| `dist-desktop/electron-preload.cjs` | `2,430` | `11da9a3b2dc6c5ebb4a4d57c61aa917140136565ae6fdbb33a97793f195c5932` | `VALIDATED` |
 
 ---
 
-## 2. Limitações de Ambiente Declaradas (Requerem Host/VM Windows Real)
+## 2. Testes Automatizados Desktop Executados (`npm run test:desktop` — 7/7 PASS)
 
-Em conformidade com a Lei Fundamental de Transparência e Zero Simulações:
+1. `WinHoodPaths`: Criação da hierarquia por usuário (`data`, `logs`, `keys`, `reports`, `temp`, `backups`) e bloqueio estrito contra caminhos em `C:\Program Files`.
+2. `Electron Preload Bridge`: Allowlist estrita de canais IPC e congelamento (`Object.freeze`) da superfície `window.winhoodDesktop`.
+3. `Electron Main Security`: `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`, `webSecurity: true` e validação de origem loopback (`127.0.0.1`).
+4. `bootstrapWindowsDesktop`: Inicialização sequencial do servidor Express, sondagem `/api/health` e fallback automático quando a porta preferencial está ocupada.
+5. `stripTrailingSlashes`: Normalização determinística em tempo linear.
+6. Alinhamento de versão `4.4.0` e diretórios `release-windows` entre `package.json`, `package-lock.json`, `electron-builder.json`, `installer/WinHoodBenchmarking.iss` e `scripts/windows/build-exe.ps1`.
+7. Ciclo de vida de animação (`prefers-reduced-motion` e `visibilityState`).
 
-| Etapa de Validação Windows Nativa | Motivo da Limitação neste Ambiente | Onde é Executada | Classificação Atual |
-|---|---|---|---|
-| **Compilação binária `.exe` pelo compilador `ISCC.exe` (Inno Setup 6)** | O ambiente de execução atual é um container Linux (`linux x64`), onde o binário Windows `ISCC.exe` não está presente nativamente. | Executado automaticamente no runner `windows-latest` do workflow `.github/workflows/ci-multiplatform.yml` (`build-and-verify-windows`). | **PARCIALMENTE VALIDADO** (Script `.iss` e bundles validados; compilação `.exe` delegada ao CI Windows) |
-| **Instalação silenciosa (`/VERYSILENT`), atalhos do Menu Iniciar e desinstalação limpa em Windows 10/11** | Exige subsistema gráfico e registro nativo do Windows 10/11. | Validado no job `build-and-verify-windows` do GitHub Actions e em homologação em VM Windows 10/11 limpa. | **NÃO VALIDADO LOCALMENTE NO CONTAINER LINUX** |
-| **Assinatura Digital Authenticode (`signtool.exe`)** | Depende de certificado Code Signing corporativo (`WINDOWS_PFX_BASE64`) provisionado no cofre de segredos do CI. | Executado quando o certificado é fornecido ao pipeline de release. | **PENDENTE DE CERTIFICADO EXTERNO** |
+---
+
+## 3. Etapas Exclusivas de Host Windows (`NOT_VALIDATED` no Container Linux)
+
+| Etapa Windows | Script / Ferramenta Configurada | Estado Atual |
+|---|---|---|
+| Empacotamento Win32 Unpacked (`npm run pack:win`) | `electron-builder --config electron-builder.json --dir` | `NOT_VALIDATED` *(configurado no job `windows-desktop-validation`)* |
+| Compilação do instalador `WinHood-Benchmarking-Setup.exe` | `ISCC.exe /DMyAppVersion=4.4.0 installer/WinHoodBenchmarking.iss` | `NOT_VALIDATED` *(requer runner/host Windows)* |
+| Ciclo E2E de 13 passos (instalação silenciosa -> launch -> `/api/health` -> `%LOCALAPPDATA%` -> desinstalação -> preservação de `userData`) | `scripts/windows/test-installer-e2e.ps1` | `IMPLEMENTED` / `NOT_VALIDATED` *(aguarda execução em `windows-latest`)* |
+| Assinatura Authenticode (`signtool.exe`) | Certificado corporativo `WINDOWS_PFX_BASE64` | `BLOCKED` *(depende de certificado externo de Code Signing)* |

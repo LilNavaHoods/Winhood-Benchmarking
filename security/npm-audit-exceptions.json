@@ -1,0 +1,83 @@
+{
+  "schemaVersion": "1.0.0",
+  "policy": "WinHood Supply-Chain Exception Governance Policy (P0)",
+  "updatedAt": "2026-11-17T22:50:00Z",
+  "notes": "Of the 11 initial high-severity npm audit advisories, 6 advisories in the electron-builder / @electron/rebuild / node-gyp / app-builder-lib / dmg-builder / electron-builder-squirrel-windows chain were permanently eliminated via deterministic dependency resolution. The remaining 5 advisories all stem from a single upstream advisory (GHSA-fc5q-39xc-vjpf in picomatch <= 4.0.7, which is currently the newest version published on the npm registry) used as a build-time dependency of Vite.",
+  "exceptions": [
+    {
+      "advisoryId": "GHSA-fc5q-39xc-vjpf",
+      "package": "picomatch",
+      "version": "4.0.7",
+      "dependencyPath": "vite@8.3.8 > picomatch@4.0.7",
+      "severity": "high",
+      "fixAvailable": "No upstream patched version > 4.0.7 exists on the npm registry as of 2026-11-17 (dist-tag latest = 4.0.7)",
+      "winhoodImpact": "Build-time frontend bundling only. Not used by WinHood SAST/SCA/SBOM analyzers, server.ts API routes, or untrusted project ingestion.",
+      "justification": "picomatch 4.0.7 is the latest published version on npm; downgrading Vite to <= 6.4.3 introduces 12 actual Vite path-traversal and WebSocket file-read vulnerabilities (GHSA-p9ff-h696-f583, GHSA-4w7w-66w2-5vf9).",
+      "compensatingControl": "WinHood never passes user-supplied glob patterns to picomatch; project file discovery uses deterministic fs.readdirSync traversal with strict path confinement and symlink rejection.",
+      "owner": "WinHood AppSec & Release Engineering",
+      "approvedAt": "2026-11-17T22:50:00Z",
+      "expiresAt": "2027-02-17T22:50:00Z",
+      "removalCondition": "Remove override/exception immediately upon publication of picomatch >= 4.0.8 on npm."
+    },
+    {
+      "advisoryId": "GHSA-fc5q-39xc-vjpf (transitive via picomatch)",
+      "package": "fdir",
+      "version": "6.5.0",
+      "dependencyPath": "vite@8.3.8 > tinyglobby@0.2.17 > fdir@6.5.0 > picomatch@4.0.7",
+      "severity": "high",
+      "fixAvailable": "Blocked on upstream picomatch > 4.0.7 publication",
+      "winhoodImpact": "Build-time Vite asset bundling only; not invoked at runtime on analyzed target repositories.",
+      "justification": "Transitive effect of GHSA-fc5q-39xc-vjpf in picomatch 4.0.7.",
+      "compensatingControl": "Restricted to static frontend build pipeline over trusted repository source files.",
+      "owner": "WinHood AppSec & Release Engineering",
+      "approvedAt": "2026-11-17T22:50:00Z",
+      "expiresAt": "2027-02-17T22:50:00Z",
+      "removalCondition": "Remove immediately upon publication of picomatch >= 4.0.8 on npm."
+    },
+    {
+      "advisoryId": "GHSA-fc5q-39xc-vjpf (transitive via picomatch/fdir)",
+      "package": "tinyglobby",
+      "version": "0.2.17",
+      "dependencyPath": "vite@8.3.8 > tinyglobby@0.2.17 > picomatch@4.0.7",
+      "severity": "high",
+      "fixAvailable": "Blocked on upstream picomatch > 4.0.7 publication",
+      "winhoodImpact": "Build-time Vite config/plugin resolution only; never exposed to external input.",
+      "justification": "Transitive effect of GHSA-fc5q-39xc-vjpf in picomatch 4.0.7.",
+      "compensatingControl": "Eliminated from node-gyp/@electron/rebuild chain via node-gyp@11.1.0 override; remaining instance is strictly Vite build-time.",
+      "owner": "WinHood AppSec & Release Engineering",
+      "approvedAt": "2026-11-17T22:50:00Z",
+      "expiresAt": "2027-02-17T22:50:00Z",
+      "removalCondition": "Remove immediately upon publication of picomatch >= 4.0.8 on npm."
+    },
+    {
+      "advisoryId": "GHSA-fc5q-39xc-vjpf (transitive via picomatch/tinyglobby)",
+      "package": "vite",
+      "version": "8.3.8",
+      "dependencyPath": "vite@8.3.8",
+      "severity": "high",
+      "fixAvailable": "Vite 8.3.8 is latest stable; npm audit suggests downgrade to 6.2.7 which has 12 direct Vite security vulnerabilities",
+      "winhoodImpact": "Used for frontend SPA compilation (vite build) and local dev server middleware; production desktop uses pre-built static assets served by Express.",
+      "justification": "Keeping Vite 8.3.8 avoids all 12 direct Vite server/fs/websocket vulnerabilities present in Vite <= 6.4.3.",
+      "compensatingControl": "Production desktop and remote deployments serve compiled dist/ via Express with strict CSP and path traversal guards.",
+      "owner": "WinHood AppSec & Release Engineering",
+      "approvedAt": "2026-11-17T22:50:00Z",
+      "expiresAt": "2027-02-17T22:50:00Z",
+      "removalCondition": "Remove immediately upon publication of picomatch >= 4.0.8 on npm."
+    },
+    {
+      "advisoryId": "GHSA-fc5q-39xc-vjpf (transitive via vite)",
+      "package": "@vitejs/plugin-react",
+      "version": "6.3.0",
+      "dependencyPath": "@vitejs/plugin-react@6.3.0 > vite@8.3.8",
+      "severity": "high",
+      "fixAvailable": "Blocked on upstream picomatch > 4.0.7 publication",
+      "winhoodImpact": "Build-time JSX transformation only; zero runtime footprint.",
+      "justification": "Peer/effect association with Vite 8.3.8 in npm audit graph.",
+      "compensatingControl": "Pure build-time compiler plugin over internal React components.",
+      "owner": "WinHood AppSec & Release Engineering",
+      "approvedAt": "2026-11-17T22:50:00Z",
+      "expiresAt": "2027-02-17T22:50:00Z",
+      "removalCondition": "Remove immediately upon publication of picomatch >= 4.0.8 on npm."
+    }
+  ]
+}

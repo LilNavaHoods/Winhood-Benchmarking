@@ -1,7 +1,12 @@
 import crypto from 'node:crypto';
+import {
+  buildComparabilityManifest,
+  sha256Canonical,
+} from '../../comparability';
 import type {
   BenchmarkMatchDecision,
   BenchmarkProfileConfig,
+  ComparabilityManifest,
   Software,
   SoftwareScoreCard,
 } from '../../types/benchmark';
@@ -14,6 +19,9 @@ export interface BenchmarkMatchInput {
   algorithmVersion: string;
   environmentEquivalent: boolean;
   baselineAlgorithmVersion?: string;
+  ruleCatalogSha256?: string;
+  configHashSha256?: string;
+  manifestsBySoftware?: Record<string, ComparabilityManifest>;
 }
 
 function detectLanguages(sw: Software): Set<string> {
@@ -244,6 +252,52 @@ export class BenchmarkMatcher {
 
     const passedCount = checks.filter((c) => c.passed).length;
     const compatibilityScorePercent = Math.round((passedCount / checks.length) * 100);
+    const comparabilityManifests: Record<string, ComparabilityManifest> = {};
+    for (const sw of softwares) {
+      const provided = input.manifestsBySoftware?.[sw.id];
+      const eligibleFiles = Object.keys(sw.sourceFilesContent || {}).sort();
+      const manifest =
+        provided ||
+        buildComparabilityManifest({
+          projectId: sw.projectId || 'default-project',
+          sourceRepository: sw.repositoryUrl || sw.officialUrl || `local://${sw.id}`,
+          commitSha: sw.commitHash || sw.packageSha256 || 'unverified-upload',
+          workingTreeClean: Boolean(sw.commitHash),
+          configHashSha256:
+            input.configHashSha256 ||
+            sha256Canonical({
+              profileId: input.profile?.id || 'default',
+              enabledCategories: input.profile?.enabledCategories || [],
+              qualityGateId: input.profile?.qualityGateId || 'qg-sonar-way',
+            }),
+          analyticalProfile:
+            input.profile?.name ||
+            input.profile?.id ||
+            (input.profile?.qualityProfileIds || ['qp-sonar-way-ts']).join(','),
+          engineVersion: input.algorithmVersion,
+          ruleCatalogSha256:
+            input.ruleCatalogSha256 ||
+            sha256Canonical({ algorithmVersion: input.algorithmVersion }),
+          weightsHashSha256: sha256Canonical(input.profile?.weights || {}),
+          analyticalDepth:
+            sw.inventory?.analyzedFilesCount && sw.inventory.analyzedFilesCount > 0
+              ? 'FULL_AST_AND_TAINT'
+              : Object.keys(sw.sourceFilesContent || {}).length > 0
+                ? 'STATIC_SOURCE_SCANNED'
+                : 'METADATA_ONLY',
+          eligibleFilesScopeHash: sha256Canonical(eligibleFiles),
+          evidenceIntegrityVerified:
+            sw.sourceType !== 'PUBLIC_DOCUMENTATION_ONLY' &&
+            Object.keys(sw.sourceFilesContent || {}).length > 0,
+        });
+      comparabilityManifests[sw.id] = manifest;
+      if (!manifest.evidenceIntegrityVerified && multiTarget) {
+        blockingReasons.push(
+          `Manifesto de comparabilidade de "${sw.name}" sem integridade verificada (evidenceIntegrityVerified=false).`
+        );
+      }
+    }
+
     const comparable = blockingReasons.length === 0;
     const comparisonModality: 'SAME_ENGINE' | 'CROSS_TOOL' =
       input.mode === 'VS_MQR_BRIDGE' || input.mode === 'VS_PUBLIC_REFERENCE'
@@ -274,6 +328,7 @@ export class BenchmarkMatcher {
       blockingReasons,
       warnings,
       qualifications: [...warnings],
+      comparabilityManifests,
     };
   }
 }

@@ -1425,16 +1425,16 @@ export const VeracityAdaptersReportsModule: React.FC<
                         <div>
                           <strong className="text-emerald-600 dark:text-[#31d6c4]">Vantagens:</strong>
                           <ul className="list-disc list-inside text-slate-600 dark:text-slate-300 mt-0.5 space-y-0.5">
-                            {sc.advantages.map((a, i) => (
+                            {(sc.advantages ?? []).map((a, i) => (
                               <li key={i}>{a}</li>
                             ))}
                           </ul>
                         </div>
-                        {sc.deficiencies.length > 0 && (
+                        {(sc.deficiencies ?? []).length > 0 && (
                           <div>
                             <strong className="text-rose-500">Deficiências &amp; Riscos:</strong>
                             <ul className="list-disc list-inside text-slate-600 dark:text-slate-300 mt-0.5 space-y-0.5">
-                              {sc.deficiencies.map((d, i) => (
+                              {(sc.deficiencies ?? []).map((d, i) => (
                                 <li key={i}>{d}</li>
                               ))}
                             </ul>

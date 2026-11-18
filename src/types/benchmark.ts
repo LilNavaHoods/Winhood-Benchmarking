@@ -342,9 +342,31 @@ export interface DimensionComparabilityEntry {
   notes: string;
 }
 
+export interface ComparabilityManifest {
+  projectId: string;
+  sourceRepository: string;
+  commitSha: string;
+  workingTreeClean: boolean;
+  configHashSha256: string;
+  analyticalProfile: string;
+  engineVersion: string;
+  ruleCatalogSha256: string;
+  weightsHashSha256: string;
+  analyticalDepth: string;
+  osPlatform: string;
+  cpuArch: string;
+  runtimeVersion: string;
+  eligibleFilesScopeHash: string;
+  taxonomyVersion: string;
+  taxonomyMappingSha256: string;
+  executedAt: string;
+  evidenceIntegrityVerified: boolean;
+}
+
 export interface ComparabilityReport {
   overallComparable: boolean;
   overallStatus?: 'COMPARABLE' | 'PARTIALLY_COMPARABLE' | 'INCONCLUSIVE_COMPARISON' | 'NOT_COMPARABLE';
+  comparabilityClassification?: 'STRICTLY_COMPARABLE' | 'QUALIFIED_COMPARISON' | 'NOT_COMPARABLE';
   canDeclareOfficialWinner: boolean;
   domainCompatible: boolean;
   objectiveCompatible: boolean;
@@ -357,6 +379,7 @@ export interface ComparabilityReport {
   warnings: string[];
   sourceAvailabilityBySoftware: Record<string, SourceAvailabilityKind>;
   dimensionMatrix: DimensionComparabilityEntry[];
+  comparabilityManifests?: Record<string, ComparabilityManifest>;
 }
 
 export type ManifestVerificationState =
@@ -2273,16 +2296,24 @@ export interface SbomDocumentBundle {
   optionalCount?: number;
   transitiveCoverageComplete?: boolean;
   lockfilesDetected?: string[];
+  supportedFormats?: Array<'cyclonedx-1.5' | 'cyclonedx-1.7' | 'spdx-2.3' | 'spdx-3.0'>;
   structuralValidation?: {
     cyclonedxValid: boolean;
     spdxValid: boolean;
+    cyclonedx17Valid?: boolean;
+    spdx30Valid?: boolean;
+    schemaVersionValidated?: string[];
     errors: string[];
   };
   components: SbomComponentRecord[];
   cyclonedx15Json: Record<string, unknown>;
+  cyclonedx17Json?: Record<string, unknown>;
   spdx23Json: Record<string, unknown>;
+  spdx30Json?: Record<string, unknown>;
   cyclonedxSha256: string;
+  cyclonedx17Sha256?: string;
   spdxSha256: string;
+  spdx30Sha256?: string;
   deterministicMode?: boolean;
   signature?: SbomSignatureRecord;
 }
@@ -2389,7 +2420,17 @@ export interface BenchmarkMatchDecision {
   blockingReasons: string[];
   warnings: string[];
   qualifications?: string[];
+  comparabilityManifests?: Record<string, ComparabilityManifest>;
 }
+
+export type GoldenDatasetRole = 'DEVELOPMENT' | 'REGRESSION' | 'INTERNAL_HOLDOUT';
+
+export type GoldenDatasetOriginLabel =
+  | 'WINHOOD_INTERNAL_DEVELOPMENT_CORPUS'
+  | 'WINHOOD_INTERNAL_REGRESSION_CORPUS'
+  | 'WINHOOD_INTERNAL_HOLDOUT_CORPUS'
+  | 'WINHOOD_INTERNAL_CALIBRATION_CORPUS'
+  | 'OWASP_BENCHMARK_OFFICIAL';
 
 export interface GoldenValidationCaseResult {
   caseId: string;
@@ -2397,6 +2438,11 @@ export interface GoldenValidationCaseResult {
   language: 'TypeScript' | 'JavaScript' | 'Python' | 'Java' | 'C#' | 'Go' | 'Rust' | 'SQL';
   category: string;
   cwe: string;
+  datasetRole?: GoldenDatasetRole;
+  origin?: string;
+  license?: string;
+  contentSha256?: string;
+  contentHashVerified?: boolean;
   expectedVulnerable: boolean;
   detectedVulnerable: boolean | null;
   classification: 'TP' | 'FP' | 'TN' | 'FN' | 'INCONCLUSIVE';
@@ -2419,6 +2465,7 @@ export interface StatisticalAggregateMetrics {
   trueNegativeRate: number | null;
   falsePositiveRate: number | null;
   falseNegativeRate: number | null;
+  evaluatedStrataCount?: number;
 }
 
 export interface GoldenValidationSuiteReport {
@@ -2426,11 +2473,15 @@ export interface GoldenValidationSuiteReport {
   executedAt: string;
   engineVersion: string;
   datasetVersion: string;
-  datasetOriginLabel:
-    | 'WINHOOD_INTERNAL_CALIBRATION_CORPUS'
-    | 'WINHOOD_INDEPENDENT_VALIDATION_BENCHMARK'
-    | 'OWASP_BENCHMARK_OFFICIAL';
+  datasetRole: GoldenDatasetRole;
+  datasetOriginLabel: GoldenDatasetOriginLabel;
   datasetSha256: string;
+  datasetIntegrityVerified: boolean;
+  integrityErrors: string[];
+  declaredLanguagesTotal: number;
+  languagesRepresented: string[];
+  missingDeclaredLanguages: string[];
+  lowSampleThreshold: number;
   sampleWarning: string | null;
   totalCases: number;
   inconclusiveCases: number;
@@ -2458,10 +2509,12 @@ export interface GoldenValidationSuiteReport {
     byCategory: StatisticalAggregateMetrics;
   };
   microAverages?: StatisticalAggregateMetrics;
-  independentValidationSummary?: {
+  holdoutValidationSummary?: {
     datasetVersion: string;
-    datasetOriginLabel: 'WINHOOD_INDEPENDENT_VALIDATION_BENCHMARK';
+    datasetRole: 'INTERNAL_HOLDOUT';
+    datasetOriginLabel: 'WINHOOD_INTERNAL_HOLDOUT_CORPUS';
     totalCases: number;
+    inconclusiveCases: number;
     truePositives: number;
     falsePositives: number;
     trueNegatives: number;
@@ -2471,6 +2524,8 @@ export interface GoldenValidationSuiteReport {
     f1Score: number | null;
     falsePositiveRate: number | null;
     falseNegativeRate: number | null;
+    languagesRepresented: string[];
+    missingDeclaredLanguages: string[];
   };
   totalDurationMs: number;
   memoryDeltaMb: number;
@@ -2479,6 +2534,7 @@ export interface GoldenValidationSuiteReport {
     string,
     {
       cases: number;
+      inconclusiveCases: number;
       tp: number;
       fp: number;
       tn: number;
@@ -2499,6 +2555,7 @@ export interface GoldenValidationSuiteReport {
     string,
     {
       cases: number;
+      inconclusiveCases: number;
       tp: number;
       fp: number;
       tn: number;

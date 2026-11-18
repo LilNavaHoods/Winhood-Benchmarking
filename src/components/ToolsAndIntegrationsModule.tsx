@@ -763,7 +763,11 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                   URL Oficial: {latestVersion?.downloadUrl}
                 </div>
                 <div className="text-slate-600 dark:text-slate-400">
-                  Tamanho: {((latestVersion?.sizeBytes || 915316171) / (1024 * 1024)).toFixed(1)} MB · Origem Checksum: {latestVersion?.checksumSource}
+                  Tamanho:{' '}
+                  {latestVersion?.sizeBytes !== undefined && latestVersion?.sizeBytes !== null
+                    ? `${(latestVersion.sizeBytes / (1024 * 1024)).toFixed(1)} MB`
+                    : 'N/D'}{' '}
+                  · Origem Checksum: {latestVersion?.checksumSource || 'N/D'}
                 </div>
                 <div className="text-emerald-700 dark:text-[#31d6c4] break-all">
                   SHA-256 Oficial: {latestVersion?.officialSha256}
@@ -1754,7 +1758,11 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
                           className={
                             t.status === 'FAILED'
                               ? 'text-rose-500 font-bold'
-                              : 'text-emerald-600 dark:text-[#31d6c4] font-bold'
+                              : t.status === 'PASSED'
+                                ? 'text-emerald-600 dark:text-[#31d6c4] font-bold'
+                                : t.status === 'EXPECTED_ERROR_HANDLED'
+                                  ? 'text-sky-500 font-bold'
+                                  : 'text-amber-500 font-bold'
                           }
                         >
                           {t.status}

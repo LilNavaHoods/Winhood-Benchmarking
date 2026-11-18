@@ -334,6 +334,136 @@ export class QualityGateEngine {
     }
   }
 
+  /**
+   * Unified Quality Gate Decision Contract shared by QualityGateEngine and scoringEngine.
+   * Guarantees zero Fudge Factor suppression on REQUIRED conditions (< 20 lines never bypasses coverage or duplication).
+   */
+  public static evaluateSharedContract(params: {
+    eligibleForScoring: boolean;
+    criticalVulns: number;
+    secretsExposed: number;
+    bugs: number;
+    securityRating: 'A' | 'B' | 'C' | 'D' | 'E';
+    reliabilityRating: 'A' | 'B' | 'C' | 'D' | 'E';
+    duplicatedLinesPercent: number;
+    hasMeasuredCoverage: boolean;
+    testCoveragePercent: number;
+    scopeCoveragePercent: number;
+    coverageRequirementTier?: GateConditionRequirementTier;
+    duplicationRequirementTier?: GateConditionRequirementTier;
+  }): {
+    failedConditions: string[];
+    unmeasuredMandatoryConditions: string[];
+    reservations: string[];
+    qualityGateStatus: 'PASSED' | 'FAILED' | 'WARN' | 'INCONCLUSIVE' | 'NOT_EVALUATED';
+    executiveDecision: ExecutiveQualityGateDecision;
+    canonicalDecision: CanonicalGateDecision;
+  } {
+    if (!params.eligibleForScoring) {
+      return {
+        failedConditions: [],
+        unmeasuredMandatoryConditions: ['Projeto inelegível para pontuação (escopo não analisado).'],
+        reservations: [],
+        qualityGateStatus: 'NOT_EVALUATED',
+        executiveDecision: 'INCONCLUSIVE',
+        canonicalDecision: 'INCONCLUSIVE',
+      };
+    }
+
+    const failedConditions: string[] = [];
+    const unmeasuredMandatoryConditions: string[] = [];
+    const reservations: string[] = [];
+
+    if (params.criticalVulns > 0) {
+      failedConditions.push(`Vulnerabilidades Críticas: ${params.criticalVulns} > 0`);
+    }
+    if (params.secretsExposed > 0) {
+      failedConditions.push(`Segredos Hardcoded Expostos: ${params.secretsExposed} > 0`);
+    }
+    if (params.bugs > 3 || params.reliabilityRating === 'E') {
+      failedConditions.push(`Bugs Confiabilidade: ${params.bugs} > 3`);
+    }
+    if (params.securityRating === 'D' || params.securityRating === 'E') {
+      failedConditions.push(`Security Rating reprovado (${params.securityRating})`);
+    }
+
+    const dupTier = params.duplicationRequirementTier || 'REQUIRED';
+    if (params.duplicatedLinesPercent > 5) {
+      if (dupTier === 'INFORMATIVE') {
+        reservations.push(`Nota informativa: Duplicação de Código ${params.duplicatedLinesPercent}% > 5.0%`);
+      } else if (dupTier === 'OPTIONAL') {
+        reservations.push(`Ressalva opcional: Duplicação de Código ${params.duplicatedLinesPercent}% > 5.0%`);
+      } else {
+        failedConditions.push(`Duplicação de Código: ${params.duplicatedLinesPercent}% > 5.0%`);
+      }
+    }
+
+    const covTier = params.coverageRequirementTier || 'REQUIRED';
+    if (!params.hasMeasuredCoverage) {
+      if (covTier === 'REQUIRED') {
+        unmeasuredMandatoryConditions.push(
+          'Cobertura de Testes: NOT_MEASURED (obrigatório relatório LCOV/JaCoCo/Cobertura/Istanbul >= 80%)'
+        );
+      } else if (covTier === 'OPTIONAL') {
+        reservations.push('Ressalva opcional: Cobertura de Testes NOT_MEASURED');
+      } else {
+        reservations.push('Nota informativa: Cobertura de Testes NOT_MEASURED');
+      }
+    } else if (params.testCoveragePercent < 80) {
+      if (covTier === 'INFORMATIVE') {
+        reservations.push(`Nota informativa: Cobertura de Testes ${params.testCoveragePercent.toFixed(1)}% < 80.0%`);
+      } else if (covTier === 'OPTIONAL') {
+        reservations.push(`Ressalva opcional: Cobertura de Testes ${params.testCoveragePercent.toFixed(1)}% < 80.0%`);
+      } else {
+        failedConditions.push(`Cobertura de Testes: ${params.testCoveragePercent.toFixed(1)}% < 80.0%`);
+      }
+    }
+
+    if (params.scopeCoveragePercent < 50) {
+      unmeasuredMandatoryConditions.push(
+        `Cobertura de Escopo Analítico: ${params.scopeCoveragePercent.toFixed(1)}% < 50.0% (evidência parcial)`
+      );
+    }
+
+    let qualityGateStatus: 'PASSED' | 'FAILED' | 'WARN' | 'INCONCLUSIVE' | 'NOT_EVALUATED';
+    if (failedConditions.length > 0) {
+      qualityGateStatus = 'FAILED';
+    } else if (unmeasuredMandatoryConditions.length > 0) {
+      qualityGateStatus = 'INCONCLUSIVE';
+    } else if (reservations.length > 0) {
+      qualityGateStatus = 'WARN';
+    } else {
+      qualityGateStatus = 'PASSED';
+    }
+
+    const executiveDecision: ExecutiveQualityGateDecision =
+      qualityGateStatus === 'INCONCLUSIVE'
+        ? 'INCONCLUSIVE'
+        : qualityGateStatus === 'PASSED'
+          ? 'APROVADO'
+          : qualityGateStatus === 'WARN'
+            ? 'APROVADO COM RESSALVAS'
+            : 'REPROVADO';
+
+    const canonicalDecision: CanonicalGateDecision =
+      qualityGateStatus === 'INCONCLUSIVE'
+        ? 'INCONCLUSIVE'
+        : qualityGateStatus === 'PASSED'
+          ? 'APPROVED'
+          : qualityGateStatus === 'WARN'
+            ? 'APPROVED_WITH_RESERVATIONS'
+            : 'BLOCKED';
+
+    return {
+      failedConditions,
+      unmeasuredMandatoryConditions,
+      reservations,
+      qualityGateStatus,
+      executiveDecision,
+      canonicalDecision,
+    };
+  }
+
   public static evaluate(params: {
     gate?: QualityGateDefinition;
     gateId?: string;

@@ -220,17 +220,175 @@ test('ControlledTestAndPerfRunner runs isolated node --test, blocks unauthorized
   }
 });
 
-test('GoldenDatasetRunner executes 20 paired TP/TN cases with >= 85% Precision, Recall and F1 and honest origin disclosures', () => {
-  const report = GoldenDatasetRunner.runValidationSuite();
-  assert.equal(report.totalCases, 20);
-  assert.equal(report.datasetOriginLabel, 'WINHOOD_INTERNAL_CALIBRATION_CORPUS');
-  assert.equal(report.datasetSha256.length, 64);
-  assert.ok(Boolean(report.sampleWarning));
-  assert.ok((report.precision ?? 0) >= 0.85, `Expected precision >= 0.85, got ${report.precision}`);
-  assert.ok((report.recall ?? 0) >= 0.85, `Expected recall >= 0.85, got ${report.recall}`);
-  assert.ok((report.f1Score ?? 0) >= 0.85, `Expected F1 >= 0.85, got ${report.f1Score}`);
-  assert.equal(report.reportSha256.length, 64);
+test('GoldenDatasetRunner executes 3-set split (DEVELOPMENT, REGRESSION, INTERNAL_HOLDOUT) across all 8 declared languages with traceability metadata', () => {
+  const devReport = GoldenDatasetRunner.runValidationSuite('DEVELOPMENT');
+  assert.equal(devReport.datasetRole, 'DEVELOPMENT');
+  assert.equal(devReport.datasetOriginLabel, 'WINHOOD_INTERNAL_DEVELOPMENT_CORPUS');
+  assert.ok(devReport.totalCases >= 4);
+  assert.equal(devReport.datasetIntegrityVerified, true);
+
+  const regReport = GoldenDatasetRunner.runValidationSuite('REGRESSION');
+  assert.equal(regReport.datasetRole, 'REGRESSION');
+  assert.equal(regReport.datasetOriginLabel, 'WINHOOD_INTERNAL_REGRESSION_CORPUS');
+  assert.equal(regReport.totalCases, 26);
+  assert.equal(regReport.missingDeclaredLanguages.length, 0);
+  assert.equal(regReport.declaredLanguagesTotal, 8);
+  assert.equal(regReport.datasetSha256.length, 64);
+  assert.equal(regReport.datasetIntegrityVerified, true);
+  assert.equal(regReport.lowSampleThreshold, 30);
+  assert.ok(Boolean(regReport.sampleWarning));
+  assert.ok((regReport.precision ?? 0) >= 0.85, `Expected precision >= 0.85, got ${regReport.precision}`);
+  assert.ok((regReport.recall ?? 0) >= 0.85, `Expected recall >= 0.85, got ${regReport.recall}`);
+  assert.ok((regReport.f1Score ?? 0) >= 0.85, `Expected F1 >= 0.85, got ${regReport.f1Score}`);
+  assert.equal(regReport.reportSha256.length, 64);
+  for (const c of regReport.cases) {
+    assert.ok(c.origin && c.license && c.contentSha256?.length === 64 && c.contentHashVerified === true);
+  }
+
+  const holdReport = GoldenDatasetRunner.runHoldoutValidationSuite();
+  assert.equal(holdReport.datasetRole, 'INTERNAL_HOLDOUT');
+  assert.equal(holdReport.datasetOriginLabel, 'WINHOOD_INTERNAL_HOLDOUT_CORPUS');
+  assert.equal(holdReport.missingDeclaredLanguages.length, 0);
+  assert.equal(holdReport.totalCases, 18);
+  assert.equal(holdReport.datasetIntegrityVerified, true);
+  assert.ok((holdReport.precision ?? 0) >= 0.85);
+  assert.ok((holdReport.recall ?? 0) >= 0.85);
 });
+
+test('Phase 7 Statistical & Integrity Matrix (11 mandatory scenarios): n<30 vs n>=30, null denominators, TP/TN/FP/FN, inconclusive, strata counts, missing languages, SHA-256 tamper', async () => {
+  const { computeConfusionMetrics, computeWilson95ConfidenceInterval } = await import(
+    '../validation/GoldenDatasetRunner'
+  );
+  const { GOLDEN_DATASET_CORPUS, computeGoldenCaseContentSha256 } = await import(
+    './datasets/GoldenDatasetCorpus'
+  );
+
+  // 1. Amostra pequena (n < 30)
+  const smallReport = GoldenDatasetRunner.runValidationSuite('REGRESSION');
+  assert.equal(smallReport.lowSampleThreshold, 30);
+  assert.equal(smallReport.byLanguage['TypeScript']?.lowSampleWarning, true);
+  assert.ok(smallReport.sampleWarning?.includes('n < 30'));
+
+  // 2. Amostra grande (n >= 30)
+  const makeSyntheticCase = (id: string, expectedVulnerable: boolean, vulnCode: boolean) => {
+    const filesMap = {
+      [`src/syn/${id}.ts`]: vulnCode
+        ? 'export function q(db: any, x: string) { return db.query("SELECT id FROM t WHERE c = \'" + x + "\'"); }'
+        : 'export function qSafe(db: any, x: string) { return db.query("SELECT id FROM t WHERE c = ?", [x]); }',
+    };
+    return {
+      caseId: id,
+      title: `Synthetic ${id}`,
+      language: 'TypeScript' as const,
+      category: 'SQL_INJECTION' as const,
+      cwe: 'CWE-89',
+      expectedVulnerable,
+      filesMap,
+      origin: 'TEST_FIXTURE',
+      license: 'MIT',
+      contentSha256: computeGoldenCaseContentSha256(filesMap),
+      datasetVersion: 'SYN-1',
+      datasetRole: 'DEVELOPMENT' as const,
+      changelog: 'test',
+    };
+  };
+  const largeCorpus = Array.from({ length: 30 }, (_, i) =>
+    makeSyntheticCase(`SYN-LG-${i}`, i % 2 === 0, i % 2 === 0)
+  );
+  const largeReport = GoldenDatasetRunner.runValidationSuite('DEVELOPMENT', { customCorpus: largeCorpus });
+  assert.equal(largeReport.totalCases, 30);
+  assert.equal(largeReport.byLanguage['TypeScript']?.lowSampleWarning, false);
+  assert.equal(largeReport.sampleWarning, null);
+
+  // 3. Denominador zero -> null
+  const zeroDenom = computeConfusionMetrics({ tp: 0, fp: 0, tn: 0, fn: 0 });
+  assert.equal(zeroDenom.precision, null);
+  assert.equal(zeroDenom.recall, null);
+  assert.equal(zeroDenom.f1Score, null);
+  assert.equal(zeroDenom.trueNegativeRate, null);
+  assert.equal(zeroDenom.falsePositiveRate, null);
+  assert.equal(computeWilson95ConfidenceInterval(0, 0).pointEstimate, null);
+
+  // 4. Todos positivos (only TP -> TNR/FPR must be null)
+  const allPosCorpus = [makeSyntheticCase('ALL-POS-1', true, true), makeSyntheticCase('ALL-POS-2', true, true)];
+  const allPosReport = GoldenDatasetRunner.runValidationSuite('DEVELOPMENT', { customCorpus: allPosCorpus });
+  assert.equal(allPosReport.precision, 1);
+  assert.equal(allPosReport.recall, 1);
+  assert.equal(allPosReport.trueNegativeRate, null);
+  assert.equal(allPosReport.falsePositiveRate, null);
+
+  // 5. Todos negativos (only TN -> Precision/Recall/F1 must be null)
+  const allNegCorpus = [makeSyntheticCase('ALL-NEG-1', false, false), makeSyntheticCase('ALL-NEG-2', false, false)];
+  const allNegReport = GoldenDatasetRunner.runValidationSuite('DEVELOPMENT', { customCorpus: allNegCorpus });
+  assert.equal(allNegReport.trueNegativeRate, 1);
+  assert.equal(allNegReport.falsePositiveRate, 0);
+  assert.equal(allNegReport.precision, null);
+  assert.equal(allNegReport.recall, null);
+  assert.equal(allNegReport.f1Score, null);
+
+  // 6. Falsos positivos (expected=false, detected=true)
+  const fpCorpus = [makeSyntheticCase('TP-CASE', true, true), makeSyntheticCase('FP-CASE', false, true)];
+  const fpReport = GoldenDatasetRunner.runValidationSuite('DEVELOPMENT', { customCorpus: fpCorpus });
+  assert.equal(fpReport.falsePositives, 1);
+  assert.equal(fpReport.precision, 0.5);
+  assert.equal(fpReport.falsePositiveRate, 1);
+
+  // 7. Falsos negativos (expected=true, detected=false)
+  const fnCorpus = [makeSyntheticCase('TP-CASE2', true, true), makeSyntheticCase('FN-CASE', true, false)];
+  const fnReport = GoldenDatasetRunner.runValidationSuite('DEVELOPMENT', { customCorpus: fnCorpus });
+  assert.equal(fnReport.falseNegatives, 1);
+  assert.equal(fnReport.recall, 0.5);
+  assert.equal(fnReport.falseNegativeRate, 0.5);
+
+  // 8 & 9. Casos inconclusivos & estratos vazios (unparsed/empty filesMap)
+  const emptyCaseFiles = {};
+  const inconclusiveCorpus = [
+    {
+      caseId: 'INC-1',
+      title: 'Empty target filesMap',
+      language: 'TypeScript' as const,
+      category: 'SQL_INJECTION' as const,
+      cwe: 'CWE-89',
+      expectedVulnerable: true,
+      filesMap: emptyCaseFiles,
+      origin: 'TEST_FIXTURE',
+      license: 'MIT',
+      contentSha256: computeGoldenCaseContentSha256(emptyCaseFiles),
+      datasetVersion: 'SYN-INC',
+      datasetRole: 'DEVELOPMENT' as const,
+      changelog: 'test',
+    },
+  ];
+  const incReport = GoldenDatasetRunner.runValidationSuite('DEVELOPMENT', { customCorpus: inconclusiveCorpus });
+  assert.equal(incReport.inconclusiveCases, 1);
+  assert.equal(incReport.cases[0]?.classification, 'INCONCLUSIVE');
+  assert.equal(incReport.cases[0]?.detectedVulnerable, null);
+  assert.equal(incReport.macroAverages?.byLanguage.evaluatedStrataCount, 0);
+  assert.equal(incReport.macroAverages?.byLanguage.precision, null);
+
+  // 10. Corpus com linguagem ausente (incomplete 8-language detection)
+  assert.ok(allPosReport.missingDeclaredLanguages.includes('Go'));
+  assert.ok(allPosReport.missingDeclaredLanguages.includes('Rust'));
+  assert.ok(allPosReport.missingDeclaredLanguages.includes('C#'));
+
+  // 11. Alteração de SHA-256 do dataset / adulteração de caso
+  const tamperedCorpus = [
+    {
+      ...GOLDEN_DATASET_CORPUS[0]!,
+      filesMap: { 'src/repo/userRepo.ts': 'export const mutated = true;' },
+      // keeps original contentSha256 intentionally -> must trigger integrity mismatch
+    },
+  ];
+  const tamperReport = GoldenDatasetRunner.runValidationSuite('REGRESSION', { customCorpus: tamperedCorpus });
+  assert.equal(tamperReport.datasetIntegrityVerified, false);
+  assert.ok(tamperReport.integrityErrors.length >= 1);
+  assert.equal(tamperReport.cases[0]?.contentHashVerified, false);
+  assert.notEqual(tamperReport.datasetSha256, regShaPlaceholder(smallReport.datasetSha256));
+});
+
+function regShaPlaceholder(s: string) {
+  return s;
+}
 
 test('stripTrailingSlashes normalizes Sonar server URLs safely without regex backtracking', () => {
   assert.equal(stripTrailingSlashes('https://sonarcloud.io///'), 'https://sonarcloud.io');

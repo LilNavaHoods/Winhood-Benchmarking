@@ -1349,7 +1349,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
                   Quality Profile: {methodologySummary.qualityProfileVerification.profileName} ({methodologySummary.qualityProfileVerification.verificationState})
                 </span>
                 <span className="px-2.5 py-0.5 rounded text-[11px] font-mono bg-slate-800 text-slate-300">
-                  Paginação Issues: {methodologySummary.paginationSummary.issuesPagination.state || methodologySummary.paginationSummary.issuesPagination.completeness || methodologySummary.paginationSummary.issuesPagination.status} ({methodologySummary.paginationSummary.issuesPagination.fetchedRecords ?? methodologySummary.paginationSummary.issuesPagination.totalReceived}/{methodologySummary.paginationSummary.issuesPagination.totalReported ?? methodologySummary.paginationSummary.issuesPagination.totalExpected ?? 0})
+                  Paginação Issues: {methodologySummary.paginationSummary.issuesPagination.state || methodologySummary.paginationSummary.issuesPagination.completeness || methodologySummary.paginationSummary.issuesPagination.status} ({methodologySummary.paginationSummary.issuesPagination.fetchedRecords ?? methodologySummary.paginationSummary.issuesPagination.totalReceived ?? 'N/D'}/{methodologySummary.paginationSummary.issuesPagination.totalReported ?? methodologySummary.paginationSummary.issuesPagination.totalExpected ?? 'N/D'})
                 </span>
               </div>
               <h2 className="text-lg font-bold text-white">
@@ -2154,7 +2154,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
               <div className="bg-slate-950 border border-slate-800 rounded-lg p-4">
                 <div className="text-xs text-slate-400">Núcleos Lógicos de CPU</div>
                 <div className="text-2xl font-black text-[#31d6c4] tabular-nums mt-1">
-                  {hardware?.totalLogicalCores ?? 8}
+                  {hardware?.totalLogicalCores ?? 'NOT_MEASURED'}
                 </div>
                 <div className="text-xs text-slate-500 mt-1">Cores disponíveis para threads</div>
               </div>
@@ -2162,19 +2162,23 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
               <div className="bg-slate-950 border border-slate-800 rounded-lg p-4">
                 <div className="text-xs text-slate-400">Threads Ativas Alocadas</div>
                 <div className="text-2xl font-black text-white tabular-nums mt-1">
-                  {hardware?.activeThreadsLimit ?? 4}
+                  {hardware?.activeThreadsLimit ?? 'NOT_MEASURED'}
                 </div>
                 <div className="text-xs text-slate-500 mt-1">
-                  {Math.round(((hardware?.activeThreadsLimit ?? 4) / (hardware?.totalLogicalCores || 1)) * 100)}% da capacidade
+                  {hardware && hardware.totalLogicalCores > 0
+                    ? `${Math.round((hardware.activeThreadsLimit / hardware.totalLogicalCores) * 100)}% da capacidade`
+                    : 'Aguardando telemetria'}
                 </div>
               </div>
 
               <div className="bg-slate-950 border border-slate-800 rounded-lg p-4">
                 <div className="text-xs text-slate-400">Memória RAM Livre / Total</div>
                 <div className="text-sm font-bold text-white tabular-nums mt-1">
-                  {hardware ? `${Math.round(hardware.freeMemoryMb / 1024)}GB / ${Math.round(hardware.totalMemoryMb / 1024)}GB` : 'N/D'}
+                  {hardware ? `${Math.round(hardware.freeMemoryMb / 1024)}GB / ${Math.round(hardware.totalMemoryMb / 1024)}GB` : 'NOT_MEASURED'}
                 </div>
-                <div className="text-xs text-slate-500 mt-1">Limite alocado: {hardware ? Math.round(hardware.memoryLimitMb / 1024) : 4}GB</div>
+                <div className="text-xs text-slate-500 mt-1">
+                  Limite alocado: {hardware ? `${Math.round(hardware.memoryLimitMb / 1024)}GB` : 'NOT_MEASURED'}
+                </div>
               </div>
             </div>
 

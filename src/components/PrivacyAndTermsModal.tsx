@@ -178,7 +178,7 @@ export const PrivacyAndTermsModal: React.FC<PrivacyAndTermsModalProps> = ({
                 </h4>
                 <ul className="list-disc pl-5 space-y-1">
                   <li><strong>Criptografia em Repouso:</strong> AES-256-GCM (<code className="font-mono">whdb:enc:v2</code>) + rotação KMS.</li>
-                  <li><strong>Autenticação Local:</strong> Senha e PIN com <code className="font-mono">scrypt</code> (N=16384, r=8, p=1), TOTP RFC 6238 e Windows Hello (WebAuthn FIDO2 <code className="font-mono">ES256</code>/<code className="font-mono">RS256</code>).</li>
+                  <li><strong>Autenticação Local:</strong> Senha e PIN com <code className="font-mono">scrypt</code> (N=32768, r=8, p=1), TOTP RFC 6238 e Windows Hello (WebAuthn FIDO2 <code className="font-mono">ES256</code>/<code className="font-mono">RS256</code>).</li>
                   <li><strong>Isolamento Electron:</strong> <code className="font-mono">nodeIntegration: false</code>, <code className="font-mono">contextIsolation: true</code>, <code className="font-mono">sandbox: true</code>, <code className="font-mono">SsrfGuard</code> e proteção CSRF Double-Submit.</li>
                 </ul>
               </div>

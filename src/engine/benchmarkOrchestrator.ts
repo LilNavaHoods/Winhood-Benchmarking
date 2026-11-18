@@ -55,6 +55,7 @@ import { BenchmarkMatcher } from '../intelligence/comparison/BenchmarkMatcher';
 import { ReferenceRegistry } from '../intelligence/reference/ReferenceRegistry';
 import { RULE_ENGINE_VERSION, RuleRegistry } from '../analyzers/RuleRegistry';
 import { QualityGateEngine } from '../gate/QualityGateEngine';
+import { buildComparabilityManifest, sha256Canonical } from '../comparability';
 
 export const DEFAULT_BENCHMARK_PROFILES: BenchmarkProfileConfig[] = [
   {
@@ -231,6 +232,7 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
       externalVersion: string | null;
       configurationValid: boolean;
       connectionState: 'VERIFIED' | 'NOT_CONNECTED' | 'NOT_APPLICABLE';
+      signatureSeed: string | null;
     }
   ) => {
     const execRec = findLatestExecution(toolId);
@@ -268,7 +270,33 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
       adapterState = opts.nativeAvailable ? 'NATIVE_AVAILABLE' : 'NOT_MEASURED';
     }
 
+    let status: ToolAdapterInfo['status'];
+    if (adapterState === 'EXECUTION_FAILED') {
+      status = 'DISABLED';
+    } else if (opts.integrationType === 'REMOTE_API') {
+      status = opts.configurationValid ? 'INTEGRAÇÃO CONFIGURADA' : 'INTEGRAÇÃO NÃO CONFIGURADA';
+    } else if (adapterState === 'NOT_INSTALLED' || adapterState === 'NOT_MEASURED') {
+      status = 'FERRAMENTA NÃO INSTALADA';
+    } else if (adapterState === 'NOT_CONFIGURED') {
+      status = 'INTEGRAÇÃO NÃO CONFIGURADA';
+    } else {
+      status = 'OPERATIONAL';
+    }
+
+    const configured =
+      opts.integrationType === 'REMOTE_API'
+        ? opts.configurationValid
+        : opts.integrationType === 'LOCAL_CLI'
+          ? opts.externalBinaryDetected
+            ? opts.configurationValid
+            : opts.nativeAvailable
+          : opts.nativeAvailable;
+
     return {
+      status,
+      configured,
+      binaryDetected: opts.externalBinaryDetected,
+      signatureHash: opts.signatureSeed ? computeSha256(opts.signatureSeed) : null,
       integrationType: opts.integrationType,
       adapterState,
       nativeAvailable: opts.nativeAvailable,
@@ -299,10 +327,6 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
       analysisType: 'SAST AST & Cross-File Taint (SQLi, RCE, CWE Top 25)',
       executionMethod: sastExternalDetected ? 'CLI_BINARY' : 'NATIVE_AST_ENGINE',
       canonicalFormat: 'SARIF_2_1_0',
-      status: 'OPERATIONAL',
-      binaryDetected: sastExternalDetected,
-      configured: true,
-      signatureHash: computeSha256(`winhood-ast-taint-4.1.0:ext=${sastExternalDetected}`),
       description: sastExternalDetected
         ? 'Binário CLI externo detectado no host e integrado ao pipeline AST nativo WinHood.'
         : 'Motor AST Compiler nativo WinHood (TypeScript/Python/Java/SQL) operacional; CLI externo semgrep/opengrep não instalado no container.',
@@ -314,6 +338,7 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
         externalVersion: sastExternalVersion,
         configurationValid: true,
         connectionState: 'NOT_APPLICABLE',
+        signatureSeed: `winhood-ast-taint-4.1.0:ext=${sastExternalDetected}`,
       }),
     },
     {
@@ -325,10 +350,6 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
       analysisType: 'Secret Scanning & Redaction (Chaves, Tokens, Senhas Fixas)',
       executionMethod: probeGitleaks.detected ? 'CLI_BINARY' : 'NATIVE_AST_ENGINE',
       canonicalFormat: 'SARIF_2_1_0',
-      status: 'OPERATIONAL',
-      binaryDetected: probeGitleaks.detected,
-      configured: true,
-      signatureHash: computeSha256(`winhood-secret-scanner-4.1.0:ext=${probeGitleaks.detected}`),
       description: probeGitleaks.detected
         ? 'Binário Gitleaks CLI detectado no host com mascaramento automático de evidências.'
         : 'Detector nativo WinHood por AST e entropia ativo; binário gitleaks CLI não instalado neste host.',
@@ -340,6 +361,7 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
         externalVersion: probeGitleaks.versionOutput || null,
         configurationValid: true,
         connectionState: 'NOT_APPLICABLE',
+        signatureSeed: `winhood-secret-scanner-4.1.0:ext=${probeGitleaks.detected}`,
       }),
     },
     {
@@ -351,10 +373,6 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
       analysisType: 'Bugs, Code Smells, Complexidade Ciclomática/Cognitiva, Duplicação',
       executionMethod: probeSonarScanner.detected ? 'CLI_BINARY' : 'NATIVE_AST_ENGINE',
       canonicalFormat: 'SARIF_2_1_0',
-      status: 'OPERATIONAL',
-      binaryDetected: probeSonarScanner.detected,
-      configured: true,
-      signatureHash: computeSha256(`winhood-sonar-mqr-3.0.0:ext=${probeSonarScanner.detected}`),
       description: probeSonarScanner.detected
         ? 'SonarScanner CLI detectado no host para submissão real à instância MqrBridge conectada.'
         : 'Cálculo estático nativo MQR ativo; conecte instância MqrBridge Server/Cloud ou instale sonar-scanner para métricas remotas nativas.',
@@ -366,6 +384,7 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
         externalVersion: probeSonarScanner.versionOutput || null,
         configurationValid: true,
         connectionState: 'NOT_APPLICABLE',
+        signatureSeed: `winhood-sonar-mqr-3.0.0:ext=${probeSonarScanner.detected}`,
       }),
     },
     {
@@ -374,14 +393,10 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
       vendor: 'WinHood SCA / OSV / Anchore',
       version: scaExternalVersion || '4.1.0-native-sbom',
       category: 'SECURITY_DEVSECOPS',
-      analysisType: 'SCA & SBOM CycloneDX 1.5 / SPDX 2.3 (CVE, GHSA, EPSS, CISA KEV)',
+      analysisType: 'SCA & SBOM CycloneDX 1.5/1.7 & SPDX 2.3/3.0 (CVE, GHSA, EPSS, CISA KEV)',
       executionMethod: scaExternalDetected ? 'CLI_BINARY' : 'NATIVE_AST_ENGINE',
       canonicalFormat: 'CYCLONEDX_1_5',
-      status: 'OPERATIONAL',
-      binaryDetected: scaExternalDetected,
-      configured: true,
-      signatureHash: computeSha256(`winhood-sbom-sca-4.1.0:ext=${scaExternalDetected}`),
-      description: 'Gerador real CycloneDX 1.5 e SPDX 2.3 a partir de lockfiles/manifestos + correlação OSV/NVD/EPSS/CISA KEV.',
+      description: 'Gerador real CycloneDX 1.5/1.7 e SPDX 2.3/3.0 a partir de lockfiles/manifestos + correlação OSV/NVD/EPSS/CISA KEV.',
       supportedLanguages: ['JSON', 'TypeScript', 'JavaScript', 'Python', 'Go', 'Rust', 'Java'],
       ...resolveAdapterTelemetry('syft-grype-sca', {
         integrationType: scaExternalDetected ? 'LOCAL_CLI' : 'NATIVE',
@@ -390,6 +405,7 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
         externalVersion: scaExternalVersion,
         configurationValid: true,
         connectionState: 'NOT_APPLICABLE',
+        signatureSeed: `winhood-sbom-sca-4.1.0:ext=${scaExternalDetected}`,
       }),
     },
     {
@@ -401,10 +417,6 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
       analysisType: 'Acoplamento Ca/Ce, Instabilidade, Ciclos e Violações de Camada',
       executionMethod: 'NATIVE_AST_ENGINE',
       canonicalFormat: 'ARCH_GRAPH_JSON',
-      status: 'OPERATIONAL',
-      binaryDetected: false,
-      configured: true,
-      signatureHash: computeSha256('winhood-arch-graph-4.1.0'),
       description: 'Mapeamento estrutural real de importações, detecção de ciclos e auditoria de camadas (Motor Nativo WinHood).',
       supportedLanguages: ['TypeScript', 'JavaScript', 'Python'],
       ...resolveAdapterTelemetry('archunit-cruiser', {
@@ -414,6 +426,7 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
         externalVersion: null,
         configurationValid: true,
         connectionState: 'NOT_APPLICABLE',
+        signatureSeed: 'winhood-arch-graph-4.1.0',
       }),
     },
     {
@@ -425,10 +438,6 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
       analysisType: 'Auditoria de Schemas, Índices, Projeções SELECT * e Criptografia de Colunas',
       executionMethod: 'NATIVE_AST_ENGINE',
       canonicalFormat: 'SARIF_2_1_0',
-      status: 'OPERATIONAL',
-      binaryDetected: false,
-      configured: true,
-      signatureHash: computeSha256('winhood-sql-auditor-4.1.0'),
       description: 'Parser estrutural DDL/DML SQL, índices de chaves estrangeiras e proteção de colunas sensíveis (Motor Nativo WinHood).',
       supportedLanguages: ['SQL'],
       ...resolveAdapterTelemetry('sqlfluff-db', {
@@ -438,30 +447,28 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
         externalVersion: null,
         configurationValid: true,
         connectionState: 'NOT_APPLICABLE',
+        signatureSeed: 'winhood-sql-auditor-4.1.0',
       }),
     },
     {
       id: 'junit-functional',
       name: 'WinHood Controlled Test & Coverage Parser (LCOV/JaCoCo/Cobertura)',
       vendor: 'WinHood QA Execution',
-      version: probeNode.versionOutput || '4.1.0',
+      version: probeNode.versionOutput || 'not-installed',
       category: 'QA_FUNCTIONAL',
       analysisType: 'Execução Isolada de Testes & Leitura Real de Relatórios de Cobertura',
       executionMethod: 'SANDBOX_WORKER',
       canonicalFormat: 'JUNIT_XML',
-      status: probeNode.detected ? 'OPERATIONAL' : 'FERRAMENTA NÃO INSTALADA',
-      binaryDetected: probeNode.detected,
-      configured: probeNode.detected,
-      signatureHash: computeSha256('winhood-test-cov-4.1.0'),
       description: 'Executa suítes reais em sandbox temporário e analisa LCOV/JaCoCo/Cobertura/Istanbul sem fabricar cobertura.',
       supportedLanguages: ['TypeScript', 'JavaScript', 'Python', 'Java'],
       ...resolveAdapterTelemetry('junit-functional', {
         integrationType: 'LOCAL_CLI',
-        nativeAvailable: true,
+        nativeAvailable: false,
         externalBinaryDetected: probeNode.detected,
         externalVersion: probeNode.versionOutput || null,
         configurationValid: probeNode.detected,
         connectionState: 'NOT_APPLICABLE',
+        signatureSeed: probeNode.detected ? `winhood-test-cov-4.1.0:${probeNode.versionOutput}` : null,
       }),
     },
     {
@@ -473,10 +480,6 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
       analysisType: 'Latência P50/P95/P99, Throughput RPS, Memória RSS e CPU reais',
       executionMethod: probeK6.detected ? 'CLI_BINARY' : 'SANDBOX_WORKER',
       canonicalFormat: 'OTLP_METRICS',
-      status: 'OPERATIONAL',
-      binaryDetected: probeK6.detected,
-      configured: true,
-      signatureHash: computeSha256(`winhood-http-perf-4.1.0:k6=${probeK6.detected}`),
       description: probeK6.detected
         ? 'Binário k6 detectado no host para testes de carga.'
         : 'Profiler HTTP controlado ativo via /api/execution/run-perf; binário externo k6 não instalado neste host (análise estática não fabrica P95/RPS).',
@@ -488,32 +491,30 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
         externalVersion: probeK6.versionOutput || null,
         configurationValid: true,
         connectionState: 'NOT_APPLICABLE',
+        signatureSeed: `winhood-http-perf-4.1.0:k6=${probeK6.detected}`,
       }),
     },
     {
       id: 'win-sandbox-snapshot',
       name: 'Windows Sandbox & Sysinternals Snapshot Differ (T0/T1/T2)',
       vendor: 'Microsoft Sysinternals / WinHood OS',
-      version: '2026.11',
+      version: isWin ? '2026.11' : 'host-unavailable',
       category: 'OS_INSTALL',
       analysisType: 'Snapshots T0 (Base), T1 (Pós-Instalação), T2 (Pós-Desinstalação) & Resíduos',
       executionMethod: 'SANDBOX_WORKER',
       canonicalFormat: 'SNAPSHOT_DIFF',
-      status: isWin ? 'OPERATIONAL' : 'FERRAMENTA NÃO INSTALADA',
-      binaryDetected: isWin,
-      configured: isWin,
-      signatureHash: computeSha256('win-sandbox-snapshot-host-gated'),
       description: isWin
         ? 'Host Windows detectado para inspeção de instalação/registro.'
-        : 'Sandbox Windows indisponível em host Linux; executa apenas inspeção estática de manifesto (STATIC_MANIFEST_INSPECTION).',
+        : 'Sandbox Windows indisponível em host Linux; não executa inspeção dinâmica OS neste ambiente.',
       supportedLanguages: ['Windows', 'Manifests'],
       ...resolveAdapterTelemetry('win-sandbox-snapshot', {
         integrationType: 'LOCAL_CLI',
-        nativeAvailable: true,
+        nativeAvailable: false,
         externalBinaryDetected: isWin,
         externalVersion: isWin ? '2026.11' : null,
         configurationValid: isWin,
         connectionState: 'NOT_APPLICABLE',
+        signatureSeed: isWin ? 'win-sandbox-snapshot-win32' : null,
       }),
     },
     {
@@ -525,10 +526,6 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
       analysisType: 'DAST (Dynamic Application Security Testing sob autorização formal)',
       executionMethod: 'EXTERNAL_API',
       canonicalFormat: 'SARIF_2_1_0',
-      status: zapConfigured ? 'INTEGRAÇÃO CONFIGURADA' : 'INTEGRAÇÃO NÃO CONFIGURADA',
-      binaryDetected: false,
-      configured: zapConfigured,
-      signatureHash: zapConfigured ? computeSha256('owasp-zap-2.15.0') : null,
       description: 'Requer endpoint externo OWASP_ZAP_API_URL e autorização formal do proprietário do ambiente.',
       supportedLanguages: ['Web', 'API'],
       ...resolveAdapterTelemetry('owasp-zap-dast', {
@@ -538,6 +535,7 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
         externalVersion: null,
         configurationValid: zapConfigured,
         connectionState: 'NOT_CONNECTED',
+        signatureSeed: zapConfigured ? 'owasp-zap-2.15.0' : null,
       }),
     },
     {
@@ -549,10 +547,6 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
       analysisType: 'Container Image & IaC Security Scanner',
       executionMethod: 'CLI_BINARY',
       canonicalFormat: 'SARIF_2_1_0',
-      status: probeTrivy.detected ? 'OPERATIONAL' : 'FERRAMENTA NÃO INSTALADA',
-      binaryDetected: probeTrivy.detected,
-      configured: probeTrivy.detected,
-      signatureHash: probeTrivy.detected ? computeSha256(`trivy-cli-${probeTrivy.versionOutput}`) : null,
       description: probeTrivy.detected
         ? `Binário trivy detectado em ${probeTrivy.executablePath}.`
         : 'Binário nativo trivy ausente no container atual; análise SCA coberta pelo SbomGenerator/ScaCorrelator nativo.',
@@ -564,6 +558,7 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
         externalVersion: probeTrivy.versionOutput || null,
         configurationValid: probeTrivy.detected,
         connectionState: 'NOT_APPLICABLE',
+        signatureSeed: probeTrivy.detected ? `trivy-cli-${probeTrivy.versionOutput}` : null,
       }),
     },
   ];
@@ -1146,21 +1141,71 @@ export function executeBenchmarkRunOrchestration(params: {
     criteriaOutcomesBySoftware,
   });
 
+  const catalogSnapshot = RuleRegistry.getCatalogSnapshot();
+  const rulePackVersions: Record<string, string> = {};
+  for (const pack of catalogSnapshot.packs) {
+    rulePackVersions[pack.packId] = pack.version;
+  }
+
+  const configHashSha256 = sha256Canonical({
+    profileId: params.profileId || 'custom-profile',
+    enabledCategories,
+    notApplicableCategories,
+    qualityGateId: params.qualityGateId || 'qg-sonar-way',
+    enablePenaltyCaps: params.enablePenaltyCaps,
+    equivalenceEnvironment: params.equivalenceEnvironment,
+  });
+  const weightsHashSha256 = sha256Canonical(normalizedWeights);
+  const comparabilityManifests: Record<string, import('../types/benchmark').ComparabilityManifest> = {};
+  for (const sw of params.softwares) {
+    const veracity = veracityResults.find((v) => v.softwareId === sw.id);
+    const eligibleFiles = Object.keys(sw.sourceFilesContent || {}).sort();
+    comparabilityManifests[sw.id] = buildComparabilityManifest({
+      projectId: params.projectId,
+      sourceRepository: sw.repositoryUrl || sw.officialUrl || `local://${sw.id}`,
+      commitSha: sw.commitHash || sw.packageSha256 || 'unverified-snapshot',
+      workingTreeClean: Boolean(sw.commitHash),
+      configHashSha256,
+      analyticalProfile: params.profileName || params.profileId || 'custom-profile',
+      engineVersion: ALGORITHM_VERSION,
+      ruleCatalogSha256: catalogSnapshot.catalogSha256,
+      weightsHashSha256,
+      analyticalDepth: eligibleFiles.length > 0 ? 'FULL_AST_AND_TAINT' : 'METADATA_ONLY',
+      eligibleFilesScopeHash: sha256Canonical(eligibleFiles),
+      executedAt: startedAt,
+      evidenceIntegrityVerified: Boolean(
+        veracity &&
+          (veracity.overallClassification === 'SUCCESS_VALIDATED' ||
+            veracity.overallClassification === 'SUCCESS_WITH_WARNINGS' ||
+            veracity.overallClassification === 'PARTIAL') &&
+          veracity.checks.eligibleForScoring
+      ),
+    });
+  }
+  comparabilityReport.comparabilityManifests = comparabilityManifests;
+
   const mode = params.assessmentMode || (params.softwares.length === 1 ? 'INDIVIDUAL' : 'AB_COMPARE');
   const matcherMode = mode === 'INDIVIDUAL' ? 'INDIVIDUAL' : 'AB_SOFTWARE';
   const benchmarkMatchDecision = BenchmarkMatcher.evaluate({
     mode: matcherMode,
     softwares: params.softwares,
     profile: {
+      id: params.profileId || 'custom-profile',
+      name: params.profileName,
       enabledCategories,
       notApplicableCategories,
+      weights: normalizedWeights,
       qualityProfileIds: specializedProfile ? [specializedProfile.id] : ['qp-sonar-way-ts'],
       qualityGateId: params.qualityGateId || 'qg-sonar-way',
     },
     scoreCards,
     algorithmVersion: ALGORITHM_VERSION,
     environmentEquivalent,
+    ruleCatalogSha256: catalogSnapshot.catalogSha256,
+    configHashSha256,
+    manifestsBySoftware: comparabilityManifests,
   });
+  comparabilityReport.comparabilityClassification = benchmarkMatchDecision.comparabilityClassification;
 
   let referenceSnapshotsUsed: import('../types/benchmark').ReferenceSnapshotRecord[] = [];
   try {
@@ -1177,12 +1222,6 @@ export function executeBenchmarkRunOrchestration(params: {
     toolExecutions,
     veracityResults,
   });
-
-  const catalogSnapshot = RuleRegistry.getCatalogSnapshot();
-  const rulePackVersions: Record<string, string> = {};
-  for (const pack of catalogSnapshot.packs) {
-    rulePackVersions[pack.packId] = pack.version;
-  }
 
   const artifactHashes: Record<string, string> = {};
   for (const [swId, sbom] of Object.entries(sbomsBySoftware)) {
@@ -1231,6 +1270,7 @@ export function executeBenchmarkRunOrchestration(params: {
       ? Boolean(topCandidate)
       : comparabilityReport.canDeclareOfficialWinner &&
         benchmarkMatchDecision.canDeclareOfficialWinner &&
+        benchmarkMatchDecision.comparabilityClassification !== 'NOT_COMPARABLE' &&
         Boolean(topCandidate);
 
   const winner = canHaveWinner ? topCandidate : null;

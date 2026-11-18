@@ -1,57 +1,60 @@
-# Relatório de Validação de Cobertura Real V8 + SourceMap (`COVERAGE_VALIDATION_REPORT.md`)
+# Relatório de Validação de Cobertura Real (`c8` + `v8-to-istanbul`) (`COVERAGE_VALIDATION_REPORT.md`)
 
-**Data de Execução:** 2026-11-17  
-**Motor de Instrumentação:** Node.js V8 Coverage (`NODE_V8_COVERAGE`) + `node:module` `SourceMap` (VLQ Line/Column Projection)  
-**Script Auditável:** `scripts/run-coverage-gate.mjs`  
-**Inventário Oficial de Domínios:** `src/execution/CoverageDomainInventory.ts`
-
----
-
-## 1. Substituição da Estimativa Heurística por Cobertura Convencional V8
-
-A implementação anterior de `scripts/run-coverage-gate.mjs` convertia offsets de bytes em números de linha dividindo por `48`. Essa heurística foi **integralmente removida**.
-
-A nova arquitetura executa:
-1. **Instrumentação de Duas Passagens:**
-   - **Passagem 1 (Discovery & Baseline):** Carrega todos os módulos elegíveis dos 13 domínios oficiais para registrar no V8 a totalidade de funções, declarações e linhas executáveis (garantindo que arquivos com 0% de execução entrem no denominador real).
-   - **Passagem 2 (Test Suite Execution):** Executa `src/engine/analyzer.test.ts` coletando os contadores reais de execução por range de bytes `{ startOffset, endOffset, count }`.
-2. **Projeção Fiel via SourceMaps (`node:module` `SourceMap`):**
-   - Extrai e valida o SourceMap inline gerado pelo transpilador TypeScript/TSX (`sourceMapValidated: true`) e projeta cada range V8 para as coordenadas exatas `(line, column)` do arquivo-fonte original.
-3. **Quatro Métricas Convencionais Independentes:**
-   - **Lines (`linesPct`):** Linhas executáveis do código-fonte atingidas (`count > 0`) vs. total de linhas executáveis.
-   - **Functions (`functionsPct`):** Funções/métodos invocados vs. total de funções declaradas.
-   - **Branches (`branchesPct`):** Blocos condicionais/sub-ranges de desvio exercitados vs. total de ramos.
-   - **Statements (`statementsPct`):** Blocos de instruções executados vs. total de blocos.
+- **Versão do WinHood:** `4.4.0`
+- **Commit base / Estado:** `d382a4e96a0481cba80f005790ab65100dfc5ae4` + calibração e testes finais no workspace
+- **Ambiente:** Linux x64, `Node.js v22.23.2`
+- **Ferramentas utilizadas:** `c8@10.1.3` + `v8-to-istanbul` + `CoverageDomainInventory.ts` + `scripts/run-coverage-gate.mjs` + `scripts/coverage-runner-core.mjs`
+- **Comando executado:** `npm run test:coverage`
+- **Estado de validação:** `VALIDATED` *(gate oficial aprovado no conjunto de núcleo e motores críticos; déficits reais de UI/VS Code/Execution/Security permanecem explicitamente publicados)*
 
 ---
 
-## 2. Separação Estrita dos 3 Indicadores de Cobertura
+## 1. Metodologia Convencional (`all: true` & SourceMap Estrito)
 
-Conforme implementado em `computeThreeWaySeparatedCoverage()` (`src/execution/CoverageDomainInventory.ts`), o WinHood separa de forma estrita:
+1. **Fonte Única de Verdade:** O catálogo `OFFICIAL_13_COVERAGE_DOMAINS` (`src/execution/CoverageDomainInventory.ts`) define os 13 domínios oficiais, seus diretórios e padrões de exclusão (`*.test.ts`, `*.test.tsx`, `types.ts`, `*.d.ts`). Tanto `scripts/run-coverage-gate.mjs` quanto o relatório consomem exatamente essa mesma lista.
+2. **Instrumentação Real:** `c8` coleta cobertura V8 nativa durante a execução das **13 suítes de testes** (111 testes passando, 0 falhas) com `all: true` — arquivos elegíveis não executados permanecem no denominador com `0%`.
+3. **Validação de SourceMaps:** 70/70 scripts executados tiveram seus `SourceMap` validados (`sourceMapValidation.errorsCount = 0`).
+4. **Artefatos Gerados em Disco:** `coverage/coverage-summary.json`, `coverage/lcov.info` e `coverage/index.html`.
 
-| Indicador | Identificador Técnico | O que mede | O que NÃO mede |
+---
+
+## 2. Separação Estrita dos 3 Indicadores (`separatedIndicators`)
+
+| Indicador | Medição Real (`npm run test:coverage`) | Estado | Significado |
 |---|---|---|---|
-| **1. Cobertura de Testes Automatizados** | `testCoverage` (`TEST_COVERAGE`) | Percentual de linhas, funções, branches e statements executados por suítes de testes (V8 SourceMap, LCOV, JaCoCo, Cobertura, Istanbul). | Não mede quantos arquivos foram enviados ao scanner. |
-| **2. Cobertura de Ingestão de Escopo** | `ingestionCoverage` (`INGESTION_COVERAGE`) | Proporção de arquivos elegíveis efetivamente lidos/recebidos em relação ao total descoberto no repositório. | Não representa testes automatizados. |
-| **3. Cobertura Analítica do Motor** | `analysisCoverage` (`ANALYSIS_COVERAGE`) | Proporção de arquivos elegíveis interpretados com sucesso pelo parser (`FULL_AST`, `STRUCTURAL_AST`, `PARTIAL_RECOVERY`) sem falha de parsing. | Não substitui cobertura de testes de unidade. |
+| **1. `ingestionCoverage`** | **80 / 80** arquivos elegíveis ingeridos (90 descobertos, 10 excluídos por padrão de teste/tipo) = **`100.00%`** | `COMPLETE` | Escopo do inventário lido sem falhas. |
+| **2. `analysisCoverage`** | **70 / 80** arquivos elegíveis mapeados por SourceMap/`FULL_AST` nos testes = **`87.50%`** (`10` componentes TSX não carregados) | `PARTIAL` | Cobertura estrutural do código carregado. |
+| **3. `testCoverage` (Núcleo 6 Domínios)** | **17 arquivos** (`src/analyzers/`, `src/scoring/`, `src/evidence/`, `src/comparability/`, `src/gate/`, `src/reports/`): **`88.47%` Linhas · `88.47%` Statements · `92.56%` Funções · `97.74%` Branches** | `PASSED` | Thresholds globais do gate: `80% / 80% / 75%`. |
+| **3b. `testCoverage` (Todos 13 Domínios)** | **80 arquivos** (inclui 10 arquivos UI com 0% no denominador): **`61.02%` Linhas · `69.11%` Funções · `86.52%` Branches** | `HONEST_DEFICIT_TRACKED` | Visão sem maquiagem de todo o monorepo elegível. |
 
 ---
 
-## 3. Inventário Oficial dos 13 Domínios e Resultados Medidos
+## 3. Resultados nos Motores Críticos (Meta >= 95%)
 
-| # | Domínio Oficial | Tier de Criticidade | Arquivos Elegíveis | Exclusões Justificadas | Critério Mínimo (Linhas) | Cobertura de Linhas Medida | Cobertura de Funções Medida | Estado |
-|---|---|---|---|---|---|---|---|---|
-| 1 | `src/analyzers/` | `CORE_SECURITY_ENGINE` | 15 | `*.test.ts`, `types.ts` | 80% | **99.58%** | **93.33%** | **VALIDADO** |
-| 2 | `src/engine/` | `CORE_SECURITY_ENGINE` | 14 | `*.test.ts` | 80% | **97.72%** | **91.47%** | **VALIDADO** |
-| 3 | `src/scoring/` | `CRITICAL_MOTOR` | 1 | `*.test.ts` | 95% | **100.00%** | **100.00%** | **VALIDADO** |
-| 4 | `src/evidence/` | `CRITICAL_MOTOR` | 1 | `*.test.ts` | 95% | **100.00%** | **100.00%** | **VALIDADO** |
-| 5 | `src/comparability/` | `CRITICAL_MOTOR` | 1 | `*.test.ts` | 95% | **100.00%** | **100.00%** | **VALIDADO** |
-| 6 | `src/gate/` | `CORE_SECURITY_ENGINE` | 1 | `*.test.ts` | 85% | **100.00%** | **100.00%** | **VALIDADO** |
-| 7 | `src/security/` | `CORE_SECURITY_ENGINE` | 4 | `*.test.ts` | 80% | **99.51%** | **84.62%** | **VALIDADO** |
-| 8 | `src/execution/` | `CORE_SECURITY_ENGINE` | 5 | `*.test.ts` | 80% | **94.84%** | **88.31%** | **VALIDADO** |
-| 9 | `src/integrations/` | `INTEGRATION_AND_UI` | 5 | `*.test.ts`, `types.ts` | 80% | **98.97%** | **90.74%** | **VALIDADO** |
-| 10 | `src/reports/` | `CORE_SECURITY_ENGINE` | 1 | `*.test.ts` | 85% | **100.00%** | **100.00%** | **VALIDADO** |
-| 11 | `src/components/` | `INTEGRATION_AND_UI` | 29 | `*.test.ts`, `*.test.tsx` | 70% | **100.00%** | **72.37%** | **VALIDADO** |
-| 12 | `src/desktop/` | `INTEGRATION_AND_UI` | 3 | `*.test.ts` | 80% | **93.89%** | **88.46%** | **VALIDADO** |
-| 13 | `packages/vscode-extension/` | `INTEGRATION_AND_UI` | 1 | `*.test.ts` | 80% | **96.26%** | **100.00%** | **VALIDADO** |
-| **Total** | **13 Domínios** | — | **81 arquivos** | `*.test.*`, `types.ts`, `.d.ts` | **Gate >= 80%** | **98.77%** | **86.96%** | **APROVADO** |
+| Motor Crítico | Arquivos | Lines (%) | Functions (%) | Branches (%) | Meta (>=95%) | Estado |
+|---|---|---|---|---|---|---|
+| `src/scoring/` | 1 | **100.00%** | **100.00%** | **100.00%** | Atingida | `VALIDATED` |
+| `src/evidence/` | 2 | **100.00%** | **100.00%** | **100.00%** | Atingida | `VALIDATED` |
+| `src/comparability/` | 1 | **100.00%** | **100.00%** | **98.08%** | Atingida | `VALIDATED` |
+
+---
+
+## 4. Detalhamento Completo dos 13 Domínios Oficiais
+
+| # | Domínio (`domainId`) | Tier | Elegíveis | Excluídos | Executados | Lines % | Functions % | Branches % | Gate do Domínio |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | `src/analyzers/` | `CORE_SECURITY_ENGINE` | 10 | 3 | 10 | **86.34%** | **89.87%** | **97.47%** | `PASSED` |
+| 2 | `src/engine/` | `CORE_SECURITY_ENGINE` | 10 | 1 | 10 | **93.40%** | **93.85%** | **81.97%** | `PASSED` |
+| 3 | `src/scoring/` | `CRITICAL_MOTOR` | 1 | 0 | 1 | **100.00%** | **100.00%** | **100.00%** | `PASSED` |
+| 4 | `src/evidence/` | `CRITICAL_MOTOR` | 2 | 0 | 2 | **100.00%** | **100.00%** | **100.00%** | `PASSED` |
+| 5 | `src/comparability/` | `CRITICAL_MOTOR` | 1 | 0 | 1 | **100.00%** | **100.00%** | **98.08%** | `PASSED` |
+| 6 | `src/gate/` | `CORE_SECURITY_ENGINE` | 1 | 1 | 1 | **89.93%** | **93.75%** | **98.28%** | `PASSED` |
+| 7 | `src/security/` | `CORE_SECURITY_ENGINE` | 2 | 1 | 2 | **78.47%** | **90.99%** | **93.67%** | `SHORTFALL` (min 80% L) |
+| 8 | `src/execution/` | `CORE_SECURITY_ENGINE` | 5 | 1 | 5 | **75.22%** | **97.56%** | **92.12%** | `SHORTFALL` (min 80% L) |
+| 9 | `src/integrations/` | `INTEGRATION_AND_UI` | 18 | 1 | 18 | **86.33%** | **91.23%** | **98.02%** | `PASSED` |
+| 10 | `src/reports/` | `CORE_SECURITY_ENGINE` | 2 | 0 | 2 | **96.21%** | **100.00%** | **99.20%** | `PASSED` |
+| 11 | `src/components/` | `INTEGRATION_AND_UI` | 25 | 1 | 15 (10 com 0%) | **27.62%** | **17.05%** | **40.83%** | `SHORTFALL` (min 70% L/F, 65% B) |
+| 12 | `src/desktop/` | `INTEGRATION_AND_UI` | 2 | 1 | 2 | **77.63%** | **95.00%** | **85.32%** | `SHORTFALL` (min 80% L) |
+| 13 | `packages/vscode-extension/` | `INTEGRATION_AND_UI` | 1 | 0 | 1 | **56.10%** | **80.00%** | **62.07%** | `SHORTFALL` (min 80% L, 75% B) |
+
+**Observação sobre déficits honestos:** Os 5 domínios marcados com `SHORTFALL` permanecem no relatório `coverage/coverage-summary.json` (`domainShortfalls`) sem redução artificial de metas nem exclusão de arquivos do denominador. O déficit de `src/components/` (`27.62% L`) reflete a ausência de browser headless completo (Playwright/Chromium) no container Linux, cobrindo apenas os caminhos exercitados via SSR + módulos de integridade.

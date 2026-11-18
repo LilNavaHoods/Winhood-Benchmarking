@@ -353,29 +353,12 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
   const [runningHostBench, setRunningHostBench] = useState<boolean>(false);
   const [hostError, setHostError] = useState<string | null>(null);
 
-  // Frame pacing state
-  const [framePacing, setFramePacing] = useState<FramePacingResult>({
-    sampledFrames: 144,
-    durationMs: 2400,
-    estimatedHz: 60,
-    measuredFps: 60.0,
-    avgFrameTimeMs: 16.67,
-    fps1PercentLow: 57.4,
-    fps01PercentLow: 55.1,
-    jitterStdDevMs: 0.42,
-    droppedFramesCount: 0,
-    stabilityScore: 95,
-    frameSamplesMs: Array.from({ length: 60 }, (_, idx) => 16.5 + ((idx % 3) - 1) * 0.15),
-  });
+  // Frame pacing state (null until real requestAnimationFrame sampling completes)
+  const [framePacing, setFramePacing] = useState<FramePacingResult | null>(null);
   const [samplingHz, setSamplingHz] = useState<boolean>(false);
 
-  // Client GPU stress state
-  const [clientGpuStress, setClientGpuStress] = useState<ClientGpuStressResult>({
-    canvas2dFps: 60,
-    trigShaderOpsPerSec: 18500000,
-    gpuNormalizedScore: 88,
-    executedAt: new Date().toISOString(),
-  });
+  // Client GPU stress state (null until explicit user stress run)
+  const [clientGpuStress, setClientGpuStress] = useState<ClientGpuStressResult | null>(null);
   const [runningGpuStress, setRunningGpuStress] = useState<boolean>(false);
 
   // Interactive Monitor Lab state
@@ -743,48 +726,76 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
     return { ppi, dotPitchMm, retinaDistanceCm, clarityRating };
   }, [telemetry.physicalWidthPx, telemetry.physicalHeightPx, diagonalInches]);
 
-  // Consolidated Hardware & Display Score (0-100)
+  // Consolidated Hardware & Display Score (0-100 across measured dimensions only)
   const consolidatedIndex = useMemo(() => {
-    const cpuScore = hostResult?.cpuBenchmark.singleCoreScore ?? 82;
+    const cpuScore = hostResult ? hostResult.cpuBenchmark.singleCoreScore : null;
     const memStorageScore = hostResult
       ? Math.round(
           hostResult.memoryBenchmark.memoryScore * 0.5 +
             hostResult.storageBenchmark.storageScore * 0.5
         )
-      : 80;
-    const gpuScore = clientGpuStress.gpuNormalizedScore;
-    const displayQualityScore = Math.min(
-      100,
-      Math.round(
-        framePacing.stabilityScore * 0.55 +
-          Math.min(25, (ppiMetrics.ppi / 160) * 25) +
-          (telemetry.colorGamut !== 'sRGB' ? 12 : 6) +
-          (framePacing.estimatedHz >= 120 ? 8 : 4)
-      )
-    );
+      : null;
+    const gpuScore = clientGpuStress ? clientGpuStress.gpuNormalizedScore : null;
+    const displayQualityScore = framePacing
+      ? Math.min(
+          100,
+          Math.round(
+            framePacing.stabilityScore * 0.55 +
+              Math.min(25, (ppiMetrics.ppi / 160) * 25) +
+              (telemetry.colorGamut !== 'sRGB' ? 12 : 6) +
+              (framePacing.estimatedHz >= 120 ? 8 : 4)
+          )
+        )
+      : null;
 
-    const totalScore = Math.round(
-      cpuScore * 0.32 + memStorageScore * 0.23 + gpuScore * 0.22 + displayQualityScore * 0.23
-    );
+    const weightedParts: Array<{ score: number; weight: number }> = [];
+    if (cpuScore !== null) weightedParts.push({ score: cpuScore, weight: 0.32 });
+    if (memStorageScore !== null) weightedParts.push({ score: memStorageScore, weight: 0.23 });
+    if (gpuScore !== null) weightedParts.push({ score: gpuScore, weight: 0.22 });
+    if (displayQualityScore !== null) weightedParts.push({ score: displayQualityScore, weight: 0.23 });
 
-    const tier: 'S' | 'A' | 'B' | 'C' =
-      totalScore >= 85 ? 'S' : totalScore >= 72 ? 'A' : totalScore >= 55 ? 'B' : 'C';
+    const weightSum = weightedParts.reduce((acc, p) => acc + p.weight, 0);
+    const totalScore =
+      weightSum > 0
+        ? Math.round(weightedParts.reduce((acc, p) => acc + p.score * p.weight, 0) / weightSum)
+        : null;
+
+    const tier: 'S' | 'A' | 'B' | 'C' | 'NOT_MEASURED' =
+      totalScore === null
+        ? 'NOT_MEASURED'
+        : totalScore >= 85
+          ? 'S'
+          : totalScore >= 72
+            ? 'A'
+            : totalScore >= 55
+              ? 'B'
+              : 'C';
 
     const suitability = [
       {
         profile: 'Compilação Pesada & Análise SAST/MqrBridge Docker',
-        status: cpuScore >= 70 && memStorageScore >= 65 ? 'Ótimo' : 'Moderado',
-        ready: cpuScore >= 70 && memStorageScore >= 65,
+        status:
+          cpuScore === null || memStorageScore === null
+            ? 'NOT_MEASURED'
+            : cpuScore >= 70 && memStorageScore >= 65
+              ? 'Ótimo'
+              : 'Moderado',
+        ready: cpuScore !== null && memStorageScore !== null && cpuScore >= 70 && memStorageScore >= 65,
       },
       {
         profile: 'Renderização Gráfica WebGL / Shaders & Telemetria Denso-Visual',
-        status: gpuScore >= 70 ? 'Excelente' : 'Adequado',
-        ready: gpuScore >= 65,
+        status: gpuScore === null ? 'NOT_MEASURED' : gpuScore >= 70 ? 'Excelente' : 'Adequado',
+        ready: gpuScore !== null && gpuScore >= 65,
       },
       {
         profile: 'Inspeção Visual de Precisão, Calibração de Cor & Motion Clarity',
-        status: displayQualityScore >= 75 ? 'Grau Referência' : 'Padrão SDR',
-        ready: displayQualityScore >= 65,
+        status:
+          displayQualityScore === null
+            ? 'NOT_MEASURED'
+            : displayQualityScore >= 75
+              ? 'Grau Referência'
+              : 'Padrão SDR',
+        ready: displayQualityScore !== null && displayQualityScore >= 65,
       },
     ];
 
@@ -796,6 +807,7 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
       totalScore,
       tier,
       suitability,
+      measuredDimensionsCount: weightedParts.length,
     };
   }, [hostResult, clientGpuStress, framePacing, ppiMetrics.ppi, telemetry.colorGamut]);
 
@@ -812,14 +824,16 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
             consolidatedIndex,
             telemetry,
             ppiMetrics,
-            framePacing: {
-              estimatedHz: framePacing.estimatedHz,
-              measuredFps: framePacing.measuredFps,
-              jitterStdDevMs: framePacing.jitterStdDevMs,
-              stabilityScore: framePacing.stabilityScore,
-            },
+            framePacing: framePacing
+              ? {
+                  estimatedHz: framePacing.estimatedHz,
+                  measuredFps: framePacing.measuredFps,
+                  jitterStdDevMs: framePacing.jitterStdDevMs,
+                  stabilityScore: framePacing.stabilityScore,
+                }
+              : null,
             hostBenchmarkId: hostResult?.benchmarkId ?? null,
-            verificationHash: hostResult?.verificationSha256 ?? 'CLIENT-TELEMETRY-VERIFIED',
+            verificationHash: hostResult?.verificationSha256 ?? null,
           },
         }),
       });
@@ -848,29 +862,27 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
   }, [telemetry.colorGamut, telemetry.colorDepthBits, telemetry.hdrSupport]);
 
   const handleExportHardwareCertificate = (format: 'json' | 'md') => {
-    const verificationSha256 =
-      hostResult?.verificationSha256 ??
-      '9f86d081884c7d659a2feaa0c55ad0150031d6c4fe912b8310a7719c2a1b4e12';
+    const verificationSha256 = hostResult?.verificationSha256 ?? null;
     const timestamp = new Date().toISOString();
 
     if (format === 'json') {
       const payload = {
         certificateTitle: 'WinHood Hardware, GPU, IOPS & Optical Display Calibration Certificate',
         generatedAt: timestamp,
-        verificationSha256,
+        verificationSha256: verificationSha256 ?? 'NOT_MEASURED',
         consolidatedIndex,
         displayTelemetry: telemetry,
         opticalDensity: ppiMetrics,
-        framePacing,
-        clientGpuStress,
-        hostBenchmark: hostResult,
+        framePacing: framePacing ?? { status: 'NOT_MEASURED' },
+        clientGpuStress: clientGpuStress ?? { status: 'NOT_MEASURED' },
+        hostBenchmark: hostResult ?? { status: 'NOT_MEASURED' },
         referenceComparison: {
           preset: selectedReferencePreset,
           myDisplay: {
             ppi: ppiMetrics.ppi,
-            refreshRateHz: framePacing.estimatedHz,
-            frameTimeMs: framePacing.avgFrameTimeMs,
-            jitterStabilityScore: framePacing.stabilityScore,
+            refreshRateHz: framePacing?.estimatedHz ?? null,
+            frameTimeMs: framePacing?.avgFrameTimeMs ?? null,
+            jitterStabilityScore: framePacing?.stabilityScore ?? null,
             colorHdrScore: myColorHdrScore,
           },
         },
@@ -881,7 +893,7 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `winhood_hardware_display_certificate_${verificationSha256.slice(0, 10)}.json`;
+      a.download = `winhood_hardware_display_certificate_${(verificationSha256 ?? 'unmeasured').slice(0, 10)}.json`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -892,13 +904,13 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
     const mdLines = [
       `# CERTIFICADO TÉCNICO DE HARDWARE, GPU, IOPS & CALIBRAÇÃO DE MONITOR`,
       `- **Gerado em:** \`${timestamp}\``,
-      `- **Hash de Verificação SHA-256:** \`${verificationSha256}\``,
-      `- **Índice Consolidado da Estação:** **${consolidatedIndex.totalScore} / 100** (Tier **${consolidatedIndex.tier}**)`,
+      `- **Hash de Verificação SHA-256:** \`${verificationSha256 ?? 'NOT_MEASURED'}\``,
+      `- **Índice Consolidado da Estação:** **${consolidatedIndex.totalScore !== null ? `${consolidatedIndex.totalScore} / 100` : 'NOT_MEASURED'}** (Tier **${consolidatedIndex.tier}**)`,
       '',
       `## 1. Telemetria Óptica do Monitor & GPU`,
       `- **Resolução Nativa Estimada:** ${telemetry.physicalWidthPx}×${telemetry.physicalHeightPx} px (${telemetry.aspectRatioLabel}, DPR ${telemetry.devicePixelRatio}x)`,
       `- **Densidade Óptica (${diagonalInches}"):** ${ppiMetrics.ppi} PPI | Dot Pitch: ${ppiMetrics.dotPitchMm} mm (${ppiMetrics.clarityRating})`,
-      `- **Taxa de Atualização & Cadência:** ${framePacing.estimatedHz} Hz (${framePacing.avgFrameTimeMs} ms) | 1% Low: ${framePacing.fps1PercentLow} FPS | Jitter: ±${framePacing.jitterStdDevMs} ms | Estabilidade: ${framePacing.stabilityScore}/100`,
+      `- **Taxa de Atualização & Cadência:** ${framePacing ? `${framePacing.estimatedHz} Hz (${framePacing.avgFrameTimeMs} ms) | 1% Low: ${framePacing.fps1PercentLow} FPS | Jitter: ±${framePacing.jitterStdDevMs} ms | Estabilidade: ${framePacing.stabilityScore}/100` : 'NOT_MEASURED'}`,
       `- **Espaço de Cor & HDR:** ${telemetry.colorGamut} (${telemetry.colorDepthBits}-bit) | ${telemetry.hdrSupport}`,
       `- **Renderizador GPU:** \`${telemetry.gpuRenderer}\` (${telemetry.webglVersion})`,
       '',
@@ -906,23 +918,23 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
       `| Métrica | Meu Display | Referência (${selectedReferencePreset.resolutionLabel}) |`,
       `| :--- | :--- | :--- |`,
       `| Densidade PPI | ${ppiMetrics.ppi} PPI | ${selectedReferencePreset.ppi} PPI |`,
-      `| Taxa de Atualização | ${framePacing.estimatedHz} Hz | ${selectedReferencePreset.refreshRateHz} Hz |`,
-      `| Frame Time | ${framePacing.avgFrameTimeMs} ms | ${selectedReferencePreset.frameTimeMs} ms |`,
-      `| Estabilidade de Jitter | ${framePacing.stabilityScore}/100 | ${selectedReferencePreset.jitterStabilityScore}/100 |`,
+      `| Taxa de Atualização | ${framePacing ? `${framePacing.estimatedHz} Hz` : 'NOT_MEASURED'} | ${selectedReferencePreset.refreshRateHz} Hz |`,
+      `| Frame Time | ${framePacing ? `${framePacing.avgFrameTimeMs} ms` : 'NOT_MEASURED'} | ${selectedReferencePreset.frameTimeMs} ms |`,
+      `| Estabilidade de Jitter | ${framePacing ? `${framePacing.stabilityScore}/100` : 'NOT_MEASURED'} | ${selectedReferencePreset.jitterStabilityScore}/100 |`,
       `| Cobertura de Cor / HDR | ${myColorHdrScore}/100 (${telemetry.colorGamut}) | ${selectedReferencePreset.colorHdrScore}/100 (${selectedReferencePreset.colorGamutLabel}) |`,
       '',
       `## 3. Micro-Benchmark Determinístico de Host (CPU, RAM & Storage IOPS)`,
-      `- **CPU SHA-256 Single-Core:** ${hostResult ? `${hostResult.cpuBenchmark.sha256OpsPerSec.toLocaleString()} ops/s` : '185,000 ops/s'}`,
-      `- **CPU Matrix Float64:** ${hostResult ? `${hostResult.cpuBenchmark.matrixFlopsMflops} MFLOPS` : '1420 MFLOPS'}`,
-      `- **Banda de Memória (Float64):** Leitura ${hostResult ? `${hostResult.memoryBenchmark.sequentialReadMbPerSec} MB/s` : '6120 MB/s'} | Escrita ${hostResult ? `${hostResult.memoryBenchmark.sequentialWriteMbPerSec} MB/s` : '4850 MB/s'}`,
-      `- **Storage IOPS 4K:** ${hostResult ? `${hostResult.storageBenchmark.random4kIops} IOPS` : '18400 IOPS'}`,
+      `- **CPU SHA-256 Single-Core:** ${hostResult ? `${hostResult.cpuBenchmark.sha256OpsPerSec.toLocaleString()} ops/s` : 'NOT_MEASURED'}`,
+      `- **CPU Matrix Float64:** ${hostResult ? `${hostResult.cpuBenchmark.matrixFlopsMflops} MFLOPS` : 'NOT_MEASURED'}`,
+      `- **Banda de Memória (Float64):** ${hostResult ? `Leitura ${hostResult.memoryBenchmark.sequentialReadMbPerSec} MB/s | Escrita ${hostResult.memoryBenchmark.sequentialWriteMbPerSec} MB/s` : 'NOT_MEASURED'}`,
+      `- **Storage IOPS 4K:** ${hostResult ? `${hostResult.storageBenchmark.random4kIops} IOPS` : 'NOT_MEASURED'}`,
     ].join('\n');
 
     const blob = new Blob([mdLines], { type: 'text/markdown;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `winhood_hardware_display_certificate_${verificationSha256.slice(0, 10)}.md`;
+    a.download = `winhood_hardware_display_certificate_${(verificationSha256 ?? 'unmeasured').slice(0, 10)}.md`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -950,7 +962,7 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
               </span>
               <span className="text-xs text-slate-400 font-mono tabular-nums">
                 {telemetry.physicalWidthPx}×{telemetry.physicalHeightPx}px ({telemetry.aspectRatioLabel}) •{' '}
-                {framePacing.estimatedHz}Hz • {telemetry.colorGamut}
+                {framePacing ? `${framePacing.estimatedHz}Hz` : 'Hz NOT_MEASURED'} • {telemetry.colorGamut}
               </span>
             </div>
             <h2 className="text-xl font-bold text-white mt-1.5 flex items-center gap-2">
@@ -1021,15 +1033,25 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
         <div className="bg-[#111722] border border-slate-800/80 rounded-xl p-5 flex flex-col justify-between">
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-slate-400">Índice Consolidado</span>
-            <span className="px-2 py-0.5 text-[11px] font-mono font-bold rounded bg-teal-500/15 text-teal-300 border border-teal-500/30">
-              Tier {consolidatedIndex.tier}
+            <span
+              className={`px-2 py-0.5 text-[11px] font-mono font-bold rounded border ${
+                consolidatedIndex.tier === 'NOT_MEASURED'
+                  ? 'bg-slate-800 text-slate-300 border-slate-700'
+                  : 'bg-teal-500/15 text-teal-300 border-teal-500/30'
+              }`}
+            >
+              {consolidatedIndex.tier === 'NOT_MEASURED'
+                ? 'NOT_MEASURED'
+                : `Tier ${consolidatedIndex.tier}`}
             </span>
           </div>
           <div className="mt-3 flex items-baseline gap-2">
             <span className="text-2xl font-bold text-white font-mono tabular-nums">
-              {consolidatedIndex.totalScore}
+              {consolidatedIndex.totalScore !== null ? consolidatedIndex.totalScore : 'N/A'}
             </span>
-            <span className="text-xs text-slate-400 font-mono">/ 100</span>
+            <span className="text-xs text-slate-400 font-mono">
+              {consolidatedIndex.totalScore !== null ? '/ 100' : 'Aguardando medição'}
+            </span>
           </div>
           <div className="mt-2 text-xs text-slate-400 flex items-center gap-1.5">
             <ShieldCheck className="w-3.5 h-3.5 text-teal-400 shrink-0" />
@@ -1055,18 +1077,28 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
         <div className="bg-[#111722] border border-slate-800/80 rounded-xl p-5 flex flex-col justify-between">
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-slate-400">Taxa de Atualização Real</span>
-            <Activity className="w-4 h-4 text-emerald-400" />
+            <Activity className={`w-4 h-4 ${framePacing ? 'text-emerald-400' : 'text-amber-400'}`} />
           </div>
           <div className="mt-3 flex items-baseline gap-2">
             <span className="text-2xl font-bold text-white font-mono tabular-nums">
-              {framePacing.estimatedHz} <span className="text-sm font-normal text-slate-300">Hz</span>
+              {framePacing ? (
+                <>
+                  {framePacing.estimatedHz} <span className="text-sm font-normal text-slate-300">Hz</span>
+                </>
+              ) : (
+                <span className="text-base text-amber-300">NOT_MEASURED</span>
+              )}
             </span>
-            <span className="text-xs text-emerald-400 font-mono tabular-nums">
-              ({framePacing.avgFrameTimeMs} ms)
-            </span>
+            {framePacing && (
+              <span className="text-xs text-emerald-400 font-mono tabular-nums">
+                ({framePacing.avgFrameTimeMs} ms)
+              </span>
+            )}
           </div>
           <div className="mt-2 text-xs text-slate-400 font-mono tabular-nums">
-            1% Low: {framePacing.fps1PercentLow} FPS • Jitter ±{framePacing.jitterStdDevMs}ms
+            {framePacing
+              ? `1% Low: ${framePacing.fps1PercentLow} FPS • Jitter ±${framePacing.jitterStdDevMs}ms`
+              : 'Execute Medir Hz & Jitter'}
           </div>
         </div>
 
@@ -1077,13 +1109,17 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
           </div>
           <div className="mt-3 flex items-baseline gap-2">
             <span className="text-2xl font-bold text-white font-mono tabular-nums">
-              {hostResult ? `${hostResult.cpuBenchmark.matrixFlopsMflops}` : '1420'}
+              {hostResult ? (
+                hostResult.cpuBenchmark.matrixFlopsMflops
+              ) : (
+                <span className="text-base text-amber-300">NOT_MEASURED</span>
+              )}
             </span>
-            <span className="text-xs text-slate-400 font-mono">MFLOPS</span>
+            {hostResult && <span className="text-xs text-slate-400 font-mono">MFLOPS</span>}
           </div>
           <div className="mt-2 text-xs text-slate-400 font-mono tabular-nums truncate">
             RAM Write:{' '}
-            {hostResult ? `${hostResult.memoryBenchmark.sequentialWriteMbPerSec} MB/s` : '4850 MB/s'}
+            {hostResult ? `${hostResult.memoryBenchmark.sequentialWriteMbPerSec} MB/s` : 'NOT_MEASURED'}
           </div>
         </div>
 
@@ -1094,12 +1130,17 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
           </div>
           <div className="mt-3 flex items-baseline gap-2">
             <span className="text-2xl font-bold text-white font-mono tabular-nums">
-              {hostResult ? `${hostResult.storageBenchmark.random4kIops}` : '18400'}
+              {hostResult ? (
+                hostResult.storageBenchmark.random4kIops
+              ) : (
+                <span className="text-base text-amber-300">NOT_MEASURED</span>
+              )}
             </span>
-            <span className="text-xs text-slate-400 font-mono">IOPS 4K</span>
+            {hostResult && <span className="text-xs text-slate-400 font-mono">IOPS 4K</span>}
           </div>
           <div className="mt-2 text-xs text-slate-400 font-mono tabular-nums truncate">
-            GPU Score: {clientGpuStress.gpuNormalizedScore}/100 ({telemetry.colorGamut})
+            GPU Score:{' '}
+            {clientGpuStress ? `${clientGpuStress.gpuNormalizedScore}/100` : 'NOT_MEASURED'} ({telemetry.colorGamut})
           </div>
         </div>
       </div>
@@ -1199,13 +1240,19 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
         <div className="xl:col-span-5 bg-[#111722] border border-slate-800/80 rounded-xl p-5 flex flex-col justify-between space-y-4">
           <div className="flex items-center justify-between border-b border-slate-800 pb-3">
             <div className="flex items-center gap-2">
-              <Gauge className="w-4 h-4 text-emerald-400" />
+              <Gauge className={`w-4 h-4 ${framePacing ? 'text-emerald-400' : 'text-amber-400'}`} />
               <h3 className="text-sm font-semibold text-white">
                 Cadência de Quadros (Frame Pacing) & Micro-Stutter
               </h3>
             </div>
-            <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 tabular-nums">
-              Estabilidade {framePacing.stabilityScore}/100
+            <span
+              className={`px-2 py-0.5 text-[11px] font-mono rounded border tabular-nums ${
+                framePacing
+                  ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                  : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+              }`}
+            >
+              {framePacing ? `Estabilidade ${framePacing.stabilityScore}/100` : 'NOT_MEASURED'}
             </span>
           </div>
 
@@ -1213,19 +1260,19 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
             <div className="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800">
               <div className="text-xs text-slate-400">FPS Médio</div>
               <div className="text-base font-bold text-white font-mono tabular-nums mt-0.5">
-                {framePacing.measuredFps}
+                {framePacing ? framePacing.measuredFps : 'NOT_MEASURED'}
               </div>
             </div>
             <div className="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800">
               <div className="text-xs text-slate-400">0.1% Low FPS</div>
               <div className="text-base font-bold text-amber-300 font-mono tabular-nums mt-0.5">
-                {framePacing.fps01PercentLow}
+                {framePacing ? framePacing.fps01PercentLow : 'NOT_MEASURED'}
               </div>
             </div>
             <div className="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800">
               <div className="text-xs text-slate-400">Frame Drops</div>
               <div className="text-base font-bold text-teal-300 font-mono tabular-nums mt-0.5">
-                {framePacing.droppedFramesCount}
+                {framePacing ? framePacing.droppedFramesCount : 'NOT_MEASURED'}
               </div>
             </div>
           </div>
@@ -1234,23 +1281,31 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
           <div className="space-y-1.5">
             <div className="flex items-center justify-between text-xs text-slate-400">
               <span>Histórico de Frame Time (últimos 60 quadros em ms)</span>
-              <span className="font-mono tabular-nums">Alvo: {framePacing.avgFrameTimeMs} ms</span>
+              <span className="font-mono tabular-nums">
+                Alvo: {framePacing ? `${framePacing.avgFrameTimeMs} ms` : 'NOT_MEASURED'}
+              </span>
             </div>
             <div className="h-24 bg-slate-950/90 border border-slate-800 rounded-lg p-2 flex items-end gap-1 overflow-hidden">
-              {framePacing.frameSamplesMs.map((ms, i) => {
-                const heightPct = Math.max(15, Math.min(100, Math.round((ms / 33.3) * 100)));
-                const isSpike = ms > framePacing.avgFrameTimeMs * 1.35;
-                return (
-                  <div
-                    key={`frame-${i}`}
-                    className={`flex-1 rounded-t transition-all ${
-                      isSpike ? 'bg-amber-400' : 'bg-teal-400/80'
-                    }`}
-                    style={{ height: `${heightPct}%` }}
-                    title={`Quadro #${i + 1}: ${ms} ms`}
-                  />
-                );
-              })}
+              {framePacing && framePacing.frameSamplesMs.length > 0 ? (
+                framePacing.frameSamplesMs.map((ms, i) => {
+                  const heightPct = Math.max(15, Math.min(100, Math.round((ms / 33.3) * 100)));
+                  const isSpike = ms > framePacing.avgFrameTimeMs * 1.35;
+                  return (
+                    <div
+                      key={`frame-${i}`}
+                      className={`flex-1 rounded-t transition-all ${
+                        isSpike ? 'bg-amber-400' : 'bg-teal-400/80'
+                      }`}
+                      style={{ height: `${heightPct}%` }}
+                      title={`Quadro #${i + 1}: ${ms} ms`}
+                    />
+                  );
+                })
+              ) : (
+                <div className="w-full h-full flex items-center justify-center text-xs text-slate-400 font-mono">
+                  Aguardando amostragem real via requestAnimationFrame
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -1302,19 +1357,21 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
             },
             {
               title: 'Taxa de Atualização (Hz)',
-              myValLabel: `${framePacing.estimatedHz} Hz`,
+              myValLabel: framePacing ? `${framePacing.estimatedHz} Hz` : 'NOT_MEASURED',
               refValLabel: `${selectedReferencePreset.refreshRateHz} Hz`,
-              myPct: Math.min(100, Math.round((framePacing.estimatedHz / 240) * 100)),
+              myPct: framePacing ? Math.min(100, Math.round((framePacing.estimatedHz / 240) * 100)) : 0,
               refPct: Math.min(100, Math.round((selectedReferencePreset.refreshRateHz / 240) * 100)),
             },
             {
               title: 'Frame Time (Menor = Melhor)',
-              myValLabel: `${framePacing.avgFrameTimeMs} ms`,
+              myValLabel: framePacing ? `${framePacing.avgFrameTimeMs} ms` : 'NOT_MEASURED',
               refValLabel: `${selectedReferencePreset.frameTimeMs} ms`,
-              myPct: Math.min(
-                100,
-                Math.max(15, Math.round((1000 / Math.max(1, framePacing.avgFrameTimeMs) / 240) * 100))
-              ),
+              myPct: framePacing
+                ? Math.min(
+                    100,
+                    Math.max(15, Math.round((1000 / Math.max(1, framePacing.avgFrameTimeMs) / 240) * 100))
+                  )
+                : 0,
               refPct: Math.min(
                 100,
                 Math.max(
@@ -1325,9 +1382,9 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
             },
             {
               title: 'Estabilidade de Jitter',
-              myValLabel: `${framePacing.stabilityScore}/100`,
+              myValLabel: framePacing ? `${framePacing.stabilityScore}/100` : 'NOT_MEASURED',
               refValLabel: `${selectedReferencePreset.jitterStabilityScore}/100`,
-              myPct: framePacing.stabilityScore,
+              myPct: framePacing ? framePacing.stabilityScore : 0,
               refPct: selectedReferencePreset.jitterStabilityScore,
             },
             {
@@ -1833,11 +1890,12 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
               <div className="text-base font-bold text-white font-mono tabular-nums mt-0.5">
                 {hostResult
                   ? `${hostResult.cpuBenchmark.sha256OpsPerSec.toLocaleString()} ops/s`
-                  : '185,000 ops/s'}
+                  : 'NOT_MEASURED'}
               </div>
               <div className="text-xs text-slate-400 font-mono mt-0.5">
-                P95: {hostResult?.cpuBenchmark.p95LatencyMs ?? 0.42}ms • P99:{' '}
-                {hostResult?.cpuBenchmark.p99LatencyMs ?? 0.68}ms
+                {hostResult
+                  ? `P95: ${hostResult.cpuBenchmark.p95LatencyMs}ms • P99: ${hostResult.cpuBenchmark.p99LatencyMs}ms`
+                  : 'Aguardando benchmark de host'}
               </div>
             </div>
 
@@ -1846,7 +1904,7 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
               <div className="text-base font-bold text-white font-mono tabular-nums mt-0.5">
                 {hostResult
                   ? `${hostResult.cpuBenchmark.astParseOpsPerSec.toLocaleString()} ops/s`
-                  : '14,200 ops/s'}
+                  : 'NOT_MEASURED'}
               </div>
               <div className="text-xs text-slate-400 font-mono mt-0.5">
                 Cores Lógicos: {hostResult?.hostSummary.cpuCores ?? telemetry.hardwareConcurrency}
@@ -1858,10 +1916,11 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
               <div className="text-base font-bold text-teal-300 font-mono tabular-nums mt-0.5">
                 {hostResult
                   ? `${hostResult.memoryBenchmark.sequentialReadMbPerSec} MB/s`
-                  : '6,120 MB/s'}
+                  : 'NOT_MEASURED'}
               </div>
               <div className="text-xs text-slate-400 font-mono mt-0.5">
-                Alocação: {hostResult?.memoryBenchmark.allocationLatencyUs ?? 180} µs
+                Alocação:{' '}
+                {hostResult ? `${hostResult.memoryBenchmark.allocationLatencyUs} µs` : 'NOT_MEASURED'}
               </div>
             </div>
 
@@ -1870,27 +1929,33 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
               <div className="text-base font-bold text-white font-mono tabular-nums mt-0.5">
                 {hostResult
                   ? `${hostResult.storageBenchmark.sequentialReadMbPerSec} / ${hostResult.storageBenchmark.sequentialWriteMbPerSec} MB/s`
-                  : '1,450 / 980 MB/s'}
+                  : 'NOT_MEASURED'}
               </div>
               <div className="text-xs text-slate-400 font-mono mt-0.5">
-                IOPS 4K: {hostResult?.storageBenchmark.random4kIops ?? 18400}
+                IOPS 4K: {hostResult ? hostResult.storageBenchmark.random4kIops : 'NOT_MEASURED'}
               </div>
             </div>
 
             <div className="p-3 rounded-lg bg-slate-900/70 border border-slate-800">
               <div className="text-xs text-slate-400">Canvas2D & Shader Trig Ops</div>
               <div className="text-base font-bold text-white font-mono tabular-nums mt-0.5">
-                {clientGpuStress.canvas2dFps} FPS
+                {clientGpuStress ? `${clientGpuStress.canvas2dFps} FPS` : 'NOT_MEASURED'}
               </div>
               <div className="text-xs text-slate-400 font-mono mt-0.5">
-                {(clientGpuStress.trigShaderOpsPerSec / 1_000_000).toFixed(1)}M trig ops/s
+                {clientGpuStress
+                  ? `${(clientGpuStress.trigShaderOpsPerSec / 1_000_000).toFixed(1)}M trig ops/s`
+                  : 'Execute Stress GPU Cliente'}
               </div>
             </div>
 
             <div className="p-3 rounded-lg bg-slate-900/70 border border-slate-800">
               <div className="text-xs text-slate-400">Hash SHA-256 de Verificação</div>
-              <div className="text-xs font-bold text-emerald-300 font-mono mt-1 truncate">
-                {hostResult?.verificationSha256 ?? '9f86d081884c7d659a2feaa0c55ad015'}
+              <div
+                className={`text-xs font-bold font-mono mt-1 truncate ${
+                  hostResult?.verificationSha256 ? 'text-emerald-300' : 'text-amber-300'
+                }`}
+              >
+                {hostResult?.verificationSha256 ?? 'NOT_MEASURED'}
               </div>
               <div className="text-xs text-slate-400 mt-0.5">Auditoria Determinística</div>
             </div>
@@ -2012,11 +2077,11 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
                   <option value="">Nenhuma execução disponível</option>
                 ) : (
                   runs.map((r) => {
-                    const topScore = r.scoreCards?.[0]?.groupedScores?.overallScore ?? 0;
+                    const topScore = r.scoreCards?.[0]?.groupedScores?.overallScore ?? null;
                     const label = r.scoreCards?.[0]?.softwareName ?? 'Benchmark';
                     return (
                       <option key={r.id} value={r.id}>
-                        {r.id} ({label}) — Score {topScore.toFixed(2)} ({r.status})
+                        {r.id} ({label}) — Score {topScore !== null ? topScore.toFixed(2) : 'N/A'} ({r.status})
                       </option>
                     );
                   })

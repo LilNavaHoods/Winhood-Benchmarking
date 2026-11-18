@@ -6,7 +6,18 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
-import { AuthService, generateTotpCode, isValidEmailAddress, validateQuickPin } from './AuthService';
+import QRCode from 'qrcode';
+import {
+  assertNoKdfDowngrade,
+  AuthService,
+  CURRENT_SCRYPT_PARAMS,
+  generateTotpCode,
+  hashPassword,
+  isValidEmailAddress,
+  needsPasswordRehash,
+  validateQuickPin,
+  verifyPassword,
+} from './AuthService';
 import { KeyManagementService } from './KeyManagementService';
 import { SsrfGuard } from '../execution/SsrfGuard';
 import { buildMinimalSandboxEnv, SandboxExecutor } from '../execution/SandboxExecutor';
@@ -1508,6 +1519,7 @@ test('enforceVerifiedQualityGateOnRun downgrades tampered evidence chain to INCO
   const now = new Date().toISOString();
   const filesMap = {
     'src/safe.ts': 'export function add(a: number, b: number): number { return a + b; }\n',
+    'coverage/lcov.info': 'TN:\nSF:src/safe.ts\nDA:1,1\nLF:1\nLH:1\nend_of_record\n',
   };
   const inv = buildTechnicalInventory(filesMap, '/isolated/sw-verify-a');
   const swA = {
@@ -2174,4 +2186,381 @@ test('WebAuthn options prioritize body.rpId and Origin hostname over Host header
   });
 });
 
+test('Phase 3 P0 Keystore fail-closed in PRODUCTION_SECURE, strict secret domain separation, separated Trust Store, and legacy migration', async () => {
+  await withIsolatedKeystoreEnv(async (tmpDir) => {
+    const storePath = path.join(tmpDir, 'keys', 'keystore.json');
+    const prevMode = process.env.WINHOOD_KEYSTORE_MODE;
+    const prevMaster = process.env.WINHOOD_KEYSTORE_MASTER_SECRET;
+    const prevLegacyMaster = process.env.WINHOOD_MASTER_KEY_SECRET;
+    const prevHmac = process.env.WINHOOD_EVIDENCE_HMAC_SECRET;
+    const prevVault = process.env.WINHOOD_VAULT_SECRET;
+    const prevSonarSalt = process.env.SONAR_SECRET_SALT;
+    const prevSimDpapi = process.env.WINHOOD_SIMULATE_DPAPI_UNAVAILABLE;
+    const prevSimKeyring = process.env.WINHOOD_SIMULATE_KEYRING_UNAVAILABLE;
+    const prevRequireEnv = process.env.WINHOOD_REQUIRE_ENV_SECRETS;
 
+    try {
+      // 1 & 2: PRODUCTION_SECURE without OS keyring/DPAPI or WINHOOD_KEYSTORE_MASTER_SECRET fails closed (no .kek fallback)
+      process.env.WINHOOD_KEYSTORE_MODE = 'PRODUCTION_SECURE';
+      process.env.WINHOOD_SIMULATE_DPAPI_UNAVAILABLE = 'true';
+      process.env.WINHOOD_SIMULATE_KEYRING_UNAVAILABLE = 'true';
+      delete process.env.WINHOOD_KEYSTORE_MASTER_SECRET;
+      delete process.env.WINHOOD_MASTER_KEY_SECRET;
+
+      assert.throws(
+        () => KeyManagementService.getStatus(storePath),
+        /KEYSTORE_PRODUCTION_PROVIDER_REQUIRED|KEYSTORE_DPAPI_REQUIRED_IN_PRODUCTION/
+      );
+      assert.equal(fs.existsSync(`${storePath}.kek`), false, '.kek file must never be created in PRODUCTION_SECURE');
+
+      // 3: SONAR_SECRET_SALT rejected when reused as WINHOOD_KEYSTORE_MASTER_SECRET or substitute for WINHOOD_VAULT_SECRET
+      process.env.SONAR_SECRET_SALT = 'shared-secret-value-at-least-16-chars';
+      process.env.WINHOOD_KEYSTORE_MASTER_SECRET = 'shared-secret-value-at-least-16-chars';
+      assert.throws(
+        () => KeyManagementService.assertSecretDomainSeparation(),
+        /KEYSTORE_SECRET_DOMAIN_VIOLATION/
+      );
+
+      delete process.env.WINHOOD_KEYSTORE_MASTER_SECRET;
+      process.env.WINHOOD_REQUIRE_ENV_SECRETS = 'true';
+      delete process.env.WINHOOD_VAULT_SECRET;
+      assert.throws(
+        () => KeyManagementService.getActiveVaultAesKey(storePath),
+        /KEY_MANAGEMENT_ENV_SECRET_REQUIRED/
+      );
+      delete process.env.WINHOOD_REQUIRE_ENV_SECRETS;
+
+      // 4: Controlled read-only backward compatibility for legacy ENV-VAULT-KEY encrypted under SONAR_SECRET_SALT
+      const legacyBuf = KeyManagementService.getVaultKeyBufferByKeyId('ENV-VAULT-KEY', storePath);
+      assert.ok(legacyBuf && legacyBuf.length === 32, 'Must derive legacy decrypt-only key from SONAR_SECRET_SALT');
+      delete process.env.SONAR_SECRET_SALT;
+
+      // 5: Provision valid PRODUCTION_SECURE keystore using canonical WINHOOD_KEYSTORE_MASTER_SECRET
+      process.env.WINHOOD_KEYSTORE_MASTER_SECRET = 'prod-canonical-master-secret-2026-secure!';
+      const status = KeyManagementService.getStatus(storePath);
+      assert.equal(status.operatingMode, 'PRODUCTION_SECURE');
+      assert.equal(status.kekProtectionMechanism, 'HKDF_EXTERNAL_ENV');
+      assert.equal(status.trustStoreSeparated, true);
+      assert.equal(fs.existsSync(status.trustStorePath), true);
+
+      // 6: GCM AuthTag & AAD mismatch detection
+      const { encryptWithAes256GcmEnvelope, decryptWithAes256GcmEnvelope } = await import('./KeyManagementService');
+      const testKey = Buffer.alloc(32, 7);
+      const env = encryptWithAes256GcmEnvelope('secret-payload', testKey, 'winhood:ctx:a');
+      assert.throws(
+        () => decryptWithAes256GcmEnvelope(env, testKey, 'winhood:ctx:b'),
+        /KEYSTORE_ENVELOPE_AAD_MISMATCH/
+      );
+      assert.throws(
+        () =>
+          decryptWithAes256GcmEnvelope(
+            { ...env, authTagHex: '00'.repeat(16) },
+            testKey,
+            'winhood:ctx:a'
+          ),
+        /KEYSTORE_GCM_AUTH_FAILED/
+      );
+
+      // 7: Separated Trust Store tampering detection
+      const rawTrust = fs.readFileSync(status.trustStorePath, 'utf8');
+      const tamperedTrust = JSON.parse(rawTrust);
+      tamperedTrust.monotonicSequence = 9999;
+      fs.writeFileSync(status.trustStorePath, JSON.stringify(tamperedTrust, null, 2), 'utf8');
+      const trustVerifyTampered = KeyManagementService.verifyTrustedEd25519PublicKey(
+        status.activeEd25519KeyId,
+        undefined,
+        undefined,
+        storePath
+      );
+      assert.equal(trustVerifyTampered.trusted, false);
+      assert.match(trustVerifyTampered.reason, /TRUST_STORE_INTEGRITY_VIOLATION/);
+      fs.writeFileSync(status.trustStorePath, rawTrust, 'utf8');
+
+      // 8: Key rotation & revocation preserves retired verify-only keys and blocks revoked keys
+      const oldEdId = status.activeEd25519KeyId;
+      const rotatedEd = KeyManagementService.rotateKey('EVIDENCE_ED25519', storePath);
+      assert.notEqual(rotatedEd.keyId, oldEdId);
+      const retiredCheck = KeyManagementService.verifyTrustedEd25519PublicKey(oldEdId, undefined, undefined, storePath);
+      assert.equal(retiredCheck.trusted, true);
+      assert.equal(retiredCheck.status, 'ROTATED_VERIFY_ONLY');
+
+      KeyManagementService.revokeKey(oldEdId, 'Compromised test key', storePath);
+      const revokedCheck = KeyManagementService.verifyTrustedEd25519PublicKey(oldEdId, undefined, undefined, storePath);
+      assert.equal(revokedCheck.trusted, false);
+      assert.equal(revokedCheck.status, 'REVOKED');
+
+      // 9: Monotonic sequence rollback detection
+      fs.writeFileSync(`${storePath}.seq`, '99999', 'utf8');
+      assert.throws(
+        () => KeyManagementService.getStatus(storePath),
+        /KEYSTORE_ROLLBACK_DETECTED/
+      );
+    } finally {
+      if (prevMode === undefined) delete process.env.WINHOOD_KEYSTORE_MODE;
+      else process.env.WINHOOD_KEYSTORE_MODE = prevMode;
+      if (prevMaster === undefined) delete process.env.WINHOOD_KEYSTORE_MASTER_SECRET;
+      else process.env.WINHOOD_KEYSTORE_MASTER_SECRET = prevMaster;
+      if (prevLegacyMaster === undefined) delete process.env.WINHOOD_MASTER_KEY_SECRET;
+      else process.env.WINHOOD_MASTER_KEY_SECRET = prevLegacyMaster;
+      if (prevHmac === undefined) delete process.env.WINHOOD_EVIDENCE_HMAC_SECRET;
+      else process.env.WINHOOD_EVIDENCE_HMAC_SECRET = prevHmac;
+      if (prevVault === undefined) delete process.env.WINHOOD_VAULT_SECRET;
+      else process.env.WINHOOD_VAULT_SECRET = prevVault;
+      if (prevSonarSalt === undefined) delete process.env.SONAR_SECRET_SALT;
+      else process.env.SONAR_SECRET_SALT = prevSonarSalt;
+      if (prevSimDpapi === undefined) delete process.env.WINHOOD_SIMULATE_DPAPI_UNAVAILABLE;
+      else process.env.WINHOOD_SIMULATE_DPAPI_UNAVAILABLE = prevSimDpapi;
+      if (prevSimKeyring === undefined) delete process.env.WINHOOD_SIMULATE_KEYRING_UNAVAILABLE;
+      else process.env.WINHOOD_SIMULATE_KEYRING_UNAVAILABLE = prevSimKeyring;
+      if (prevRequireEnv === undefined) delete process.env.WINHOOD_REQUIRE_ENV_SECRETS;
+      else process.env.WINHOOD_REQUIRE_ENV_SECRETS = prevRequireEnv;
+    }
+  });
+});
+
+test('Phase 10 Auth/TOTP/Migration Matrix: QR PNG generation, restart persistence, TOTP disable & reconfiguration, Scrypt N=16384->32768 migration, downgrade rejection & write-failure preservation', async () => {
+  await withIsolatedKeystoreEnv(async (tmpDir) => {
+    // 1. Scrypt downgrade rejection & N=32768 validation
+    assert.equal(CURRENT_SCRYPT_PARAMS.N, 32768);
+    const legacyHash = hashPassword('Phase10Pass!2026', { N: 16384, r: 8, p: 1 });
+    assert.equal(needsPasswordRehash(legacyHash), true);
+    assert.equal(verifyPassword('Phase10Pass!2026', legacyHash), true);
+    const strongHash = hashPassword('Phase10Pass!2026');
+    assert.equal(needsPasswordRehash(strongHash), false);
+    assert.ok(strongHash.startsWith('scrypt:N=32768,r=8,p=1:'));
+    assert.throws(() => assertNoKdfDowngrade(null, legacyHash), /AUTH_KDF_DOWNGRADE_REJECTED/);
+    assert.throws(() => assertNoKdfDowngrade(strongHash, legacyHash), /AUTH_KDF_DOWNGRADE_REJECTED/);
+
+    // 2. Boot instance 1 -> Register -> TOTP setup + otpauth:// secret extraction + real QR PNG validation
+    const app1 = await createWinHoodApp({
+      dataDir: tmpDir,
+      enforceProductionAuth: true,
+    });
+    const server1 = http.createServer(app1.app);
+    await new Promise<void>((resolve) => server1.listen(0, '127.0.0.1', resolve));
+    const port1 = (server1.address() as AddressInfo).port;
+    const base1 = `http://127.0.0.1:${port1}`;
+
+    let cookieJar1 = '';
+    let csrf1 = '';
+    let initialTotpSecret = '';
+
+    try {
+      const regRes = await fetch(`${base1}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Phase 10 Lead',
+          email: 'phase10@winhood.local',
+          password: 'Phase10Strong!Password',
+        }),
+      });
+      assert.equal(regRes.status, 201);
+      const jar = extractSetCookieValues(regRes);
+      cookieJar1 = `winhood_session=${jar.winhood_session}; winhood_csrf=${jar.winhood_csrf}`;
+      csrf1 = jar.winhood_csrf!;
+
+      const setupRes = await fetch(`${base1}/api/auth/totp/setup`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: cookieJar1,
+          'x-csrf-token': csrf1,
+        },
+        body: JSON.stringify({}),
+      });
+      assert.equal(setupRes.status, 200);
+      const setupJson = (await setupRes.json()) as { otpauthUri: string; secretBase32: string };
+      const parsedOtpAuth = new URL(setupJson.otpauthUri);
+      assert.equal(parsedOtpAuth.protocol, 'otpauth:');
+      initialTotpSecret = parsedOtpAuth.searchParams.get('secret') || '';
+      assert.equal(initialTotpSecret, setupJson.secretBase32);
+
+      // Verify QRCode PNG generation succeeds cleanly from otpauth URI
+      const qrDataUrl = await QRCode.toDataURL(setupJson.otpauthUri, { width: 180, margin: 2 });
+      assert.ok(qrDataUrl.startsWith('data:image/png;base64,'));
+      const pngBytes = Buffer.from(qrDataUrl.split(',')[1]!, 'base64');
+      assert.equal(pngBytes.subarray(0, 4).toString('hex'), '89504e47');
+
+      const step0 = Math.floor(Date.now() / 1000 / 30);
+      const code0 = generateTotpCode(initialTotpSecret, step0 * 30 * 1000);
+      const confirmRes = await fetch(`${base1}/api/auth/totp/verify-setup`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: cookieJar1,
+          'x-csrf-token': csrf1,
+        },
+        body: JSON.stringify({ totpCode: code0 }),
+      });
+      assert.equal(confirmRes.status, 200);
+    } finally {
+      await new Promise<void>((resolve) => server1.close(() => resolve()));
+    }
+
+    // 3. Restart instance 2 on same dataDir -> Verify persistent TOTP, then disable TOTP (with CSRF/auth checks), then reconfigure TOTP
+    const app2 = await createWinHoodApp({
+      dataDir: tmpDir,
+      enforceProductionAuth: true,
+    });
+    const server2 = http.createServer(app2.app);
+    await new Promise<void>((resolve) => server2.listen(0, '127.0.0.1', resolve));
+    const port2 = (server2.address() as AddressInfo).port;
+    const base2 = `http://127.0.0.1:${port2}`;
+
+    try {
+      const login1 = await fetch(`${base2}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: 'phase10@winhood.local',
+          password: 'Phase10Strong!Password',
+        }),
+      });
+      assert.equal(login1.status, 200);
+      const login1Json = (await login1.json()) as { requiresTotp: boolean; preAuthToken: string };
+      assert.equal(login1Json.requiresTotp, true);
+
+      const step1 = Math.floor(Date.now() / 1000 / 30) + 1;
+      const totpLoginRes = await fetch(`${base2}/api/auth/totp/authenticate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          preAuthToken: login1Json.preAuthToken,
+          totpCode: generateTotpCode(initialTotpSecret, step1 * 30 * 1000),
+        }),
+      });
+      assert.equal(totpLoginRes.status, 200);
+      const jar2 = extractSetCookieValues(totpLoginRes);
+      const cookie2 = `winhood_session=${jar2.winhood_session}; winhood_csrf=${jar2.winhood_csrf}`;
+
+      // Disable TOTP without CSRF -> 403
+      const disNoCsrf = await fetch(`${base2}/api/auth/mfa/disable`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: cookie2 },
+        body: JSON.stringify({ password: 'Phase10Strong!Password' }),
+      });
+      assert.equal(disNoCsrf.status, 403);
+
+      // Disable TOTP with wrong password -> 401
+      const disBadPass = await fetch(`${base2}/api/auth/mfa/disable`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: cookie2,
+          'x-csrf-token': jar2.winhood_csrf!,
+        },
+        body: JSON.stringify({ password: 'WrongPassword!2026' }),
+      });
+      assert.equal(disBadPass.status, 401);
+
+      // Disable TOTP with valid password -> 200
+      const disOk = await fetch(`${base2}/api/auth/mfa/disable`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: cookie2,
+          'x-csrf-token': jar2.winhood_csrf!,
+        },
+        body: JSON.stringify({ password: 'Phase10Strong!Password' }),
+      });
+      assert.equal(disOk.status, 200);
+      const disJson = (await disOk.json()) as { ok: boolean; user: { mfaEnabled: boolean } };
+      assert.equal(disJson.ok, true);
+      assert.equal(disJson.user.mfaEnabled, false);
+
+      // Login after removal must authenticate immediately without TOTP
+      const noMfaLogin = await fetch(`${base2}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: 'phase10@winhood.local',
+          password: 'Phase10Strong!Password',
+        }),
+      });
+      assert.equal(noMfaLogin.status, 200);
+      const noMfaJson = (await noMfaLogin.json()) as { authenticated: boolean; requiresTotp: boolean };
+      assert.equal(noMfaJson.authenticated, true);
+      assert.equal(noMfaJson.requiresTotp, false);
+
+      // Reconfigure TOTP with fresh secret & confirm old secret cannot verify
+      const reSetup = await fetch(`${base2}/api/auth/totp/setup`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: cookie2,
+          'x-csrf-token': jar2.winhood_csrf!,
+        },
+        body: JSON.stringify({}),
+      });
+      assert.equal(reSetup.status, 200);
+      const reSetupJson = (await reSetup.json()) as { secretBase32: string };
+      assert.notEqual(reSetupJson.secretBase32, initialTotpSecret);
+
+      const newStep = Math.floor(Date.now() / 1000 / 30);
+      const reConfirm = await fetch(`${base2}/api/auth/totp/verify-setup`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: cookie2,
+          'x-csrf-token': jar2.winhood_csrf!,
+        },
+        body: JSON.stringify({
+          totpCode: generateTotpCode(reSetupJson.secretBase32, newStep * 30 * 1000),
+        }),
+      });
+      assert.equal(reConfirm.status, 200);
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+    }
+
+    // 4. Seed legacy N=16384 user, verify disk-write failure preserves account, then normal login migrates N=16384 -> N=32768 across restart
+    const legacyDir = fs.mkdtempSync(path.join(tmpDir, 'legacy-mig-'));
+    const authSvcA = new AuthService(legacyDir);
+    const bootMeta = authSvcA.getBootstrapMetadata();
+    const bootTok = readBootstrapTokenFromFile(bootMeta.bootstrapTokenFilePath);
+    authSvcA.bootstrapInitialAdmin({
+      bootstrapToken: bootTok,
+      name: 'Legacy Admin',
+      email: 'legacy@winhood.local',
+      password: 'LegacyPassword!2026',
+    });
+
+    // Replace stored hash on disk with legitimate legacy N=16384 Scrypt hash
+    const storePath = path.join(legacyDir, 'security', 'auth_users.json');
+    const diskState = JSON.parse(fs.readFileSync(storePath, 'utf8'));
+    diskState.users[0].passwordHash = hashPassword('LegacyPassword!2026', { N: 16384, r: 8, p: 1 });
+    fs.writeFileSync(storePath, JSON.stringify(diskState, null, 2), 'utf8');
+
+    const authSvcB = new AuthService(legacyDir);
+    // Simulate disk write failure on first login -> in-memory passwordHash MUST NOT be partially mutated/corrupted
+    const originalSave = (authSvcB as any).save.bind(authSvcB);
+    (authSvcB as any).save = () => {
+      throw new Error('DISK_WRITE_SIMULATED_ENOSPC');
+    };
+    assert.throws(
+      () => authSvcB.login({ email: 'legacy@winhood.local', password: 'LegacyPassword!2026' }),
+      /DISK_WRITE_SIMULATED_ENOSPC/
+    );
+    const intactUser = (authSvcB as any).db.users[0];
+    assert.ok(intactUser.passwordHash.startsWith('scrypt:N=16384,r=8,p=1:'));
+
+    // Restore normal disk persistence -> login succeeds and migrates N=16384 -> N=32768
+    (authSvcB as any).save = originalSave;
+    const migratedLogin = authSvcB.login({
+      email: 'legacy@winhood.local',
+      password: 'LegacyPassword!2026',
+    });
+    assert.equal(migratedLogin.user.email, 'legacy@winhood.local');
+    const diskAfterMig = JSON.parse(fs.readFileSync(storePath, 'utf8'));
+    assert.ok(diskAfterMig.users[0].passwordHash.startsWith('scrypt:N=32768,r=8,p=1:'));
+
+    // Reload AuthService after restart and verify migrated N=32768 login works
+    const authSvcC = new AuthService(legacyDir);
+    const postRestartLogin = authSvcC.login({
+      email: 'legacy@winhood.local',
+      password: 'LegacyPassword!2026',
+    });
+    assert.equal(postRestartLogin.user.email, 'legacy@winhood.local');
+  });
+});

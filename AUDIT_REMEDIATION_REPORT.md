@@ -1,36 +1,60 @@
 # Relatório de Auditoria Técnica e Remediação — WinHood Benchmarking v4.4.0
 
-**Data da Auditoria:** 2026-11-17  
-**Versão Auditada:** `4.4.0`  
-**Escopo:** Arquitetura Full-Stack (React 19 + Express + TypeScript), Motores SAST/SCA/Taint/Scoring/Comparabilidade, Criptografia de Cofre (Keystore Envelope V2), Cobertura V8 Real e Empacotamento Desktop Windows (Electron + Inno Setup).
+- **Versão do WinHood:** `4.4.0`
+- **Commit base auditado:** `d382a4e96a0481cba80f005790ab65100dfc5ae4` (pós-run CI `44141919950`, com remediações subsequentes aplicadas neste workspace)
+- **Ambiente de verificação local:** Container Linux (`linux x64`), `Node.js v22.23.2`, `npm 10.9.8`
+- **Ferramentas utilizadas:** `tsc --noEmit` (`typescript@5.9.3`), `tsx --test` (`node:test`), `c8@10.1.3` + `v8-to-istanbul`, `npm audit`, `esbuild@0.28.2`, `vite@8.3.8`, `scripts/verify-independent-positioning.mjs`, `scripts/verify-npm-audit.mjs`, `scripts/ci-summary.mjs`
+- **Estado de validação global local:** `PARTIALLY_VALIDATED` *(validações locais Linux e Full-Stack aprovadas; execução remota em runners `ubuntu-latest` + `windows-latest` do GitHub Actions e testes manuais presenciais WCAG permanecem `NOT_VALIDATED` neste container)*
 
 ---
 
 ## 1. Sumário Executivo
 
-O WinHood Benchmarking passou por uma auditoria multidisciplinar (AppSec, SAST/SCA, Engenharia de Qualidade, Criptografia, DevSecOps e Empacotamento Desktop) dividida em **9 fases controladas**. Todas as alterações preservaram integralmente as funcionalidades existentes e a suíte de regressão automatizada, eliminando estimativas heurísticas, metadados sintéticos de adaptadores não executados e fragilidades criptográficas de derivação de chaves.
+Esta revisão da auditoria v4.4.0 corrige os achados remanescentes identificados após o commit `d382a4e96a0481cba80f005790ab65100dfc5ae4` e a execução de CI `44141919950`:
+1. **Desbloqueio da CI Linux (`positioning`) e Windows (`lint`):** Substituição da verificação literal de marca por verificador semântico (`scripts/verify-independent-positioning.mjs`) e resolução do erro `@typescript/typescript-win32-x64` com `typescript@5.9.3` (JS puro) + CI multi-job determinística com agregação real (`scripts/ci-summary.mjs`).
+2. **Governança honesta de vulnerabilidades NPM (`npm audit`):** Redução de **11 para 5** advisories high-severity; os 5 remanescentes são exclusivamente da cadeia build-time `picomatch <= 4.0.7` (`GHSA-fc5q-39xc-vjpf`) via `vite@8.3.8`, governados com prazo e controles compensatórios em `security/npm-audit-exceptions.json` (**0 vulnerabilidades não aprovadas**).
+3. **Cobertura V8 convencional via `c8` + `v8-to-istanbul` (`all: true`):** Inventário único de 13 domínios (`src/execution/CoverageDomainInventory.ts`) sem listas duplicadas e com separação estrita entre `testCoverage`, `ingestionCoverage` e `analysisCoverage`. Os 3 motores críticos (`src/scoring`, `src/evidence`, `src/comparability`) atingem `100% / 100% / >=98.08%`, e o núcleo de 6 domínios auditados atinge `88.47% L / 92.56% F / 97.74% B`, mantendo visível o déficit real dos domínios UI/desktop/VS Code (`61.02% L` nos 13 domínios).
+4. **Keystore `PRODUCTION_SECURE` Fail-Closed:** Remoção do fallback silencioso para `.kek` em `PRODUCTION_SECURE`, segregação estrita de segredos (`WINHOOD_KEYSTORE_MASTER_SECRET` separado de `SONAR_SECRET_SALT`), Trust Store Ed25519 isolado em `trust-store.json` e documentação honesta dos limites do contador monotônico local.
+5. **UI Honesta & Suíte E2E de 10 Fluxos:** Substituição de valores sintéticos na interface (`DashboardModule.tsx`, `SonarDockerCloudHubModule.tsx`, `ToolsAndIntegrationsModule.tsx`, `HardwareAndDisplayBenchmarkModule.tsx`) por `NOT_MEASURED` / `N/A` quando ausentes, além da suíte automatizada `src/components/uiAndE2e.test.ts` (SSR + 10 fluxos HTTP reais).
 
 ---
 
-## 2. Matriz de Achados Identificados, Causas Raiz e Remediações
+## 2. Matriz Atualizada de Achados (`AUD-01` a `AUD-10`)
 
-| ID | Severidade | Domínio | Achado Técnico e Causa Raiz | Solução Implementada | Estado |
-|---|---|---|---|---|---|
-| **AUD-01** | Alta | Dependências & Supply Chain | Dessincronização entre `package.json`, `package-lock.json` e `bun.lock`; advisories transitivos em `electron`, `electron-builder`, `esbuild` e `minimatch`. | Padronização exclusiva em NPM (`package-lock.json` v3), remoção de `bun.lock` do repositório raiz, atualização de `electron@^45.3.3` e `electron-builder@^26.18.0`, e `overrides` auditáveis (`esbuild@^0.28.2`, `minimatch@^11.0.9`). `npm audit` = **0 vulnerabilidades**. | **CORRIGIDO / VALIDADO** |
-| **AUD-02** | Crítica | Cobertura de Testes | `scripts/run-coverage-gate.mjs` estimava cobertura de linhas dividindo offsets de bytes V8 por uma constante heurística de 48 bytes por linha (`Math.ceil(maxEndOffset / 48)`). | Substituição integral por projeção convencional V8 + `node:module` `SourceMap` sobre os arquivos-fonte TypeScript/TSX reais, calculando separadamente `statements`, `lines`, `functions` e `branches` nos **13 domínios oficiais** (`src/execution/CoverageDomainInventory.ts`). | **CORRIGIDO / VALIDADO** |
-| **AUD-03** | Alta | Rastreabilidade de Ferramentas | `buildToolAdaptersCatalog()` preenchia `lastExecutionAt` com timestamp atual e `lastExitCode = 0` por padrão antes da execução real do binário. | Separação estrita entre `integrationType` (`NATIVE`, `LOCAL_CLI`, `REMOTE_API`), estados de prontidão (`NATIVE_AVAILABLE`, `EXTERNAL_BINARY_DETECTED`, `NOT_INSTALLED`, `NOT_CONFIGURED`) e `resultCompleteness` (`COMPLETE`, `PARTIAL`, `EMPTY`, `INCONCLUSIVE`, `NOT_EXECUTED`). `lastExecutionAt` e `lastExitCode` permanecem `null` até execução real. | **CORRIGIDO / VALIDADO** |
-| **AUD-04** | Crítica | Criptografia do Keystore | Uso anterior de segredo derivado de características previsíveis da máquina (`hostname`/`username`/`platform`) combinado com HMAC redundante sobre AES-GCM. | Reformulação para **Criptografia por Envelope (`WINHOOD-ENVELOPE-V2`)** em `src/security/KeyManagementService.ts`: DEK aleatória CSPRNG de 256 bits cifrada com AES-256-GCM (nonce único de 96 bits + AAD contextual), protegida por KEK (Windows DPAPI, segredo externo ou KEK local persistida com `0600`), derivação por finalidade via **HKDF-SHA256 (RFC 5869)**, contador monotônico anti-rollback (`.seq`) e **Trust Store Ed25519** verificável. | **CORRIGIDO / VALIDADO** |
-| **AUD-05** | Média | Autenticação & KDF | `AuthService.ts` utilizava parâmetros Scrypt fixos (`N=16384`) sem metadados de custo para migração futura. | Evolução para formato parametrizado `scrypt:N=32768,r=8,p=1:<salt>:<hash>` com verificação retrocompatível de contas `N=16384` e migração transparente (`needsPasswordRehash`) no próximo login válido. | **CORRIGIDO / VALIDADO** |
-| **AUD-06** | Alta | Profundidade Analítica & Validação | Ausência de distinção explícita entre profundidade AST (`FULL_AST` vs `STRUCTURAL_AST` vs `PARTIAL_RECOVERY`) e uso de um único corpus interno sem intervalos de confiança estatísticos. | Declaração explícita de `analyticalDepth` em `ParserRegistry.ts` (rebaixando confiança `HIGH` para `MEDIUM` em `PARTIAL_RECOVERY`), criação do `INDEPENDENT_VALIDATION_CORPUS` separado do corpus de regressão e cálculo de Intervalos de Confiança de 95% (Wilson Score), TPR/TNR/FPR/FNR e médias Macro/Micro em `GoldenDatasetRunner.ts`. | **CORRIGIDO / VALIDADO** |
-| **AUD-07** | Alta | Comparabilidade A/B & Quality Gates | Comparabilidade tratava apenas execuções de mesmo motor e Quality Gates não distinguiam condições obrigatórias de opcionais/informativas diante de métricas `NOT_MEASURED`. | Comparabilidade bimodal (`SAME_ENGINE` vs `CROSS_TOOL`) classificada em `STRICTLY_COMPARABLE`, `QUALIFIED_COMPARISON` e `NOT_COMPARABLE` (bloqueando vencedor em `NOT_COMPARABLE`). Quality Gates com `requirementTier` (`REQUIRED`, `OPTIONAL`, `INFORMATIVE`). | **CORRIGIDO / VALIDADO** |
-| **AUD-08** | Média | SCA, Multi-Lockfile & Licenças | `SbomGenerator.ts` dependia primariamente de `package-lock.json` para dependências transitivas JS/TS e aplicava catálogo estático de licenças sem diferenciar proveniência. | Suporte a projetos externos com `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lock` e `Cargo.lock`; proveniência estrita de licenças (`NOASSERTION` quando não comprovada); metadados de frescor (`advisoryFeedMetadata`) e validação estrutural CycloneDX 1.5 / SPDX 2.3. | **CORRIGIDO / VALIDADO** |
-| **AUD-09** | Média | CI/CD & Supply Chain | GitHub Actions referenciadas por tags mutáveis (`@v4`, `@v7`) em `.github/workflows/ci-multiplatform.yml`. | Pinagem de todas as GitHub Actions por commit SHA completo de 40 caracteres, permissões `contents: read` e inclusão obrigatória de `npm run test:security` e `npm audit --audit-level=moderate`. | **CORRIGIDO / VALIDADO** |
+| ID | Domínio | Causa Raiz Confirmada | Remediação Aplicada e Evidência | Estado |
+|---|---|---|---|---|
+| **AUD-01** | Supply Chain & NPM | `bun.lock` conflitante + 11 advisories (`electron-builder`, `node-gyp`, `picomatch`). | `bun.lock` ausente, `package-lock.json` sincronizado, `electron-builder@^26.18.0` / `electron@^45.3.3` eliminam 6 advisories; 5 restantes (`picomatch <= 4.0.7`) governados em `security/npm-audit-exceptions.json` (`verify-npm-audit.mjs` PASS). | `VALIDATED` (local) / `PARTIALLY_VALIDATED` (CI remota pendente) |
+| **AUD-02** | Cobertura de Testes | Script customizado anterior substituído por motor convencional + transparência nos 13 domínios. | `c8@10.1.3` + `v8-to-istanbul` (`all: true`) a partir de `OFFICIAL_13_COVERAGE_DOMAINS`; núcleo 6 domínios `88.47% L / 92.56% F / 97.74% B`, motores críticos `>=98.08%`, 13 domínios `61.02% L` com déficits declarados. | `VALIDATED` |
+| **AUD-03** | Rastreabilidade de Ferramentas | Timestamps e códigos de saída padrão pré-preenchidos antes da execução real. | `lastExecutionAt = null`, `lastExitCode = null`, `integrationType`, `readinessState` e `resultCompleteness` validados em `analyzer.test.ts`. | `VALIDATED` |
+| **AUD-04** | Keystore & Trust Store | Fallback `.kek` em produção, reutilização de `SONAR_SECRET_SALT` e Trust Store embutido. | `PRODUCTION_SECURE` exige DPAPI / macOS Keychain / Linux Secret Service / `WINHOOD_KEYSTORE_MASTER_SECRET`; Trust Store isolado em `trust-store.json`; `test:security` 23/23 PASS. | `VALIDATED` (Linux/env/DPAPI simulado) / `PARTIALLY_VALIDATED` (DPAPI nativo Windows em CI) |
+| **AUD-05** | Autenticação, Scrypt & MFA | Parâmetros Scrypt `N=16384` e lacunas de matriz E2E TOTP/QR/downgrade. | Migração `scrypt:N=32768,r=8,p=1` com proteção contra downgrade e preservação de arquivo em falha de escrita (`test:security` teste #23 PASS). | `VALIDATED` |
+| **AUD-06** | Golden Dataset & Estatística | Separação incompleta e nomenclatura imprecisa de independência externa. | Split formal em 3 conjuntos (`DEVELOPMENT` N=4, `REGRESSION` N=26, `INTERNAL_HOLDOUT` N=18), Wilson IC 95%, alerta `n<30` operacional e aviso explícito que holdout interno != OWASP/Juliet. | `VALIDATED` |
+| **AUD-07** | Comparabilidade & Quality Gate | Aceitação de booleanos soltos sem manifesto e `fudgeFactorApplied` legado `<20` linhas. | `ComparabilityManifest` obrigatório com digests SHA-256 verificáveis e remoção integral de supressão `<20` linhas em `QualityGateEngine` / `scoringEngine`. | `VALIDATED` |
+| **AUD-08** | SCA & Multi-Lockfile | Ausência de proveniência estrita de licenças e lockfiles múltiplos. | Suporte a 7 formatos (`package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lock`, `Cargo.lock`, `package.json`), `NOASSERTION` quando não comprovada. | `VALIDATED` |
+| **AUD-09** | CI/CD & GitHub Actions | Actions sem pinagem completa ou rodando em Node 20 legado / uploads frágeis. | Actions pinadas por SHA de 40 chars (`actions/checkout@3d3c42e...`, `actions/setup-node@949feb2...`, `actions/upload-artifact@cf430e0...` Node 24), `if: hashFiles(...) != ''` e `scripts/ci-summary.mjs`. | `IMPLEMENTED` / `TESTED` (local `--self-test` 7/7 PASS; run remoto `NOT_VALIDATED`) |
+| **AUD-10** | CI Run `44141919950` (Linux + Windows + UI) | Falha Linux no texto legítimo em `PrivacyAndTermsModal.tsx`, falha Windows `@typescript/typescript-win32-x64` (TS 7), e fallback numérico na UI. | `verify-independent-positioning.mjs` (141 arquivos PASS), `typescript@5.9.3` (`npm run lint` PASS local), UI honesta (`NOT_MEASURED`), suíte SSR + 10 fluxos HTTP (`uiAndE2e.test.ts` PASS). | `PARTIALLY_VALIDATED` (execução Windows remota `NOT_VALIDATED` até novo push) |
 
 ---
 
-## 3. Riscos Residuais e Limitações de Ambiente Declaradas
+## 3. Comandos Executados e Resultados Reais Neste Workspace
 
-1. **Validação em Host Físico Windows (`PARCIALMENTE VALIDADO` neste container Linux):**
-   - Os artefatos Desktop (`dist-desktop/electron-main.mjs`, `dist-desktop/electron-preload.cjs`, `dist-desktop/server.mjs`), o script de manifesto `installer/WinHoodBenchmarking.iss` e os fluxos de chamada PowerShell/WinRT (`Windows.Security.Credentials.UI.UserConsentVerifier` e `ProtectedData::Protect` DPAPI) foram validados estaticamente e por testes automatizados multiplataforma, mas a execução interativa do instalador `.exe` compilado pelo Inno Setup e do prompt biométrico nativo Windows Hello requer um host ou VM Windows 10/11 real (executado no job `build-and-verify-windows` do GitHub Actions).
-2. **Escopo de Parsers Multi-Linguagem:**
-   - JavaScript, TypeScript, JSX e TSX contam com AST completa (`FULL_AST`) via TypeScript Compiler API. Python, Java, Go, Rust, C# e SQL operam com análise estrutural de blocos, escopos e declarações (`STRUCTURAL_AST`), explicitamente sinalizada em cada achado e relatório técnico.
+| Comando | Resultado Real | Evidência Principal |
+|---|---|---|
+| `npm run lint` | `EXIT 0` | 0 erros TypeScript (`tsc --noEmit` v5.9.3) |
+| `npm test` | `102/102 PASS` | 10 arquivos de teste (inclui `uiAndE2e.test.ts`), `0` falhas (`30.82s`) |
+| `npm run test:security` | `23/23 PASS` | Keystore fail-closed, Scrypt `N=32768`, TOTP, WebAuthn, SSRF, Path Traversal (`23.45s`) |
+| `npm run test:golden` | `7/7 PASS` | Split 3 conjuntos (`DEVELOPMENT`/`REGRESSION`/`INTERNAL_HOLDOUT`) (`1.20s`) |
+| `npm run test:desktop` | `7/7 PASS` | `WinHoodPaths`, preload/IPC, bootstrap sequencial + fallback de porta (`3.10s`) |
+| `npm run test:coverage` | `111/111 PASS` | Gate `c8` + `v8-to-istanbul` aprovado (`88.47% L` núcleo, `>=98.08%` críticos) |
+| `node scripts/verify-npm-audit.mjs` | `PASSED` | `GOVERNED_BUILD_TIME_EXCEPTIONS_ACTIVE` (`0` não aprovadas, `5/5` governadas) |
+| `node scripts/verify-independent-positioning.mjs` | `PASSED` | 141 arquivos varridos, 5/5 self-tests, 0 violações |
+| `node scripts/ci-summary.mjs --self-test` | `PASSED` | 7/7 cenários de propagação verificados |
+| `npm run build && npm run build:desktop` | `EXIT 0` | `dist/index.html` + `dist-desktop/{server.mjs,electron-main.mjs,electron-preload.cjs,build-manifest.json}` |
+
+---
+
+## 4. Limitações Explicitamente Declaradas
+
+- **Execução Remota GitHub Actions (`ubuntu-latest` e `windows-latest`):** `NOT_VALIDATED` neste container até envio do commit e execução real do workflow.
+- **Compilação `ISCC.exe` e E2E do Instalador Windows (`scripts/windows/test-installer-e2e.ps1`):** `NOT_VALIDATED` no container Linux (`winhoodDesktop` + `build:desktop` validados localmente; instalação silenciosa `/VERYSILENT`, `%LOCALAPPDATA%`, DPAPI nativo real e Windows Hello WinRT real exigem Windows 10/11).
+- **Verificação WCAG 2.2 AA Presencial em Navegador:** Inspeção estrutural via SSR automatizada (`TESTED`); contraste visual ao vivo, armadilha de foco Tab e leitura real em NVDA/Narrator permanecem `NOT_VALIDATED`.

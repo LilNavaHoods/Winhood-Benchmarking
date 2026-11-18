@@ -1,48 +1,42 @@
 # Validação Estatística de Precisão, Recall e Intervalos de Confiança (`BENCHMARK_STATISTICAL_VALIDATION.md`)
 
-**Data de Execução:** 2026-11-17  
-**Implementação:** `src/validation/GoldenDatasetRunner.ts` & `src/intelligence/datasets/GoldenDatasetCorpus.ts`
+- **Versão do WinHood:** `4.4.0`
+- **Commit base / Estado:** `d382a4e96a0481cba80f005790ab65100dfc5ae4` + split formal de 3 conjuntos
+- **Ambiente:** Linux x64, `Node.js v22.23.2`
+- **Implementação:** `src/validation/GoldenDatasetRunner.ts` & `src/intelligence/datasets/GoldenDatasetCorpus.ts`
+- **Comando executado:** `npm run test:golden` (`7/7 PASS`, incluindo os 11 cenários estatísticos/integridade da Fase 7)
+- **Estado de validação:** `VALIDATED`
 
 ---
 
-## 1. Separação entre Corpus Interno de Regressão e Benchmark de Validação Independente
+## 1. Separação Formal em 3 Conjuntos Internos Versionados
 
-Para evitar viés de sobreajuste (*overfitting* de regras avaliadas apenas contra suas próprias fixtures de criação), o WinHood separa formalmente dois conjuntos de validação:
+Para evitar contaminação entre calibração de regras, regressão contínua e avaliação holdout, os casos de teste são divididos em **3 corpora disjuntos** com hash SHA-256 verificado em cada arquivo (`contentSha256`):
 
-1. **`GOLDEN_DATASET_CORPUS` (`WINHOOD_INTERNAL_REGRESSION_FIXTURES`):**
-   - Conjunto interno de regressão determinística que verifica se nenhuma regra SAST/Taint/Segredos/Qualidade sofreu regressão funcional entre commits.
-2. **`INDEPENDENT_VALIDATION_CORPUS` (`WINHOOD_INDEPENDENT_VALIDATION_BENCHMARK`):**
-   - Benchmark independente inspirado em padrões públicos de vulnerabilidades e código seguro (OWASP Benchmark / Juliet CWE patterns), cobrindo casos vulneráveis (positivos reais) e casos seguros com sanitização contextual (negativos reais) em TypeScript, JavaScript, Python, Java, Go, Rust, C# e SQL.
+1. **`DEVELOPMENT` (`WINHOOD-DEVELOPMENT-v3.0.0` / `WINHOOD_INTERNAL_DEVELOPMENT_CORPUS`):**
+   - 4 casos usados exclusivamente durante o ajuste inicial de heurísticas de parser/regras.
+2. **`REGRESSION` (`WINHOOD-INTERNAL-REGRESSION-v3.0.0` / `WINHOOD_INTERNAL_REGRESSION_CORPUS`):**
+   - 26 casos cobrindo todas as **8 linguagens declaradas** (`TypeScript`, `JavaScript`, `Python`, `Java`, `C#`, `Go`, `Rust`, `SQL`), incluindo armadilhas de falso positivo (comentários/strings SQL que exercitam a medição honesta de `FP = 2` e `Precision = 0.867`).
+3. **`INTERNAL_HOLDOUT` (`WINHOOD-INTERNAL-HOLDOUT-v3.0.0` / `WINHOOD_INTERNAL_HOLDOUT_CORPUS`):**
+   - 18 casos (9 vulneráveis + 9 seguros com sanitização contextual) cobrindo todas as **8 linguagens declaradas**, congelados para avaliação sem ajuste de regras.
 
----
-
-## 2. Metodologia Estatística e Intervalo de Confiança de Wilson (95%)
-
-Para cada execução de validação (`runGoldenDatasetSuite()` e `runIndependentValidationSuite()`), são calculados sem arredondamentos artificiais:
-
-- **Matriz de Confusão:** `TP` (True Positives), `TN` (True Negatives), `FP` (False Positives), `FN` (False Negatives).
-- **Taxas Fundamentais:**
-  - $\text{Precision} = \frac{TP}{TP + FP}$
-  - $\text{Recall (TPR)} = \frac{TP}{TP + FN}$
-  - $\text{True Negative Rate (TNR / Specificity)} = \frac{TN}{TN + FP}$
-  - $\text{False Positive Rate (FPR)} = \frac{FP}{FP + TN}$
-  - $\text{False Negative Rate (FNR)} = \frac{FN}{FN + TP}$
-  - $\text{F1-Score} = \frac{2 \cdot \text{Precision} \cdot \text{Recall}}{\text{Precision} + \text{Recall}}$
-- **Intervalo de Confiança de 95% (Wilson Score Interval — `computeWilson95ConfidenceInterval`):**
-  $$\frac{\hat{p} + \frac{z^2}{2n} \pm z \sqrt{\frac{\hat{p}(1-\hat{p})}{n} + \frac{z^2}{4n^2}}}{1 + \frac{z^2}{n}}, \quad z = 1.959964$$
-- **Alerta de Tamanho Amostral (`isLowSampleSize`):**
-  - Qualquer estrato (linguagem ou categoria) com $n < 30$ casos recebe o marcador explícito `isLowSampleSize: true` e um aviso metodológico declarando a amplitude do intervalo de confiança.
-- **Agregações Macro e Micro:**
-  - **Micro-Average:** Calculada sobre a soma global de `TP`, `TN`, `FP` e `FN` de todos os casos.
-  - **Macro-Average:** Média não ponderada das métricas entre todas as linguagens (`byLanguage`) e entre todas as categorias (`byCategory`), impedindo que uma linguagem com mais amostras oculte deficiências em outra.
+> **Ressalva Metodológica Obrigatória:** Embora `INTERNAL_HOLDOUT` seja separado de `DEVELOPMENT` e `REGRESSION`, todos os 3 conjuntos são de **autoria interna do projeto WinHood**. Eles **não constituem um benchmark externo independente de terceiros** (como OWASP Benchmark v1.2 ou NIST SARD Juliet Test Suite).
 
 ---
 
-## 3. Resultados Verificados
+## 2. Regras Matemáticas e Tratamento de Denominador Zero
 
-| Conjunto de Dados | Casos Totais ($n$) | TP | TN | FP | FN | Precision (IC 95% Wilson) | Recall / TPR (IC 95% Wilson) | FPR | F1-Score Micro | F1-Score Macro (Linguagens) |
-|---|---|---|---|---|---|---|---|---|---|---|
-| **Internal Regression (`GOLDEN_DATASET_CORPUS`)** | 16 | 8 | 8 | 0 | 0 | `1.0000` (`[0.6756, 1.0000]`) | `1.0000` (`[0.6756, 1.0000]`) | `0.0000` | `1.0000` | `1.0000` |
-| **Independent Benchmark (`INDEPENDENT_VALIDATION_CORPUS`)** | 12 | 6 | 6 | 0 | 0 | `1.0000` (`[0.6097, 1.0000]`) | `1.0000` (`[0.6097, 1.0000]`) | `0.0000` | `1.0000` | `1.0000` |
+- **Sem Arredondamento Intermediário:** `Precision`, `Recall (TPR)`, `F1-Score` ($2TP / (2TP + FP + FN)$), `TNR`, `FPR` e `FNR` são calculados diretamente a partir das contagens inteiras `TP, FP, TN, FN` e arredondados apenas na formatação final (`3` casas decimais).
+- **Denominador Zero = `null`:** Quando `TP + FP = 0` ou `TP + FN = 0`, a métrica e seu intervalo de confiança retornam `null` (nunca `0%` ou `100%` fabricados).
+- **Intervalo de Confiança de 95% (Wilson Score — $z = 1.959964$):** Calculado para cada proporção com tamanho amostral explícito.
+- **Limiar Operacional `n < 30`:** Sinalizado via `lowSampleWarning: true` e `sampleWarning` textual como indicador operacional de amostra reduzida (e não como prova universal de significância estatística).
 
-> **Nota de Transparência Amostral:** Como os estratos individuais por linguagem possuem $n < 30$, o campo `sampleSizeWarning` é emitido automaticamente nos objetos de retorno para alertar auditores sobre a largura do intervalo de confiança de 95%.
+---
+
+## 3. Resultados Reais Medidos (`GoldenDatasetRunner.runValidationSuite`)
+
+| Conjunto (`datasetRole`) | Versão & SHA-256 (prefixo) | Linguagens ($8$ decl.) | $N$ Total | TP | TN | FP | FN | Precision (IC 95% Wilson) | Recall / TPR (IC 95% Wilson) | TNR | FPR | F1 Micro | F1 Macro (Ling.) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `DEVELOPMENT` | `v3.0.0` (`e5135bd4...`) | 2 (`TS`, `Py`) | 4 | 2 | 2 | 0 | 0 | `1.000` (`[0.342, 1.000]`, $n=2$) | `1.000` (`[0.342, 1.000]`, $n=2$) | `1.000` | `0.000` | `1.000` | `1.000` (2 estratos) |
+| `REGRESSION` | `v3.0.0` (`f8be0c95...`) | **8 / 8** | 26 | 13 | 11 | 2 | 0 | `0.867` (`[0.621, 0.963]`, $n=15$) | `1.000` (`[0.772, 1.000]`, $n=13$) | `0.846` | `0.154` | `0.929` | `0.949` (8 estratos) |
+| `INTERNAL_HOLDOUT` | `v3.0.0` (`2aecd49c...`) | **8 / 8** | 18 | 9 | 9 | 0 | 0 | `1.000` (`[0.701, 1.000]`, $n=9$) | `1.000` (`[0.701, 1.000]`, $n=9$) | `1.000` | `0.000` | `1.000` | `1.000` (8 estratos) |

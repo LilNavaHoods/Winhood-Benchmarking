@@ -91,7 +91,7 @@ function evaluatePinClientStatus(pin: string): { valid: boolean; reason: string 
   if (asc || desc) {
     return { valid: false, reason: 'Sequências simples (ex.: 123456) não são permitidas' };
   }
-  return { valid: true, reason: 'PIN forte válido (Scrypt N=16384)' };
+  return { valid: true, reason: 'PIN forte válido (Scrypt N=32768)' };
 }
 
 interface PasswordStrengthReport {
@@ -350,9 +350,11 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
     }
   };
 
-  const tryNativeWindowsHelloRegister = async (): Promise<
-    { ok: true } | { ok: false; osUnsupported: boolean; errorMessage: string }
-  > => {
+  const tryNativeWindowsHelloRegister = async (): Promise<{
+    ok: boolean;
+    osUnsupported?: boolean;
+    errorMessage?: string;
+  }> => {
     try {
       const nativeRes = await fetch('/api/auth/windows-hello/native-register', {
         method: 'POST',
@@ -394,9 +396,11 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
     }
   };
 
-  const tryNativeWindowsHelloLogin = async (): Promise<
-    { ok: true } | { ok: false; osUnsupported: boolean; errorMessage: string }
-  > => {
+  const tryNativeWindowsHelloLogin = async (): Promise<{
+    ok: boolean;
+    osUnsupported?: boolean;
+    errorMessage?: string;
+  }> => {
     try {
       const nativeRes = await fetch('/api/auth/windows-hello/native-login', {
         method: 'POST',
@@ -1748,7 +1752,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                     className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 font-mono text-base tracking-[0.3em] text-center text-slate-900 dark:text-slate-100 tabular-nums"
                   />
                   <p className="mt-1.5 text-[11px] text-slate-500 dark:text-slate-400">
-                    Armazenado com Scrypt (N=16384, r=8, p=1) e bloqueio automático contra força bruta após 5 tentativas.
+                    Armazenado com Scrypt (N=32768, r=8, p=1) e bloqueio automático contra força bruta após 5 tentativas.
                   </p>
                 </div>
               )}

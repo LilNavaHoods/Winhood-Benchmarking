@@ -1,52 +1,38 @@
 # Metodologia de Métricas, Scoring, Comparabilidade e Quality Gates (`METRICS_METHODOLOGY.md`)
 
-**Versão Metodológica:** `WinHood-Methodology-v4.4.0`
+- **Versão do WinHood:** `4.4.0` (`WinHood-Methodology-v4.4.0`)
+- **Commit base / Estado:** `d382a4e96a0481cba80f005790ab65100dfc5ae4` + alinhamento de contratos Fase 3/4/6/7
+- **Ambiente:** Linux x64, `Node.js v22.23.2`
+- **Comandos de verificação:** `npm test`, `npm run test:coverage`, `npm run test:golden`
+- **Estado de validação:** `VALIDATED`
 
 ---
 
-## 1. Princípio de Proveniência e Não-Fabricação
+## 1. Princípio de Proveniência e Não-Fabricação (Lei Fundamental)
 
-1. **Zero Fabricação de Métricas:** Nenhuma dimensão do WinHood recebe nota numérica quando não há evidência verificável. Dimensões sem medição permanecem com `score: null` e `assessmentStatus: 'NOT_ASSESSED'` ou `'INCONCLUSIVE'`.
-2. **Separação dos 4 Indicadores Executivos (`separatedIndicators`):**
-   - `technicalScore` (0.00 a 5.00, ou `null` quando não avaliado);
-   - `scopeCoveragePercent` (0% a 100% de cobertura analítica sobre arquivos elegíveis);
-   - `evidenceConfidence` (`HIGH` | `MEDIUM` | `LOW`);
-   - `qualityGateDecision` (`APPROVED` | `APPROVED_WITH_RESERVATIONS` | `REJECTED` | `INCONCLUSIVE`).
-
----
-
-## 2. Profundidade Analítica por Linguagem (`analyticalDepth`)
-
-Cada achado e cada arquivo analisado por `ParserRegistry` declara explicitamente sua profundidade analítica:
-
-| Nível (`ParserAnalyticalDepth`) | Linguagens | Capacidades Reais | Limitações Declaradas |
-|---|---|---|---|
-| `FULL_AST` | TypeScript, JavaScript, TSX, JSX | AST completa via TypeScript Compiler API, resolução de escopo léxico, CFG e Taint intraprocedural completo. | Fluxos interprocedurais dinâmicos via reflexão/eval são sinalizados como aviso. |
-| `STRUCTURAL_AST` | Python, Java, Go, Rust, C#, SQL | Extração estrutural de funções, classes, blocos de controle, chamadas de API e propagação local de taint com sanitizadores contextuais. | Não realiza resolução de tipos entre múltiplos pacotes externos compilados. |
-| `PARTIAL_RECOVERY` | Qualquer linguagem com erro sintático parcial | Recuperação tolerante a falhas sobre blocos íntegros do arquivo. | Rebaixa automaticamente achados de confiança `HIGH` para `MEDIUM` e reduz a cobertura analítica efetiva. |
-| `UNSUPPORTED` | Binários ou extensões fora do catálogo | Contabilizado em `unsupportedFilesCount`. | Não entra como arquivo analisado. |
+1. **Zero Fabricação de Métricas:** Nenhuma dimensão do WinHood ou cartão da UI recebe valor numérico quando não há medição real. Categorias e telemetrias ausentes permanecem `null` no modelo de dados e são exibidas na interface como `NOT_MEASURED` / `NÃO MEDIDO` / `N/A`.
+2. **Separação dos 3 Indicadores de Cobertura (`computeThreeWaySeparatedCoverage`):**
+   - `testCoverage`: Cobertura de linhas, funções, branches e statements medida via `c8` + `v8-to-istanbul` (`all: true`) ou relatórios LCOV/JaCoCo/Cobertura importados.
+   - `ingestionCoverage`: Proporção de arquivos elegíveis lidos em relação ao total descoberto.
+   - `analysisCoverage`: Proporção de arquivos elegíveis interpretados pelos parsers (`FULL_AST`, `STRUCTURAL_AST`, `PARTIAL_RECOVERY`).
 
 ---
 
-## 3. Comparabilidade A/B Bimodal (`src/comparability/index.ts`)
+## 2. Comparabilidade A/B Baseada em Manifesto Verificável (`src/comparability/index.ts`)
 
-O motor de comparabilidade suporta duas modalidades explícitas:
-
-1. **Modalidade 1 — Intraclasse (`SAME_ENGINE`):**
-   - Compara dois projetos ou duas versões analisadas pela mesma versão do motor (`engineVersion`) e mesmo catálogo de regras (`ruleCatalogSha256`), mesma categoria funcional e diferença de cobertura de escopo $\le 15\%$.
-   - Classificação quando todos os requisitos são cumpridos: `STRICTLY_COMPARABLE`.
-2. **Modalidade 2 — Interferramentas (`CROSS_TOOL`):**
-   - Permite comparar resultados do motor nativo WinHood com ferramentas externas (ex.: `MqrBridge`, Semgrep/OpenGrep) sobre o **mesmo commit/escopo** utilizando taxonomia normalizada CWE/severidade.
-   - Classificação máxima permitida: `QUALIFIED_COMPARISON` (com ressalvas explícitas listando a divergência de motores/catálogos).
-3. **Bloqueio de Vencedor (`NOT_COMPARABLE`):**
-   - Quando categorias funcionais são incompatíveis, cobertura é insuficiente ($< 50\%$) ou evidências são `LOW`, o par recebe `NOT_COMPARABLE` e `winnerSoftwareId` é obrigatoriamente `null`.
+1. **Obrigatoriedade de `ComparabilityManifest`:** Nenhuma comparação `SAME_ENGINE` ou `CROSS_TOOL` é aceita sem `manifest` válido em ambos os candidatos contendo `projectId`, `commitSha` ($\ge 7$ chars), `engineVersion`, `analyticalProfile`, `configHashSha256`, `weightsHashSha256`, `eligibleFilesScopeHash` e `evidenceIntegrityVerified: true`.
+2. **Proibição de Flags Booleanas Soltas:** Passar `sameCommitVerified: true` ou `normalizedTaxonomyApplied: true` sem que os respectivos campos `commitSha` idênticos e `taxonomyMappingSha256` (hash SHA-256 de 64 hex chars) constem nos manifestos resulta em rejeição imediata (`NOT_COMPARABLE`).
+3. **Classificações:**
+   - `STRICTLY_COMPARABLE`: `SAME_ENGINE`, mesmos hashes de catálogo/pesos/configuração/commit/escopo, árvore limpa, mesmo SO/runtime, $\Delta\text{cobertura} \le 10\%$ e confiança `HIGH`.
+   - `QUALIFIED_COMPARISON`: Comparação válida em `CROSS_TOOL` (mesmo `projectId`, mesmo `commitSha`, mesmo `taxonomyMappingSha256`) ou `SAME_ENGINE` com ressalvas documentadas ($10\% < \Delta\text{cobertura} \le 30\%$, confiança `MEDIUM`, runtime distinto).
+   - `NOT_COMPARABLE`: Bloqueia proclamação de vencedor (`winnerSoftwareId = null`).
 
 ---
 
-## 4. Quality Gates com Três Níveis de Condição (`requirementTier`)
+## 3. Contrato Unificado de Quality Gate Sem Supressão por Tamanho (`src/gate/QualityGateEngine.ts`)
 
-Em `src/gate/QualityGateEngine.ts`, cada condição de um Quality Gate declara seu `requirementTier`:
-
-- **`REQUIRED` (Obrigatória):** Se a métrica for `NOT_MEASURED` (`null`), a condição é marcada como `INCONCLUSIVE` e a decisão global do Gate torna-se `INCONCLUSIVE` (nunca `APPROVED`). Se violar o limiar com severidade `BLOCKER`/`CRITICAL`, a decisão é `REJECTED`.
-- **`OPTIONAL` (Opcional):** Se a métrica for `NOT_MEASURED` (`null`), não reprova nem invalida o Gate; registra uma ressalva auditável e degrada `APPROVED` para `APPROVED_WITH_RESERVATIONS`.
-- **`INFORMATIVE` (Informativa):** Registrada no laudo como observação técnica para acompanhamento contínuo sem bloquear a aprovação.
+1. **Remoção de `fudgeFactorApplied` no Motor WinHood:** O WinHood **nunca** suprime achados `BLOCKER`, `CRITICAL`, `HIGH` ou `secrets_exposed` porque o changeset possui menos de 20 linhas (`fudgeFactorApplied` é permanentemente `false` no `scoringEngine.ts` e `QualityGateEngine.ts`; apenas o conector externo `SonarQualityGateMapper.ts` relata quando um servidor Sonar remoto aplicou essa heurística).
+2. **Três Níveis de Condição (`requirementTier`):**
+   - `REQUIRED`: Valor `null` (`NOT_MEASURED`) torna a decisão `INCONCLUSIVE`; violação com `severityOnFail: 'BLOCKER'` resulta em `BLOCKED` / `REJECTED`; violação com `RESERVATION` resulta em `APPROVED_WITH_RESERVATIONS`.
+   - `OPTIONAL`: Valor `null` ou falha de limiar registra ressalva e resulta em `APPROVED_WITH_RESERVATIONS`.
+   - `INFORMATIVE`: Registrada apenas para observabilidade, sem alterar `APPROVED`.

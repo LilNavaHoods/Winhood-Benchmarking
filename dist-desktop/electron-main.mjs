@@ -5,7 +5,7 @@ import path18 from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // server.ts
-import crypto28 from "node:crypto";
+import crypto30 from "node:crypto";
 import fs16 from "node:fs";
 import os10 from "node:os";
 import path17 from "node:path";
@@ -16,7 +16,2244 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 
 // src/engine/scoringEngine.ts
+import crypto3 from "node:crypto";
+
+// src/gate/QualityGateEngine.ts
+import crypto2 from "node:crypto";
+import http2 from "node:http";
+import https2 from "node:https";
+import net2 from "node:net";
+
+// src/execution/SsrfGuard.ts
+import dns from "node:dns";
+import http from "node:http";
+import https from "node:https";
+import net from "node:net";
+var BLOCKED_HOSTNAMES = /* @__PURE__ */ new Set([
+  "localhost",
+  "localhost.localdomain",
+  "metadata.google.internal",
+  "metadata.goog",
+  "instance-data",
+  "169.254.169.254",
+  // NOSONAR (typescript:S1313): IP intencional de metadata cloud bloqueado pela proteção SSRF
+  "metadata.azure.internal"
+]);
+function ipv4ToInt(ip) {
+  const parts = ip.split(".").map((p) => Number.parseInt(p, 10));
+  if (parts.length !== 4 || parts.some((n) => Number.isNaN(n) || n < 0 || n > 255)) {
+    return -1;
+  }
+  return (parts[0] << 24 | parts[1] << 16 | parts[2] << 8 | parts[3]) >>> 0;
+}
+function inCidr4(ip, base, maskBits) {
+  const ipInt = ipv4ToInt(ip);
+  const baseInt = ipv4ToInt(base);
+  if (ipInt < 0 || baseInt < 0) return false;
+  const mask = maskBits === 0 ? 0 : ~0 << 32 - maskBits >>> 0;
+  return (ipInt & mask) === (baseInt & mask);
+}
+function isDisallowedIpAddress(rawIp, allowLoopbackExplicit = false) {
+  const ip = rawIp.trim().toLowerCase();
+  if (!ip) return { blocked: true, reason: "Endere\xE7o IP vazio." };
+  if (ip.startsWith("::ffff:")) {
+    const suffix = ip.slice(7);
+    if (net.isIPv4(suffix)) {
+      return isDisallowedIpAddress(suffix, allowLoopbackExplicit);
+    }
+    const hexMatch = suffix.match(/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+    if (hexMatch) {
+      const hi = Number.parseInt(hexMatch[1], 16);
+      const lo = Number.parseInt(hexMatch[2], 16);
+      const v4 = `${hi >> 8 & 255}.${hi & 255}.${lo >> 8 & 255}.${lo & 255}`;
+      return isDisallowedIpAddress(v4, allowLoopbackExplicit);
+    }
+    return { blocked: true, reason: `IPv6 mapeado bloqueado (${ip}).` };
+  }
+  if (net.isIPv4(ip)) {
+    if (inCidr4(ip, "127.0.0.0", 8)) {
+      return allowLoopbackExplicit ? { blocked: false } : { blocked: true, reason: `Loopback IPv4 bloqueado (${ip}).` };
+    }
+    if (inCidr4(ip, "10.0.0.0", 8)) return { blocked: true, reason: `Rede privada RFC1918 bloqueada (${ip}).` };
+    if (inCidr4(ip, "172.16.0.0", 12)) return { blocked: true, reason: `Rede privada RFC1918 bloqueada (${ip}).` };
+    if (inCidr4(ip, "192.168.0.0", 16)) return { blocked: true, reason: `Rede privada RFC1918 bloqueada (${ip}).` };
+    if (inCidr4(ip, "169.254.0.0", 16)) return { blocked: true, reason: `Link-local / Cloud Metadata bloqueado (${ip}).` };
+    if (inCidr4(ip, "0.0.0.0", 8)) return { blocked: true, reason: `Endere\xE7o 0.0.0.0/8 bloqueado (${ip}).` };
+    if (inCidr4(ip, "100.64.0.0", 10)) return { blocked: true, reason: `CGNAT RFC6598 bloqueado (${ip}).` };
+    if (inCidr4(ip, "224.0.0.0", 4)) return { blocked: true, reason: `Multicast bloqueado (${ip}).` };
+    if (inCidr4(ip, "240.0.0.0", 4)) return { blocked: true, reason: `Reservado/Broadcast bloqueado (${ip}).` };
+    return { blocked: false };
+  }
+  if (net.isIPv6(ip)) {
+    const bare = ip.split("%")[0];
+    if (bare === "::1" || bare === "0:0:0:0:0:0:0:1") {
+      return allowLoopbackExplicit ? { blocked: false } : { blocked: true, reason: `Loopback IPv6 bloqueado (${ip}).` };
+    }
+    if (bare === "::" || bare === "0:0:0:0:0:0:0:0") {
+      return { blocked: true, reason: `Unspecified IPv6 bloqueado (${ip}).` };
+    }
+    if (/^fe[89ab][0-9a-f]:/i.test(bare) || bare.startsWith("fe80")) {
+      return { blocked: true, reason: `Link-local IPv6 bloqueado (${ip}).` };
+    }
+    if (/^f[cd][0-9a-f]{2}:/i.test(bare)) {
+      return { blocked: true, reason: `Unique-Local IPv6 (fc00::/7) bloqueado (${ip}).` };
+    }
+    if (bare.startsWith("ff")) {
+      return { blocked: true, reason: `Multicast IPv6 bloqueado (${ip}).` };
+    }
+    if (bare.startsWith("64:ff9b:")) {
+      return { blocked: true, reason: `NAT64 prefix bloqueado (${ip}).` };
+    }
+    return { blocked: false };
+  }
+  return { blocked: true, reason: `Formato de IP inv\xE1lido ou desconhecido (${ip}).` };
+}
+var defaultDnsResolver = async (hostname) => {
+  return await dns.promises.lookup(hostname, { all: true, verbatim: true });
+};
+var SsrfGuard = class _SsrfGuard {
+  static isExplicitLoopbackUrl(rawUrl) {
+    try {
+      const parsed = new URL(rawUrl);
+      const hostname = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+      return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+    } catch {
+      return false;
+    }
+  }
+  static async validateUrl(params) {
+    let parsed;
+    try {
+      parsed = new URL(params.targetUrl);
+    } catch {
+      return { allowed: false, reason: "URL malformada.", resolvedIps: [] };
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return {
+        allowed: false,
+        reason: `Protocolo proibido (${parsed.protocol}): apenas http/https autorizados.`,
+        resolvedIps: []
+      };
+    }
+    if (parsed.username || parsed.password) {
+      return {
+        allowed: false,
+        reason: "Credenciais embutidas na URL n\xE3o s\xE3o permitidas.",
+        resolvedIps: []
+      };
+    }
+    const hostname = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    if (!hostname) {
+      return { allowed: false, reason: "Hostname ausente.", resolvedIps: [] };
+    }
+    if (params.requireRegisteredTarget) {
+      const list = params.authorizedTargets || [];
+      const match = list.find((t) => {
+        try {
+          return new URL(t.origin).origin === parsed.origin;
+        } catch {
+          return false;
+        }
+      });
+      if (!match) {
+        return {
+          allowed: false,
+          reason: `Destino n\xE3o autorizado (${parsed.origin}): cadastre o ambiente previamente no registro de destinos autorizados.`,
+          resolvedIps: []
+        };
+      }
+    }
+    const allowLoopback = Boolean(params.allowExplicitLoopback);
+    if (!allowLoopback && BLOCKED_HOSTNAMES.has(hostname)) {
+      return {
+        allowed: false,
+        reason: `Hostname interno/metadata bloqueado por pol\xEDtica SSRF (${hostname}).`,
+        resolvedIps: []
+      };
+    }
+    if (net.isIP(hostname) !== 0) {
+      const check = isDisallowedIpAddress(hostname, allowLoopback);
+      if (check.blocked) {
+        return { allowed: false, reason: check.reason || "IP bloqueado.", resolvedIps: [hostname] };
+      }
+      return {
+        allowed: true,
+        reason: "IP literal validado.",
+        parsedUrl: parsed,
+        resolvedIps: [hostname],
+        pinnedIp: hostname
+      };
+    }
+    const resolver = params.dnsResolver || defaultDnsResolver;
+    let records;
+    try {
+      records = await resolver(hostname);
+    } catch (err) {
+      return {
+        allowed: false,
+        reason: `Falha na resolu\xE7\xE3o DNS para ${hostname}: ${err?.message || "NXDOMAIN"}.`,
+        resolvedIps: []
+      };
+    }
+    if (!records || records.length === 0) {
+      return { allowed: false, reason: `Nenhum endere\xE7o IP retornado pelo DNS para ${hostname}.`, resolvedIps: [] };
+    }
+    const resolvedIps = records.map((r) => r.address);
+    for (const rec of records) {
+      const check = isDisallowedIpAddress(rec.address, allowLoopback);
+      if (check.blocked) {
+        return {
+          allowed: false,
+          reason: `DNS para ${hostname} resolveu para IP proibido (${rec.address}): ${check.reason}`,
+          resolvedIps
+        };
+      }
+    }
+    return {
+      allowed: true,
+      reason: "Destino e resolu\xE7\xE3o DNS validados.",
+      parsedUrl: parsed,
+      resolvedIps,
+      pinnedIp: resolvedIps[0]
+    };
+  }
+  /**
+   * Executa requisição HTTP(S) com IP pinado (proteção contra DNS rebinding)
+   * e revalidação de cada salto de redirecionamento HTTP (máximo 3 redirects).
+   */
+  static async pinnedSafeRequest(params) {
+    const maxRedirects = params.maxRedirects ?? 3;
+    const timeoutMs = params.timeoutMs ?? 4e3;
+    let currentUrl = params.targetUrl;
+    for (let hop = 0; hop <= maxRedirects; hop++) {
+      const validation = await _SsrfGuard.validateUrl({
+        targetUrl: currentUrl,
+        authorizedTargets: params.authorizedTargets,
+        requireRegisteredTarget: params.requireRegisteredTarget,
+        allowExplicitLoopback: params.allowExplicitLoopback,
+        dnsResolver: params.dnsResolver
+      });
+      if (!validation.allowed || !validation.parsedUrl || !validation.pinnedIp) {
+        throw new Error(`SSRF_BLOCKED: ${validation.reason}`);
+      }
+      const parsed = validation.parsedUrl;
+      const pinnedIp = validation.pinnedIp;
+      const family = net.isIPv6(pinnedIp) ? 6 : 4;
+      const start = performance.now();
+      const resp = await new Promise((resolve, reject) => {
+        const transport = parsed.protocol === "https:" ? https : http;
+        const req = transport.request(
+          {
+            hostname: parsed.hostname,
+            port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
+            path: `${parsed.pathname}${parsed.search}`,
+            method: "GET",
+            timeout: timeoutMs,
+            lookup: (_host, _opts, cb) => {
+              cb(null, pinnedIp, family);
+            },
+            headers: {
+              Host: parsed.host,
+              "User-Agent": "WinHood-Perf-Validator/4.2"
+            }
+          },
+          (res) => {
+            const loc = typeof res.headers.location === "string" ? res.headers.location : void 0;
+            res.on("data", () => {
+            });
+            res.on("end", () => resolve({ statusCode: res.statusCode || 0, location: loc }));
+          }
+        );
+        req.on("timeout", () => {
+          req.destroy(new Error(`Timeout after ${timeoutMs}ms`));
+        });
+        req.on("error", reject);
+        req.end();
+      });
+      const latencyMs = performance.now() - start;
+      if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.location) {
+        if (hop >= maxRedirects) {
+          throw new Error("SSRF_BLOCKED: Limite m\xE1ximo de redirecionamentos excedido.");
+        }
+        currentUrl = new URL(resp.location, parsed.toString()).toString();
+        continue;
+      }
+      return {
+        ok: resp.statusCode >= 200 && resp.statusCode < 300,
+        statusCode: resp.statusCode,
+        latencyMs,
+        finalUrl: currentUrl
+      };
+    }
+    throw new Error("SSRF_BLOCKED: Redirecionamento inv\xE1lido.");
+  }
+};
+
+// src/security/KeyManagementService.ts
+import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+function generateEd25519Pair() {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519", {
+    publicKeyEncoding: { type: "spki", format: "pem" },
+    privateKeyEncoding: { type: "pkcs8", format: "pem" }
+  });
+  return { privateKeyPem: privateKey, publicKeyPem: publicKey };
+}
+function resolvePowerShellExecutable() {
+  const sysRoot = process.env.SystemRoot || "C:\\Windows";
+  const exePath = path.win32.join(sysRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const safeEnv = {
+    SystemRoot: sysRoot,
+    PATH: path.win32.join(sysRoot, "System32")
+  };
+  return { exePath, safeEnv };
+}
+function tryDpapiProtectBytes(rawBytes) {
+  if (process.env.WINHOOD_SIMULATE_DPAPI_UNAVAILABLE === "true" || os.platform() !== "win32") {
+    return { protectedB64: "", usedDpapi: false };
+  }
+  try {
+    const b64 = rawBytes.toString("base64");
+    const ps = [
+      "Add-Type -AssemblyName System.Security;",
+      `$bytes = [Convert]::FromBase64String('${b64}');`,
+      "$prot = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser);",
+      "[Convert]::ToBase64String($prot)"
+    ].join(" ");
+    const { exePath, safeEnv } = resolvePowerShellExecutable();
+    const res = spawnSync(exePath, ["-NoProfile", "-NonInteractive", "-Command", ps], {
+      shell: false,
+      encoding: "utf8",
+      timeout: 5e3,
+      env: safeEnv
+    });
+    if (res.status === 0 && res.stdout && res.stdout.trim().length > 0) {
+      return { protectedB64: res.stdout.trim(), usedDpapi: true };
+    }
+  } catch {
+  }
+  return { protectedB64: "", usedDpapi: false };
+}
+function tryDpapiUnprotectBytes(cipherB64) {
+  if (process.env.WINHOOD_SIMULATE_DPAPI_UNAVAILABLE === "true") {
+    throw new Error("KEYSTORE_DPAPI_UNAVAILABLE: Windows DPAPI indispon\xEDvel ou bloqueado.");
+  }
+  const ps = [
+    "Add-Type -AssemblyName System.Security;",
+    `$bytes = [Convert]::FromBase64String('${cipherB64}');`,
+    "$unprot = [System.Security.Cryptography.ProtectedData]::Unprotect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser);",
+    "[Convert]::ToBase64String($unprot)"
+  ].join(" ");
+  const { exePath, safeEnv } = resolvePowerShellExecutable();
+  const res = spawnSync(exePath, ["-NoProfile", "-NonInteractive", "-Command", ps], {
+    shell: false,
+    encoding: "utf8",
+    timeout: 5e3,
+    env: safeEnv
+  });
+  if (res.status !== 0 || !res.stdout) {
+    throw new Error("KEYSTORE_DPAPI_UNPROTECT_FAILED: Falha ao descriptografar DEK via Windows DPAPI.");
+  }
+  return Buffer.from(res.stdout.trim(), "base64");
+}
+function tryDpapiUnprotectUtf8Legacy(cipherB64OrPlain, wasProtected) {
+  if (!wasProtected || os.platform() !== "win32") {
+    return cipherB64OrPlain;
+  }
+  const ps = [
+    "Add-Type -AssemblyName System.Security;",
+    `$bytes = [Convert]::FromBase64String('${cipherB64OrPlain}');`,
+    "$unprot = [System.Security.Cryptography.ProtectedData]::Unprotect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser);",
+    "[System.Text.Encoding]::UTF8.GetString($unprot)"
+  ].join(" ");
+  const { exePath, safeEnv } = resolvePowerShellExecutable();
+  const res = spawnSync(exePath, ["-NoProfile", "-NonInteractive", "-Command", ps], {
+    shell: false,
+    encoding: "utf8",
+    timeout: 5e3,
+    env: safeEnv
+  });
+  if (res.status !== 0 || !res.stdout) {
+    throw new Error("KEYSTORE_DPAPI_UNPROTECT_FAILED: Falha ao descriptografar chave legada via Windows DPAPI.");
+  }
+  return res.stdout.trim();
+}
+function tryMacosKeychainStoreOrLoadKek(accountName) {
+  if (process.env.WINHOOD_SIMULATE_KEYRING_UNAVAILABLE === "true" || os.platform() !== "darwin") {
+    return { seedBuffer: null, available: false };
+  }
+  const securityBin = "/usr/bin/security";
+  if (!fs.existsSync(securityBin)) {
+    return { seedBuffer: null, available: false };
+  }
+  try {
+    const findRes = spawnSync(
+      securityBin,
+      ["find-generic-password", "-a", accountName, "-s", "winhood-keystore-kek", "-w"],
+      { shell: false, encoding: "utf8", timeout: 4e3 }
+    );
+    if (findRes.status === 0 && findRes.stdout && findRes.stdout.trim().length >= 64) {
+      return { seedBuffer: Buffer.from(findRes.stdout.trim(), "hex"), available: true };
+    }
+    const newSeedHex = crypto.randomBytes(32).toString("hex");
+    const addRes = spawnSync(
+      securityBin,
+      ["add-generic-password", "-U", "-a", accountName, "-s", "winhood-keystore-kek", "-w", newSeedHex],
+      { shell: false, encoding: "utf8", timeout: 4e3 }
+    );
+    if (addRes.status === 0) {
+      return { seedBuffer: Buffer.from(newSeedHex, "hex"), available: true };
+    }
+  } catch {
+  }
+  return { seedBuffer: null, available: false };
+}
+function tryLinuxSecretServiceStoreOrLoadKek(accountName) {
+  if (process.env.WINHOOD_SIMULATE_KEYRING_UNAVAILABLE === "true" || os.platform() !== "linux") {
+    return { seedBuffer: null, available: false };
+  }
+  if (!process.env.DBUS_SESSION_BUS_ADDRESS) {
+    return { seedBuffer: null, available: false };
+  }
+  try {
+    const lookupRes = spawnSync(
+      "secret-tool",
+      ["lookup", "application", "winhood-benchmarking", "account", accountName],
+      { shell: false, encoding: "utf8", timeout: 3e3 }
+    );
+    if (lookupRes.status === 0 && lookupRes.stdout && lookupRes.stdout.trim().length >= 64) {
+      return { seedBuffer: Buffer.from(lookupRes.stdout.trim(), "hex"), available: true };
+    }
+    const newSeedHex = crypto.randomBytes(32).toString("hex");
+    const storeRes = spawnSync(
+      "secret-tool",
+      ["store", "--label=WinHood Keystore KEK", "application", "winhood-benchmarking", "account", accountName],
+      { shell: false, input: newSeedHex, encoding: "utf8", timeout: 3e3 }
+    );
+    if (storeRes.status === 0) {
+      return { seedBuffer: Buffer.from(newSeedHex, "hex"), available: true };
+    }
+  } catch {
+  }
+  return { seedBuffer: null, available: false };
+}
+function deriveHkdfPurposeKey(ikmBuffer, saltHex, purposeInfo) {
+  const saltBuf = Buffer.from(saltHex, "hex");
+  const infoBuf = Buffer.from(purposeInfo, "utf8");
+  const derived = crypto.hkdfSync("sha256", ikmBuffer, saltBuf, infoBuf, 32);
+  return Buffer.from(derived);
+}
+function encryptWithAes256GcmEnvelope(plaintextUtf8, key32Bytes, aadContext) {
+  if (key32Bytes.length !== 32) {
+    throw new Error("KEYSTORE_INVALID_KEY_LENGTH: Chave AES-256-GCM deve possuir exatamente 32 bytes.");
+  }
+  const nonce = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key32Bytes, nonce, { authTagLength: 16 });
+  cipher.setAAD(Buffer.from(aadContext, "utf8"));
+  const encrypted = Buffer.concat([cipher.update(plaintextUtf8, "utf8"), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return {
+    alg: "AES-256-GCM",
+    nonceHex: nonce.toString("hex"),
+    authTagHex: authTag.toString("hex"),
+    ciphertextHex: encrypted.toString("hex"),
+    aadContext
+  };
+}
+function decryptWithAes256GcmEnvelope(envelope, key32Bytes, expectedAadContext) {
+  if (!envelope || envelope.alg !== "AES-256-GCM") {
+    throw new Error("KEYSTORE_ENVELOPE_INVALID_ALG: Algoritmo de envelope inv\xE1lido.");
+  }
+  if (expectedAadContext && envelope.aadContext !== expectedAadContext) {
+    throw new Error(
+      `KEYSTORE_ENVELOPE_AAD_MISMATCH: Contexto de finalidade divergente (${envelope.aadContext} !== ${expectedAadContext}).`
+    );
+  }
+  const nonce = Buffer.from(envelope.nonceHex, "hex");
+  const authTag = Buffer.from(envelope.authTagHex, "hex");
+  if (nonce.length !== 12 || authTag.length !== 16) {
+    throw new Error("KEYSTORE_ENVELOPE_CORRUPTED_NONCE_OR_TAG: Nonce de 96 bits ou AuthTag de 128 bits inv\xE1lido.");
+  }
+  const decipher = crypto.createDecipheriv("aes-256-gcm", key32Bytes, nonce, { authTagLength: 16 });
+  decipher.setAAD(Buffer.from(envelope.aadContext, "utf8"));
+  decipher.setAuthTag(authTag);
+  try {
+    const decrypted = Buffer.concat([
+      decipher.update(Buffer.from(envelope.ciphertextHex, "hex")),
+      decipher.final()
+    ]);
+    return decrypted.toString("utf8");
+  } catch {
+    throw new Error(
+      "KEYSTORE_GCM_AUTH_FAILED: Falha de autentica\xE7\xE3o AES-256-GCM \u2014 ciphertext, nonce, AAD ou chave corrompidos."
+    );
+  }
+}
+var KeyManagementService = class _KeyManagementService {
+  static {
+    this.DEFAULT_STORE_PATH = path.resolve(
+      process.cwd(),
+      ".winhood_data",
+      "keys",
+      "keystore.json"
+    );
+  }
+  static getStorePath(customPath) {
+    return customPath || process.env.WINHOOD_KEYSTORE_PATH || _KeyManagementService.DEFAULT_STORE_PATH;
+  }
+  static getTrustStorePath(customStorePath) {
+    if (process.env.WINHOOD_TRUST_STORE_PATH && !customStorePath) {
+      return process.env.WINHOOD_TRUST_STORE_PATH;
+    }
+    const baseStore = _KeyManagementService.getStorePath(customStorePath);
+    return path.join(path.dirname(baseStore), "trust-store.json");
+  }
+  static resolveOperatingMode() {
+    const explicitMode = (process.env.WINHOOD_KEYSTORE_MODE || "").trim().toUpperCase();
+    if (explicitMode === "PRODUCTION_SECURE" || explicitMode === "DEVELOPMENT" || explicitMode === "RECOVERY") {
+      return explicitMode;
+    }
+    if (process.env.NODE_ENV === "production") {
+      return "PRODUCTION_SECURE";
+    }
+    return "DEVELOPMENT";
+  }
+  static computeSha256(content) {
+    return crypto.createHash("sha256").update(content, "utf8").digest("hex");
+  }
+  /**
+   * Validates strict domain separation across secret environment variables.
+   * Rejects reuse of identical secret strings across different cryptographic purposes
+   * and forbids SONAR_SECRET_SALT from acting as a keystore master secret.
+   */
+  static assertSecretDomainSeparation() {
+    const masterSecret = (process.env.WINHOOD_KEYSTORE_MASTER_SECRET || "").trim();
+    const hmacSecret = (process.env.WINHOOD_EVIDENCE_HMAC_SECRET || "").trim();
+    const vaultSecret = (process.env.WINHOOD_VAULT_SECRET || "").trim();
+    const sonarSalt = (process.env.SONAR_SECRET_SALT || "").trim();
+    if (masterSecret.length > 0 && sonarSalt.length > 0 && masterSecret === sonarSalt) {
+      throw new Error(
+        "KEYSTORE_SECRET_DOMAIN_VIOLATION: SONAR_SECRET_SALT \xE9 exclusivo de integra\xE7\xE3o/migra\xE7\xE3o legada e n\xE3o pode ser reutilizado como WINHOOD_KEYSTORE_MASTER_SECRET."
+      );
+    }
+    if (masterSecret.length > 0 && hmacSecret.length > 0 && masterSecret === hmacSecret) {
+      throw new Error(
+        "KEYSTORE_SECRET_DOMAIN_VIOLATION: WINHOOD_KEYSTORE_MASTER_SECRET e WINHOOD_EVIDENCE_HMAC_SECRET devem ser segredos independentes."
+      );
+    }
+    if (masterSecret.length > 0 && vaultSecret.length > 0 && masterSecret === vaultSecret) {
+      throw new Error(
+        "KEYSTORE_SECRET_DOMAIN_VIOLATION: WINHOOD_KEYSTORE_MASTER_SECRET e WINHOOD_VAULT_SECRET devem ser segredos independentes."
+      );
+    }
+    if (hmacSecret.length > 0 && vaultSecret.length > 0 && hmacSecret === vaultSecret) {
+      throw new Error(
+        "KEYSTORE_SECRET_DOMAIN_VIOLATION: WINHOOD_EVIDENCE_HMAC_SECRET e WINHOOD_VAULT_SECRET devem ser segredos independentes."
+      );
+    }
+  }
+  /**
+   * Resolves the Key Encryption Key (KEK) used exclusively to wrap/unwrap the random Data Encryption Key (DEK).
+   * Enforces fail-closed behavior in PRODUCTION_SECURE: never falls back to local .kek file in PRODUCTION_SECURE.
+   */
+  static resolveKekForStore(storePath, hkdfSaltHex, hkdfInfo, expectedMechanism) {
+    _KeyManagementService.assertSecretDomainSeparation();
+    const operatingMode = _KeyManagementService.resolveOperatingMode();
+    const accountId = _KeyManagementService.computeSha256(storePath).slice(0, 16);
+    const canonicalMasterEnv = (process.env.WINHOOD_KEYSTORE_MASTER_SECRET || "").trim();
+    const legacyMasterAlias = (process.env.WINHOOD_MASTER_KEY_SECRET || "").trim();
+    const extMasterEnv = canonicalMasterEnv || legacyMasterAlias;
+    const externalExplicitlyEnabled = process.env.WINHOOD_KEYSTORE_EXTERNAL_SECRET_ENABLED === "true" || operatingMode !== "PRODUCTION_SECURE" || canonicalMasterEnv.length >= 16;
+    if (extMasterEnv.length >= 16 && externalExplicitlyEnabled) {
+      const ikm = Buffer.from(extMasterEnv, "utf8");
+      return {
+        kekBuffer: deriveHkdfPurposeKey(ikm, hkdfSaltHex, hkdfInfo),
+        mechanism: "HKDF_EXTERNAL_ENV"
+      };
+    }
+    if (!expectedMechanism || expectedMechanism === "MACOS_KEYCHAIN") {
+      const macos = tryMacosKeychainStoreOrLoadKek(accountId);
+      if (macos.available && macos.seedBuffer) {
+        return {
+          kekBuffer: deriveHkdfPurposeKey(macos.seedBuffer, hkdfSaltHex, hkdfInfo),
+          mechanism: "MACOS_KEYCHAIN"
+        };
+      }
+    }
+    if (!expectedMechanism || expectedMechanism === "LINUX_SECRET_SERVICE") {
+      const linuxSecret = tryLinuxSecretServiceStoreOrLoadKek(accountId);
+      if (linuxSecret.available && linuxSecret.seedBuffer) {
+        return {
+          kekBuffer: deriveHkdfPurposeKey(linuxSecret.seedBuffer, hkdfSaltHex, hkdfInfo),
+          mechanism: "LINUX_SECRET_SERVICE"
+        };
+      }
+    }
+    if (operatingMode === "PRODUCTION_SECURE") {
+      throw new Error(
+        "KEYSTORE_PRODUCTION_PROVIDER_REQUIRED: Modo PRODUCTION_SECURE exige Windows DPAPI, macOS Keychain, Linux Secret Service ou WINHOOD_KEYSTORE_MASTER_SECRET (>= 16 caracteres). Fallback para arquivo .kek local \xE9 proibido em produ\xE7\xE3o."
+      );
+    }
+    const kekFilePath = `${storePath}.kek`;
+    let rawKekSeed;
+    if (fs.existsSync(kekFilePath)) {
+      const hex = fs.readFileSync(kekFilePath, "utf8").trim();
+      rawKekSeed = Buffer.from(hex, "hex");
+      if (rawKekSeed.length < 32) {
+        throw new Error(`KEYSTORE_KEK_CORRUPTED: Arquivo KEK em ${kekFilePath} corrompido.`);
+      }
+    } else {
+      fs.mkdirSync(path.dirname(kekFilePath), { recursive: true });
+      rawKekSeed = crypto.randomBytes(32);
+      const tmpKek = `${kekFilePath}.tmp-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
+      const fd = fs.openSync(tmpKek, "w", 384);
+      try {
+        fs.writeFileSync(fd, rawKekSeed.toString("hex"), "utf8");
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+      fs.renameSync(tmpKek, kekFilePath);
+      fs.chmodSync(kekFilePath, 384);
+    }
+    return {
+      kekBuffer: deriveHkdfPurposeKey(rawKekSeed, hkdfSaltHex, hkdfInfo),
+      mechanism: "HKDF_LOCAL_KEK_FILE"
+    };
+  }
+  /**
+   * Wraps a random 256-bit DEK using OS DPAPI (when on Windows), macOS Keychain, Linux Secret Service,
+   * or HKDF-derived KEK with AES-256-GCM.
+   */
+  static wrapDekBuffer(dekBuffer, storePath) {
+    _KeyManagementService.assertSecretDomainSeparation();
+    const operatingMode = _KeyManagementService.resolveOperatingMode();
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const hkdfSaltHex = crypto.randomBytes(16).toString("hex");
+    const hkdfInfo = "winhood:keystore:kek-envelope:v2";
+    if (os.platform() === "win32" && !(process.env.WINHOOD_KEYSTORE_MASTER_SECRET || "").trim()) {
+      const dpapiAttempt = tryDpapiProtectBytes(dekBuffer);
+      if (dpapiAttempt.usedDpapi) {
+        return {
+          envelopeVersion: "WINHOOD-ENVELOPE-V2",
+          kekMechanism: "WINDOWS_DPAPI",
+          hkdfSaltHex,
+          hkdfInfo,
+          dpapiProtectedBlobB64: dpapiAttempt.protectedB64,
+          createdAt: now,
+          rotatedAt: null
+        };
+      }
+      if (operatingMode === "PRODUCTION_SECURE") {
+        throw new Error(
+          "KEYSTORE_DPAPI_REQUIRED_IN_PRODUCTION: Windows DPAPI falhou ou est\xE1 indispon\xEDvel em PRODUCTION_SECURE e WINHOOD_KEYSTORE_MASTER_SECRET n\xE3o foi definido."
+        );
+      }
+    }
+    const { kekBuffer, mechanism } = _KeyManagementService.resolveKekForStore(
+      storePath,
+      hkdfSaltHex,
+      hkdfInfo
+    );
+    const wrappedCipher = encryptWithAes256GcmEnvelope(
+      dekBuffer.toString("hex"),
+      kekBuffer,
+      "winhood:dek:wrap:v2"
+    );
+    return {
+      envelopeVersion: "WINHOOD-ENVELOPE-V2",
+      kekMechanism: mechanism,
+      hkdfSaltHex,
+      hkdfInfo,
+      osKeyringAccount: mechanism === "MACOS_KEYCHAIN" || mechanism === "LINUX_SECRET_SERVICE" ? _KeyManagementService.computeSha256(storePath).slice(0, 16) : void 0,
+      aesGcmWrappedDek: wrappedCipher,
+      createdAt: now,
+      rotatedAt: null
+    };
+  }
+  /**
+   * Unwraps the 256-bit DEK from the keystore envelope.
+   */
+  static unwrapDekBuffer(wrappedDek, storePath) {
+    _KeyManagementService.assertSecretDomainSeparation();
+    const operatingMode = _KeyManagementService.resolveOperatingMode();
+    if (wrappedDek.kekMechanism === "WINDOWS_DPAPI") {
+      if (!wrappedDek.dpapiProtectedBlobB64) {
+        throw new Error("KEYSTORE_DPAPI_BLOB_MISSING: Blob DPAPI ausente no envelope.");
+      }
+      return tryDpapiUnprotectBytes(wrappedDek.dpapiProtectedBlobB64);
+    }
+    if (operatingMode === "PRODUCTION_SECURE" && wrappedDek.kekMechanism === "HKDF_LOCAL_KEK_FILE") {
+      const hasExternalMaster = (process.env.WINHOOD_KEYSTORE_MASTER_SECRET || "").trim().length >= 16;
+      if (!hasExternalMaster) {
+        throw new Error(
+          "KEYSTORE_PRODUCTION_LOCAL_KEK_REJECTED: Keystore protegido por arquivo .kek local n\xE3o \xE9 aceito em PRODUCTION_SECURE sem migra\xE7\xE3o para provedor seguro ou WINHOOD_KEYSTORE_MASTER_SECRET."
+        );
+      }
+    }
+    if (!wrappedDek.aesGcmWrappedDek) {
+      throw new Error("KEYSTORE_DEK_ENVELOPE_MISSING: Envelope AES-256-GCM da DEK ausente.");
+    }
+    const { kekBuffer } = _KeyManagementService.resolveKekForStore(
+      storePath,
+      wrappedDek.hkdfSaltHex,
+      wrappedDek.hkdfInfo,
+      wrappedDek.kekMechanism
+    );
+    const dekHex = decryptWithAes256GcmEnvelope(
+      wrappedDek.aesGcmWrappedDek,
+      kekBuffer,
+      "winhood:dek:wrap:v2"
+    );
+    return Buffer.from(dekHex, "hex");
+  }
+  /**
+   *Persists and verifies the separated Ed25519 Trust Store (`trust-store.json`).
+   */
+  static persistSeparatedTrustStore(storePath, trustedPublicKeys, monotonicSequence) {
+    const trustStorePath = _KeyManagementService.getTrustStorePath(storePath);
+    fs.mkdirSync(path.dirname(trustStorePath), { recursive: true });
+    const entries = Object.values(trustedPublicKeys);
+    const firstActive = entries.find((e) => e.status === "ACTIVE") || entries[0];
+    const rootAnchor = (process.env.WINHOOD_TRUST_ROOT_FINGERPRINT_SHA256 || "").trim() || firstActive?.fingerprintSha256 || null;
+    const trustPayload = {
+      version: 2,
+      rootAnchorFingerprintSha256: rootAnchor,
+      monotonicSequence,
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      trustedPublicKeys
+    };
+    const canonicalBody = JSON.stringify({
+      version: trustPayload.version,
+      rootAnchorFingerprintSha256: trustPayload.rootAnchorFingerprintSha256,
+      monotonicSequence: trustPayload.monotonicSequence,
+      trustedPublicKeys: trustPayload.trustedPublicKeys
+    });
+    const masterEnv = (process.env.WINHOOD_KEYSTORE_MASTER_SECRET || "").trim();
+    const macKey = masterEnv.length >= 16 ? deriveHkdfPurposeKey(
+      Buffer.from(masterEnv, "utf8"),
+      "77696e686f6f642d74727573742d7374",
+      "winhood:purpose:trust-store-mac:v2"
+    ) : Buffer.from(_KeyManagementService.computeSha256(`winhood-trust-anchor:${storePath}`), "hex");
+    trustPayload.integrityMacHex = crypto.createHmac("sha256", macKey).update(canonicalBody, "utf8").digest("hex");
+    const json = JSON.stringify(trustPayload, null, 2);
+    const tmpPath = `${trustStorePath}.tmp-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
+    const fd = fs.openSync(tmpPath, "w", 384);
+    try {
+      fs.writeFileSync(fd, json, "utf8");
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmpPath, trustStorePath);
+    fs.chmodSync(trustStorePath, 384);
+  }
+  static readSeparatedTrustStore(storePath) {
+    const trustStorePath = _KeyManagementService.getTrustStorePath(storePath);
+    if (!fs.existsSync(trustStorePath)) return null;
+    const raw = fs.readFileSync(trustStorePath, "utf8");
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error(`TRUST_STORE_CORRUPTED: JSON inv\xE1lido em ${trustStorePath}.`);
+    }
+    if (!parsed || !parsed.trustedPublicKeys || typeof parsed.trustedPublicKeys !== "object") {
+      throw new Error(`TRUST_STORE_INVALID_SCHEMA: Estrutura de chaves p\xFAblicas inv\xE1lida em ${trustStorePath}.`);
+    }
+    const canonicalBody = JSON.stringify({
+      version: parsed.version,
+      rootAnchorFingerprintSha256: parsed.rootAnchorFingerprintSha256,
+      monotonicSequence: parsed.monotonicSequence,
+      trustedPublicKeys: parsed.trustedPublicKeys
+    });
+    const masterEnv = (process.env.WINHOOD_KEYSTORE_MASTER_SECRET || "").trim();
+    const macKey = masterEnv.length >= 16 ? deriveHkdfPurposeKey(
+      Buffer.from(masterEnv, "utf8"),
+      "77696e686f6f642d74727573742d7374",
+      "winhood:purpose:trust-store-mac:v2"
+    ) : Buffer.from(_KeyManagementService.computeSha256(`winhood-trust-anchor:${storePath}`), "hex");
+    const expectedMac = crypto.createHmac("sha256", macKey).update(canonicalBody, "utf8").digest("hex");
+    if (parsed.integrityMacHex && parsed.integrityMacHex !== expectedMac) {
+      throw new Error(
+        `TRUST_STORE_INTEGRITY_VIOLATION: Assinatura de integridade do Trust Store (${trustStorePath}) inv\xE1lida ou adulterada.`
+      );
+    }
+    for (const [kId, entry] of Object.entries(parsed.trustedPublicKeys)) {
+      const actualFp = _KeyManagementService.computeSha256(entry.publicKeyPem);
+      if (actualFp !== entry.fingerprintSha256) {
+        throw new Error(
+          `TRUST_STORE_FINGERPRINT_MISMATCH: Chave p\xFAblica ${kId} no Trust Store n\xE3o corresponde ao fingerprint SHA-256 registrado.`
+        );
+      }
+    }
+    const pinnedRootFp = (process.env.WINHOOD_TRUST_ROOT_FINGERPRINT_SHA256 || "").trim();
+    if (pinnedRootFp && parsed.rootAnchorFingerprintSha256 !== pinnedRootFp) {
+      throw new Error(
+        "TRUST_STORE_ROOT_ANCHOR_MISMATCH: Fingerprint raiz do Trust Store diverge de WINHOOD_TRUST_ROOT_FINGERPRINT_SHA256."
+      );
+    }
+    return parsed.trustedPublicKeys;
+  }
+  static writeAtomicWithChecksum(storePath, payloadJson, monotonicSequence) {
+    const dir = path.dirname(storePath);
+    fs.mkdirSync(dir, { recursive: true });
+    const checksumPath = `${storePath}.sha256`;
+    const seqPath = `${storePath}.seq`;
+    const backupPath = `${storePath}.bak`;
+    if (fs.existsSync(storePath)) {
+      try {
+        fs.copyFileSync(storePath, backupPath);
+        fs.chmodSync(backupPath, 384);
+      } catch {
+      }
+    }
+    const tmpMain = `${storePath}.tmp-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
+    const fd = fs.openSync(tmpMain, "w", 384);
+    try {
+      fs.writeFileSync(fd, payloadJson, "utf8");
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmpMain, storePath);
+    fs.chmodSync(storePath, 384);
+    const hash = _KeyManagementService.computeSha256(payloadJson);
+    const tmpHash = `${checksumPath}.tmp-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
+    const hfd = fs.openSync(tmpHash, "w", 384);
+    try {
+      fs.writeFileSync(hfd, hash, "utf8");
+      fs.fsyncSync(hfd);
+    } finally {
+      fs.closeSync(hfd);
+    }
+    fs.renameSync(tmpHash, checksumPath);
+    fs.chmodSync(checksumPath, 384);
+    const tmpSeq = `${seqPath}.tmp-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
+    const sfd = fs.openSync(tmpSeq, "w", 384);
+    try {
+      fs.writeFileSync(sfd, String(monotonicSequence), "utf8");
+      fs.fsyncSync(sfd);
+    } finally {
+      fs.closeSync(sfd);
+    }
+    fs.renameSync(tmpSeq, seqPath);
+    fs.chmodSync(seqPath, 384);
+  }
+  static readVerifiedStoreFile(storePath) {
+    if (!fs.existsSync(storePath)) return null;
+    const checksumPath = `${storePath}.sha256`;
+    const seqPath = `${storePath}.seq`;
+    const raw = fs.readFileSync(storePath, "utf8");
+    if (fs.existsSync(checksumPath)) {
+      const expectedSha = fs.readFileSync(checksumPath, "utf8").trim();
+      const actualSha = _KeyManagementService.computeSha256(raw);
+      if (expectedSha !== actualSha) {
+        const backupPath = `${storePath}.bak`;
+        if (fs.existsSync(backupPath) && _KeyManagementService.resolveOperatingMode() !== "PRODUCTION_SECURE") {
+          const bakRaw = fs.readFileSync(backupPath, "utf8");
+          const bakParsed = JSON.parse(bakRaw);
+          if (bakParsed && bakParsed.keysHex && bakParsed.activeEvidenceKeyId && bakParsed.activeVaultKeyId) {
+            return { store: bakParsed, integrityVerified: false, rollbackVerified: false };
+          }
+        }
+        throw new Error(`KEYSTORE_INTEGRITY_VIOLATION: Checksum SHA-256 de ${storePath} n\xE3o confere.`);
+      }
+    }
+    const parsed = JSON.parse(raw);
+    if (!parsed || !parsed.keysHex || !parsed.activeEvidenceKeyId || !parsed.activeVaultKeyId) {
+      throw new Error(`KEYSTORE_CORRUPTED: Estrutura inv\xE1lida em ${storePath}.`);
+    }
+    let rollbackVerified = true;
+    if (fs.existsSync(seqPath) && typeof parsed.monotonicSequence === "number") {
+      const recordedSeq = Number.parseInt(fs.readFileSync(seqPath, "utf8").trim(), 10);
+      if (Number.isFinite(recordedSeq) && parsed.monotonicSequence < recordedSeq) {
+        if (_KeyManagementService.resolveOperatingMode() !== "RECOVERY") {
+          throw new Error(
+            `KEYSTORE_ROLLBACK_DETECTED: Sequ\xEAncia monot\xF4nica do keystore (${parsed.monotonicSequence}) \xE9 anterior ao \xFAltimo estado confirmado (${recordedSeq}).`
+          );
+        }
+        rollbackVerified = false;
+      }
+    }
+    let upgraded = false;
+    if (!parsed.wrappedDek || parsed.envelopeVersion !== "WINHOOD-ENVELOPE-V2" || parsed.wrappedDek.kekMechanism === "HKDF_LOCAL_KEK_FILE" && (process.env.WINHOOD_KEYSTORE_MASTER_SECRET || "").trim().length >= 16) {
+      let dekBuffer;
+      if (parsed.wrappedDek && parsed.envelopeVersion === "WINHOOD-ENVELOPE-V2") {
+        const kekFilePath = `${storePath}.kek`;
+        if (fs.existsSync(kekFilePath) && parsed.wrappedDek.aesGcmWrappedDek) {
+          const rawKekSeed = Buffer.from(fs.readFileSync(kekFilePath, "utf8").trim(), "hex");
+          const oldKek = deriveHkdfPurposeKey(
+            rawKekSeed,
+            parsed.wrappedDek.hkdfSaltHex,
+            parsed.wrappedDek.hkdfInfo
+          );
+          const dekHex = decryptWithAes256GcmEnvelope(
+            parsed.wrappedDek.aesGcmWrappedDek,
+            oldKek,
+            "winhood:dek:wrap:v2"
+          );
+          dekBuffer = Buffer.from(dekHex, "hex");
+        } else {
+          dekBuffer = crypto.randomBytes(32);
+        }
+      } else {
+        dekBuffer = crypto.randomBytes(32);
+      }
+      parsed.wrappedDek = _KeyManagementService.wrapDekBuffer(dekBuffer, storePath);
+      parsed.envelopeVersion = "WINHOOD-ENVELOPE-V2";
+      parsed.operatingMode = _KeyManagementService.resolveOperatingMode();
+      parsed.monotonicSequence = (parsed.monotonicSequence || 0) + 1;
+      for (const [kId, entry] of Object.entries(parsed.keysHex)) {
+        if (!entry.envelopeCipher && entry.secretHex) {
+          const plainHex = tryDpapiUnprotectUtf8Legacy(entry.secretHex, entry.dpapiProtected);
+          entry.envelopeCipher = encryptWithAes256GcmEnvelope(
+            plainHex,
+            dekBuffer,
+            `winhood:key:${kId}:${entry.purpose}`
+          );
+          delete entry.secretHex;
+        }
+      }
+      if (!parsed.ed25519Keys || !parsed.activeEd25519KeyId) {
+        const now = (/* @__PURE__ */ new Date()).toISOString();
+        const edId = `wh-ed25519-${now.slice(0, 10).replace(/-/g, "")}-${crypto.randomBytes(4).toString("hex")}`;
+        const pair = generateEd25519Pair();
+        parsed.ed25519Keys = {
+          [edId]: {
+            purpose: "EVIDENCE_ED25519",
+            privateKeyEnvelope: encryptWithAes256GcmEnvelope(
+              pair.privateKeyPem,
+              dekBuffer,
+              `winhood:key:${edId}:EVIDENCE_ED25519`
+            ),
+            publicKeyPem: pair.publicKeyPem,
+            createdAt: now,
+            validFrom: now,
+            validUntil: null,
+            status: "ACTIVE",
+            rotatedAt: null,
+            revokedAt: null
+          }
+        };
+        parsed.activeEd25519KeyId = edId;
+      } else {
+        for (const [edId, edEntry] of Object.entries(parsed.ed25519Keys)) {
+          if (!edEntry.privateKeyEnvelope && edEntry.privateKeyPem) {
+            const plainPem = tryDpapiUnprotectUtf8Legacy(edEntry.privateKeyPem, edEntry.dpapiProtected);
+            edEntry.privateKeyEnvelope = encryptWithAes256GcmEnvelope(
+              plainPem,
+              dekBuffer,
+              `winhood:key:${edId}:EVIDENCE_ED25519`
+            );
+            delete edEntry.privateKeyPem;
+          }
+        }
+      }
+      parsed.version = 3;
+      upgraded = true;
+    }
+    if (!parsed.trustedPublicKeys) {
+      parsed.trustedPublicKeys = {};
+      upgraded = true;
+    }
+    for (const [edId, edEntry] of Object.entries(parsed.ed25519Keys || {})) {
+      if (!parsed.trustedPublicKeys[edId]) {
+        parsed.trustedPublicKeys[edId] = {
+          keyId: edId,
+          publicKeyPem: edEntry.publicKeyPem,
+          fingerprintSha256: _KeyManagementService.computeSha256(edEntry.publicKeyPem),
+          validFrom: edEntry.validFrom || edEntry.createdAt,
+          validUntil: edEntry.validUntil || null,
+          revokedAt: edEntry.revokedAt || null,
+          revocationReason: edEntry.revocationReason || null,
+          status: edEntry.status === "REVOKED" ? "REVOKED" : edEntry.status === "RETIRED_VERIFY_ONLY" ? "ROTATED_VERIFY_ONLY" : "ACTIVE"
+        };
+        upgraded = true;
+      }
+    }
+    const trustStorePath = _KeyManagementService.getTrustStorePath(storePath);
+    if (!fs.existsSync(trustStorePath)) {
+      _KeyManagementService.persistSeparatedTrustStore(
+        storePath,
+        parsed.trustedPublicKeys,
+        parsed.monotonicSequence || 1
+      );
+    } else {
+      const separatedKeys = _KeyManagementService.readSeparatedTrustStore(storePath);
+      if (separatedKeys) {
+        parsed.trustedPublicKeys = separatedKeys;
+      }
+    }
+    if (!parsed.rotationHistory) {
+      parsed.rotationHistory = [];
+      upgraded = true;
+    }
+    if (upgraded || !fs.existsSync(checksumPath)) {
+      _KeyManagementService.persistStore(parsed, storePath);
+    }
+    return { store: parsed, integrityVerified: true, rollbackVerified };
+  }
+  static loadOrInitializeStore(customPath) {
+    _KeyManagementService.assertSecretDomainSeparation();
+    const storePath = _KeyManagementService.getStorePath(customPath);
+    const existing = _KeyManagementService.readVerifiedStoreFile(storePath);
+    if (existing) {
+      return existing;
+    }
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const evidenceKeyId = `wh-hmac-${now.slice(0, 10).replace(/-/g, "")}-${crypto.randomBytes(4).toString("hex")}`;
+    const ed25519KeyId = `wh-ed25519-${now.slice(0, 10).replace(/-/g, "")}-${crypto.randomBytes(4).toString("hex")}`;
+    const vaultKeyId = `wh-vault-${now.slice(0, 10).replace(/-/g, "")}-${crypto.randomBytes(4).toString("hex")}`;
+    const dekBuffer = crypto.randomBytes(32);
+    const wrappedDek = _KeyManagementService.wrapDekBuffer(dekBuffer, storePath);
+    const hmacSecretHex = crypto.randomBytes(32).toString("hex");
+    const vaultSecretHex = crypto.randomBytes(32).toString("hex");
+    const edPair = generateEd25519Pair();
+    const initialStore = {
+      version: 3,
+      envelopeVersion: "WINHOOD-ENVELOPE-V2",
+      operatingMode: _KeyManagementService.resolveOperatingMode(),
+      monotonicSequence: 1,
+      wrappedDek,
+      activeEvidenceKeyId: evidenceKeyId,
+      activeEd25519KeyId: ed25519KeyId,
+      activeVaultKeyId: vaultKeyId,
+      keysHex: {
+        [evidenceKeyId]: {
+          purpose: "EVIDENCE_HMAC",
+          envelopeCipher: encryptWithAes256GcmEnvelope(
+            hmacSecretHex,
+            dekBuffer,
+            `winhood:key:${evidenceKeyId}:EVIDENCE_HMAC`
+          ),
+          createdAt: now,
+          status: "ACTIVE",
+          rotatedAt: null,
+          revokedAt: null
+        },
+        [vaultKeyId]: {
+          purpose: "TOKEN_VAULT_AES256",
+          envelopeCipher: encryptWithAes256GcmEnvelope(
+            vaultSecretHex,
+            dekBuffer,
+            `winhood:key:${vaultKeyId}:TOKEN_VAULT_AES256`
+          ),
+          createdAt: now,
+          status: "ACTIVE",
+          rotatedAt: null,
+          revokedAt: null
+        }
+      },
+      ed25519Keys: {
+        [ed25519KeyId]: {
+          purpose: "EVIDENCE_ED25519",
+          privateKeyEnvelope: encryptWithAes256GcmEnvelope(
+            edPair.privateKeyPem,
+            dekBuffer,
+            `winhood:key:${ed25519KeyId}:EVIDENCE_ED25519`
+          ),
+          publicKeyPem: edPair.publicKeyPem,
+          createdAt: now,
+          validFrom: now,
+          validUntil: null,
+          status: "ACTIVE",
+          rotatedAt: null,
+          revokedAt: null
+        }
+      },
+      trustedPublicKeys: {
+        [ed25519KeyId]: {
+          keyId: ed25519KeyId,
+          publicKeyPem: edPair.publicKeyPem,
+          fingerprintSha256: _KeyManagementService.computeSha256(edPair.publicKeyPem),
+          validFrom: now,
+          validUntil: null,
+          revokedAt: null,
+          revocationReason: null,
+          status: "ACTIVE"
+        }
+      },
+      rotationHistory: [],
+      adminTokenSha256: process.env.WINHOOD_ADMIN_TOKEN ? crypto.createHash("sha256").update(process.env.WINHOOD_ADMIN_TOKEN, "utf8").digest("hex") : null
+    };
+    _KeyManagementService.persistStore(initialStore, storePath);
+    return { store: initialStore, integrityVerified: true, rollbackVerified: true };
+  }
+  static decryptSymmetricKeyHex(store, keyId, storePath) {
+    const entry = store.keysHex[keyId];
+    if (!entry) {
+      throw new Error(`KEYSTORE_KEY_NOT_FOUND: Chave ${keyId} n\xE3o encontrada.`);
+    }
+    if (entry.status === "REVOKED") {
+      throw new Error(`KEYSTORE_KEY_REVOKED: A chave ${keyId} foi revogada e n\xE3o pode ser utilizada.`);
+    }
+    if (entry.envelopeCipher && store.wrappedDek) {
+      const dekBuffer = _KeyManagementService.unwrapDekBuffer(store.wrappedDek, storePath);
+      return decryptWithAes256GcmEnvelope(
+        entry.envelopeCipher,
+        dekBuffer,
+        `winhood:key:${keyId}:${entry.purpose}`
+      );
+    }
+    if (entry.secretHex) {
+      return tryDpapiUnprotectUtf8Legacy(entry.secretHex, entry.dpapiProtected);
+    }
+    throw new Error(`KEYSTORE_KEY_EMPTY: Material criptogr\xE1fico ausente para ${keyId}.`);
+  }
+  static decryptEd25519PrivateKeyPem(store, keyId, storePath) {
+    const entry = store.ed25519Keys[keyId];
+    if (!entry) {
+      throw new Error(`KEYSTORE_ED25519_NOT_FOUND: Chave Ed25519 ${keyId} n\xE3o encontrada.`);
+    }
+    if (entry.status === "REVOKED") {
+      throw new Error(`KEYSTORE_ED25519_REVOKED: Chave Ed25519 ${keyId} encontra-se revogada.`);
+    }
+    if (entry.privateKeyEnvelope && store.wrappedDek) {
+      const dekBuffer = _KeyManagementService.unwrapDekBuffer(store.wrappedDek, storePath);
+      return decryptWithAes256GcmEnvelope(
+        entry.privateKeyEnvelope,
+        dekBuffer,
+        `winhood:key:${keyId}:EVIDENCE_ED25519`
+      );
+    }
+    if (entry.privateKeyPem) {
+      return tryDpapiUnprotectUtf8Legacy(entry.privateKeyPem, entry.dpapiProtected);
+    }
+    throw new Error(`KEYSTORE_ED25519_EMPTY: Chave privada ausente para ${keyId}.`);
+  }
+  static persistStore(store, customPath) {
+    const storePath = _KeyManagementService.getStorePath(customPath);
+    const seq = (store.monotonicSequence || 0) + 1;
+    store.monotonicSequence = seq;
+    try {
+      _KeyManagementService.writeAtomicWithChecksum(storePath, JSON.stringify(store, null, 2), seq);
+      if (store.trustedPublicKeys) {
+        _KeyManagementService.persistSeparatedTrustStore(storePath, store.trustedPublicKeys, seq);
+      }
+    } catch (err) {
+      throw new Error(
+        `KEYSTORE_PERSISTENCE_FAILED: N\xE3o foi poss\xEDvel persistir o keystore de forma segura em ${storePath}: ${err?.message || String(err)}`
+      );
+    }
+  }
+  static getActiveEvidenceHmacKey(customPath) {
+    _KeyManagementService.assertSecretDomainSeparation();
+    const envVal = process.env.WINHOOD_EVIDENCE_HMAC_SECRET;
+    if (envVal && envVal.trim().length >= 16) {
+      const derived = deriveHkdfPurposeKey(
+        Buffer.from(envVal.trim(), "utf8"),
+        "77696e686f6f642d65766964656e6365",
+        "winhood:purpose:evidence-hmac:v2"
+      );
+      return {
+        keyId: process.env.WINHOOD_EVIDENCE_KEY_ID || "ENV-HMAC-KEY",
+        secret: derived.toString("hex"),
+        origin: "ENV_EXTERNAL"
+      };
+    }
+    if (process.env.WINHOOD_REQUIRE_ENV_SECRETS === "true") {
+      throw new Error(
+        "KEY_MANAGEMENT_ENV_SECRET_REQUIRED: Defina WINHOOD_EVIDENCE_HMAC_SECRET (>= 16 caracteres) quando WINHOOD_REQUIRE_ENV_SECRETS=true."
+      );
+    }
+    const storePath = _KeyManagementService.getStorePath(customPath);
+    const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
+    return {
+      keyId: store.activeEvidenceKeyId,
+      secret: _KeyManagementService.decryptSymmetricKeyHex(store, store.activeEvidenceKeyId, storePath),
+      origin: "HOST_CSPRNG_KEYSTORE"
+    };
+  }
+  static getEvidenceSecretByKeyId(keyId, customPath) {
+    _KeyManagementService.assertSecretDomainSeparation();
+    const envVal = process.env.WINHOOD_EVIDENCE_HMAC_SECRET;
+    const envKeyId = process.env.WINHOOD_EVIDENCE_KEY_ID || "ENV-HMAC-KEY";
+    if (envVal && envVal.trim().length >= 16 && keyId === envKeyId) {
+      const derived = deriveHkdfPurposeKey(
+        Buffer.from(envVal.trim(), "utf8"),
+        "77696e686f6f642d65766964656e6365",
+        "winhood:purpose:evidence-hmac:v2"
+      );
+      return derived.toString("hex");
+    }
+    const storePath = _KeyManagementService.getStorePath(customPath);
+    const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
+    if (!store.keysHex[keyId] || store.keysHex[keyId].status === "REVOKED") {
+      return null;
+    }
+    return _KeyManagementService.decryptSymmetricKeyHex(store, keyId, storePath);
+  }
+  static getActiveEvidenceEd25519Key(customPath) {
+    const storePath = _KeyManagementService.getStorePath(customPath);
+    const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
+    const active = store.ed25519Keys[store.activeEd25519KeyId];
+    return {
+      keyId: store.activeEd25519KeyId,
+      privateKeyPem: _KeyManagementService.decryptEd25519PrivateKeyPem(
+        store,
+        store.activeEd25519KeyId,
+        storePath
+      ),
+      publicKeyPem: active.publicKeyPem
+    };
+  }
+  static getEd25519PublicKeyByKeyId(keyId, customPath) {
+    const storePath = _KeyManagementService.getStorePath(customPath);
+    const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
+    const separatedTrust = _KeyManagementService.readSeparatedTrustStore(storePath);
+    const trusted = separatedTrust?.[keyId] || store.trustedPublicKeys?.[keyId];
+    if (trusted) {
+      if (trusted.status === "REVOKED" || trusted.revokedAt) {
+        return null;
+      }
+      return trusted.publicKeyPem;
+    }
+    const fallback = store.ed25519Keys?.[keyId];
+    if (!fallback || fallback.status === "REVOKED") return null;
+    return fallback.publicKeyPem;
+  }
+  /**
+   * Verifies an Ed25519 public key against the separated Trusted Public Key Registry (`trust-store.json`),
+   * preventing a tampered manifest or keystore from substituting its own self-signed public key.
+   */
+  static verifyTrustedEd25519PublicKey(keyId, attachedPublicKeyPem, signedAtIso, customPath) {
+    const storePath = _KeyManagementService.getStorePath(customPath);
+    let trustMap;
+    try {
+      const separated = _KeyManagementService.readSeparatedTrustStore(storePath);
+      if (separated) {
+        trustMap = separated;
+      } else {
+        const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
+        trustMap = _KeyManagementService.readSeparatedTrustStore(storePath) || store.trustedPublicKeys || {};
+      }
+    } catch (err) {
+      return {
+        trusted: false,
+        keyId: keyId || null,
+        publicKeyPem: null,
+        status: "UNTRUSTED",
+        reason: err?.message || "Falha de integridade no Trust Store separado."
+      };
+    }
+    if (!keyId) {
+      return {
+        trusted: false,
+        keyId: null,
+        publicKeyPem: null,
+        status: "UNTRUSTED",
+        reason: "Manifesto n\xE3o declara identificador de chave Ed25519 (ed25519KeyId ausente)."
+      };
+    }
+    const trustedEntry = trustMap[keyId];
+    if (!trustedEntry) {
+      return {
+        trusted: false,
+        keyId,
+        publicKeyPem: null,
+        status: "UNTRUSTED",
+        reason: `Chave Ed25519 ${keyId} n\xE3o consta no Registro de Chaves P\xFAblicas Confi\xE1veis (Trust Store).`
+      };
+    }
+    if (trustedEntry.status === "REVOKED" || trustedEntry.revokedAt) {
+      return {
+        trusted: false,
+        keyId,
+        publicKeyPem: null,
+        status: "REVOKED",
+        reason: `Chave Ed25519 ${keyId} revogada em ${trustedEntry.revokedAt || "data registrada"} (${trustedEntry.revocationReason || "sem motivo especificado"}).`
+      };
+    }
+    if (signedAtIso && trustedEntry.validUntil) {
+      const signedTs = Date.parse(signedAtIso);
+      const untilTs = Date.parse(trustedEntry.validUntil);
+      if (Number.isFinite(signedTs) && Number.isFinite(untilTs) && signedTs > untilTs) {
+        return {
+          trusted: false,
+          keyId,
+          publicKeyPem: null,
+          status: "EXPIRED",
+          reason: `Chave Ed25519 ${keyId} expirada em ${trustedEntry.validUntil}.`
+        };
+      }
+    }
+    if (attachedPublicKeyPem && attachedPublicKeyPem.trim() !== trustedEntry.publicKeyPem.trim()) {
+      return {
+        trusted: false,
+        keyId,
+        publicKeyPem: null,
+        status: "UNTRUSTED",
+        reason: `Chave p\xFAblica anexada ao manifesto diverge da chave registrada no Trust Store para ${keyId}.`
+      };
+    }
+    return {
+      trusted: true,
+      keyId,
+      publicKeyPem: trustedEntry.publicKeyPem,
+      status: trustedEntry.status,
+      reason: `Chave Ed25519 ${keyId} verificada no Trust Store separado (${trustedEntry.status}).`
+    };
+  }
+  static revokeKey(keyId, reason = "Revoga\xE7\xE3o administrativa de seguran\xE7a", customPath) {
+    const storePath = _KeyManagementService.getStorePath(customPath);
+    const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    if (store.ed25519Keys?.[keyId]) {
+      store.ed25519Keys[keyId].status = "REVOKED";
+      store.ed25519Keys[keyId].revokedAt = now;
+      store.ed25519Keys[keyId].revocationReason = reason;
+    }
+    if (store.trustedPublicKeys?.[keyId]) {
+      store.trustedPublicKeys[keyId].status = "REVOKED";
+      store.trustedPublicKeys[keyId].revokedAt = now;
+      store.trustedPublicKeys[keyId].revocationReason = reason;
+    }
+    if (store.keysHex?.[keyId]) {
+      store.keysHex[keyId].status = "REVOKED";
+      store.keysHex[keyId].revokedAt = now;
+    }
+    _KeyManagementService.persistStore(store, storePath);
+  }
+  /**
+   * Returns the active 256-bit AES-GCM Vault Key.
+   * Strict Secret Policy: ONLY `WINHOOD_VAULT_SECRET` is accepted as an external vault secret for active encryption.
+   * `SONAR_SECRET_SALT` is strictly forbidden as an active vault encryption secret (reserved for legacy decrypt-only migration).
+   */
+  static getActiveVaultAesKey(customPath) {
+    _KeyManagementService.assertSecretDomainSeparation();
+    const envVaultVal = (process.env.WINHOOD_VAULT_SECRET || "").trim();
+    if (envVaultVal.length >= 16) {
+      const derivedKey = deriveHkdfPurposeKey(
+        Buffer.from(envVaultVal, "utf8"),
+        "77696e686f6f642d7661756c742d6165",
+        "winhood:purpose:token-vault-aes256:v2"
+      );
+      return {
+        keyId: "ENV-VAULT-KEY",
+        keyBuffer: derivedKey,
+        origin: "ENV_EXTERNAL"
+      };
+    }
+    if (process.env.WINHOOD_REQUIRE_ENV_SECRETS === "true") {
+      throw new Error(
+        "KEY_MANAGEMENT_ENV_SECRET_REQUIRED: Defina WINHOOD_VAULT_SECRET (>= 16 caracteres) quando WINHOOD_REQUIRE_ENV_SECRETS=true. SONAR_SECRET_SALT n\xE3o \xE9 aceito como substituto de WINHOOD_VAULT_SECRET."
+      );
+    }
+    const storePath = _KeyManagementService.getStorePath(customPath);
+    const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
+    const hex = _KeyManagementService.decryptSymmetricKeyHex(store, store.activeVaultKeyId, storePath);
+    return {
+      keyId: store.activeVaultKeyId,
+      keyBuffer: Buffer.from(hex, "hex"),
+      origin: "HOST_CSPRNG_KEYSTORE"
+    };
+  }
+  /**
+   * Resolves a vault key by keyId for decryption.
+   * Supports controlled read-only backward compatibility for legacy `ENV-VAULT-KEY` records encrypted under `SONAR_SECRET_SALT`.
+   */
+  static getVaultKeyBufferByKeyId(keyId, customPath) {
+    _KeyManagementService.assertSecretDomainSeparation();
+    if (keyId === "ENV-VAULT-KEY") {
+      const envVaultVal = (process.env.WINHOOD_VAULT_SECRET || "").trim();
+      if (envVaultVal.length >= 16) {
+        return deriveHkdfPurposeKey(
+          Buffer.from(envVaultVal, "utf8"),
+          "77696e686f6f642d7661756c742d6165",
+          "winhood:purpose:token-vault-aes256:v2"
+        );
+      }
+      const legacySonarSalt = (process.env.SONAR_SECRET_SALT || "").trim();
+      if (legacySonarSalt.length >= 16) {
+        return deriveHkdfPurposeKey(
+          Buffer.from(legacySonarSalt, "utf8"),
+          "77696e686f6f642d7661756c742d6165",
+          "winhood:purpose:token-vault-aes256:v2"
+        );
+      }
+      return null;
+    }
+    if (keyId === "LEGACY-SONAR-SALT-KEY") {
+      const legacySonarSalt = (process.env.SONAR_SECRET_SALT || "").trim();
+      if (legacySonarSalt.length >= 16) {
+        return deriveHkdfPurposeKey(
+          Buffer.from(legacySonarSalt, "utf8"),
+          "77696e686f6f642d7661756c742d6165",
+          "winhood:purpose:token-vault-aes256:v2"
+        );
+      }
+      return null;
+    }
+    const storePath = _KeyManagementService.getStorePath(customPath);
+    const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
+    if (!store.keysHex[keyId] || store.keysHex[keyId].status === "REVOKED") return null;
+    const hex = _KeyManagementService.decryptSymmetricKeyHex(store, keyId, storePath);
+    return Buffer.from(hex, "hex");
+  }
+  static rotateKey(purpose, customPath, onVaultReencrypt) {
+    const storePath = _KeyManagementService.getStorePath(customPath);
+    const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const dekBuffer = _KeyManagementService.unwrapDekBuffer(store.wrappedDek, storePath);
+    if (purpose === "EVIDENCE_ED25519") {
+      const prevKeyId2 = store.activeEd25519KeyId;
+      if (store.ed25519Keys[prevKeyId2]) {
+        store.ed25519Keys[prevKeyId2].status = "RETIRED_VERIFY_ONLY";
+        store.ed25519Keys[prevKeyId2].rotatedAt = now;
+      }
+      if (store.trustedPublicKeys?.[prevKeyId2]) {
+        store.trustedPublicKeys[prevKeyId2].status = "ROTATED_VERIFY_ONLY";
+      }
+      const newKeyId2 = `wh-ed25519-${now.slice(0, 10).replace(/-/g, "")}-${crypto.randomBytes(4).toString("hex")}`;
+      const pair = generateEd25519Pair();
+      store.ed25519Keys[newKeyId2] = {
+        purpose: "EVIDENCE_ED25519",
+        privateKeyEnvelope: encryptWithAes256GcmEnvelope(
+          pair.privateKeyPem,
+          dekBuffer,
+          `winhood:key:${newKeyId2}:EVIDENCE_ED25519`
+        ),
+        publicKeyPem: pair.publicKeyPem,
+        createdAt: now,
+        validFrom: now,
+        validUntil: null,
+        status: "ACTIVE",
+        rotatedAt: null,
+        revokedAt: null
+      };
+      store.trustedPublicKeys = store.trustedPublicKeys || {};
+      store.trustedPublicKeys[newKeyId2] = {
+        keyId: newKeyId2,
+        publicKeyPem: pair.publicKeyPem,
+        fingerprintSha256: _KeyManagementService.computeSha256(pair.publicKeyPem),
+        validFrom: now,
+        validUntil: null,
+        revokedAt: null,
+        revocationReason: null,
+        status: "ACTIVE"
+      };
+      store.activeEd25519KeyId = newKeyId2;
+      store.rotationHistory = store.rotationHistory || [];
+      store.rotationHistory.push({
+        timestamp: now,
+        purpose: "EVIDENCE_ED25519",
+        previousKeyId: prevKeyId2,
+        newKeyId: newKeyId2,
+        reason: "Rota\xE7\xE3o programada de par assim\xE9trico Ed25519 com preserva\xE7\xE3o no Trust Store separado",
+        monotonicSequence: (store.monotonicSequence || 0) + 1
+      });
+      _KeyManagementService.persistStore(store, customPath);
+      return {
+        keyId: newKeyId2,
+        purpose: "EVIDENCE_ED25519",
+        createdAt: now,
+        rotatedAt: null,
+        status: "ACTIVE",
+        fingerprintSha256: _KeyManagementService.computeSha256(pair.publicKeyPem).slice(0, 16),
+        algorithm: "ED25519"
+      };
+    }
+    const prevKeyId = purpose === "EVIDENCE_HMAC" ? store.activeEvidenceKeyId : store.activeVaultKeyId;
+    const prevEntry = store.keysHex[prevKeyId];
+    const prevKeyBuffer = purpose === "TOKEN_VAULT_AES256" && prevEntry ? Buffer.from(_KeyManagementService.decryptSymmetricKeyHex(store, prevKeyId, storePath), "hex") : null;
+    const prefix = purpose === "EVIDENCE_HMAC" ? "wh-hmac" : "wh-vault";
+    const newKeyId = `${prefix}-${now.slice(0, 10).replace(/-/g, "")}-${crypto.randomBytes(4).toString("hex")}`;
+    const rawKeyHex = crypto.randomBytes(32).toString("hex");
+    const newKeyBuffer = Buffer.from(rawKeyHex, "hex");
+    if (purpose === "TOKEN_VAULT_AES256" && onVaultReencrypt && prevKeyBuffer) {
+      onVaultReencrypt({
+        oldKeyId: prevKeyId,
+        oldKeyBuffer: prevKeyBuffer,
+        newKeyId,
+        newKeyBuffer
+      });
+    }
+    if (prevEntry) {
+      prevEntry.status = "RETIRED_VERIFY_ONLY";
+      prevEntry.rotatedAt = now;
+    }
+    store.keysHex[newKeyId] = {
+      purpose,
+      envelopeCipher: encryptWithAes256GcmEnvelope(
+        rawKeyHex,
+        dekBuffer,
+        `winhood:key:${newKeyId}:${purpose}`
+      ),
+      createdAt: now,
+      status: "ACTIVE",
+      rotatedAt: null,
+      revokedAt: null
+    };
+    if (purpose === "EVIDENCE_HMAC") {
+      store.activeEvidenceKeyId = newKeyId;
+    } else {
+      store.activeVaultKeyId = newKeyId;
+    }
+    store.rotationHistory = store.rotationHistory || [];
+    store.rotationHistory.push({
+      timestamp: now,
+      purpose,
+      previousKeyId: prevKeyId,
+      newKeyId,
+      reason: `Rota\xE7\xE3o criptogr\xE1fica de chave ${purpose} sob DEK Envelope V2`,
+      monotonicSequence: (store.monotonicSequence || 0) + 1
+    });
+    _KeyManagementService.persistStore(store, customPath);
+    return {
+      keyId: newKeyId,
+      purpose,
+      createdAt: now,
+      rotatedAt: null,
+      status: "ACTIVE",
+      fingerprintSha256: _KeyManagementService.computeSha256(rawKeyHex).slice(0, 16),
+      algorithm: purpose === "EVIDENCE_HMAC" ? "HMAC-SHA256" : "AES-256-GCM"
+    };
+  }
+  static verifyStrictAdminToken(providedToken, customPath) {
+    if (!providedToken || providedToken.trim().length === 0) return false;
+    const envAdminToken = process.env.WINHOOD_ADMIN_TOKEN;
+    if (envAdminToken && envAdminToken.trim().length > 0) {
+      const a2 = Buffer.from(providedToken.trim(), "utf8");
+      const b2 = Buffer.from(envAdminToken.trim(), "utf8");
+      return a2.length === b2.length && crypto.timingSafeEqual(a2, b2);
+    }
+    const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
+    if (!store.adminTokenSha256) {
+      return false;
+    }
+    const providedSha = _KeyManagementService.computeSha256(providedToken.trim());
+    const a = Buffer.from(providedSha, "hex");
+    const b = Buffer.from(store.adminTokenSha256, "hex");
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  }
+  static getStatus(customPath) {
+    const storePath = _KeyManagementService.getStorePath(customPath);
+    const trustStorePath = _KeyManagementService.getTrustStorePath(customPath);
+    const { store, integrityVerified, rollbackVerified } = _KeyManagementService.loadOrInitializeStore(customPath);
+    const hasEnvEvidence = Boolean(
+      process.env.WINHOOD_EVIDENCE_HMAC_SECRET && process.env.WINHOOD_EVIDENCE_HMAC_SECRET.trim().length >= 16
+    );
+    const hasEnvVault = Boolean(
+      process.env.WINHOOD_VAULT_SECRET && process.env.WINHOOD_VAULT_SECRET.trim().length >= 16
+    );
+    const symKeys = Object.entries(store.keysHex).map(([keyId, info]) => {
+      const fpSource = info.envelopeCipher ? info.envelopeCipher.ciphertextHex : info.secretHex || keyId;
+      return {
+        keyId,
+        purpose: info.purpose,
+        createdAt: info.createdAt,
+        rotatedAt: info.rotatedAt,
+        revokedAt: info.revokedAt || null,
+        status: info.status,
+        fingerprintSha256: _KeyManagementService.computeSha256(fpSource).slice(0, 16),
+        algorithm: info.purpose === "EVIDENCE_HMAC" ? "HMAC-SHA256" : "AES-256-GCM"
+      };
+    });
+    const asymKeys = Object.entries(store.ed25519Keys || {}).map(([keyId, info]) => ({
+      keyId,
+      purpose: info.purpose,
+      createdAt: info.createdAt,
+      rotatedAt: info.rotatedAt,
+      revokedAt: info.revokedAt || null,
+      status: info.status,
+      fingerprintSha256: _KeyManagementService.computeSha256(info.publicKeyPem).slice(0, 16),
+      algorithm: "ED25519"
+    }));
+    const keys = [...symKeys, ...asymKeys];
+    const trustedPublicKeys = Object.values(store.trustedPublicKeys || {});
+    const operatingMode = store.operatingMode || _KeyManagementService.resolveOperatingMode();
+    const kekMechanism = store.wrappedDek?.kekMechanism || "HKDF_LOCAL_KEK_FILE";
+    const securityWarnings = [];
+    if ((process.env.WINHOOD_MASTER_KEY_SECRET || "").trim().length >= 16) {
+      securityWarnings.push(
+        "Alias legado WINHOOD_MASTER_KEY_SECRET detectado; migre para o nome can\xF4nico WINHOOD_KEYSTORE_MASTER_SECRET."
+      );
+    }
+    if ((process.env.SONAR_SECRET_SALT || "").trim().length >= 16 && !hasEnvVault) {
+      securityWarnings.push(
+        "SONAR_SECRET_SALT detectado apenas para leitura retrocompat\xEDvel; configure WINHOOD_VAULT_SECRET para cifragem ativa."
+      );
+    }
+    if (process.env.NODE_ENV === "production" || operatingMode === "PRODUCTION_SECURE") {
+      if (!hasEnvEvidence) {
+        securityWarnings.push(
+          "Produ\xE7\xE3o utilizando keystore local para HMAC de evid\xEAncias; configure WINHOOD_EVIDENCE_HMAC_SECRET."
+        );
+      }
+      if (!hasEnvVault) {
+        securityWarnings.push(
+          "Produ\xE7\xE3o utilizando keystore local para cofre AES-256; configure WINHOOD_VAULT_SECRET."
+        );
+      }
+    }
+    securityWarnings.push(
+      "Limita\xE7\xE3o f\xEDsica local: sem TPM ou \xE2ncora remota independente, um atacante com escrita administrativa total no diret\xF3rio local pode substituir simultaneamente keystore.json, .sha256, .seq e trust-store.json."
+    );
+    return {
+      keystorePath: storePath,
+      trustStorePath,
+      integrityVerified,
+      trustStoreSeparated: fs.existsSync(trustStorePath),
+      hardwareTpmOrRemoteAnchorAvailable: Boolean(process.env.WINHOOD_TRUST_ROOT_FINGERPRINT_SHA256),
+      envelopeVersion: store.envelopeVersion || "WINHOOD-ENVELOPE-V2",
+      operatingMode,
+      kekProtectionMechanism: kekMechanism,
+      monotonicSequence: store.monotonicSequence || 1,
+      rollbackProtectionVerified: rollbackVerified,
+      dpapiSupported: os.platform() === "win32",
+      macosKeychainAvailable: os.platform() === "darwin" && fs.existsSync("/usr/bin/security"),
+      linuxSecretServiceAvailable: os.platform() === "linux" && Boolean(process.env.DBUS_SESSION_BUS_ADDRESS),
+      keyOrigin: hasEnvEvidence || hasEnvVault ? "ENV_EXTERNAL" : "HOST_CSPRNG_KEYSTORE",
+      productionEnvSecretConfigured: hasEnvEvidence && hasEnvVault,
+      securityWarnings,
+      activeEvidenceKeyId: store.activeEvidenceKeyId,
+      activeEd25519KeyId: store.activeEd25519KeyId,
+      activeVaultKeyId: store.activeVaultKeyId,
+      adminTokenConfigured: Boolean(process.env.WINHOOD_ADMIN_TOKEN || store.adminTokenSha256),
+      totalKeysTracked: keys.length,
+      trustedPublicKeysCount: trustedPublicKeys.length,
+      keys,
+      trustedPublicKeys,
+      rotationHistory: store.rotationHistory || []
+    };
+  }
+};
+
+// src/gate/QualityGateEngine.ts
+var BUILTIN_QUALITY_GATES = [
+  {
+    id: "winhood-standard-v2",
+    name: "WinHood Standard Engineering Gate",
+    version: "2.1.0",
+    description: "Gate padr\xE3o independente: bloqueia achados BLOCKER/CRITICAL e segredos expostos; exige cobertura m\xEDnima de escopo >= 50%.",
+    requireVerifiedEvidence: true,
+    createdAt: "2026-11-14T00:00:00Z",
+    conditions: [
+      {
+        id: "cond-no-blocker",
+        metricKey: "blocker_findings",
+        label: "Achados BLOCKER",
+        operator: "EQ",
+        threshold: 0,
+        severityOnFail: "BLOCKER",
+        requirementTier: "REQUIRED"
+      },
+      {
+        id: "cond-no-critical",
+        metricKey: "critical_findings",
+        label: "Achados CRITICAL",
+        operator: "EQ",
+        threshold: 0,
+        severityOnFail: "BLOCKER",
+        requirementTier: "REQUIRED"
+      },
+      {
+        id: "cond-no-secrets",
+        metricKey: "secrets_exposed",
+        label: "Segredos Expostos",
+        operator: "EQ",
+        threshold: 0,
+        severityOnFail: "BLOCKER",
+        requirementTier: "REQUIRED"
+      },
+      {
+        id: "cond-min-coverage",
+        metricKey: "scope_coverage_percent",
+        label: "Cobertura de Escopo (%)",
+        operator: "GTE",
+        threshold: 50,
+        severityOnFail: "RESERVATION",
+        requirementTier: "REQUIRED"
+      },
+      {
+        id: "cond-min-confidence",
+        metricKey: "evidence_confidence_score",
+        label: "Confian\xE7a M\xEDnima da Evid\xEAncia (1=LOW,2=MED,3=HIGH)",
+        operator: "GTE",
+        threshold: 2,
+        severityOnFail: "RESERVATION",
+        requirementTier: "REQUIRED"
+      }
+    ]
+  },
+  {
+    id: "winhood-zero-trust-v2",
+    name: "WinHood Zero-Trust Security Audit Gate",
+    version: "2.2.0",
+    description: "Gate rigoroso para due diligence e pipelines cr\xEDticos: 0 cr\xEDticos/segredos/IaC cr\xEDticos, <= 2 HIGH e cobertura >= 70%.",
+    requireVerifiedEvidence: true,
+    createdAt: "2026-11-14T00:00:00Z",
+    conditions: [
+      {
+        id: "zt-no-blocker",
+        metricKey: "blocker_findings",
+        label: "Achados BLOCKER",
+        operator: "EQ",
+        threshold: 0,
+        severityOnFail: "BLOCKER",
+        requirementTier: "REQUIRED"
+      },
+      {
+        id: "zt-no-critical",
+        metricKey: "critical_findings",
+        label: "Achados CRITICAL",
+        operator: "EQ",
+        threshold: 0,
+        severityOnFail: "BLOCKER",
+        requirementTier: "REQUIRED"
+      },
+      {
+        id: "zt-max-high",
+        metricKey: "high_findings",
+        label: "Achados HIGH",
+        operator: "LTE",
+        threshold: 2,
+        severityOnFail: "BLOCKER",
+        requirementTier: "REQUIRED"
+      },
+      {
+        id: "zt-no-secrets",
+        metricKey: "secrets_exposed",
+        label: "Segredos Expostos",
+        operator: "EQ",
+        threshold: 0,
+        severityOnFail: "BLOCKER",
+        requirementTier: "REQUIRED"
+      },
+      {
+        id: "zt-no-iac-crit",
+        metricKey: "iac_critical_findings",
+        label: "Achados IaC Cr\xEDticos",
+        operator: "EQ",
+        threshold: 0,
+        severityOnFail: "BLOCKER",
+        requirementTier: "REQUIRED"
+      },
+      {
+        id: "zt-min-coverage",
+        metricKey: "scope_coverage_percent",
+        label: "Cobertura de Escopo (%)",
+        operator: "GTE",
+        threshold: 70,
+        severityOnFail: "BLOCKER",
+        requirementTier: "REQUIRED"
+      },
+      {
+        id: "zt-high-confidence",
+        metricKey: "evidence_confidence_score",
+        label: "Confian\xE7a da Evid\xEAncia (HIGH=3)",
+        operator: "GTE",
+        threshold: 3,
+        severityOnFail: "RESERVATION",
+        requirementTier: "REQUIRED"
+      }
+    ]
+  },
+  {
+    id: "winhood-release-audit-v1",
+    name: "WinHood Release Comparative Gate",
+    version: "1.0.0",
+    description: "Gate de release comparativo exigindo pontua\xE7\xE3o t\xE9cnica >= 3.00/5.00, 0 BLOCKERS e cobertura >= 60%.",
+    requireVerifiedEvidence: true,
+    createdAt: "2026-11-14T00:00:00Z",
+    conditions: [
+      {
+        id: "rel-no-blocker",
+        metricKey: "blocker_findings",
+        label: "Achados BLOCKER",
+        operator: "EQ",
+        threshold: 0,
+        severityOnFail: "BLOCKER",
+        requirementTier: "REQUIRED"
+      },
+      {
+        id: "rel-min-score",
+        metricKey: "overall_score",
+        label: "Nota T\xE9cnica Geral (0-5)",
+        operator: "GTE",
+        threshold: 3,
+        severityOnFail: "BLOCKER",
+        requirementTier: "REQUIRED"
+      },
+      {
+        id: "rel-min-coverage",
+        metricKey: "scope_coverage_percent",
+        label: "Cobertura de Escopo (%)",
+        operator: "GTE",
+        threshold: 60,
+        severityOnFail: "RESERVATION",
+        requirementTier: "REQUIRED"
+      }
+    ]
+  }
+];
+function evaluateOperator(actual, op, threshold) {
+  switch (op) {
+    case "EQ":
+      return actual === threshold;
+    case "LTE":
+      return actual <= threshold;
+    case "GTE":
+      return actual >= threshold;
+    case "LT":
+      return actual < threshold;
+    case "GT":
+      return actual > threshold;
+    default:
+      return false;
+  }
+}
+function confidenceToNumeric(conf) {
+  if (conf === "HIGH") return 3;
+  if (conf === "MEDIUM") return 2;
+  if (conf === "LOW") return 1;
+  return null;
+}
+var QualityGateEngine = class _QualityGateEngine {
+  static {
+    this.customGates = /* @__PURE__ */ new Map();
+  }
+  static listGates() {
+    return [...BUILTIN_QUALITY_GATES, ...Array.from(_QualityGateEngine.customGates.values())];
+  }
+  static registerGate(gate) {
+    _QualityGateEngine.customGates.set(gate.id, gate);
+    return gate;
+  }
+  static getGateById(gateId) {
+    if (!gateId) return BUILTIN_QUALITY_GATES[0];
+    return _QualityGateEngine.listGates().find((g) => g.id === gateId) || BUILTIN_QUALITY_GATES[0];
+  }
+  static computeGateHash(gate) {
+    return crypto2.createHash("sha256").update(
+      JSON.stringify({
+        id: gate.id,
+        version: gate.version,
+        requireVerifiedEvidence: gate.requireVerifiedEvidence,
+        conditions: gate.conditions
+      }),
+      "utf8"
+    ).digest("hex");
+  }
+  static exitCodeForDecision(decision) {
+    switch (decision) {
+      case "APPROVED":
+      case "APPROVED_WITH_RESERVATIONS":
+      case "APROVADO":
+      case "APROVADO COM RESSALVAS":
+        return 0;
+      case "BLOCKED":
+      case "REJECTED":
+      case "REPROVADO":
+        return 1;
+      case "INCONCLUSIVE":
+      case "INCONCLUSIVO":
+      case "N\xC3O AVALIADO":
+        return 2;
+      default:
+        return 3;
+    }
+  }
+  /**
+   * Unified Quality Gate Decision Contract shared by QualityGateEngine and scoringEngine.
+   * Guarantees zero Fudge Factor suppression on REQUIRED conditions (< 20 lines never bypasses coverage or duplication).
+   */
+  static evaluateSharedContract(params) {
+    if (!params.eligibleForScoring) {
+      return {
+        failedConditions: [],
+        unmeasuredMandatoryConditions: ["Projeto ineleg\xEDvel para pontua\xE7\xE3o (escopo n\xE3o analisado)."],
+        reservations: [],
+        qualityGateStatus: "NOT_EVALUATED",
+        executiveDecision: "INCONCLUSIVE",
+        canonicalDecision: "INCONCLUSIVE"
+      };
+    }
+    const failedConditions = [];
+    const unmeasuredMandatoryConditions = [];
+    const reservations = [];
+    if (params.criticalVulns > 0) {
+      failedConditions.push(`Vulnerabilidades Cr\xEDticas: ${params.criticalVulns} > 0`);
+    }
+    if (params.secretsExposed > 0) {
+      failedConditions.push(`Segredos Hardcoded Expostos: ${params.secretsExposed} > 0`);
+    }
+    if (params.bugs > 3 || params.reliabilityRating === "E") {
+      failedConditions.push(`Bugs Confiabilidade: ${params.bugs} > 3`);
+    }
+    if (params.securityRating === "D" || params.securityRating === "E") {
+      failedConditions.push(`Security Rating reprovado (${params.securityRating})`);
+    }
+    const dupTier = params.duplicationRequirementTier || "REQUIRED";
+    if (params.duplicatedLinesPercent > 5) {
+      if (dupTier === "INFORMATIVE") {
+        reservations.push(`Nota informativa: Duplica\xE7\xE3o de C\xF3digo ${params.duplicatedLinesPercent}% > 5.0%`);
+      } else if (dupTier === "OPTIONAL") {
+        reservations.push(`Ressalva opcional: Duplica\xE7\xE3o de C\xF3digo ${params.duplicatedLinesPercent}% > 5.0%`);
+      } else {
+        failedConditions.push(`Duplica\xE7\xE3o de C\xF3digo: ${params.duplicatedLinesPercent}% > 5.0%`);
+      }
+    }
+    const covTier = params.coverageRequirementTier || "REQUIRED";
+    if (!params.hasMeasuredCoverage) {
+      if (covTier === "REQUIRED") {
+        unmeasuredMandatoryConditions.push(
+          "Cobertura de Testes: NOT_MEASURED (obrigat\xF3rio relat\xF3rio LCOV/JaCoCo/Cobertura/Istanbul >= 80%)"
+        );
+      } else if (covTier === "OPTIONAL") {
+        reservations.push("Ressalva opcional: Cobertura de Testes NOT_MEASURED");
+      } else {
+        reservations.push("Nota informativa: Cobertura de Testes NOT_MEASURED");
+      }
+    } else if (params.testCoveragePercent < 80) {
+      if (covTier === "INFORMATIVE") {
+        reservations.push(`Nota informativa: Cobertura de Testes ${params.testCoveragePercent.toFixed(1)}% < 80.0%`);
+      } else if (covTier === "OPTIONAL") {
+        reservations.push(`Ressalva opcional: Cobertura de Testes ${params.testCoveragePercent.toFixed(1)}% < 80.0%`);
+      } else {
+        failedConditions.push(`Cobertura de Testes: ${params.testCoveragePercent.toFixed(1)}% < 80.0%`);
+      }
+    }
+    if (params.scopeCoveragePercent < 50) {
+      unmeasuredMandatoryConditions.push(
+        `Cobertura de Escopo Anal\xEDtico: ${params.scopeCoveragePercent.toFixed(1)}% < 50.0% (evid\xEAncia parcial)`
+      );
+    }
+    let qualityGateStatus;
+    if (failedConditions.length > 0) {
+      qualityGateStatus = "FAILED";
+    } else if (unmeasuredMandatoryConditions.length > 0) {
+      qualityGateStatus = "INCONCLUSIVE";
+    } else if (reservations.length > 0) {
+      qualityGateStatus = "WARN";
+    } else {
+      qualityGateStatus = "PASSED";
+    }
+    const executiveDecision = qualityGateStatus === "INCONCLUSIVE" ? "INCONCLUSIVE" : qualityGateStatus === "PASSED" ? "APROVADO" : qualityGateStatus === "WARN" ? "APROVADO COM RESSALVAS" : "REPROVADO";
+    const canonicalDecision = qualityGateStatus === "INCONCLUSIVE" ? "INCONCLUSIVE" : qualityGateStatus === "PASSED" ? "APPROVED" : qualityGateStatus === "WARN" ? "APPROVED_WITH_RESERVATIONS" : "BLOCKED";
+    return {
+      failedConditions,
+      unmeasuredMandatoryConditions,
+      reservations,
+      qualityGateStatus,
+      executiveDecision,
+      canonicalDecision
+    };
+  }
+  static evaluate(params) {
+    const gate = params.gate || _QualityGateEngine.getGateById(params.gateId);
+    const gateHash = _QualityGateEngine.computeGateHash(gate);
+    const evaluatedAt = params.deterministicTimestamp || (/* @__PURE__ */ new Date()).toISOString();
+    const activeFindings = params.findings.filter((f) => {
+      const st = f.lifecycleState || f.validationStatus;
+      return st !== "FALSE_POSITIVE" && st !== "FALSE_POSITIVE_REVIEWED" && st !== "ACCEPTED" && st !== "ACCEPTED_RISK" && st !== "VERIFIED_RESOLVED" && st !== "NOT_REPRODUCIBLE";
+    });
+    const blockerCount = activeFindings.filter((f) => f.severity === "BLOCKER").length;
+    const criticalCount = activeFindings.filter((f) => f.severity === "CRITICAL").length;
+    const highCount = activeFindings.filter((f) => f.severity === "HIGH").length;
+    const secretsCount = activeFindings.filter((f) => f.category === "SECRETS").length;
+    const iacCriticalCount = activeFindings.filter(
+      (f) => f.category === "IAC" && (f.severity === "BLOCKER" || f.severity === "CRITICAL")
+    ).length;
+    const scaCriticalCount = activeFindings.filter(
+      (f) => f.category === "SCA" && (f.severity === "BLOCKER" || f.severity === "CRITICAL")
+    ).length;
+    const coverageVal = params.scopeCoveragePercent ?? params.scoreCard?.separatedIndicators?.scopeCoveragePercent ?? null;
+    const confScore = confidenceToNumeric(
+      params.evidenceConfidence ?? params.scoreCard?.separatedIndicators?.evidenceConfidence
+    );
+    const overallScore = params.scoreCard?.separatedIndicators?.technicalScore ?? null;
+    const metricsMap = {
+      blocker_findings: blockerCount,
+      critical_findings: criticalCount,
+      high_findings: highCount,
+      secrets_exposed: secretsCount,
+      iac_critical_findings: iacCriticalCount,
+      sca_critical_findings: scaCriticalCount,
+      scope_coverage_percent: coverageVal,
+      evidence_confidence_score: confScore,
+      overall_score: overallScore
+    };
+    const reservations = [];
+    const evaluatedConditions = gate.conditions.map((cond) => {
+      const tier = cond.requirementTier || "REQUIRED";
+      const actual = metricsMap[cond.metricKey];
+      if (actual === null || actual === void 0 || Number.isNaN(actual)) {
+        if (tier === "OPTIONAL") {
+          const msg = `M\xE9trica opcional "${cond.label}" n\xE3o aplic\xE1vel ou n\xE3o mensurada (NOT_MEASURED) \u2014 registrada como ressalva sem reprova\xE7\xE3o autom\xE1tica.`;
+          reservations.push(msg);
+          return {
+            id: cond.id,
+            metricKey: cond.metricKey,
+            label: cond.label,
+            operator: cond.operator,
+            threshold: cond.threshold,
+            actualValue: null,
+            passed: true,
+            inconclusive: false,
+            severityOnFail: cond.severityOnFail,
+            requirementTier: tier,
+            reason: msg
+          };
+        }
+        if (tier === "INFORMATIVE") {
+          const msg = `M\xE9trica informativa "${cond.label}" ausente (NOT_MEASURED) \u2014 nota informativa sem impacto bloqueante.`;
+          reservations.push(msg);
+          return {
+            id: cond.id,
+            metricKey: cond.metricKey,
+            label: cond.label,
+            operator: cond.operator,
+            threshold: cond.threshold,
+            actualValue: null,
+            passed: true,
+            inconclusive: false,
+            severityOnFail: "RESERVATION",
+            requirementTier: tier,
+            reason: msg
+          };
+        }
+        return {
+          id: cond.id,
+          metricKey: cond.metricKey,
+          label: cond.label,
+          operator: cond.operator,
+          threshold: cond.threshold,
+          actualValue: null,
+          passed: false,
+          inconclusive: true,
+          severityOnFail: cond.severityOnFail,
+          requirementTier: tier,
+          reason: `M\xE9trica obrigat\xF3ria "${cond.label}" n\xE3o foi mensurada (NOT_MEASURED).`
+        };
+      }
+      const rawPassed = evaluateOperator(actual, cond.operator, cond.threshold);
+      if (!rawPassed && tier === "INFORMATIVE") {
+        const msg = `Condi\xE7\xE3o informativa "${cond.label}": ${actual} fora da faixa ${cond.operator} ${cond.threshold} (registrada como ressalva).`;
+        reservations.push(msg);
+        return {
+          id: cond.id,
+          metricKey: cond.metricKey,
+          label: cond.label,
+          operator: cond.operator,
+          threshold: cond.threshold,
+          actualValue: actual,
+          passed: false,
+          inconclusive: false,
+          severityOnFail: "RESERVATION",
+          requirementTier: tier,
+          reason: msg
+        };
+      }
+      return {
+        id: cond.id,
+        metricKey: cond.metricKey,
+        label: cond.label,
+        operator: cond.operator,
+        threshold: cond.threshold,
+        actualValue: actual,
+        passed: rawPassed,
+        inconclusive: false,
+        severityOnFail: cond.severityOnFail,
+        requirementTier: tier,
+        reason: rawPassed ? `${cond.label}: ${actual} atende ${cond.operator} ${cond.threshold}.` : `${cond.label}: ${actual} viola ${cond.operator} ${cond.threshold}.`
+      };
+    });
+    const conditionsMet = evaluatedConditions.filter((c) => c.passed).length;
+    const conditionsFailed = evaluatedConditions.filter((c) => !c.passed && !c.inconclusive).length;
+    const conditionsInconclusive = evaluatedConditions.filter((c) => c.inconclusive).length;
+    const hasBlockerFailure = evaluatedConditions.some(
+      (c) => !c.passed && !c.inconclusive && c.severityOnFail === "BLOCKER" && c.requirementTier !== "INFORMATIVE"
+    );
+    const hasReservationFailure = reservations.length > 0 || evaluatedConditions.some(
+      (c) => !c.passed && !c.inconclusive && c.severityOnFail === "RESERVATION"
+    );
+    let decision;
+    if (gate.requireVerifiedEvidence && params.evidenceVerified === false) {
+      decision = "INCONCLUSIVE";
+    } else if (hasBlockerFailure) {
+      decision = blockerCount > 0 && criticalCount > 0 ? "REJECTED" : "BLOCKED";
+    } else if (conditionsInconclusive > 0) {
+      decision = "INCONCLUSIVE";
+    } else if (hasReservationFailure) {
+      decision = "APPROVED_WITH_RESERVATIONS";
+    } else {
+      decision = "APPROVED";
+    }
+    const cliExitCode = _QualityGateEngine.exitCodeForDecision(decision);
+    const exitCodeNormalized = cliExitCode === 3 ? 2 : cliExitCode;
+    return {
+      gateId: gate.id,
+      gateName: gate.name,
+      gateVersion: gate.version,
+      gateHash,
+      decision,
+      cliExitCode: exitCodeNormalized,
+      evaluatedAt,
+      conditionsMet,
+      conditionsFailed,
+      conditionsInconclusive,
+      conditions: evaluatedConditions,
+      reservations,
+      summary: `Gate "${gate.name}" v${gate.version} => ${decision} (exit=${exitCodeNormalized}; ${conditionsMet}/${evaluatedConditions.length} condi\xE7\xF5es atendidas).`
+    };
+  }
+  static evaluateFromRun(run, gateId, deterministicTimestamp) {
+    const primaryCard = run.scoreCards.find((s) => s.softwareId === run.winnerSoftwareId) || run.scoreCards[0] || null;
+    const activeFindings = primaryCard ? run.findings.filter((f) => f.softwareId === primaryCard.softwareId) : run.findings;
+    return _QualityGateEngine.evaluate({
+      gateId: gateId || run.qualityGateId,
+      findings: activeFindings,
+      scoreCard: primaryCard,
+      scopeCoveragePercent: primaryCard?.separatedIndicators?.scopeCoveragePercent ?? null,
+      evidenceConfidence: primaryCard?.separatedIndicators?.evidenceConfidence,
+      evidenceVerified: run.evidenceVerification?.valid ?? void 0,
+      deterministicTimestamp
+    });
+  }
+  static signWebhookPayload(params) {
+    const activeKey = KeyManagementService.getActiveEvidenceHmacKey();
+    const secret = params.secret || activeKey.secret;
+    const timestampEpochSec = params.timestampEpochSec ?? Math.floor(Date.now() / 1e3);
+    const bodyObj = {
+      schemaVersion: "1.0.0",
+      event: params.event,
+      runId: params.runId || null,
+      timestampEpochSec,
+      gate: {
+        id: params.evaluation.gateId,
+        name: params.evaluation.gateName,
+        version: params.evaluation.gateVersion,
+        hash: params.evaluation.gateHash,
+        decision: params.evaluation.decision,
+        cliExitCode: params.evaluation.cliExitCode,
+        conditionsMet: params.evaluation.conditionsMet,
+        conditionsFailed: params.evaluation.conditionsFailed,
+        conditionsInconclusive: params.evaluation.conditionsInconclusive,
+        summary: params.evaluation.summary
+      }
+    };
+    const bodyJson = JSON.stringify(bodyObj);
+    const signedInput = `${timestampEpochSec}.${bodyJson}`;
+    const hmacHex = crypto2.createHmac("sha256", secret).update(signedInput, "utf8").digest("hex");
+    const payloadSha256 = crypto2.createHash("sha256").update(bodyJson, "utf8").digest("hex");
+    return {
+      bodyJson,
+      signatureHeader: `t=${timestampEpochSec},v1=${hmacHex}`,
+      timestampEpochSec,
+      keyId: params.secret ? "CUSTOM_WEBHOOK_SECRET" : activeKey.keyId,
+      payloadSha256
+    };
+  }
+  static verifyWebhookSignature(params) {
+    const parts = Object.fromEntries(
+      params.signatureHeader.split(",").map((kv) => {
+        const idx = kv.indexOf("=");
+        return idx > 0 ? [kv.slice(0, idx).trim(), kv.slice(idx + 1).trim()] : ["", ""];
+      })
+    );
+    const ts = Number.parseInt(parts.t || "", 10);
+    const sig = parts.v1 || "";
+    if (!Number.isFinite(ts) || !sig) {
+      return { valid: false, reason: "INVALID_SIGNATURE_HEADER_FORMAT" };
+    }
+    if (params.maxSkewSeconds !== void 0) {
+      const nowSec = params.nowEpochSec ?? Math.floor(Date.now() / 1e3);
+      if (Math.abs(nowSec - ts) > params.maxSkewSeconds) {
+        return { valid: false, reason: "WEBHOOK_TIMESTAMP_OUT_OF_WINDOW" };
+      }
+    }
+    const expected = crypto2.createHmac("sha256", params.secret).update(`${ts}.${params.bodyJson}`, "utf8").digest("hex");
+    const a = Buffer.from(expected, "hex");
+    const b = Buffer.from(sig, "hex");
+    if (a.length !== b.length || !crypto2.timingSafeEqual(a, b)) {
+      return { valid: false, reason: "WEBHOOK_HMAC_MISMATCH" };
+    }
+    return { valid: true, reason: "WEBHOOK_SIGNATURE_VERIFIED" };
+  }
+  static async dispatchSignedWebhook(params) {
+    const signed = _QualityGateEngine.signWebhookPayload({
+      event: "quality_gate.evaluated",
+      runId: params.runId,
+      evaluation: params.evaluation,
+      secret: params.secret
+    });
+    const ssrfCheck = await SsrfGuard.validateUrl({
+      targetUrl: params.targetUrl,
+      allowExplicitLoopback: false
+    });
+    if (!ssrfCheck.allowed || !ssrfCheck.parsedUrl || !ssrfCheck.pinnedIp) {
+      return {
+        delivered: false,
+        blockedBySsrf: true,
+        statusCode: null,
+        signatureHeader: signed.signatureHeader,
+        payloadSha256: signed.payloadSha256,
+        message: `SSRF_BLOCKED: ${ssrfCheck.reason}`
+      };
+    }
+    const parsed = ssrfCheck.parsedUrl;
+    const pinnedIp = ssrfCheck.pinnedIp;
+    const family = net2.isIPv6(pinnedIp) ? 6 : 4;
+    const timeoutMs = params.timeoutMs ?? 5e3;
+    try {
+      const statusCode = await new Promise((resolve, reject) => {
+        const transport = parsed.protocol === "https:" ? https2 : http2;
+        const req = transport.request(
+          {
+            hostname: parsed.hostname,
+            port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
+            path: `${parsed.pathname}${parsed.search}`,
+            method: "POST",
+            timeout: timeoutMs,
+            lookup: (_h, _o, cb) => cb(null, pinnedIp, family),
+            headers: {
+              Host: parsed.host,
+              "Content-Type": "application/json",
+              "Content-Length": Buffer.byteLength(signed.bodyJson, "utf8"),
+              "User-Agent": "WinHood-QualityGate-Webhook/1.0",
+              "X-WinHood-Event": "quality_gate.evaluated",
+              "X-WinHood-Signature": signed.signatureHeader,
+              "X-WinHood-Key-Id": signed.keyId
+            }
+          },
+          (res) => {
+            res.on("data", () => {
+            });
+            res.on("end", () => resolve(res.statusCode || 0));
+          }
+        );
+        req.on("timeout", () => req.destroy(new Error(`Timeout after ${timeoutMs}ms`)));
+        req.on("error", reject);
+        req.write(signed.bodyJson);
+        req.end();
+      });
+      return {
+        delivered: statusCode >= 200 && statusCode < 300,
+        blockedBySsrf: false,
+        statusCode,
+        signatureHeader: signed.signatureHeader,
+        payloadSha256: signed.payloadSha256,
+        message: statusCode >= 200 && statusCode < 300 ? `Webhook entregue com assinatura HMAC-SHA256 (HTTP ${statusCode}).` : `Webhook respondido com HTTP ${statusCode}.`
+      };
+    } catch (err) {
+      return {
+        delivered: false,
+        blockedBySsrf: false,
+        statusCode: null,
+        signatureHeader: signed.signatureHeader,
+        payloadSha256: signed.payloadSha256,
+        message: `Falha ao entregar webhook: ${err?.message || String(err)}`
+      };
+    }
+  }
+};
+
+// src/engine/scoringEngine.ts
 var ALGORITHM_VERSION = "WINHOOD-SONAR-MQR-v3.0.0";
 var ALL_BENCHMARK_CATEGORIES = [
   "functionality",
@@ -47,7 +2284,7 @@ var DEFAULT_CATEGORY_WEIGHTS = {
   documentation: 4
 };
 function computeSha256(content) {
-  return crypto.createHash("sha256").update(content, "utf8").digest("hex");
+  return crypto3.createHash("sha256").update(content, "utf8").digest("hex");
 }
 function maskSecretsInText(input) {
   if (!input) return input;
@@ -1284,8 +3521,7 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
     loc,
     m.duplicatedLinesPercent
   );
-  const newCodeLines = input.newCodeLinesCount ?? loc;
-  const fudgeFactorApplied = newCodeLines < 20;
+  const fudgeFactorApplied = false;
   const qgConditions = [
     {
       metricKey: "new_security_rating",
@@ -1316,38 +3552,34 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
       label: "Densidade de Duplica\xE7\xE3o de C\xF3digo",
       threshold: "<= 5.0%",
       actualValue: isEligibleForScoring ? `${m.duplicatedLinesPercent.toFixed(1)}%` : "N/A",
-      status: !isEligibleForScoring ? "NOT_EVALUATED" : m.duplicatedLinesPercent > 5 ? fudgeFactorApplied ? "WARN_FUDGE_FACTOR" : "FAILED" : "PASSED",
-      failureReason: m.duplicatedLinesPercent > 5 ? fudgeFactorApplied ? `Fudge Factor MqrBridge ativo (< 20 linhas novas): falha de duplica\xE7\xE3o (${m.duplicatedLinesPercent.toFixed(1)}%) suprimida.` : `Densidade de duplica\xE7\xE3o (${m.duplicatedLinesPercent.toFixed(1)}%) excede o limite de 5.0%.` : void 0
+      status: !isEligibleForScoring ? "NOT_EVALUATED" : m.duplicatedLinesPercent > 5 ? "FAILED" : "PASSED",
+      failureReason: m.duplicatedLinesPercent > 5 ? `Densidade de duplica\xE7\xE3o (${m.duplicatedLinesPercent.toFixed(1)}%) excede o limite de 5.0%.` : void 0
     },
     {
       metricKey: "new_coverage",
       label: "Cobertura de Testes no C\xF3digo Eleg\xEDvel",
       threshold: ">= 80.0%",
       actualValue: !isEligibleForScoring ? "N/A" : hasMeasuredCoverage ? `${m.testCoveragePercent.toFixed(1)}%` : "NOT_MEASURED",
-      status: !isEligibleForScoring ? "NOT_EVALUATED" : !hasMeasuredCoverage ? fudgeFactorApplied ? "WARN_FUDGE_FACTOR" : "NOT_EVALUATED" : m.testCoveragePercent < 80 ? fudgeFactorApplied ? "WARN_FUDGE_FACTOR" : "FAILED" : "PASSED",
-      failureReason: !hasMeasuredCoverage ? fudgeFactorApplied ? "Fudge Factor MqrBridge ativo (< 20 linhas novas): aus\xEAncia de relat\xF3rio de cobertura suprimida." : "Relat\xF3rio real de cobertura de testes ausente (NOT_MEASURED) \u2014 condi\xE7\xE3o obrigat\xF3ria n\xE3o avaliada." : m.testCoveragePercent < 80 ? fudgeFactorApplied ? `Fudge Factor MqrBridge ativo (< 20 linhas novas): falha de cobertura (${m.testCoveragePercent.toFixed(1)}%) suprimida.` : `Cobertura de testes (${m.testCoveragePercent.toFixed(1)}%) abaixo do m\xEDnimo exigido pelo Quality Gate Sonar way (80.0%).` : void 0
+      status: !isEligibleForScoring ? "NOT_EVALUATED" : !hasMeasuredCoverage ? "NOT_EVALUATED" : m.testCoveragePercent < 80 ? "FAILED" : "PASSED",
+      failureReason: !hasMeasuredCoverage ? "Relat\xF3rio real de cobertura de testes ausente (NOT_MEASURED) \u2014 condi\xE7\xE3o obrigat\xF3ria n\xE3o avaliada." : m.testCoveragePercent < 80 ? `Cobertura de testes (${m.testCoveragePercent.toFixed(1)}%) abaixo do m\xEDnimo exigido pelo Quality Gate (80.0%).` : void 0
     }
   ];
-  const failedConditions = [];
-  const unmeasuredMandatoryConditions = [];
-  if (isEligibleForScoring) {
-    if (m.criticalVulns > 0) failedConditions.push(`Vulnerabilidades Cr\xEDticas: ${m.criticalVulns} > 0`);
-    if (m.secretsExposed > 0) failedConditions.push(`Segredos Hardcoded Expostos: ${m.secretsExposed} > 0`);
-    if (m.bugs > 3) failedConditions.push(`Bugs Confiabilidade: ${m.bugs} > 3`);
-    if (m.duplicatedLinesPercent > 5 && !fudgeFactorApplied) {
-      failedConditions.push(`Duplica\xE7\xE3o de C\xF3digo: ${m.duplicatedLinesPercent}% > 5.0%`);
-    }
-    if (securityRating === "D" || securityRating === "E") {
-      failedConditions.push(`Security Rating reprovado (${securityRating})`);
-    }
-    if (!hasMeasuredCoverage && !fudgeFactorApplied) {
-      unmeasuredMandatoryConditions.push("Cobertura de Testes: NOT_MEASURED (obrigat\xF3rio relat\xF3rio LCOV/JaCoCo/Cobertura/Istanbul >= 80%)");
-    } else if (hasMeasuredCoverage && m.testCoveragePercent < 80 && !fudgeFactorApplied) {
-      failedConditions.push(`Cobertura de Testes: ${m.testCoveragePercent.toFixed(1)}% < 80.0%`);
-    }
-  }
-  const qualityGateStatus = !isEligibleForScoring ? "NOT_EVALUATED" : failedConditions.length === 0 && unmeasuredMandatoryConditions.length === 0 ? "PASSED" : unmeasuredMandatoryConditions.length > 0 && failedConditions.length === 0 ? "INCONCLUSIVE" : failedConditions.length === 1 && m.criticalVulns === 0 && m.secretsExposed === 0 && unmeasuredMandatoryConditions.length === 0 ? "WARN" : "FAILED";
-  const executiveDecision = !isEligibleForScoring || qualityGateStatus === "INCONCLUSIVE" ? "INCONCLUSIVE" : input.coveragePercent < 50 ? "INCONCLUSIVE" : qualityGateStatus === "PASSED" ? "APROVADO" : qualityGateStatus === "WARN" ? "APROVADO COM RESSALVAS" : "REPROVADO";
+  const sharedGateEval = QualityGateEngine.evaluateSharedContract({
+    eligibleForScoring: isEligibleForScoring,
+    criticalVulns: m.criticalVulns,
+    secretsExposed: m.secretsExposed,
+    bugs: m.bugs,
+    securityRating,
+    reliabilityRating,
+    duplicatedLinesPercent: m.duplicatedLinesPercent,
+    hasMeasuredCoverage,
+    testCoveragePercent: m.testCoveragePercent,
+    scopeCoveragePercent: input.coveragePercent
+  });
+  const failedConditions = sharedGateEval.failedConditions;
+  const unmeasuredMandatoryConditions = sharedGateEval.unmeasuredMandatoryConditions;
+  const qualityGateStatus = sharedGateEval.qualityGateStatus;
+  const executiveDecision = sharedGateEval.executiveDecision;
   const sumEffort = (cat) => reasonsByCat[cat].reduce((acc, r) => acc + (r.remediationEffortMinutes || 0), 0);
   const buildStatus = (cat, defaultAssessed = true) => {
     if (notApplicableSet.has(cat)) return "NOT_APPLICABLE";
@@ -3638,7 +5870,7 @@ var ParserRegistry = class _ParserRegistry {
 var SOURCE_PARAM_HINT = /(input|query|filter|path|target|cmd|command|url|uri|webhook|endpoint|req|request|body|param|user|title|name|payload|raw|sql|expr|file|html|tpl|data)/i;
 var SINK_RULES = [
   {
-    calleePattern: /^(?:execSync|exec|execFile|system|popen|Popen|check_output|Command|CommandContext)$|^(?:os|subprocess|exec|Runtime\.getRuntime\(\))\.(?:system|popen|run|Popen|call|check_output|exec|Command|CommandContext)$/i,
+    calleePattern: /^(?:execSync|exec|execFile|execFileSync|system|popen|Popen|check_output)$|^(?:os|subprocess|exec|child_process|Runtime\.getRuntime\(\))\.(?:system|popen|run|Popen|call|check_output|exec|execSync|execFile|Command|CommandContext)$/,
     ruleId: "taint:S2076",
     title: "Fluxo Taint interprocedural at\xE9 execu\xE7\xE3o de comando OS (CWE-78)",
     cwe: "CWE-78",
@@ -4200,998 +6432,9 @@ var TaintAnalyzer = class {
 };
 
 // src/analyzers/sca/SbomGenerator.ts
-import crypto3 from "node:crypto";
+import crypto4 from "node:crypto";
 import fs2 from "node:fs";
 import path2 from "node:path";
-
-// src/security/KeyManagementService.ts
-import { spawnSync } from "node:child_process";
-import crypto2 from "node:crypto";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-function generateEd25519Pair() {
-  const { publicKey, privateKey } = crypto2.generateKeyPairSync("ed25519", {
-    publicKeyEncoding: { type: "spki", format: "pem" },
-    privateKeyEncoding: { type: "pkcs8", format: "pem" }
-  });
-  return { privateKeyPem: privateKey, publicKeyPem: publicKey };
-}
-function resolvePowerShellExecutable() {
-  const sysRoot = process.env.SystemRoot || "C:\\Windows";
-  const exePath = path.win32.join(sysRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-  const safeEnv = {
-    SystemRoot: sysRoot,
-    PATH: path.win32.join(sysRoot, "System32")
-  };
-  return { exePath, safeEnv };
-}
-function tryDpapiProtectBytes(rawBytes) {
-  if (os.platform() !== "win32") {
-    return { protectedB64: "", usedDpapi: false };
-  }
-  try {
-    const b64 = rawBytes.toString("base64");
-    const ps = [
-      "Add-Type -AssemblyName System.Security;",
-      `$bytes = [Convert]::FromBase64String('${b64}');`,
-      "$prot = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser);",
-      "[Convert]::ToBase64String($prot)"
-    ].join(" ");
-    const { exePath, safeEnv } = resolvePowerShellExecutable();
-    const res = spawnSync(exePath, ["-NoProfile", "-NonInteractive", "-Command", ps], {
-      shell: false,
-      encoding: "utf8",
-      timeout: 5e3,
-      env: safeEnv
-    });
-    if (res.status === 0 && res.stdout && res.stdout.trim().length > 0) {
-      return { protectedB64: res.stdout.trim(), usedDpapi: true };
-    }
-  } catch {
-  }
-  return { protectedB64: "", usedDpapi: false };
-}
-function tryDpapiUnprotectBytes(cipherB64) {
-  const ps = [
-    "Add-Type -AssemblyName System.Security;",
-    `$bytes = [Convert]::FromBase64String('${cipherB64}');`,
-    "$unprot = [System.Security.Cryptography.ProtectedData]::Unprotect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser);",
-    "[Convert]::ToBase64String($unprot)"
-  ].join(" ");
-  const { exePath, safeEnv } = resolvePowerShellExecutable();
-  const res = spawnSync(exePath, ["-NoProfile", "-NonInteractive", "-Command", ps], {
-    shell: false,
-    encoding: "utf8",
-    timeout: 5e3,
-    env: safeEnv
-  });
-  if (res.status !== 0 || !res.stdout) {
-    throw new Error("KEYSTORE_DPAPI_UNPROTECT_FAILED: Falha ao descriptografar DEK via Windows DPAPI.");
-  }
-  return Buffer.from(res.stdout.trim(), "base64");
-}
-function tryDpapiUnprotectUtf8Legacy(cipherB64OrPlain, wasProtected) {
-  if (!wasProtected || os.platform() !== "win32") {
-    return cipherB64OrPlain;
-  }
-  const ps = [
-    "Add-Type -AssemblyName System.Security;",
-    `$bytes = [Convert]::FromBase64String('${cipherB64OrPlain}');`,
-    "$unprot = [System.Security.Cryptography.ProtectedData]::Unprotect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser);",
-    "[System.Text.Encoding]::UTF8.GetString($unprot)"
-  ].join(" ");
-  const { exePath, safeEnv } = resolvePowerShellExecutable();
-  const res = spawnSync(exePath, ["-NoProfile", "-NonInteractive", "-Command", ps], {
-    shell: false,
-    encoding: "utf8",
-    timeout: 5e3,
-    env: safeEnv
-  });
-  if (res.status !== 0 || !res.stdout) {
-    throw new Error("KEYSTORE_DPAPI_UNPROTECT_FAILED: Falha ao descriptografar chave legada via Windows DPAPI.");
-  }
-  return res.stdout.trim();
-}
-function deriveHkdfPurposeKey(ikmBuffer, saltHex, purposeInfo) {
-  const saltBuf = Buffer.from(saltHex, "hex");
-  const infoBuf = Buffer.from(purposeInfo, "utf8");
-  const derived = crypto2.hkdfSync("sha256", ikmBuffer, saltBuf, infoBuf, 32);
-  return Buffer.from(derived);
-}
-function encryptWithAes256GcmEnvelope(plaintextUtf8, key32Bytes, aadContext) {
-  if (key32Bytes.length !== 32) {
-    throw new Error("KEYSTORE_INVALID_KEY_LENGTH: Chave AES-256-GCM deve possuir exatamente 32 bytes.");
-  }
-  const nonce = crypto2.randomBytes(12);
-  const cipher = crypto2.createCipheriv("aes-256-gcm", key32Bytes, nonce, { authTagLength: 16 });
-  cipher.setAAD(Buffer.from(aadContext, "utf8"));
-  const encrypted = Buffer.concat([cipher.update(plaintextUtf8, "utf8"), cipher.final()]);
-  const authTag = cipher.getAuthTag();
-  return {
-    alg: "AES-256-GCM",
-    nonceHex: nonce.toString("hex"),
-    authTagHex: authTag.toString("hex"),
-    ciphertextHex: encrypted.toString("hex"),
-    aadContext
-  };
-}
-function decryptWithAes256GcmEnvelope(envelope, key32Bytes, expectedAadContext) {
-  if (!envelope || envelope.alg !== "AES-256-GCM") {
-    throw new Error("KEYSTORE_ENVELOPE_INVALID_ALG: Algoritmo de envelope inv\xE1lido.");
-  }
-  if (expectedAadContext && envelope.aadContext !== expectedAadContext) {
-    throw new Error(
-      `KEYSTORE_ENVELOPE_AAD_MISMATCH: Contexto de finalidade divergente (${envelope.aadContext} !== ${expectedAadContext}).`
-    );
-  }
-  const nonce = Buffer.from(envelope.nonceHex, "hex");
-  const authTag = Buffer.from(envelope.authTagHex, "hex");
-  if (nonce.length !== 12 || authTag.length !== 16) {
-    throw new Error("KEYSTORE_ENVELOPE_CORRUPTED_NONCE_OR_TAG: Nonce de 96 bits ou AuthTag de 128 bits inv\xE1lido.");
-  }
-  const decipher = crypto2.createDecipheriv("aes-256-gcm", key32Bytes, nonce, { authTagLength: 16 });
-  decipher.setAAD(Buffer.from(envelope.aadContext, "utf8"));
-  decipher.setAuthTag(authTag);
-  try {
-    const decrypted = Buffer.concat([
-      decipher.update(Buffer.from(envelope.ciphertextHex, "hex")),
-      decipher.final()
-    ]);
-    return decrypted.toString("utf8");
-  } catch {
-    throw new Error(
-      "KEYSTORE_GCM_AUTH_FAILED: Falha de autentica\xE7\xE3o AES-256-GCM \u2014 ciphertext, nonce, AAD ou chave corrompidos."
-    );
-  }
-}
-var KeyManagementService = class _KeyManagementService {
-  static {
-    this.DEFAULT_STORE_PATH = path.resolve(
-      process.cwd(),
-      ".winhood_data",
-      "keys",
-      "keystore.json"
-    );
-  }
-  static getStorePath(customPath) {
-    return customPath || process.env.WINHOOD_KEYSTORE_PATH || _KeyManagementService.DEFAULT_STORE_PATH;
-  }
-  static resolveOperatingMode() {
-    const explicitMode = (process.env.WINHOOD_KEYSTORE_MODE || "").trim().toUpperCase();
-    if (explicitMode === "PRODUCTION_SECURE" || explicitMode === "DEVELOPMENT" || explicitMode === "RECOVERY") {
-      return explicitMode;
-    }
-    if (process.env.NODE_ENV === "production") {
-      return "PRODUCTION_SECURE";
-    }
-    return "DEVELOPMENT";
-  }
-  static computeSha256(content) {
-    return crypto2.createHash("sha256").update(content, "utf8").digest("hex");
-  }
-  /**
-   * Resolves the Key Encryption Key (KEK) used exclusively to wrap/unwrap the random Data Encryption Key (DEK).
-   * Never uses predictable machine traits (hostname, username, platform, arch).
-   */
-  static resolveKekForStore(storePath, hkdfSaltHex, hkdfInfo) {
-    const extMasterEnv = (process.env.WINHOOD_KEYSTORE_MASTER_SECRET || "").trim();
-    if (extMasterEnv.length >= 16) {
-      const ikm = Buffer.from(extMasterEnv, "utf8");
-      return {
-        kekBuffer: deriveHkdfPurposeKey(ikm, hkdfSaltHex, hkdfInfo),
-        mechanism: "HKDF_EXTERNAL_ENV"
-      };
-    }
-    const kekFilePath = `${storePath}.kek`;
-    let rawKekSeed;
-    if (fs.existsSync(kekFilePath)) {
-      const hex = fs.readFileSync(kekFilePath, "utf8").trim();
-      rawKekSeed = Buffer.from(hex, "hex");
-      if (rawKekSeed.length < 32) {
-        throw new Error(`KEYSTORE_KEK_CORRUPTED: Arquivo KEK em ${kekFilePath} corrompido.`);
-      }
-    } else {
-      fs.mkdirSync(path.dirname(kekFilePath), { recursive: true });
-      rawKekSeed = crypto2.randomBytes(32);
-      const tmpKek = `${kekFilePath}.tmp-${process.pid}-${crypto2.randomBytes(4).toString("hex")}`;
-      const fd = fs.openSync(tmpKek, "w", 384);
-      try {
-        fs.writeFileSync(fd, rawKekSeed.toString("hex"), "utf8");
-        fs.fsyncSync(fd);
-      } finally {
-        fs.closeSync(fd);
-      }
-      fs.renameSync(tmpKek, kekFilePath);
-      fs.chmodSync(kekFilePath, 384);
-    }
-    return {
-      kekBuffer: deriveHkdfPurposeKey(rawKekSeed, hkdfSaltHex, hkdfInfo),
-      mechanism: "HKDF_LOCAL_KEK_FILE"
-    };
-  }
-  /**
-   * Wraps a random 256-bit DEK using OS DPAPI (when on Windows) or HKDF-derived KEK with AES-256-GCM.
-   */
-  static wrapDekBuffer(dekBuffer, storePath) {
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    const hkdfSaltHex = crypto2.randomBytes(16).toString("hex");
-    const hkdfInfo = "winhood:keystore:kek-envelope:v2";
-    const dpapiAttempt = tryDpapiProtectBytes(dekBuffer);
-    if (dpapiAttempt.usedDpapi) {
-      return {
-        envelopeVersion: "WINHOOD-ENVELOPE-V2",
-        kekMechanism: "WINDOWS_DPAPI",
-        hkdfSaltHex,
-        hkdfInfo,
-        dpapiProtectedBlobB64: dpapiAttempt.protectedB64,
-        createdAt: now,
-        rotatedAt: null
-      };
-    }
-    const { kekBuffer, mechanism } = _KeyManagementService.resolveKekForStore(
-      storePath,
-      hkdfSaltHex,
-      hkdfInfo
-    );
-    const wrappedCipher = encryptWithAes256GcmEnvelope(
-      dekBuffer.toString("hex"),
-      kekBuffer,
-      "winhood:dek:wrap:v2"
-    );
-    return {
-      envelopeVersion: "WINHOOD-ENVELOPE-V2",
-      kekMechanism: mechanism,
-      hkdfSaltHex,
-      hkdfInfo,
-      aesGcmWrappedDek: wrappedCipher,
-      createdAt: now,
-      rotatedAt: null
-    };
-  }
-  /**
-   * Unwraps the 256-bit DEK from the keystore envelope.
-   */
-  static unwrapDekBuffer(wrappedDek, storePath) {
-    if (wrappedDek.kekMechanism === "WINDOWS_DPAPI" && wrappedDek.dpapiProtectedBlobB64) {
-      return tryDpapiUnprotectBytes(wrappedDek.dpapiProtectedBlobB64);
-    }
-    if (!wrappedDek.aesGcmWrappedDek) {
-      throw new Error("KEYSTORE_DEK_ENVELOPE_MISSING: Envelope AES-256-GCM da DEK ausente.");
-    }
-    const { kekBuffer } = _KeyManagementService.resolveKekForStore(
-      storePath,
-      wrappedDek.hkdfSaltHex,
-      wrappedDek.hkdfInfo
-    );
-    const dekHex = decryptWithAes256GcmEnvelope(
-      wrappedDek.aesGcmWrappedDek,
-      kekBuffer,
-      "winhood:dek:wrap:v2"
-    );
-    return Buffer.from(dekHex, "hex");
-  }
-  static writeAtomicWithChecksum(storePath, payloadJson, monotonicSequence) {
-    const dir = path.dirname(storePath);
-    fs.mkdirSync(dir, { recursive: true });
-    const checksumPath = `${storePath}.sha256`;
-    const seqPath = `${storePath}.seq`;
-    const backupPath = `${storePath}.bak`;
-    if (fs.existsSync(storePath)) {
-      try {
-        fs.copyFileSync(storePath, backupPath);
-        fs.chmodSync(backupPath, 384);
-      } catch {
-      }
-    }
-    const tmpMain = `${storePath}.tmp-${process.pid}-${crypto2.randomBytes(4).toString("hex")}`;
-    const fd = fs.openSync(tmpMain, "w", 384);
-    try {
-      fs.writeFileSync(fd, payloadJson, "utf8");
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
-    }
-    fs.renameSync(tmpMain, storePath);
-    fs.chmodSync(storePath, 384);
-    const hash = _KeyManagementService.computeSha256(payloadJson);
-    const tmpHash = `${checksumPath}.tmp-${process.pid}-${crypto2.randomBytes(4).toString("hex")}`;
-    const hfd = fs.openSync(tmpHash, "w", 384);
-    try {
-      fs.writeFileSync(hfd, hash, "utf8");
-      fs.fsyncSync(hfd);
-    } finally {
-      fs.closeSync(hfd);
-    }
-    fs.renameSync(tmpHash, checksumPath);
-    fs.chmodSync(checksumPath, 384);
-    const tmpSeq = `${seqPath}.tmp-${process.pid}-${crypto2.randomBytes(4).toString("hex")}`;
-    const sfd = fs.openSync(tmpSeq, "w", 384);
-    try {
-      fs.writeFileSync(sfd, String(monotonicSequence), "utf8");
-      fs.fsyncSync(sfd);
-    } finally {
-      fs.closeSync(sfd);
-    }
-    fs.renameSync(tmpSeq, seqPath);
-    fs.chmodSync(seqPath, 384);
-  }
-  static readVerifiedStoreFile(storePath) {
-    if (!fs.existsSync(storePath)) return null;
-    const checksumPath = `${storePath}.sha256`;
-    const seqPath = `${storePath}.seq`;
-    const raw = fs.readFileSync(storePath, "utf8");
-    if (fs.existsSync(checksumPath)) {
-      const expectedSha = fs.readFileSync(checksumPath, "utf8").trim();
-      const actualSha = _KeyManagementService.computeSha256(raw);
-      if (expectedSha !== actualSha) {
-        const backupPath = `${storePath}.bak`;
-        if (fs.existsSync(backupPath)) {
-          const bakRaw = fs.readFileSync(backupPath, "utf8");
-          const bakParsed = JSON.parse(bakRaw);
-          if (bakParsed && bakParsed.keysHex && bakParsed.activeEvidenceKeyId && bakParsed.activeVaultKeyId) {
-            return { store: bakParsed, integrityVerified: false, rollbackVerified: false };
-          }
-        }
-        throw new Error(`KEYSTORE_INTEGRITY_VIOLATION: Checksum SHA-256 de ${storePath} n\xE3o confere.`);
-      }
-    }
-    const parsed = JSON.parse(raw);
-    if (!parsed || !parsed.keysHex || !parsed.activeEvidenceKeyId || !parsed.activeVaultKeyId) {
-      throw new Error(`KEYSTORE_CORRUPTED: Estrutura inv\xE1lida em ${storePath}.`);
-    }
-    let rollbackVerified = true;
-    if (fs.existsSync(seqPath) && typeof parsed.monotonicSequence === "number") {
-      const recordedSeq = Number.parseInt(fs.readFileSync(seqPath, "utf8").trim(), 10);
-      if (Number.isFinite(recordedSeq) && parsed.monotonicSequence < recordedSeq) {
-        if (_KeyManagementService.resolveOperatingMode() !== "RECOVERY") {
-          throw new Error(
-            `KEYSTORE_ROLLBACK_DETECTED: Sequ\xEAncia monot\xF4nica do keystore (${parsed.monotonicSequence}) \xE9 anterior ao \xFAltimo estado confirmado (${recordedSeq}).`
-          );
-        }
-        rollbackVerified = false;
-      }
-    }
-    let upgraded = false;
-    if (!parsed.wrappedDek || parsed.envelopeVersion !== "WINHOOD-ENVELOPE-V2") {
-      const dekBuffer = crypto2.randomBytes(32);
-      parsed.wrappedDek = _KeyManagementService.wrapDekBuffer(dekBuffer, storePath);
-      parsed.envelopeVersion = "WINHOOD-ENVELOPE-V2";
-      parsed.operatingMode = _KeyManagementService.resolveOperatingMode();
-      parsed.monotonicSequence = (parsed.monotonicSequence || 0) + 1;
-      for (const [kId, entry] of Object.entries(parsed.keysHex)) {
-        if (!entry.envelopeCipher && entry.secretHex) {
-          const plainHex = tryDpapiUnprotectUtf8Legacy(entry.secretHex, entry.dpapiProtected);
-          entry.envelopeCipher = encryptWithAes256GcmEnvelope(
-            plainHex,
-            dekBuffer,
-            `winhood:key:${kId}:${entry.purpose}`
-          );
-          delete entry.secretHex;
-        }
-      }
-      if (!parsed.ed25519Keys || !parsed.activeEd25519KeyId) {
-        const now = (/* @__PURE__ */ new Date()).toISOString();
-        const edId = `wh-ed25519-${now.slice(0, 10).replace(/-/g, "")}-${crypto2.randomBytes(4).toString("hex")}`;
-        const pair = generateEd25519Pair();
-        parsed.ed25519Keys = {
-          [edId]: {
-            purpose: "EVIDENCE_ED25519",
-            privateKeyEnvelope: encryptWithAes256GcmEnvelope(
-              pair.privateKeyPem,
-              dekBuffer,
-              `winhood:key:${edId}:EVIDENCE_ED25519`
-            ),
-            publicKeyPem: pair.publicKeyPem,
-            createdAt: now,
-            validFrom: now,
-            validUntil: null,
-            status: "ACTIVE",
-            rotatedAt: null,
-            revokedAt: null
-          }
-        };
-        parsed.activeEd25519KeyId = edId;
-      } else {
-        for (const [edId, edEntry] of Object.entries(parsed.ed25519Keys)) {
-          if (!edEntry.privateKeyEnvelope && edEntry.privateKeyPem) {
-            const plainPem = tryDpapiUnprotectUtf8Legacy(edEntry.privateKeyPem, edEntry.dpapiProtected);
-            edEntry.privateKeyEnvelope = encryptWithAes256GcmEnvelope(
-              plainPem,
-              dekBuffer,
-              `winhood:key:${edId}:EVIDENCE_ED25519`
-            );
-            delete edEntry.privateKeyPem;
-          }
-        }
-      }
-      parsed.version = 3;
-      upgraded = true;
-    }
-    if (!parsed.trustedPublicKeys) {
-      parsed.trustedPublicKeys = {};
-      upgraded = true;
-    }
-    for (const [edId, edEntry] of Object.entries(parsed.ed25519Keys || {})) {
-      if (!parsed.trustedPublicKeys[edId]) {
-        parsed.trustedPublicKeys[edId] = {
-          keyId: edId,
-          publicKeyPem: edEntry.publicKeyPem,
-          fingerprintSha256: _KeyManagementService.computeSha256(edEntry.publicKeyPem),
-          validFrom: edEntry.validFrom || edEntry.createdAt,
-          validUntil: edEntry.validUntil || null,
-          revokedAt: edEntry.revokedAt || null,
-          revocationReason: edEntry.revocationReason || null,
-          status: edEntry.status === "REVOKED" ? "REVOKED" : edEntry.status === "RETIRED_VERIFY_ONLY" ? "ROTATED_VERIFY_ONLY" : "ACTIVE"
-        };
-        upgraded = true;
-      }
-    }
-    if (!parsed.rotationHistory) {
-      parsed.rotationHistory = [];
-      upgraded = true;
-    }
-    if (upgraded || !fs.existsSync(checksumPath)) {
-      _KeyManagementService.persistStore(parsed, storePath);
-    }
-    return { store: parsed, integrityVerified: true, rollbackVerified };
-  }
-  static loadOrInitializeStore(customPath) {
-    const storePath = _KeyManagementService.getStorePath(customPath);
-    const existing = _KeyManagementService.readVerifiedStoreFile(storePath);
-    if (existing) {
-      return existing;
-    }
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    const evidenceKeyId = `wh-hmac-${now.slice(0, 10).replace(/-/g, "")}-${crypto2.randomBytes(4).toString("hex")}`;
-    const ed25519KeyId = `wh-ed25519-${now.slice(0, 10).replace(/-/g, "")}-${crypto2.randomBytes(4).toString("hex")}`;
-    const vaultKeyId = `wh-vault-${now.slice(0, 10).replace(/-/g, "")}-${crypto2.randomBytes(4).toString("hex")}`;
-    const dekBuffer = crypto2.randomBytes(32);
-    const wrappedDek = _KeyManagementService.wrapDekBuffer(dekBuffer, storePath);
-    const hmacSecretHex = crypto2.randomBytes(32).toString("hex");
-    const vaultSecretHex = crypto2.randomBytes(32).toString("hex");
-    const edPair = generateEd25519Pair();
-    const initialStore = {
-      version: 3,
-      envelopeVersion: "WINHOOD-ENVELOPE-V2",
-      operatingMode: _KeyManagementService.resolveOperatingMode(),
-      monotonicSequence: 1,
-      wrappedDek,
-      activeEvidenceKeyId: evidenceKeyId,
-      activeEd25519KeyId: ed25519KeyId,
-      activeVaultKeyId: vaultKeyId,
-      keysHex: {
-        [evidenceKeyId]: {
-          purpose: "EVIDENCE_HMAC",
-          envelopeCipher: encryptWithAes256GcmEnvelope(
-            hmacSecretHex,
-            dekBuffer,
-            `winhood:key:${evidenceKeyId}:EVIDENCE_HMAC`
-          ),
-          createdAt: now,
-          status: "ACTIVE",
-          rotatedAt: null,
-          revokedAt: null
-        },
-        [vaultKeyId]: {
-          purpose: "TOKEN_VAULT_AES256",
-          envelopeCipher: encryptWithAes256GcmEnvelope(
-            vaultSecretHex,
-            dekBuffer,
-            `winhood:key:${vaultKeyId}:TOKEN_VAULT_AES256`
-          ),
-          createdAt: now,
-          status: "ACTIVE",
-          rotatedAt: null,
-          revokedAt: null
-        }
-      },
-      ed25519Keys: {
-        [ed25519KeyId]: {
-          purpose: "EVIDENCE_ED25519",
-          privateKeyEnvelope: encryptWithAes256GcmEnvelope(
-            edPair.privateKeyPem,
-            dekBuffer,
-            `winhood:key:${ed25519KeyId}:EVIDENCE_ED25519`
-          ),
-          publicKeyPem: edPair.publicKeyPem,
-          createdAt: now,
-          validFrom: now,
-          validUntil: null,
-          status: "ACTIVE",
-          rotatedAt: null,
-          revokedAt: null
-        }
-      },
-      trustedPublicKeys: {
-        [ed25519KeyId]: {
-          keyId: ed25519KeyId,
-          publicKeyPem: edPair.publicKeyPem,
-          fingerprintSha256: _KeyManagementService.computeSha256(edPair.publicKeyPem),
-          validFrom: now,
-          validUntil: null,
-          revokedAt: null,
-          revocationReason: null,
-          status: "ACTIVE"
-        }
-      },
-      rotationHistory: [],
-      adminTokenSha256: process.env.WINHOOD_ADMIN_TOKEN ? crypto2.createHash("sha256").update(process.env.WINHOOD_ADMIN_TOKEN, "utf8").digest("hex") : null
-    };
-    _KeyManagementService.persistStore(initialStore, storePath);
-    return { store: initialStore, integrityVerified: true, rollbackVerified: true };
-  }
-  static decryptSymmetricKeyHex(store, keyId, storePath) {
-    const entry = store.keysHex[keyId];
-    if (!entry) {
-      throw new Error(`KEYSTORE_KEY_NOT_FOUND: Chave ${keyId} n\xE3o encontrada.`);
-    }
-    if (entry.status === "REVOKED") {
-      throw new Error(`KEYSTORE_KEY_REVOKED: A chave ${keyId} foi revogada e n\xE3o pode ser utilizada.`);
-    }
-    if (entry.envelopeCipher && store.wrappedDek) {
-      const dekBuffer = _KeyManagementService.unwrapDekBuffer(store.wrappedDek, storePath);
-      return decryptWithAes256GcmEnvelope(
-        entry.envelopeCipher,
-        dekBuffer,
-        `winhood:key:${keyId}:${entry.purpose}`
-      );
-    }
-    if (entry.secretHex) {
-      return tryDpapiUnprotectUtf8Legacy(entry.secretHex, entry.dpapiProtected);
-    }
-    throw new Error(`KEYSTORE_KEY_EMPTY: Material criptogr\xE1fico ausente para ${keyId}.`);
-  }
-  static decryptEd25519PrivateKeyPem(store, keyId, storePath) {
-    const entry = store.ed25519Keys[keyId];
-    if (!entry) {
-      throw new Error(`KEYSTORE_ED25519_NOT_FOUND: Chave Ed25519 ${keyId} n\xE3o encontrada.`);
-    }
-    if (entry.status === "REVOKED") {
-      throw new Error(`KEYSTORE_ED25519_REVOKED: Chave Ed25519 ${keyId} encontra-se revogada.`);
-    }
-    if (entry.privateKeyEnvelope && store.wrappedDek) {
-      const dekBuffer = _KeyManagementService.unwrapDekBuffer(store.wrappedDek, storePath);
-      return decryptWithAes256GcmEnvelope(
-        entry.privateKeyEnvelope,
-        dekBuffer,
-        `winhood:key:${keyId}:EVIDENCE_ED25519`
-      );
-    }
-    if (entry.privateKeyPem) {
-      return tryDpapiUnprotectUtf8Legacy(entry.privateKeyPem, entry.dpapiProtected);
-    }
-    throw new Error(`KEYSTORE_ED25519_EMPTY: Chave privada ausente para ${keyId}.`);
-  }
-  static persistStore(store, customPath) {
-    const storePath = _KeyManagementService.getStorePath(customPath);
-    const seq = (store.monotonicSequence || 0) + 1;
-    store.monotonicSequence = seq;
-    try {
-      _KeyManagementService.writeAtomicWithChecksum(storePath, JSON.stringify(store, null, 2), seq);
-    } catch (err) {
-      throw new Error(
-        `KEYSTORE_PERSISTENCE_FAILED: N\xE3o foi poss\xEDvel persistir o keystore de forma segura em ${storePath}: ${err?.message || String(err)}`
-      );
-    }
-  }
-  static getActiveEvidenceHmacKey(customPath) {
-    const envVal = process.env.WINHOOD_EVIDENCE_HMAC_SECRET;
-    if (envVal && envVal.trim().length >= 16) {
-      const derived = deriveHkdfPurposeKey(
-        Buffer.from(envVal.trim(), "utf8"),
-        "77696e686f6f642d65766964656e6365",
-        "winhood:purpose:evidence-hmac:v2"
-      );
-      return {
-        keyId: process.env.WINHOOD_EVIDENCE_KEY_ID || "ENV-HMAC-KEY",
-        secret: derived.toString("hex"),
-        origin: "ENV_EXTERNAL"
-      };
-    }
-    if (process.env.WINHOOD_REQUIRE_ENV_SECRETS === "true") {
-      throw new Error(
-        "KEY_MANAGEMENT_ENV_SECRET_REQUIRED: Defina WINHOOD_EVIDENCE_HMAC_SECRET (>= 16 caracteres) quando WINHOOD_REQUIRE_ENV_SECRETS=true."
-      );
-    }
-    const storePath = _KeyManagementService.getStorePath(customPath);
-    const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
-    return {
-      keyId: store.activeEvidenceKeyId,
-      secret: _KeyManagementService.decryptSymmetricKeyHex(store, store.activeEvidenceKeyId, storePath),
-      origin: "HOST_CSPRNG_KEYSTORE"
-    };
-  }
-  static getEvidenceSecretByKeyId(keyId, customPath) {
-    const envVal = process.env.WINHOOD_EVIDENCE_HMAC_SECRET;
-    const envKeyId = process.env.WINHOOD_EVIDENCE_KEY_ID || "ENV-HMAC-KEY";
-    if (envVal && envVal.trim().length >= 16 && keyId === envKeyId) {
-      const derived = deriveHkdfPurposeKey(
-        Buffer.from(envVal.trim(), "utf8"),
-        "77696e686f6f642d65766964656e6365",
-        "winhood:purpose:evidence-hmac:v2"
-      );
-      return derived.toString("hex");
-    }
-    const storePath = _KeyManagementService.getStorePath(customPath);
-    const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
-    if (!store.keysHex[keyId] || store.keysHex[keyId].status === "REVOKED") {
-      return null;
-    }
-    return _KeyManagementService.decryptSymmetricKeyHex(store, keyId, storePath);
-  }
-  static getActiveEvidenceEd25519Key(customPath) {
-    const storePath = _KeyManagementService.getStorePath(customPath);
-    const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
-    const active = store.ed25519Keys[store.activeEd25519KeyId];
-    return {
-      keyId: store.activeEd25519KeyId,
-      privateKeyPem: _KeyManagementService.decryptEd25519PrivateKeyPem(
-        store,
-        store.activeEd25519KeyId,
-        storePath
-      ),
-      publicKeyPem: active.publicKeyPem
-    };
-  }
-  static getEd25519PublicKeyByKeyId(keyId, customPath) {
-    const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
-    const trusted = store.trustedPublicKeys?.[keyId];
-    if (trusted) {
-      if (trusted.status === "REVOKED" || trusted.revokedAt) {
-        return null;
-      }
-      return trusted.publicKeyPem;
-    }
-    const fallback = store.ed25519Keys?.[keyId];
-    if (!fallback || fallback.status === "REVOKED") return null;
-    return fallback.publicKeyPem;
-  }
-  /**
-   * Verifies an Ed25519 public key against the Trusted Public Key Registry (Trust Store),
-   * preventing a tampered manifest from substituting its own self-signed public key.
-   */
-  static verifyTrustedEd25519PublicKey(keyId, attachedPublicKeyPem, signedAtIso, customPath) {
-    const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
-    if (!keyId) {
-      return {
-        trusted: false,
-        keyId: null,
-        publicKeyPem: null,
-        status: "UNTRUSTED",
-        reason: "Manifesto n\xE3o declara identificador de chave Ed25519 (ed25519KeyId ausente)."
-      };
-    }
-    const trustedEntry = store.trustedPublicKeys?.[keyId];
-    if (!trustedEntry) {
-      return {
-        trusted: false,
-        keyId,
-        publicKeyPem: null,
-        status: "UNTRUSTED",
-        reason: `Chave Ed25519 ${keyId} n\xE3o consta no Registro de Chaves P\xFAblicas Confi\xE1veis (Trust Store).`
-      };
-    }
-    if (trustedEntry.status === "REVOKED" || trustedEntry.revokedAt) {
-      return {
-        trusted: false,
-        keyId,
-        publicKeyPem: null,
-        status: "REVOKED",
-        reason: `Chave Ed25519 ${keyId} revogada em ${trustedEntry.revokedAt || "data registrada"} (${trustedEntry.revocationReason || "sem motivo especificado"}).`
-      };
-    }
-    if (signedAtIso && trustedEntry.validUntil) {
-      const signedTs = Date.parse(signedAtIso);
-      const untilTs = Date.parse(trustedEntry.validUntil);
-      if (Number.isFinite(signedTs) && Number.isFinite(untilTs) && signedTs > untilTs) {
-        return {
-          trusted: false,
-          keyId,
-          publicKeyPem: null,
-          status: "EXPIRED",
-          reason: `Chave Ed25519 ${keyId} expirada em ${trustedEntry.validUntil}.`
-        };
-      }
-    }
-    if (attachedPublicKeyPem && attachedPublicKeyPem.trim() !== trustedEntry.publicKeyPem.trim()) {
-      return {
-        trusted: false,
-        keyId,
-        publicKeyPem: null,
-        status: "UNTRUSTED",
-        reason: `Chave p\xFAblica anexada ao manifesto diverge da chave registrada no Trust Store para ${keyId}.`
-      };
-    }
-    return {
-      trusted: true,
-      keyId,
-      publicKeyPem: trustedEntry.publicKeyPem,
-      status: trustedEntry.status,
-      reason: `Chave Ed25519 ${keyId} verificada no Trust Store (${trustedEntry.status}).`
-    };
-  }
-  static revokeKey(keyId, reason = "Revoga\xE7\xE3o administrativa de seguran\xE7a", customPath) {
-    const storePath = _KeyManagementService.getStorePath(customPath);
-    const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    if (store.ed25519Keys?.[keyId]) {
-      store.ed25519Keys[keyId].status = "REVOKED";
-      store.ed25519Keys[keyId].revokedAt = now;
-      store.ed25519Keys[keyId].revocationReason = reason;
-    }
-    if (store.trustedPublicKeys?.[keyId]) {
-      store.trustedPublicKeys[keyId].status = "REVOKED";
-      store.trustedPublicKeys[keyId].revokedAt = now;
-      store.trustedPublicKeys[keyId].revocationReason = reason;
-    }
-    if (store.keysHex?.[keyId]) {
-      store.keysHex[keyId].status = "REVOKED";
-      store.keysHex[keyId].revokedAt = now;
-    }
-    _KeyManagementService.persistStore(store, storePath);
-  }
-  static getActiveVaultAesKey(customPath) {
-    const envVaultVal = process.env.SONAR_SECRET_SALT || process.env.WINHOOD_VAULT_SECRET;
-    if (envVaultVal && envVaultVal.trim().length >= 16) {
-      const derivedKey = deriveHkdfPurposeKey(
-        Buffer.from(envVaultVal.trim(), "utf8"),
-        "77696e686f6f642d7661756c742d6165",
-        "winhood:purpose:token-vault-aes256:v2"
-      );
-      return {
-        keyId: "ENV-VAULT-KEY",
-        keyBuffer: derivedKey,
-        origin: "ENV_EXTERNAL"
-      };
-    }
-    if (process.env.WINHOOD_REQUIRE_ENV_SECRETS === "true") {
-      throw new Error(
-        "KEY_MANAGEMENT_ENV_SECRET_REQUIRED: Defina WINHOOD_VAULT_SECRET ou SONAR_SECRET_SALT (>= 16 caracteres) quando WINHOOD_REQUIRE_ENV_SECRETS=true."
-      );
-    }
-    const storePath = _KeyManagementService.getStorePath(customPath);
-    const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
-    const hex = _KeyManagementService.decryptSymmetricKeyHex(store, store.activeVaultKeyId, storePath);
-    return {
-      keyId: store.activeVaultKeyId,
-      keyBuffer: Buffer.from(hex, "hex"),
-      origin: "HOST_CSPRNG_KEYSTORE"
-    };
-  }
-  static getVaultKeyBufferByKeyId(keyId, customPath) {
-    if (keyId === "ENV-VAULT-KEY") {
-      const envVaultVal = process.env.SONAR_SECRET_SALT || process.env.WINHOOD_VAULT_SECRET;
-      if (envVaultVal && envVaultVal.trim().length >= 16) {
-        return deriveHkdfPurposeKey(
-          Buffer.from(envVaultVal.trim(), "utf8"),
-          "77696e686f6f642d7661756c742d6165",
-          "winhood:purpose:token-vault-aes256:v2"
-        );
-      }
-      return null;
-    }
-    const storePath = _KeyManagementService.getStorePath(customPath);
-    const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
-    if (!store.keysHex[keyId] || store.keysHex[keyId].status === "REVOKED") return null;
-    const hex = _KeyManagementService.decryptSymmetricKeyHex(store, keyId, storePath);
-    return Buffer.from(hex, "hex");
-  }
-  static rotateKey(purpose, customPath, onVaultReencrypt) {
-    const storePath = _KeyManagementService.getStorePath(customPath);
-    const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    const dekBuffer = _KeyManagementService.unwrapDekBuffer(store.wrappedDek, storePath);
-    if (purpose === "EVIDENCE_ED25519") {
-      const prevKeyId2 = store.activeEd25519KeyId;
-      if (store.ed25519Keys[prevKeyId2]) {
-        store.ed25519Keys[prevKeyId2].status = "RETIRED_VERIFY_ONLY";
-        store.ed25519Keys[prevKeyId2].rotatedAt = now;
-      }
-      if (store.trustedPublicKeys?.[prevKeyId2]) {
-        store.trustedPublicKeys[prevKeyId2].status = "ROTATED_VERIFY_ONLY";
-      }
-      const newKeyId2 = `wh-ed25519-${now.slice(0, 10).replace(/-/g, "")}-${crypto2.randomBytes(4).toString("hex")}`;
-      const pair = generateEd25519Pair();
-      store.ed25519Keys[newKeyId2] = {
-        purpose: "EVIDENCE_ED25519",
-        privateKeyEnvelope: encryptWithAes256GcmEnvelope(
-          pair.privateKeyPem,
-          dekBuffer,
-          `winhood:key:${newKeyId2}:EVIDENCE_ED25519`
-        ),
-        publicKeyPem: pair.publicKeyPem,
-        createdAt: now,
-        validFrom: now,
-        validUntil: null,
-        status: "ACTIVE",
-        rotatedAt: null,
-        revokedAt: null
-      };
-      store.trustedPublicKeys = store.trustedPublicKeys || {};
-      store.trustedPublicKeys[newKeyId2] = {
-        keyId: newKeyId2,
-        publicKeyPem: pair.publicKeyPem,
-        fingerprintSha256: _KeyManagementService.computeSha256(pair.publicKeyPem),
-        validFrom: now,
-        validUntil: null,
-        revokedAt: null,
-        revocationReason: null,
-        status: "ACTIVE"
-      };
-      store.activeEd25519KeyId = newKeyId2;
-      store.rotationHistory = store.rotationHistory || [];
-      store.rotationHistory.push({
-        timestamp: now,
-        purpose: "EVIDENCE_ED25519",
-        previousKeyId: prevKeyId2,
-        newKeyId: newKeyId2,
-        reason: "Rota\xE7\xE3o programada de par assim\xE9trico Ed25519 com preserva\xE7\xE3o no Trust Store",
-        monotonicSequence: (store.monotonicSequence || 0) + 1
-      });
-      _KeyManagementService.persistStore(store, customPath);
-      return {
-        keyId: newKeyId2,
-        purpose: "EVIDENCE_ED25519",
-        createdAt: now,
-        rotatedAt: null,
-        status: "ACTIVE",
-        fingerprintSha256: _KeyManagementService.computeSha256(pair.publicKeyPem).slice(0, 16),
-        algorithm: "ED25519"
-      };
-    }
-    const prevKeyId = purpose === "EVIDENCE_HMAC" ? store.activeEvidenceKeyId : store.activeVaultKeyId;
-    const prevEntry = store.keysHex[prevKeyId];
-    const prevKeyBuffer = purpose === "TOKEN_VAULT_AES256" && prevEntry ? Buffer.from(_KeyManagementService.decryptSymmetricKeyHex(store, prevKeyId, storePath), "hex") : null;
-    const prefix = purpose === "EVIDENCE_HMAC" ? "wh-hmac" : "wh-vault";
-    const newKeyId = `${prefix}-${now.slice(0, 10).replace(/-/g, "")}-${crypto2.randomBytes(4).toString("hex")}`;
-    const rawKeyHex = crypto2.randomBytes(32).toString("hex");
-    const newKeyBuffer = Buffer.from(rawKeyHex, "hex");
-    if (purpose === "TOKEN_VAULT_AES256" && onVaultReencrypt && prevKeyBuffer) {
-      onVaultReencrypt({
-        oldKeyId: prevKeyId,
-        oldKeyBuffer: prevKeyBuffer,
-        newKeyId,
-        newKeyBuffer
-      });
-    }
-    if (prevEntry) {
-      prevEntry.status = "RETIRED_VERIFY_ONLY";
-      prevEntry.rotatedAt = now;
-    }
-    store.keysHex[newKeyId] = {
-      purpose,
-      envelopeCipher: encryptWithAes256GcmEnvelope(
-        rawKeyHex,
-        dekBuffer,
-        `winhood:key:${newKeyId}:${purpose}`
-      ),
-      createdAt: now,
-      status: "ACTIVE",
-      rotatedAt: null,
-      revokedAt: null
-    };
-    if (purpose === "EVIDENCE_HMAC") {
-      store.activeEvidenceKeyId = newKeyId;
-    } else {
-      store.activeVaultKeyId = newKeyId;
-    }
-    store.rotationHistory = store.rotationHistory || [];
-    store.rotationHistory.push({
-      timestamp: now,
-      purpose,
-      previousKeyId: prevKeyId,
-      newKeyId,
-      reason: `Rota\xE7\xE3o criptogr\xE1fica de chave ${purpose} sob DEK Envelope V2`,
-      monotonicSequence: (store.monotonicSequence || 0) + 1
-    });
-    _KeyManagementService.persistStore(store, customPath);
-    return {
-      keyId: newKeyId,
-      purpose,
-      createdAt: now,
-      rotatedAt: null,
-      status: "ACTIVE",
-      fingerprintSha256: _KeyManagementService.computeSha256(rawKeyHex).slice(0, 16),
-      algorithm: purpose === "EVIDENCE_HMAC" ? "HMAC-SHA256" : "AES-256-GCM"
-    };
-  }
-  static verifyStrictAdminToken(providedToken, customPath) {
-    if (!providedToken || providedToken.trim().length === 0) return false;
-    const envAdminToken = process.env.WINHOOD_ADMIN_TOKEN;
-    if (envAdminToken && envAdminToken.trim().length > 0) {
-      const a2 = Buffer.from(providedToken.trim(), "utf8");
-      const b2 = Buffer.from(envAdminToken.trim(), "utf8");
-      return a2.length === b2.length && crypto2.timingSafeEqual(a2, b2);
-    }
-    const { store } = _KeyManagementService.loadOrInitializeStore(customPath);
-    if (!store.adminTokenSha256) {
-      return false;
-    }
-    const providedSha = _KeyManagementService.computeSha256(providedToken.trim());
-    const a = Buffer.from(providedSha, "hex");
-    const b = Buffer.from(store.adminTokenSha256, "hex");
-    return a.length === b.length && crypto2.timingSafeEqual(a, b);
-  }
-  static getStatus(customPath) {
-    const { store, integrityVerified, rollbackVerified } = _KeyManagementService.loadOrInitializeStore(customPath);
-    const hasEnvEvidence = Boolean(
-      process.env.WINHOOD_EVIDENCE_HMAC_SECRET && process.env.WINHOOD_EVIDENCE_HMAC_SECRET.trim().length >= 16
-    );
-    const hasEnvVault = Boolean(
-      (process.env.SONAR_SECRET_SALT || process.env.WINHOOD_VAULT_SECRET || "").trim().length >= 16
-    );
-    const symKeys = Object.entries(store.keysHex).map(([keyId, info]) => {
-      const fpSource = info.envelopeCipher ? info.envelopeCipher.ciphertextHex : info.secretHex || keyId;
-      return {
-        keyId,
-        purpose: info.purpose,
-        createdAt: info.createdAt,
-        rotatedAt: info.rotatedAt,
-        revokedAt: info.revokedAt || null,
-        status: info.status,
-        fingerprintSha256: _KeyManagementService.computeSha256(fpSource).slice(0, 16),
-        algorithm: info.purpose === "EVIDENCE_HMAC" ? "HMAC-SHA256" : "AES-256-GCM"
-      };
-    });
-    const asymKeys = Object.entries(store.ed25519Keys || {}).map(([keyId, info]) => ({
-      keyId,
-      purpose: info.purpose,
-      createdAt: info.createdAt,
-      rotatedAt: info.rotatedAt,
-      revokedAt: info.revokedAt || null,
-      status: info.status,
-      fingerprintSha256: _KeyManagementService.computeSha256(info.publicKeyPem).slice(0, 16),
-      algorithm: "ED25519"
-    }));
-    const keys = [...symKeys, ...asymKeys];
-    const trustedPublicKeys = Object.values(store.trustedPublicKeys || {});
-    const operatingMode = store.operatingMode || _KeyManagementService.resolveOperatingMode();
-    const kekMechanism = store.wrappedDek?.kekMechanism || "HKDF_LOCAL_KEK_FILE";
-    const securityWarnings = [];
-    if (process.env.NODE_ENV === "production" || operatingMode === "PRODUCTION_SECURE") {
-      if (!hasEnvEvidence) {
-        securityWarnings.push(
-          "Produ\xE7\xE3o utilizando keystore local para HMAC de evid\xEAncias; configure WINHOOD_EVIDENCE_HMAC_SECRET."
-        );
-      }
-      if (!hasEnvVault) {
-        securityWarnings.push(
-          "Produ\xE7\xE3o utilizando keystore local para cofre AES-256; configure WINHOOD_VAULT_SECRET ou SONAR_SECRET_SALT."
-        );
-      }
-      if (kekMechanism === "HKDF_LOCAL_KEK_FILE") {
-        securityWarnings.push(
-          "DEK protegida por KEK local derivada via HKDF; em produ\xE7\xE3o sem DPAPI/Keychain, recomenda-se definir WINHOOD_KEYSTORE_MASTER_SECRET."
-        );
-      }
-    }
-    return {
-      keystorePath: _KeyManagementService.getStorePath(customPath),
-      integrityVerified,
-      envelopeVersion: store.envelopeVersion || "WINHOOD-ENVELOPE-V2",
-      operatingMode,
-      kekProtectionMechanism: kekMechanism,
-      monotonicSequence: store.monotonicSequence || 1,
-      rollbackProtectionVerified: rollbackVerified,
-      dpapiSupported: os.platform() === "win32",
-      keyOrigin: hasEnvEvidence || hasEnvVault ? "ENV_EXTERNAL" : "HOST_CSPRNG_KEYSTORE",
-      productionEnvSecretConfigured: hasEnvEvidence && hasEnvVault,
-      securityWarnings,
-      activeEvidenceKeyId: store.activeEvidenceKeyId,
-      activeEd25519KeyId: store.activeEd25519KeyId,
-      activeVaultKeyId: store.activeVaultKeyId,
-      adminTokenConfigured: Boolean(process.env.WINHOOD_ADMIN_TOKEN || store.adminTokenSha256),
-      totalKeysTracked: keys.length,
-      trustedPublicKeysCount: trustedPublicKeys.length,
-      keys,
-      trustedPublicKeys,
-      rotationHistory: store.rotationHistory || []
-    };
-  }
-};
-
-// src/analyzers/sca/SbomGenerator.ts
 var KNOWN_OSS_PACKAGE_LICENSES = {
   react: "MIT",
   "react-dom": "MIT",
@@ -5291,48 +6534,219 @@ function resolvePackageSpdxLicenseWithProvenance(pkgName, explicitLicense, rootM
   return { license: "NOASSERTION", provenance: "UNVERIFIED" };
 }
 function deterministicUuidFromSeed(seed) {
-  const hex = crypto3.createHash("sha256").update(seed, "utf8").digest("hex").slice(0, 32);
+  const hex = crypto4.createHash("sha256").update(seed, "utf8").digest("hex").slice(0, 32);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
+var UUID_V4_URN_REGEX = /^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+var PURL_REGEX = /^pkg:[a-z0-9.+-]+\/.+@.+$/i;
+var SHA256_HEX_REGEX = /^[0-9a-f]{64}$/i;
+var ISO_TIMESTAMP_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
 var SbomGenerator = class _SbomGenerator {
-  static validateSbomBundle(bundle) {
+  static validateCycloneDxSchema(cdx, expectedSpecVersion) {
     const errors = [];
-    const cdx = bundle.cyclonedx15Json;
-    if (!cdx) {
-      errors.push("CycloneDX 1.5 JSON document missing.");
-    } else {
-      if (cdx.bomFormat !== "CycloneDX") errors.push('CycloneDX bomFormat must be "CycloneDX".');
-      if (cdx.specVersion !== "1.5") errors.push('CycloneDX specVersion must be "1.5".');
-      if (typeof cdx.serialNumber !== "string" || !cdx.serialNumber.startsWith("urn:uuid:")) {
-        errors.push("CycloneDX serialNumber must be a valid urn:uuid.");
+    const prefix = `CycloneDX ${expectedSpecVersion}`;
+    if (!cdx || typeof cdx !== "object") {
+      return { valid: false, errors: [`${prefix} JSON document missing.`] };
+    }
+    if (cdx.bomFormat !== "CycloneDX") errors.push(`${prefix} bomFormat must be "CycloneDX".`);
+    if (cdx.specVersion !== expectedSpecVersion) {
+      errors.push(`${prefix} specVersion must be "${expectedSpecVersion}".`);
+    }
+    if (typeof cdx.serialNumber !== "string" || !UUID_V4_URN_REGEX.test(cdx.serialNumber)) {
+      errors.push(`${prefix} serialNumber must match urn:uuid:<UUID>.`);
+    }
+    if (typeof cdx.version !== "number" || !Number.isInteger(cdx.version) || cdx.version < 1) {
+      errors.push(`${prefix} version must be an integer >= 1.`);
+    }
+    if (typeof cdx.metadata?.timestamp !== "string" || !ISO_TIMESTAMP_REGEX.test(cdx.metadata.timestamp)) {
+      errors.push(`${prefix} metadata.timestamp must be a valid ISO-8601 UTC timestamp.`);
+    }
+    if (!cdx.metadata?.component || typeof cdx.metadata.component.name !== "string" || !cdx.metadata.component.name.trim() || typeof cdx.metadata.component.type !== "string") {
+      errors.push(`${prefix} metadata.component.name and type are required.`);
+    }
+    if (!Array.isArray(cdx.components)) {
+      errors.push(`${prefix} components must be an array.`);
+      return { valid: false, errors };
+    }
+    const knownRefs = /* @__PURE__ */ new Set();
+    if (typeof cdx.metadata?.component?.["bom-ref"] === "string") {
+      knownRefs.add(cdx.metadata.component["bom-ref"]);
+    }
+    for (let i = 0; i < cdx.components.length; i++) {
+      const comp = cdx.components[i];
+      if (!comp || typeof comp !== "object") {
+        errors.push(`${prefix} components[${i}] must be an object.`);
+        continue;
       }
-      if (!cdx.metadata?.timestamp || !cdx.metadata?.component?.name) {
-        errors.push("CycloneDX metadata.timestamp and metadata.component.name are required.");
+      if (typeof comp.name !== "string" || !comp.name.trim()) {
+        errors.push(`${prefix} components[${i}].name must be a non-empty string.`);
       }
-      if (!Array.isArray(cdx.components)) {
-        errors.push("CycloneDX components must be an array.");
+      if (typeof comp.version !== "string" || !comp.version.trim()) {
+        errors.push(`${prefix} components[${i}].version must be a non-empty string.`);
+      }
+      const bomRef = comp["bom-ref"];
+      if (typeof bomRef !== "string" || !bomRef.trim()) {
+        errors.push(`${prefix} components[${i}].bom-ref is required.`);
+      } else if (knownRefs.has(bomRef)) {
+        errors.push(`${prefix} duplicate bom-ref "${bomRef}".`);
+      } else {
+        knownRefs.add(bomRef);
+      }
+      if (comp.purl !== void 0 && (typeof comp.purl !== "string" || !PURL_REGEX.test(comp.purl))) {
+        errors.push(`${prefix} components[${i}].purl invalid: "${comp.purl}".`);
+      }
+      if (Array.isArray(comp.hashes)) {
+        for (const h of comp.hashes) {
+          if (h?.alg === "SHA-256" && !SHA256_HEX_REGEX.test(String(h?.content || ""))) {
+            errors.push(`${prefix} components[${i}] has invalid SHA-256 digest.`);
+          }
+        }
       }
     }
-    const spdx = bundle.spdx23Json;
-    if (!spdx) {
-      errors.push("SPDX 2.3 JSON document missing.");
+    if (!Array.isArray(cdx.dependencies)) {
+      errors.push(`${prefix} dependencies graph array is required.`);
     } else {
-      if (spdx.spdxVersion !== "SPDX-2.3") errors.push('SPDX spdxVersion must be "SPDX-2.3".');
-      if (spdx.dataLicense !== "CC0-1.0") errors.push('SPDX dataLicense must be "CC0-1.0".');
-      if (spdx.SPDXID !== "SPDXRef-DOCUMENT") errors.push('SPDX SPDXID must be "SPDXRef-DOCUMENT".');
-      if (typeof spdx.documentNamespace !== "string" || !spdx.documentNamespace.startsWith("https://")) {
-        errors.push("SPDX documentNamespace must be a valid URI.");
-      }
-      if (!spdx.creationInfo?.created || !Array.isArray(spdx.creationInfo?.creators)) {
-        errors.push("SPDX creationInfo.created and creators are required.");
-      }
-      if (!Array.isArray(spdx.packages)) {
-        errors.push("SPDX packages must be an array.");
+      for (const dep of cdx.dependencies) {
+        if (!dep || typeof dep.ref !== "string" || !knownRefs.has(dep.ref)) {
+          errors.push(`${prefix} dependencies contains unknown ref "${dep?.ref}".`);
+        }
+        if (Array.isArray(dep?.dependsOn)) {
+          for (const target of dep.dependsOn) {
+            if (typeof target !== "string" || !knownRefs.has(target)) {
+              errors.push(`${prefix} dependency target "${target}" is dangling/missing from components.`);
+            }
+          }
+        }
       }
     }
-    const cyclonedxValid = !errors.some((e) => e.startsWith("CycloneDX"));
-    const spdxValid = !errors.some((e) => e.startsWith("SPDX"));
-    return { cyclonedxValid, spdxValid, errors };
+    return { valid: errors.length === 0, errors };
+  }
+  static validateSpdx23Schema(spdx) {
+    const errors = [];
+    if (!spdx || typeof spdx !== "object") {
+      return { valid: false, errors: ["SPDX 2.3 JSON document missing."] };
+    }
+    if (spdx.spdxVersion !== "SPDX-2.3") errors.push('SPDX 2.3 spdxVersion must be "SPDX-2.3".');
+    if (spdx.dataLicense !== "CC0-1.0") errors.push('SPDX 2.3 dataLicense must be "CC0-1.0".');
+    if (spdx.SPDXID !== "SPDXRef-DOCUMENT") errors.push('SPDX 2.3 SPDXID must be "SPDXRef-DOCUMENT".');
+    if (typeof spdx.documentNamespace !== "string" || !/^https?:\/\/.+/.test(spdx.documentNamespace)) {
+      errors.push("SPDX 2.3 documentNamespace must be a valid URI.");
+    }
+    if (!spdx.creationInfo?.created || !ISO_TIMESTAMP_REGEX.test(String(spdx.creationInfo.created)) || !Array.isArray(spdx.creationInfo?.creators) || spdx.creationInfo.creators.length === 0) {
+      errors.push("SPDX 2.3 creationInfo.created (ISO-8601) and non-empty creators are required.");
+    }
+    if (!Array.isArray(spdx.packages)) {
+      errors.push("SPDX 2.3 packages must be an array.");
+      return { valid: false, errors };
+    }
+    const pkgIds = /* @__PURE__ */ new Set();
+    for (let i = 0; i < spdx.packages.length; i++) {
+      const p = spdx.packages[i];
+      if (!p || typeof p.SPDXID !== "string" || !p.SPDXID.startsWith("SPDXRef-")) {
+        errors.push(`SPDX 2.3 packages[${i}].SPDXID invalid.`);
+      } else if (pkgIds.has(p.SPDXID)) {
+        errors.push(`SPDX 2.3 duplicate SPDXID "${p.SPDXID}".`);
+      } else {
+        pkgIds.add(p.SPDXID);
+      }
+      if (typeof p.name !== "string" || !p.name.trim()) {
+        errors.push(`SPDX 2.3 packages[${i}].name must be non-empty.`);
+      }
+      if (typeof p.versionInfo !== "string" || !p.versionInfo.trim()) {
+        errors.push(`SPDX 2.3 packages[${i}].versionInfo must be non-empty.`);
+      }
+      if (typeof p.licenseDeclared !== "string" || !p.licenseDeclared.trim()) {
+        errors.push(`SPDX 2.3 packages[${i}].licenseDeclared must be a valid expression or NOASSERTION.`);
+      }
+      if (Array.isArray(p.checksums)) {
+        for (const c of p.checksums) {
+          if (c?.algorithm === "SHA256" && !SHA256_HEX_REGEX.test(String(c?.checksumValue || ""))) {
+            errors.push(`SPDX 2.3 packages[${i}] has invalid SHA256 checksumValue.`);
+          }
+        }
+      }
+    }
+    return { valid: errors.length === 0, errors };
+  }
+  static validateSpdx30JsonLdSchema(spdx30) {
+    const errors = [];
+    if (!spdx30 || typeof spdx30 !== "object") {
+      return { valid: false, errors: ["SPDX 3.0 JSON-LD document missing."] };
+    }
+    if (spdx30["@context"] !== "https://spdx.org/rdf/3.0.1/spdx-context.jsonld") {
+      errors.push("SPDX 3.0 @context must reference official SPDX 3.0.1 JSON-LD context.");
+    }
+    if (!Array.isArray(spdx30["@graph"]) || spdx30["@graph"].length === 0) {
+      errors.push("SPDX 3.0 @graph must be a non-empty array.");
+      return { valid: false, errors };
+    }
+    const graphNodes = /* @__PURE__ */ new Map();
+    let hasDocument = false;
+    let hasCreationInfo = false;
+    for (const node of spdx30["@graph"]) {
+      if (!node || typeof node !== "object") {
+        errors.push("SPDX 3.0 @graph contains non-object element.");
+        continue;
+      }
+      if (node.type === "SpdxDocument") hasDocument = true;
+      if (node.type === "CreationInfo") hasCreationInfo = true;
+      if (typeof node.spdxId === "string") {
+        graphNodes.set(node.spdxId, node);
+      }
+      if (node.type === "software_Package") {
+        if (typeof node.name !== "string" || !node.name.trim()) {
+          errors.push(`SPDX 3.0 software_Package "${node.spdxId}" missing name.`);
+        }
+        if (typeof node.software_packageVersion !== "string" || !node.software_packageVersion.trim()) {
+          errors.push(`SPDX 3.0 software_Package "${node.spdxId}" missing software_packageVersion.`);
+        }
+        if (typeof node.software_packageUrl !== "string" || !PURL_REGEX.test(node.software_packageUrl)) {
+          errors.push(`SPDX 3.0 software_Package "${node.spdxId}" has invalid PURL.`);
+        }
+      }
+    }
+    if (!hasDocument) errors.push("SPDX 3.0 @graph missing SpdxDocument element.");
+    if (!hasCreationInfo) errors.push("SPDX 3.0 @graph missing CreationInfo element.");
+    for (const node of spdx30["@graph"]) {
+      if (node?.type === "Relationship") {
+        if (!graphNodes.has(node.from)) {
+          errors.push(`SPDX 3.0 Relationship missing "from" target "${node.from}".`);
+        }
+        if (Array.isArray(node.to)) {
+          for (const target of node.to) {
+            if (!graphNodes.has(target)) {
+              errors.push(`SPDX 3.0 Relationship dangling "to" target "${target}".`);
+            }
+          }
+        }
+      }
+    }
+    return { valid: errors.length === 0, errors };
+  }
+  static validateSbomBundle(bundle) {
+    const cdx15 = _SbomGenerator.validateCycloneDxSchema(
+      bundle.cyclonedx15Json,
+      "1.5"
+    );
+    const spdx23 = _SbomGenerator.validateSpdx23Schema(
+      bundle.spdx23Json
+    );
+    const cdx17 = bundle.cyclonedx17Json ? _SbomGenerator.validateCycloneDxSchema(bundle.cyclonedx17Json, "1.7") : { valid: true, errors: [] };
+    const spdx30 = bundle.spdx30Json ? _SbomGenerator.validateSpdx30JsonLdSchema(bundle.spdx30Json) : { valid: true, errors: [] };
+    const errors = [...cdx15.errors, ...spdx23.errors, ...cdx17.errors, ...spdx30.errors];
+    const schemaVersionValidated = [];
+    if (cdx15.valid) schemaVersionValidated.push("CycloneDX-1.5");
+    if (cdx17.valid && bundle.cyclonedx17Json) schemaVersionValidated.push("CycloneDX-1.7");
+    if (spdx23.valid) schemaVersionValidated.push("SPDX-2.3");
+    if (spdx30.valid && bundle.spdx30Json) schemaVersionValidated.push("SPDX-3.0.1");
+    return {
+      cyclonedxValid: cdx15.valid,
+      spdxValid: spdx23.valid,
+      cyclonedx17Valid: cdx17.valid,
+      spdx30Valid: spdx30.valid,
+      schemaVersionValidated,
+      errors
+    };
   }
   static generateFromSoftware(software, options) {
     const filesMap = software.sourceFilesContent || {};
@@ -5352,8 +6766,39 @@ var SbomGenerator = class _SbomGenerator {
       version: software.version,
       components: components.map((c) => `${c.bomRef}:${c.sha256 || ""}`)
     });
-    const docUuid = deterministicMode ? deterministicUuidFromSeed(serialSeed) : crypto3.randomUUID();
+    const docUuid = deterministicMode ? deterministicUuidFromSeed(serialSeed) : crypto4.randomUUID();
+    const appBomRef = `app:${software.id}@${software.version}`;
+    const directRefs = components.filter((c) => c.dependencyScope !== "TRANSITIVE").map((c) => c.bomRef);
+    const transitiveRefs = components.filter((c) => c.dependencyScope === "TRANSITIVE").map((c) => c.bomRef);
+    const mappedComponents = components.map((c) => ({
+      type: "library",
+      "bom-ref": c.bomRef,
+      name: c.name,
+      version: c.version,
+      purl: c.purl,
+      scope: c.dependencyScope === "DIRECT" ? "required" : c.dependencyScope === "OPTIONAL" ? "optional" : "optional",
+      hashes: c.sha256 ? [{ alg: "SHA-256", content: c.sha256 }] : [],
+      licenses: c.license && c.license !== "UNKNOWN" && c.license !== "NOASSERTION" ? [{ license: { id: c.license } }] : [],
+      properties: [
+        { name: "winhood:dependencyScope", value: c.dependencyScope },
+        { name: "winhood:licenseProvenance", value: c.licenseProvenance || "UNVERIFIED" },
+        { name: "winhood:manifestFile", value: c.manifestFile },
+        { name: "winhood:ecosystem", value: c.ecosystem },
+        ...c.license === "NOASSERTION" ? [{ name: "winhood:spdxLicenseConclusion", value: "NOASSERTION" }] : []
+      ]
+    }));
+    const cyclonedxDependencies = [
+      {
+        ref: appBomRef,
+        dependsOn: directRefs.length > 0 ? directRefs : transitiveRefs
+      },
+      ...components.map((c) => ({
+        ref: c.bomRef,
+        dependsOn: []
+      }))
+    ];
     const cyclonedx15Json = {
+      $schema: "http://cyclonedx.org/schema/bom-1.5.schema.json",
       bomFormat: "CycloneDX",
       specVersion: "1.5",
       serialNumber: `urn:uuid:${docUuid}`,
@@ -5371,7 +6816,7 @@ var SbomGenerator = class _SbomGenerator {
           type: "application",
           name: software.name,
           version: software.version,
-          "bom-ref": `app:${software.id}@${software.version}`
+          "bom-ref": appBomRef
         },
         properties: [
           {
@@ -5384,22 +6829,46 @@ var SbomGenerator = class _SbomGenerator {
           }
         ]
       },
-      components: components.map((c) => ({
-        type: "library",
-        "bom-ref": c.bomRef,
-        name: c.name,
-        version: c.version,
-        purl: c.purl,
-        scope: c.dependencyScope === "DIRECT" ? "required" : c.dependencyScope === "OPTIONAL" ? "optional" : "optional",
-        hashes: c.sha256 ? [{ alg: "SHA-256", content: c.sha256 }] : [],
-        licenses: c.license && c.license !== "UNKNOWN" ? [{ license: { id: c.license } }] : [],
+      components: mappedComponents,
+      dependencies: cyclonedxDependencies
+    };
+    const cyclonedx17Json = {
+      $schema: "http://cyclonedx.org/schema/bom-1.7.schema.json",
+      bomFormat: "CycloneDX",
+      specVersion: "1.7",
+      serialNumber: `urn:uuid:${docUuid}`,
+      version: 1,
+      metadata: {
+        timestamp: generatedAt,
+        tools: {
+          components: [
+            {
+              type: "application",
+              publisher: "WinHood Engineering",
+              name: "WinHood SBOM Generator",
+              version: "4.4.0"
+            }
+          ]
+        },
+        component: {
+          type: "application",
+          name: software.name,
+          version: software.version,
+          "bom-ref": appBomRef
+        },
         properties: [
-          { name: "winhood:dependencyScope", value: c.dependencyScope },
-          { name: "winhood:licenseProvenance", value: c.licenseProvenance || "UNVERIFIED" },
-          { name: "winhood:manifestFile", value: c.manifestFile },
-          { name: "winhood:ecosystem", value: c.ecosystem }
+          {
+            name: "winhood:transitiveCoverageComplete",
+            value: String(transitiveCoverageComplete)
+          },
+          {
+            name: "winhood:lockfilesDetected",
+            value: lockfilesDetected.join(", ") || "NONE"
+          }
         ]
-      }))
+      },
+      components: mappedComponents,
+      dependencies: cyclonedxDependencies
     };
     const spdx23Json = {
       spdxVersion: "SPDX-2.3",
@@ -5411,6 +6880,7 @@ var SbomGenerator = class _SbomGenerator {
         created: generatedAt,
         creators: ["Tool: WinHood SBOM Generator-4.4.0"]
       },
+      documentDescribes: components.map((_, idx) => `SPDXRef-Package-${idx + 1}`),
       packages: components.map((c, idx) => ({
         SPDXID: `SPDXRef-Package-${idx + 1}`,
         name: c.name,
@@ -5429,8 +6899,62 @@ var SbomGenerator = class _SbomGenerator {
         comment: `dependencyScope=${c.dependencyScope}; licenseProvenance=${c.licenseProvenance || "UNVERIFIED"}; manifest=${c.manifestFile}`
       }))
     };
-    const cyclonedxSha256 = crypto3.createHash("sha256").update(JSON.stringify(cyclonedx15Json)).digest("hex");
-    const spdxSha256 = crypto3.createHash("sha256").update(JSON.stringify(spdx23Json)).digest("hex");
+    const spdx30BaseUri = `https://winhood.local/spdx3/${software.id}/${docUuid}`;
+    const spdx30CreationInfoId = `${spdx30BaseUri}/CreationInfo`;
+    const spdx30DocId = `${spdx30BaseUri}/SpdxDocument`;
+    const spdx30PkgIds = components.map((_, idx) => `${spdx30BaseUri}/Package/${idx + 1}`);
+    const spdx30Json = {
+      "@context": "https://spdx.org/rdf/3.0.1/spdx-context.jsonld",
+      "@graph": [
+        {
+          type: "CreationInfo",
+          spdxId: spdx30CreationInfoId,
+          created: generatedAt,
+          createdBy: [`${spdx30BaseUri}/Tool/WinHood-4.4.0`],
+          specVersion: "3.0.1"
+        },
+        {
+          type: "SpdxDocument",
+          spdxId: spdx30DocId,
+          name: `${software.name}-${software.version}-sbom`,
+          creationInfo: spdx30CreationInfoId,
+          rootElement: spdx30PkgIds
+        },
+        ...components.map((c, idx) => ({
+          type: "software_Package",
+          spdxId: spdx30PkgIds[idx],
+          creationInfo: spdx30CreationInfoId,
+          name: c.name,
+          software_packageVersion: c.version,
+          software_packageUrl: c.purl,
+          software_downloadLocation: "NOASSERTION",
+          ...c.sha256 ? {
+            verifiedUsing: [
+              {
+                type: "Hash",
+                algorithm: "sha256",
+                hashValue: c.sha256
+              }
+            ]
+          } : {},
+          comment: `declaredLicense=${c.license && c.license !== "UNKNOWN" ? c.license : "NOASSERTION"}; dependencyScope=${c.dependencyScope}; licenseProvenance=${c.licenseProvenance || "UNVERIFIED"}`
+        })),
+        ...spdx30PkgIds.length > 0 ? [
+          {
+            type: "Relationship",
+            spdxId: `${spdx30BaseUri}/Relationship/Contains`,
+            creationInfo: spdx30CreationInfoId,
+            relationshipType: "contains",
+            from: spdx30DocId,
+            to: spdx30PkgIds
+          }
+        ] : []
+      ]
+    };
+    const cyclonedxSha256 = crypto4.createHash("sha256").update(JSON.stringify(cyclonedx15Json)).digest("hex");
+    const cyclonedx17Sha256 = crypto4.createHash("sha256").update(JSON.stringify(cyclonedx17Json)).digest("hex");
+    const spdxSha256 = crypto4.createHash("sha256").update(JSON.stringify(spdx23Json)).digest("hex");
+    const spdx30Sha256 = crypto4.createHash("sha256").update(JSON.stringify(spdx30Json)).digest("hex");
     const bundle = {
       softwareId: software.id,
       softwareName: software.name,
@@ -5444,11 +6968,16 @@ var SbomGenerator = class _SbomGenerator {
       optionalCount,
       transitiveCoverageComplete,
       lockfilesDetected,
+      supportedFormats: ["cyclonedx-1.5", "cyclonedx-1.7", "spdx-2.3", "spdx-3.0"],
       components,
       cyclonedx15Json,
+      cyclonedx17Json,
       spdx23Json,
+      spdx30Json,
       cyclonedxSha256,
+      cyclonedx17Sha256,
       spdxSha256,
+      spdx30Sha256,
       deterministicMode
     };
     bundle.structuralValidation = _SbomGenerator.validateSbomBundle(bundle);
@@ -5458,7 +6987,7 @@ var SbomGenerator = class _SbomGenerator {
     return bundle;
   }
   static signSbomBundle(bundle, signedAt) {
-    const payloadSha256 = crypto3.createHash("sha256").update(
+    const payloadSha256 = crypto4.createHash("sha256").update(
       JSON.stringify({
         softwareId: bundle.softwareId,
         softwareVersion: bundle.softwareVersion,
@@ -5469,13 +6998,13 @@ var SbomGenerator = class _SbomGenerator {
       "utf8"
     ).digest("hex");
     const hmacKey = KeyManagementService.getActiveEvidenceHmacKey();
-    const hmacSignature = crypto3.createHmac("sha256", hmacKey.secret).update(payloadSha256, "utf8").digest("hex");
+    const hmacSignature = crypto4.createHmac("sha256", hmacKey.secret).update(payloadSha256, "utf8").digest("hex");
     let ed25519Signature;
     let ed25519PublicKeyPem;
     let ed25519KeyId;
     try {
       const edKey = KeyManagementService.getActiveEvidenceEd25519Key();
-      ed25519Signature = crypto3.sign(null, Buffer.from(payloadSha256, "utf8"), edKey.privateKeyPem).toString("base64");
+      ed25519Signature = crypto4.sign(null, Buffer.from(payloadSha256, "utf8"), edKey.privateKeyPem).toString("base64");
       ed25519PublicKeyPem = edKey.publicKeyPem;
       ed25519KeyId = edKey.keyId;
     } catch {
@@ -5498,12 +7027,12 @@ var SbomGenerator = class _SbomGenerator {
     if (Array.isArray(bundle.components) && bundle.components.length !== bundle.componentsCount) {
       return { valid: false, reason: "SBOM_COMPONENTS_COUNT_MISMATCH", ed25519Valid: null };
     }
-    const recomputedCdx = crypto3.createHash("sha256").update(JSON.stringify(bundle.cyclonedx15Json)).digest("hex");
-    const recomputedSpdx = crypto3.createHash("sha256").update(JSON.stringify(bundle.spdx23Json)).digest("hex");
+    const recomputedCdx = crypto4.createHash("sha256").update(JSON.stringify(bundle.cyclonedx15Json)).digest("hex");
+    const recomputedSpdx = crypto4.createHash("sha256").update(JSON.stringify(bundle.spdx23Json)).digest("hex");
     if (recomputedCdx !== bundle.cyclonedxSha256 || recomputedSpdx !== bundle.spdxSha256) {
       return { valid: false, reason: "SBOM_DOCUMENT_HASH_MISMATCH", ed25519Valid: null };
     }
-    const expectedPayloadSha = crypto3.createHash("sha256").update(
+    const expectedPayloadSha = crypto4.createHash("sha256").update(
       JSON.stringify({
         softwareId: bundle.softwareId,
         softwareVersion: bundle.softwareVersion,
@@ -5520,10 +7049,10 @@ var SbomGenerator = class _SbomGenerator {
     if (!hmacSecret) {
       return { valid: false, reason: "SBOM_HMAC_KEY_NOT_FOUND", ed25519Valid: null };
     }
-    const expectedHmac = crypto3.createHmac("sha256", hmacSecret).update(expectedPayloadSha, "utf8").digest("hex");
+    const expectedHmac = crypto4.createHmac("sha256", hmacSecret).update(expectedPayloadSha, "utf8").digest("hex");
     const a = Buffer.from(expectedHmac, "hex");
     const b = Buffer.from(bundle.signature.hmacSignature, "hex");
-    const hmacOk = a.length === b.length && crypto3.timingSafeEqual(a, b);
+    const hmacOk = a.length === b.length && crypto4.timingSafeEqual(a, b);
     if (!hmacOk) {
       return { valid: false, reason: "SBOM_HMAC_INVALID", ed25519Valid: null };
     }
@@ -5537,7 +7066,7 @@ var SbomGenerator = class _SbomGenerator {
       if (!trustCheck.trusted || !trustCheck.publicKeyPem) {
         return { valid: false, reason: "SBOM_ED25519_KEY_NOT_FOUND", ed25519Valid: false };
       }
-      ed25519Valid = crypto3.verify(
+      ed25519Valid = crypto4.verify(
         null,
         Buffer.from(expectedPayloadSha, "utf8"),
         trustCheck.publicKeyPem,
@@ -5560,9 +7089,9 @@ var SbomGenerator = class _SbomGenerator {
     const strictProvenance = Boolean(options?.strictLicenseProvenance);
     const computeComponentDigest = (ecosystem, name, version, manifestDigest, integrityRaw) => {
       if (integrityRaw && /^sha(512|256)-/i.test(integrityRaw)) {
-        return crypto3.createHash("sha256").update(integrityRaw, "utf8").digest("hex");
+        return crypto4.createHash("sha256").update(integrityRaw, "utf8").digest("hex");
       }
-      return crypto3.createHash("sha256").update(`${ecosystem}:${name}@${version}:${manifestDigest}`, "utf8").digest("hex");
+      return crypto4.createHash("sha256").update(`${ecosystem}:${name}@${version}:${manifestDigest}`, "utf8").digest("hex");
     };
     const addComponent = (rec) => {
       const key = `${rec.ecosystem}:${rec.name}@${rec.version}`;
@@ -5575,7 +7104,7 @@ var SbomGenerator = class _SbomGenerator {
     for (const [filePath, content] of sortedEntries) {
       if (filePath.endsWith("package.json")) {
         hasManifestWithoutLockfile = true;
-        const manifestDigest = crypto3.createHash("sha256").update(content, "utf8").digest("hex").slice(0, 16);
+        const manifestDigest = crypto4.createHash("sha256").update(content, "utf8").digest("hex").slice(0, 16);
         try {
           const pkg = JSON.parse(content);
           const rootLicense = typeof pkg.license === "string" ? pkg.license : "UNKNOWN";
@@ -5614,7 +7143,7 @@ var SbomGenerator = class _SbomGenerator {
     for (const [filePath, content] of sortedEntries) {
       if (filePath.endsWith("package-lock.json") || filePath.endsWith("npm-shrinkwrap.json")) {
         lockfilesDetected.push(filePath);
-        const manifestDigest = crypto3.createHash("sha256").update(content, "utf8").digest("hex").slice(0, 16);
+        const manifestDigest = crypto4.createHash("sha256").update(content, "utf8").digest("hex").slice(0, 16);
         try {
           const lock = JSON.parse(content);
           if (lock.packages && typeof lock.packages === "object") {
@@ -5660,7 +7189,7 @@ var SbomGenerator = class _SbomGenerator {
       }
       if (filePath.endsWith("yarn.lock")) {
         lockfilesDetected.push(filePath);
-        const manifestDigest = crypto3.createHash("sha256").update(content, "utf8").digest("hex").slice(0, 16);
+        const manifestDigest = crypto4.createHash("sha256").update(content, "utf8").digest("hex").slice(0, 16);
         const blocks = content.split(/\r?\n\r?\n+/);
         for (const block of blocks) {
           const lines = block.split(/\r?\n/).map((l) => l.trim());
@@ -5696,7 +7225,7 @@ var SbomGenerator = class _SbomGenerator {
       }
       if (filePath.endsWith("pnpm-lock.yaml")) {
         lockfilesDetected.push(filePath);
-        const manifestDigest = crypto3.createHash("sha256").update(content, "utf8").digest("hex").slice(0, 16);
+        const manifestDigest = crypto4.createHash("sha256").update(content, "utf8").digest("hex").slice(0, 16);
         for (const rawLine of content.split(/\r?\n/)) {
           const trimmed = rawLine.trim();
           const m = trimmed.match(/^['"]?\/?(@?[a-zA-Z0-9._/-]+)@([0-9]+\.[0-9]+\.[0-9]+[^('":\s]*)/);
@@ -5723,7 +7252,7 @@ var SbomGenerator = class _SbomGenerator {
       }
       if (filePath.endsWith("bun.lock")) {
         lockfilesDetected.push(filePath);
-        const manifestDigest = crypto3.createHash("sha256").update(content, "utf8").digest("hex").slice(0, 16);
+        const manifestDigest = crypto4.createHash("sha256").update(content, "utf8").digest("hex").slice(0, 16);
         try {
           const cleanJson = content.replace(/,\s*([\]}])/g, "$1");
           const parsedBun = JSON.parse(cleanJson);
@@ -5756,7 +7285,7 @@ var SbomGenerator = class _SbomGenerator {
       }
     }
     for (const [filePath, content] of sortedEntries) {
-      const manifestDigest = crypto3.createHash("sha256").update(content, "utf8").digest("hex").slice(0, 16);
+      const manifestDigest = crypto4.createHash("sha256").update(content, "utf8").digest("hex").slice(0, 16);
       if (filePath.endsWith("requirements.txt")) {
         lockfilesDetected.push(filePath);
         for (const rawLine of content.split(/\r?\n/)) {
@@ -5938,11 +7467,11 @@ var SbomGenerator = class _SbomGenerator {
 };
 
 // src/analyzers/sca/ScaCorrelator.ts
-import crypto6 from "node:crypto";
+import crypto7 from "node:crypto";
 
 // src/execution/SandboxExecutor.ts
 import { spawnSync as spawnSync2 } from "node:child_process";
-import crypto4 from "node:crypto";
+import crypto5 from "node:crypto";
 import fs4 from "node:fs";
 import os3 from "node:os";
 import path4 from "node:path";
@@ -6241,8 +7770,8 @@ var SandboxExecutor = class _SandboxExecutor {
         exitCode: null,
         stdout: "",
         stderr: "Execu\xE7\xE3o bloqueada: nenhum mecanismo real de sandbox dispon\xEDvel no host.",
-        stdoutSha256: crypto4.createHash("sha256").update("").digest("hex"),
-        stderrSha256: crypto4.createHash("sha256").update("ISOLATION_FAILED").digest("hex"),
+        stdoutSha256: crypto5.createHash("sha256").update("").digest("hex"),
+        stderrSha256: crypto5.createHash("sha256").update("ISOLATION_FAILED").digest("hex"),
         durationMs: 0,
         startedAt,
         completedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -6268,8 +7797,8 @@ var SandboxExecutor = class _SandboxExecutor {
             exitCode: null,
             stdout: "",
             stderr: `Path traversal bloqueado no sandbox: ${relPath}`,
-            stdoutSha256: crypto4.createHash("sha256").update("").digest("hex"),
-            stderrSha256: crypto4.createHash("sha256").update("PATH_TRAVERSAL_BLOCKED").digest("hex"),
+            stdoutSha256: crypto5.createHash("sha256").update("").digest("hex"),
+            stderrSha256: crypto5.createHash("sha256").update("PATH_TRAVERSAL_BLOCKED").digest("hex"),
             durationMs: Math.round(performance.now() - startMs),
             startedAt,
             completedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -6363,8 +7892,8 @@ var SandboxExecutor = class _SandboxExecutor {
         exitCode: res.status,
         stdout,
         stderr,
-        stdoutSha256: crypto4.createHash("sha256").update(stdout, "utf8").digest("hex"),
-        stderrSha256: crypto4.createHash("sha256").update(stderr, "utf8").digest("hex"),
+        stdoutSha256: crypto5.createHash("sha256").update(stdout, "utf8").digest("hex"),
+        stderrSha256: crypto5.createHash("sha256").update(stderr, "utf8").digest("hex"),
         durationMs,
         startedAt,
         completedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -6405,8 +7934,8 @@ var SandboxExecutor = class _SandboxExecutor {
         exitCode: null,
         stdout: "",
         stderr: "Execu\xE7\xE3o bloqueada: nenhum mecanismo real de sandbox dispon\xEDvel no host.",
-        stdoutSha256: crypto4.createHash("sha256").update("").digest("hex"),
-        stderrSha256: crypto4.createHash("sha256").update("ISOLATION_FAILED").digest("hex"),
+        stdoutSha256: crypto5.createHash("sha256").update("").digest("hex"),
+        stderrSha256: crypto5.createHash("sha256").update("ISOLATION_FAILED").digest("hex"),
         durationMs: 0,
         startedAt,
         completedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -6431,8 +7960,8 @@ var SandboxExecutor = class _SandboxExecutor {
             exitCode: null,
             stdout: "",
             stderr: `Tentativa de escapar do workspace isolado bloqueada: ${relPath}`,
-            stdoutSha256: crypto4.createHash("sha256").update("").digest("hex"),
-            stderrSha256: crypto4.createHash("sha256").update("PATH_ESCAPE_BLOCKED").digest("hex"),
+            stdoutSha256: crypto5.createHash("sha256").update("").digest("hex"),
+            stderrSha256: crypto5.createHash("sha256").update("PATH_ESCAPE_BLOCKED").digest("hex"),
             durationMs: Math.round(performance.now() - startMs),
             startedAt,
             completedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -6524,8 +8053,8 @@ var SandboxExecutor = class _SandboxExecutor {
         stdout,
         stderr: timedOut ? `Timeout excedido (${timeoutMs}ms): processo encerrado.
 ${stderr}` : stderr,
-        stdoutSha256: crypto4.createHash("sha256").update(stdout, "utf8").digest("hex"),
-        stderrSha256: crypto4.createHash("sha256").update(stderr, "utf8").digest("hex"),
+        stdoutSha256: crypto5.createHash("sha256").update(stdout, "utf8").digest("hex"),
+        stderrSha256: crypto5.createHash("sha256").update(stderr, "utf8").digest("hex"),
         durationMs,
         startedAt,
         completedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -6564,8 +8093,8 @@ ${stderr}` : stderr,
         exitCode: null,
         stdout: "",
         stderr: "Execu\xE7\xE3o de analisador CLI externo bloqueada por pol\xEDtica P0: isolamento OS (Docker/bwrap) indispon\xEDvel neste host.",
-        stdoutSha256: crypto4.createHash("sha256").update("").digest("hex"),
-        stderrSha256: crypto4.createHash("sha256").update("CLI_SANDBOX_REQUIRED").digest("hex"),
+        stdoutSha256: crypto5.createHash("sha256").update("").digest("hex"),
+        stderrSha256: crypto5.createHash("sha256").update("CLI_SANDBOX_REQUIRED").digest("hex"),
         durationMs: 0,
         startedAt,
         completedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -6634,8 +8163,8 @@ ${stderr}` : stderr,
         exitCode: res.status,
         stdout,
         stderr,
-        stdoutSha256: crypto4.createHash("sha256").update(stdout, "utf8").digest("hex"),
-        stderrSha256: crypto4.createHash("sha256").update(stderr, "utf8").digest("hex"),
+        stdoutSha256: crypto5.createHash("sha256").update(stdout, "utf8").digest("hex"),
+        stderrSha256: crypto5.createHash("sha256").update(stderr, "utf8").digest("hex"),
         durationMs,
         startedAt,
         completedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -6659,7 +8188,7 @@ ${stderr}` : stderr,
 };
 
 // src/intelligence/reference/ReferenceRegistry.ts
-import crypto5 from "node:crypto";
+import crypto6 from "node:crypto";
 import fs5 from "node:fs";
 import path5 from "node:path";
 var REFERENCE_CATALOG_DEFAULTS = [
@@ -6822,7 +8351,7 @@ var REFERENCE_CATALOG_DEFAULTS = [
   }
 ];
 function computeHash(payload) {
-  return crypto5.createHash("sha256").update(JSON.stringify(payload), "utf8").digest("hex");
+  return crypto6.createHash("sha256").update(JSON.stringify(payload), "utf8").digest("hex");
 }
 function writeAtomicJson(targetPath, data) {
   const tmpPath = `${targetPath}.${process.pid}.tmp`;
@@ -7332,7 +8861,7 @@ var ScaCorrelator = class _ScaCorrelator {
                   const nvdEntry = cve ? syncedBundle.nvdByCve[cve] : void 0;
                   const cvss = nvdEntry?.cvssScore ?? null;
                   const severity = scoreToSeverity(cvss, kev);
-                  const evidenceSha256 = crypto6.createHash("sha256").update(JSON.stringify({ softwareId: software.id, pkgName, pkgVer, idStr, source: "osv-scanner" })).digest("hex");
+                  const evidenceSha256 = crypto7.createHash("sha256").update(JSON.stringify({ softwareId: software.id, pkgName, pkgVer, idStr, source: "osv-scanner" })).digest("hex");
                   correlations.push({
                     id: `sca-${software.id}-${idStr}`,
                     softwareId: software.id,
@@ -7377,7 +8906,7 @@ var ScaCorrelator = class _ScaCorrelator {
           const nvdEntry = cve ? syncedBundle.nvdByCve[cve] : void 0;
           const cvss = nvdEntry?.cvssScore ?? adv.cvssScore ?? null;
           const severity = scoreToSeverity(cvss, kev);
-          const evidenceSha256 = crypto6.createHash("sha256").update(JSON.stringify({ softwareId: software.id, pkg: comp.name, ver: comp.version, cve, ghsa: adv.ghsaId, syncedAt: adv.syncedAt })).digest("hex");
+          const evidenceSha256 = crypto7.createHash("sha256").update(JSON.stringify({ softwareId: software.id, pkg: comp.name, ver: comp.version, cve, ghsa: adv.ghsaId, syncedAt: adv.syncedAt })).digest("hex");
           const corr = {
             id: `sca-${software.id}-${cve || adv.ghsaId || comp.name}`,
             softwareId: software.id,
@@ -7453,7 +8982,7 @@ var ScaCorrelator = class _ScaCorrelator {
             ghsa: adv.ghsaId,
             dbVersion: sourceLabel
           };
-          const evidenceSha256 = crypto6.createHash("sha256").update(JSON.stringify(payloadForHash)).digest("hex");
+          const evidenceSha256 = crypto7.createHash("sha256").update(JSON.stringify(payloadForHash)).digest("hex");
           const corr = {
             id: `sca-${software.id}-${adv.cveId}`,
             softwareId: software.id,
@@ -7674,7 +9203,7 @@ var DEFAULT_ENTERPRISE_LICENSE_POLICY = {
 };
 
 // src/execution/CoverageReportParser.ts
-import crypto7 from "node:crypto";
+import crypto8 from "node:crypto";
 var CoverageReportParser = class _CoverageReportParser {
   static parseFromFilesMap(filesMap) {
     const entries = Object.entries(filesMap || {});
@@ -7742,7 +9271,7 @@ var CoverageReportParser = class _CoverageReportParser {
         lineCoveragePercent: null,
         branchCoveragePercent: null,
         state: "INCONCLUSIVE",
-        evidenceHash: crypto7.createHash("sha256").update(content || "", "utf8").digest("hex"),
+        evidenceHash: crypto8.createHash("sha256").update(content || "", "utf8").digest("hex"),
         limitations: ["Relat\xF3rio LCOV vazio."]
       };
     }
@@ -7828,7 +9357,7 @@ var CoverageReportParser = class _CoverageReportParser {
       lineCoveragePercent: linePct,
       branchCoveragePercent: branchPct,
       state: linesFound > 0 ? "MEASURED" : "INCONCLUSIVE",
-      evidenceHash: crypto7.createHash("sha256").update(content, "utf8").digest("hex")
+      evidenceHash: crypto8.createHash("sha256").update(content, "utf8").digest("hex")
     };
   }
   static parseMultipleJacocoXml(files) {
@@ -7861,7 +9390,7 @@ var CoverageReportParser = class _CoverageReportParser {
       lineCoveragePercent: linesFound > 0 ? Math.round(totalLinesCovered / linesFound * 1e3) / 10 : null,
       branchCoveragePercent: branchesFound > 0 ? Math.round(totalBranchesCovered / branchesFound * 1e3) / 10 : null,
       state: linesFound > 0 ? "MEASURED" : "INCONCLUSIVE",
-      evidenceHash: crypto7.createHash("sha256").update(combinedRaw, "utf8").digest("hex")
+      evidenceHash: crypto8.createHash("sha256").update(combinedRaw, "utf8").digest("hex")
     };
   }
   static parseJacocoXml(sourceFiles, content) {
@@ -7879,7 +9408,7 @@ var CoverageReportParser = class _CoverageReportParser {
         lineCoveragePercent: null,
         branchCoveragePercent: null,
         state: "INCONCLUSIVE",
-        evidenceHash: crypto7.createHash("sha256").update(content, "utf8").digest("hex"),
+        evidenceHash: crypto8.createHash("sha256").update(content, "utf8").digest("hex"),
         limitations: ['Relat\xF3rio JaCoCo XML n\xE3o cont\xE9m contadores <counter type="LINE"/>.']
       };
     }
@@ -7906,7 +9435,7 @@ var CoverageReportParser = class _CoverageReportParser {
       lineCoveragePercent: linesFound > 0 ? Math.round(linesCovered / linesFound * 1e3) / 10 : null,
       branchCoveragePercent: branchesFound > 0 ? Math.round(branchesCovered / branchesFound * 1e3) / 10 : null,
       state: linesFound > 0 ? "MEASURED" : "INCONCLUSIVE",
-      evidenceHash: crypto7.createHash("sha256").update(content, "utf8").digest("hex")
+      evidenceHash: crypto8.createHash("sha256").update(content, "utf8").digest("hex")
     };
   }
   static parseCoberturaXml(sourceFiles, content) {
@@ -7953,7 +9482,7 @@ var CoverageReportParser = class _CoverageReportParser {
       lineCoveragePercent: linePct,
       branchCoveragePercent: branchPct,
       state: linePct !== null ? "MEASURED" : "INCONCLUSIVE",
-      evidenceHash: crypto7.createHash("sha256").update(content, "utf8").digest("hex"),
+      evidenceHash: crypto8.createHash("sha256").update(content, "utf8").digest("hex"),
       limitations: limitations.length > 0 ? limitations : void 0
     };
   }
@@ -7986,7 +9515,7 @@ var CoverageReportParser = class _CoverageReportParser {
           lineCoveragePercent: null,
           branchCoveragePercent: null,
           state: "FAILED",
-          evidenceHash: crypto7.createHash("sha256").update(files.map(([, c]) => c).join("\n"), "utf8").digest("hex"),
+          evidenceHash: crypto8.createHash("sha256").update(files.map(([, c]) => c).join("\n"), "utf8").digest("hex"),
           limitations: ["Falha ao interpretar JSON de cobertura Istanbul (arquivo corrompido ou malformado)."]
         };
       }
@@ -8029,7 +9558,7 @@ var CoverageReportParser = class _CoverageReportParser {
         lineCoveragePercent: linesFound > 0 ? Math.round(linesHit / linesFound * 1e3) / 10 : null,
         branchCoveragePercent: branchesFound > 0 ? Math.round(branchesHit / branchesFound * 1e3) / 10 : null,
         state: linesFound > 0 ? "MEASURED" : "INCONCLUSIVE",
-        evidenceHash: crypto7.createHash("sha256").update(content, "utf8").digest("hex")
+        evidenceHash: crypto8.createHash("sha256").update(content, "utf8").digest("hex")
       };
     } catch {
       return {
@@ -8043,7 +9572,7 @@ var CoverageReportParser = class _CoverageReportParser {
         lineCoveragePercent: null,
         branchCoveragePercent: null,
         state: "FAILED",
-        evidenceHash: crypto7.createHash("sha256").update(content, "utf8").digest("hex"),
+        evidenceHash: crypto8.createHash("sha256").update(content, "utf8").digest("hex"),
         limitations: ["JSON de cobertura Istanbul malformado."]
       };
     }
@@ -11341,20 +12870,20 @@ function evaluateSoftwareComparability(params) {
   };
 }
 function buildPreAnalysisSummary(paramsOrSoftware, enabledCategoriesArg, weightsArg, profileIdArg) {
-  const isObjectCall = typeof paramsOrSoftware === "object" && paramsOrSoftware !== null && "software" in paramsOrSoftware;
-  const software = isObjectCall ? paramsOrSoftware.software : paramsOrSoftware;
+  const isObjectCall = (val) => typeof val === "object" && val !== null && "software" in val;
+  const software = isObjectCall(paramsOrSoftware) ? paramsOrSoftware.software : paramsOrSoftware;
   const matchedProfile = getProfileByIdOrDomain(
-    isObjectCall ? paramsOrSoftware.profile?.id : profileIdArg,
+    isObjectCall(paramsOrSoftware) ? paramsOrSoftware.profile?.id : profileIdArg,
     software.functionalDomain
   );
-  const profile = isObjectCall ? paramsOrSoftware.profile || {} : {
+  const profile = isObjectCall(paramsOrSoftware) ? paramsOrSoftware.profile || {} : {
     id: profileIdArg || matchedProfile?.id || "custom-profile",
     name: matchedProfile?.name || "Perfil Customizado",
     enabledCategories: enabledCategoriesArg || matchedProfile?.recommendedCategories || ALL_12_CATEGORIES,
     notApplicableCategories: matchedProfile?.notApplicableCategories || [],
     weights: weightsArg || matchedProfile?.weights
   };
-  const adapters = isObjectCall ? paramsOrSoftware.adapters || [] : [];
+  const adapters = isObjectCall(paramsOrSoftware) ? paramsOrSoftware.adapters || [] : [];
   const ingestionState = determineSourceIngestionState(software);
   const sourceAvailability = determineSourceAvailability(software);
   const inv = software.inventory;
@@ -11443,13 +12972,13 @@ function buildPreAnalysisSummary(paramsOrSoftware, enabledCategoriesArg, weights
 }
 
 // src/engine/evidenceProvenanceEngine.ts
-import crypto8 from "crypto";
+import crypto9 from "crypto";
 var GENESIS_EVIDENCE_HASH = "0".repeat(64);
 function sha256Hex(payload) {
-  return crypto8.createHash("sha256").update(payload, "utf8").digest("hex");
+  return crypto9.createHash("sha256").update(payload, "utf8").digest("hex");
 }
 function hmacSha256Hex(payload, secret) {
-  return crypto8.createHmac("sha256", secret).update(payload, "utf8").digest("hex");
+  return crypto9.createHmac("sha256", secret).update(payload, "utf8").digest("hex");
 }
 function computeCanonicalEvidenceHash(record, previousRecordSha256) {
   const canonicalPayload = JSON.stringify({
@@ -11703,7 +13232,7 @@ function signEvidenceManifestHmacSha256(params) {
   if (includeEd25519) {
     try {
       const edKey = KeyManagementService.getActiveEvidenceEd25519Key();
-      const sigBuf = crypto8.sign(null, Buffer.from(manifestPayloadSha256, "utf8"), edKey.privateKeyPem);
+      const sigBuf = crypto9.sign(null, Buffer.from(manifestPayloadSha256, "utf8"), edKey.privateKeyPem);
       ed25519Signature = sigBuf.toString("base64");
       ed25519PublicKeyPem = edKey.publicKeyPem;
       ed25519KeyId = edKey.keyId;
@@ -11823,7 +13352,7 @@ function verifyEvidenceChainAndManifest(evidenceChain, signedManifest, secret) {
       const expectedHmac = hmacSha256Hex(manifestPayloadSha256, resolvedSecret);
       const a = Buffer.from(expectedHmac, "hex");
       const b = Buffer.from(signedManifest.digitalSignatureHmacSha256 || "", "hex");
-      hmacValid = a.length === b.length && crypto8.timingSafeEqual(a, b);
+      hmacValid = a.length === b.length && crypto9.timingSafeEqual(a, b);
     }
     if (signedManifest.ed25519Signature) {
       const trustCheck = KeyManagementService.verifyTrustedEd25519PublicKey(
@@ -11836,7 +13365,7 @@ function verifyEvidenceChainAndManifest(evidenceChain, signedManifest, secret) {
         details.push(`Falha de confian\xE7a na chave Ed25519: ${trustCheck.reason}`);
       } else {
         try {
-          ed25519SignatureValid = crypto8.verify(
+          ed25519SignatureValid = crypto9.verify(
             null,
             Buffer.from(manifestPayloadSha256, "utf8"),
             trustCheck.publicKeyPem,
@@ -12418,277 +13947,10 @@ var DEMO_FIXTURE_METADATA = {
 };
 
 // src/engine/benchmarkOrchestrator.ts
-import crypto13 from "node:crypto";
+import crypto14 from "node:crypto";
 
 // src/execution/ControlledTestAndPerfRunner.ts
-import crypto9 from "node:crypto";
-
-// src/execution/SsrfGuard.ts
-import dns from "node:dns";
-import http from "node:http";
-import https from "node:https";
-import net from "node:net";
-var BLOCKED_HOSTNAMES = /* @__PURE__ */ new Set([
-  "localhost",
-  "localhost.localdomain",
-  "metadata.google.internal",
-  "metadata.goog",
-  "instance-data",
-  "169.254.169.254",
-  // NOSONAR (typescript:S1313): IP intencional de metadata cloud bloqueado pela proteção SSRF
-  "metadata.azure.internal"
-]);
-function ipv4ToInt(ip) {
-  const parts = ip.split(".").map((p) => Number.parseInt(p, 10));
-  if (parts.length !== 4 || parts.some((n) => Number.isNaN(n) || n < 0 || n > 255)) {
-    return -1;
-  }
-  return (parts[0] << 24 | parts[1] << 16 | parts[2] << 8 | parts[3]) >>> 0;
-}
-function inCidr4(ip, base, maskBits) {
-  const ipInt = ipv4ToInt(ip);
-  const baseInt = ipv4ToInt(base);
-  if (ipInt < 0 || baseInt < 0) return false;
-  const mask = maskBits === 0 ? 0 : ~0 << 32 - maskBits >>> 0;
-  return (ipInt & mask) === (baseInt & mask);
-}
-function isDisallowedIpAddress(rawIp, allowLoopbackExplicit = false) {
-  const ip = rawIp.trim().toLowerCase();
-  if (!ip) return { blocked: true, reason: "Endere\xE7o IP vazio." };
-  if (ip.startsWith("::ffff:")) {
-    const suffix = ip.slice(7);
-    if (net.isIPv4(suffix)) {
-      return isDisallowedIpAddress(suffix, allowLoopbackExplicit);
-    }
-    const hexMatch = suffix.match(/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-    if (hexMatch) {
-      const hi = Number.parseInt(hexMatch[1], 16);
-      const lo = Number.parseInt(hexMatch[2], 16);
-      const v4 = `${hi >> 8 & 255}.${hi & 255}.${lo >> 8 & 255}.${lo & 255}`;
-      return isDisallowedIpAddress(v4, allowLoopbackExplicit);
-    }
-    return { blocked: true, reason: `IPv6 mapeado bloqueado (${ip}).` };
-  }
-  if (net.isIPv4(ip)) {
-    if (inCidr4(ip, "127.0.0.0", 8)) {
-      return allowLoopbackExplicit ? { blocked: false } : { blocked: true, reason: `Loopback IPv4 bloqueado (${ip}).` };
-    }
-    if (inCidr4(ip, "10.0.0.0", 8)) return { blocked: true, reason: `Rede privada RFC1918 bloqueada (${ip}).` };
-    if (inCidr4(ip, "172.16.0.0", 12)) return { blocked: true, reason: `Rede privada RFC1918 bloqueada (${ip}).` };
-    if (inCidr4(ip, "192.168.0.0", 16)) return { blocked: true, reason: `Rede privada RFC1918 bloqueada (${ip}).` };
-    if (inCidr4(ip, "169.254.0.0", 16)) return { blocked: true, reason: `Link-local / Cloud Metadata bloqueado (${ip}).` };
-    if (inCidr4(ip, "0.0.0.0", 8)) return { blocked: true, reason: `Endere\xE7o 0.0.0.0/8 bloqueado (${ip}).` };
-    if (inCidr4(ip, "100.64.0.0", 10)) return { blocked: true, reason: `CGNAT RFC6598 bloqueado (${ip}).` };
-    if (inCidr4(ip, "224.0.0.0", 4)) return { blocked: true, reason: `Multicast bloqueado (${ip}).` };
-    if (inCidr4(ip, "240.0.0.0", 4)) return { blocked: true, reason: `Reservado/Broadcast bloqueado (${ip}).` };
-    return { blocked: false };
-  }
-  if (net.isIPv6(ip)) {
-    const bare = ip.split("%")[0];
-    if (bare === "::1" || bare === "0:0:0:0:0:0:0:1") {
-      return allowLoopbackExplicit ? { blocked: false } : { blocked: true, reason: `Loopback IPv6 bloqueado (${ip}).` };
-    }
-    if (bare === "::" || bare === "0:0:0:0:0:0:0:0") {
-      return { blocked: true, reason: `Unspecified IPv6 bloqueado (${ip}).` };
-    }
-    if (/^fe[89ab][0-9a-f]:/i.test(bare) || bare.startsWith("fe80")) {
-      return { blocked: true, reason: `Link-local IPv6 bloqueado (${ip}).` };
-    }
-    if (/^f[cd][0-9a-f]{2}:/i.test(bare)) {
-      return { blocked: true, reason: `Unique-Local IPv6 (fc00::/7) bloqueado (${ip}).` };
-    }
-    if (bare.startsWith("ff")) {
-      return { blocked: true, reason: `Multicast IPv6 bloqueado (${ip}).` };
-    }
-    if (bare.startsWith("64:ff9b:")) {
-      return { blocked: true, reason: `NAT64 prefix bloqueado (${ip}).` };
-    }
-    return { blocked: false };
-  }
-  return { blocked: true, reason: `Formato de IP inv\xE1lido ou desconhecido (${ip}).` };
-}
-var defaultDnsResolver = async (hostname) => {
-  return await dns.promises.lookup(hostname, { all: true, verbatim: true });
-};
-var SsrfGuard = class _SsrfGuard {
-  static isExplicitLoopbackUrl(rawUrl) {
-    try {
-      const parsed = new URL(rawUrl);
-      const hostname = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-      return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
-    } catch {
-      return false;
-    }
-  }
-  static async validateUrl(params) {
-    let parsed;
-    try {
-      parsed = new URL(params.targetUrl);
-    } catch {
-      return { allowed: false, reason: "URL malformada.", resolvedIps: [] };
-    }
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      return {
-        allowed: false,
-        reason: `Protocolo proibido (${parsed.protocol}): apenas http/https autorizados.`,
-        resolvedIps: []
-      };
-    }
-    if (parsed.username || parsed.password) {
-      return {
-        allowed: false,
-        reason: "Credenciais embutidas na URL n\xE3o s\xE3o permitidas.",
-        resolvedIps: []
-      };
-    }
-    const hostname = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-    if (!hostname) {
-      return { allowed: false, reason: "Hostname ausente.", resolvedIps: [] };
-    }
-    if (params.requireRegisteredTarget) {
-      const list = params.authorizedTargets || [];
-      const match = list.find((t) => {
-        try {
-          return new URL(t.origin).origin === parsed.origin;
-        } catch {
-          return false;
-        }
-      });
-      if (!match) {
-        return {
-          allowed: false,
-          reason: `Destino n\xE3o autorizado (${parsed.origin}): cadastre o ambiente previamente no registro de destinos autorizados.`,
-          resolvedIps: []
-        };
-      }
-    }
-    const allowLoopback = Boolean(params.allowExplicitLoopback);
-    if (!allowLoopback && BLOCKED_HOSTNAMES.has(hostname)) {
-      return {
-        allowed: false,
-        reason: `Hostname interno/metadata bloqueado por pol\xEDtica SSRF (${hostname}).`,
-        resolvedIps: []
-      };
-    }
-    if (net.isIP(hostname) !== 0) {
-      const check = isDisallowedIpAddress(hostname, allowLoopback);
-      if (check.blocked) {
-        return { allowed: false, reason: check.reason || "IP bloqueado.", resolvedIps: [hostname] };
-      }
-      return {
-        allowed: true,
-        reason: "IP literal validado.",
-        parsedUrl: parsed,
-        resolvedIps: [hostname],
-        pinnedIp: hostname
-      };
-    }
-    const resolver = params.dnsResolver || defaultDnsResolver;
-    let records;
-    try {
-      records = await resolver(hostname);
-    } catch (err) {
-      return {
-        allowed: false,
-        reason: `Falha na resolu\xE7\xE3o DNS para ${hostname}: ${err?.message || "NXDOMAIN"}.`,
-        resolvedIps: []
-      };
-    }
-    if (!records || records.length === 0) {
-      return { allowed: false, reason: `Nenhum endere\xE7o IP retornado pelo DNS para ${hostname}.`, resolvedIps: [] };
-    }
-    const resolvedIps = records.map((r) => r.address);
-    for (const rec of records) {
-      const check = isDisallowedIpAddress(rec.address, allowLoopback);
-      if (check.blocked) {
-        return {
-          allowed: false,
-          reason: `DNS para ${hostname} resolveu para IP proibido (${rec.address}): ${check.reason}`,
-          resolvedIps
-        };
-      }
-    }
-    return {
-      allowed: true,
-      reason: "Destino e resolu\xE7\xE3o DNS validados.",
-      parsedUrl: parsed,
-      resolvedIps,
-      pinnedIp: resolvedIps[0]
-    };
-  }
-  /**
-   * Executa requisição HTTP(S) com IP pinado (proteção contra DNS rebinding)
-   * e revalidação de cada salto de redirecionamento HTTP (máximo 3 redirects).
-   */
-  static async pinnedSafeRequest(params) {
-    const maxRedirects = params.maxRedirects ?? 3;
-    const timeoutMs = params.timeoutMs ?? 4e3;
-    let currentUrl = params.targetUrl;
-    for (let hop = 0; hop <= maxRedirects; hop++) {
-      const validation = await _SsrfGuard.validateUrl({
-        targetUrl: currentUrl,
-        authorizedTargets: params.authorizedTargets,
-        requireRegisteredTarget: params.requireRegisteredTarget,
-        allowExplicitLoopback: params.allowExplicitLoopback,
-        dnsResolver: params.dnsResolver
-      });
-      if (!validation.allowed || !validation.parsedUrl || !validation.pinnedIp) {
-        throw new Error(`SSRF_BLOCKED: ${validation.reason}`);
-      }
-      const parsed = validation.parsedUrl;
-      const pinnedIp = validation.pinnedIp;
-      const family = net.isIPv6(pinnedIp) ? 6 : 4;
-      const start = performance.now();
-      const resp = await new Promise((resolve, reject) => {
-        const transport = parsed.protocol === "https:" ? https : http;
-        const req = transport.request(
-          {
-            hostname: parsed.hostname,
-            port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
-            path: `${parsed.pathname}${parsed.search}`,
-            method: "GET",
-            timeout: timeoutMs,
-            lookup: (_host, _opts, cb) => {
-              cb(null, pinnedIp, family);
-            },
-            headers: {
-              Host: parsed.host,
-              "User-Agent": "WinHood-Perf-Validator/4.2"
-            }
-          },
-          (res) => {
-            const loc = typeof res.headers.location === "string" ? res.headers.location : void 0;
-            res.on("data", () => {
-            });
-            res.on("end", () => resolve({ statusCode: res.statusCode || 0, location: loc }));
-          }
-        );
-        req.on("timeout", () => {
-          req.destroy(new Error(`Timeout after ${timeoutMs}ms`));
-        });
-        req.on("error", reject);
-        req.end();
-      });
-      const latencyMs = performance.now() - start;
-      if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.location) {
-        if (hop >= maxRedirects) {
-          throw new Error("SSRF_BLOCKED: Limite m\xE1ximo de redirecionamentos excedido.");
-        }
-        currentUrl = new URL(resp.location, parsed.toString()).toString();
-        continue;
-      }
-      return {
-        ok: resp.statusCode >= 200 && resp.statusCode < 300,
-        statusCode: resp.statusCode,
-        latencyMs,
-        finalUrl: currentUrl
-      };
-    }
-    throw new Error("SSRF_BLOCKED: Redirecionamento inv\xE1lido.");
-  }
-};
-
-// src/execution/ControlledTestAndPerfRunner.ts
+import crypto10 from "node:crypto";
 var ControlledTestAndPerfRunner = class {
   /**
    * Executa testes do projeto EXCLUSIVAMENTE dentro do SandboxExecutor isolado
@@ -13090,14 +14352,60 @@ ${sandboxRes.stderr}`;
         toolVersion: "4.2.0",
         measuredAt: nowIso,
         scope: params.targetUrl,
-        evidenceHash: crypto9.createHash("sha256").update(`${params.targetUrl}|${p50}|${p95}|${p99}|${rps}|${nowIso}`, "utf8").digest("hex")
+        evidenceHash: crypto10.createHash("sha256").update(`${params.targetUrl}|${p50}|${p95}|${p99}|${rps}|${nowIso}`, "utf8").digest("hex")
       }
     };
   }
 };
 
 // src/intelligence/comparison/BenchmarkMatcher.ts
-import crypto10 from "node:crypto";
+import crypto12 from "node:crypto";
+
+// src/comparability/index.ts
+import crypto11 from "node:crypto";
+var CANONICAL_TAXONOMY_VERSION = "WINHOOD-CWE-MQR-TAXONOMY-v1.0.0";
+var CANONICAL_TAXONOMY_MAPPING_SPEC = {
+  version: CANONICAL_TAXONOMY_VERSION,
+  domains: ["SECURITY", "RELIABILITY", "MAINTAINABILITY", "ARCHITECTURE", "PERFORMANCE", "DATABASE"],
+  cweSeverityMap: {
+    "CWE-89": "BLOCKER",
+    "CWE-78": "BLOCKER",
+    "CWE-95": "BLOCKER",
+    "CWE-798": "BLOCKER",
+    "CWE-327": "CRITICAL",
+    "CWE-328": "CRITICAL",
+    "CWE-390": "HIGH",
+    "CWE-119": "MEDIUM"
+  }
+};
+var CANONICAL_TAXONOMY_MAPPING_SHA256 = crypto11.createHash("sha256").update(JSON.stringify(CANONICAL_TAXONOMY_MAPPING_SPEC), "utf8").digest("hex");
+function sha256Canonical(payload) {
+  return crypto11.createHash("sha256").update(typeof payload === "string" ? payload : JSON.stringify(payload), "utf8").digest("hex");
+}
+function buildComparabilityManifest(input) {
+  return {
+    projectId: input.projectId,
+    sourceRepository: input.sourceRepository || `project://${input.projectId}`,
+    commitSha: input.commitSha,
+    workingTreeClean: input.workingTreeClean ?? true,
+    configHashSha256: input.configHashSha256 || sha256Canonical({ profile: input.analyticalProfile, engine: input.engineVersion }),
+    analyticalProfile: input.analyticalProfile,
+    engineVersion: input.engineVersion,
+    ruleCatalogSha256: input.ruleCatalogSha256,
+    weightsHashSha256: input.weightsHashSha256 || sha256Canonical({ defaultWeights: true }),
+    analyticalDepth: input.analyticalDepth || "FULL_AST_AND_TAINT",
+    osPlatform: input.osPlatform || process.platform,
+    cpuArch: input.cpuArch || process.arch,
+    runtimeVersion: input.runtimeVersion || process.version,
+    eligibleFilesScopeHash: input.eligibleFilesScopeHash || sha256Canonical({ scope: input.projectId, commit: input.commitSha }),
+    taxonomyVersion: input.taxonomyVersion || CANONICAL_TAXONOMY_VERSION,
+    taxonomyMappingSha256: input.taxonomyMappingSha256 ?? CANONICAL_TAXONOMY_MAPPING_SHA256,
+    executedAt: input.executedAt || (/* @__PURE__ */ new Date()).toISOString(),
+    evidenceIntegrityVerified: input.evidenceIntegrityVerified ?? true
+  };
+}
+
+// src/intelligence/comparison/BenchmarkMatcher.ts
 function detectLanguages(sw) {
   const langs = /* @__PURE__ */ new Set();
   const extMap = {
@@ -13263,12 +14571,41 @@ var BenchmarkMatcher = class {
     }
     const passedCount = checks.filter((c) => c.passed).length;
     const compatibilityScorePercent = Math.round(passedCount / checks.length * 100);
+    const comparabilityManifests = {};
+    for (const sw of softwares) {
+      const provided = input.manifestsBySoftware?.[sw.id];
+      const eligibleFiles = Object.keys(sw.sourceFilesContent || {}).sort();
+      const manifest = provided || buildComparabilityManifest({
+        projectId: sw.projectId || "default-project",
+        sourceRepository: sw.repositoryUrl || sw.officialUrl || `local://${sw.id}`,
+        commitSha: sw.commitHash || sw.packageSha256 || "unverified-upload",
+        workingTreeClean: Boolean(sw.commitHash),
+        configHashSha256: input.configHashSha256 || sha256Canonical({
+          profileId: input.profile?.id || "default",
+          enabledCategories: input.profile?.enabledCategories || [],
+          qualityGateId: input.profile?.qualityGateId || "qg-sonar-way"
+        }),
+        analyticalProfile: input.profile?.name || input.profile?.id || (input.profile?.qualityProfileIds || ["qp-sonar-way-ts"]).join(","),
+        engineVersion: input.algorithmVersion,
+        ruleCatalogSha256: input.ruleCatalogSha256 || sha256Canonical({ algorithmVersion: input.algorithmVersion }),
+        weightsHashSha256: sha256Canonical(input.profile?.weights || {}),
+        analyticalDepth: sw.inventory?.analyzedFilesCount && sw.inventory.analyzedFilesCount > 0 ? "FULL_AST_AND_TAINT" : Object.keys(sw.sourceFilesContent || {}).length > 0 ? "STATIC_SOURCE_SCANNED" : "METADATA_ONLY",
+        eligibleFilesScopeHash: sha256Canonical(eligibleFiles),
+        evidenceIntegrityVerified: sw.sourceType !== "PUBLIC_DOCUMENTATION_ONLY" && Object.keys(sw.sourceFilesContent || {}).length > 0
+      });
+      comparabilityManifests[sw.id] = manifest;
+      if (!manifest.evidenceIntegrityVerified && multiTarget) {
+        blockingReasons.push(
+          `Manifesto de comparabilidade de "${sw.name}" sem integridade verificada (evidenceIntegrityVerified=false).`
+        );
+      }
+    }
     const comparable = blockingReasons.length === 0;
     const comparisonModality = input.mode === "VS_MQR_BRIDGE" || input.mode === "VS_PUBLIC_REFERENCE" ? "CROSS_TOOL" : "SAME_ENGINE";
     const comparabilityClassification = !comparable ? "NOT_COMPARABLE" : comparisonModality === "CROSS_TOOL" || warnings.length > 0 ? "QUALIFIED_COMPARISON" : "STRICTLY_COMPARABLE";
     const canDeclareOfficialWinner = comparable && comparabilityClassification !== "NOT_COMPARABLE" && (input.mode === "INDIVIDUAL" || softwares.length > 1);
     return {
-      matchId: `match-${crypto10.createHash("sha256").update(`${input.mode}:${softwares.map((s) => s.id).join("|")}`).digest("hex").slice(0, 12)}`,
+      matchId: `match-${crypto12.createHash("sha256").update(`${input.mode}:${softwares.map((s) => s.id).join("|")}`).digest("hex").slice(0, 12)}`,
       mode: input.mode,
       comparisonModality,
       comparabilityClassification,
@@ -13278,13 +14615,14 @@ var BenchmarkMatcher = class {
       checks,
       blockingReasons,
       warnings,
-      qualifications: [...warnings]
+      qualifications: [...warnings],
+      comparabilityManifests
     };
   }
 };
 
 // src/analyzers/RuleRegistry.ts
-import crypto11 from "node:crypto";
+import crypto13 from "node:crypto";
 var RULE_ENGINE_VERSION = "4.3.0";
 var BUILTIN_RULES = [
   {
@@ -13903,7 +15241,7 @@ var RuleRegistry = class {
   }
   static getCatalogSnapshot() {
     const packs = RulePackVersionManager.listRulePacks();
-    const checksumSha256 = crypto11.createHash("sha256").update(JSON.stringify(BUILTIN_RULES)).digest("hex");
+    const checksumSha256 = crypto13.createHash("sha256").update(JSON.stringify(BUILTIN_RULES)).digest("hex");
     return {
       engineVersion: RULE_ENGINE_VERSION,
       semverPolicy: "MAJOR breaking rule removals/reclassifications | MINOR new rules | PATCH FP tuning",
@@ -13932,7 +15270,7 @@ var RulePackVersionManager = class {
     const result = [];
     for (const [packId, rules] of groups.entries()) {
       const langs = Array.from(new Set(rules.flatMap((r) => r.languages)));
-      const checksumSha256 = crypto11.createHash("sha256").update(JSON.stringify(rules)).digest("hex");
+      const checksumSha256 = crypto13.createHash("sha256").update(JSON.stringify(rules)).digest("hex");
       result.push({
         packId,
         name: packInfo[packId]?.name || packId,
@@ -13944,554 +15282,6 @@ var RulePackVersionManager = class {
       });
     }
     return result;
-  }
-};
-
-// src/gate/QualityGateEngine.ts
-import crypto12 from "node:crypto";
-import http2 from "node:http";
-import https2 from "node:https";
-import net2 from "node:net";
-var BUILTIN_QUALITY_GATES = [
-  {
-    id: "winhood-standard-v2",
-    name: "WinHood Standard Engineering Gate",
-    version: "2.1.0",
-    description: "Gate padr\xE3o independente: bloqueia achados BLOCKER/CRITICAL e segredos expostos; exige cobertura m\xEDnima de escopo >= 50%.",
-    requireVerifiedEvidence: true,
-    createdAt: "2026-11-14T00:00:00Z",
-    conditions: [
-      {
-        id: "cond-no-blocker",
-        metricKey: "blocker_findings",
-        label: "Achados BLOCKER",
-        operator: "EQ",
-        threshold: 0,
-        severityOnFail: "BLOCKER",
-        requirementTier: "REQUIRED"
-      },
-      {
-        id: "cond-no-critical",
-        metricKey: "critical_findings",
-        label: "Achados CRITICAL",
-        operator: "EQ",
-        threshold: 0,
-        severityOnFail: "BLOCKER",
-        requirementTier: "REQUIRED"
-      },
-      {
-        id: "cond-no-secrets",
-        metricKey: "secrets_exposed",
-        label: "Segredos Expostos",
-        operator: "EQ",
-        threshold: 0,
-        severityOnFail: "BLOCKER",
-        requirementTier: "REQUIRED"
-      },
-      {
-        id: "cond-min-coverage",
-        metricKey: "scope_coverage_percent",
-        label: "Cobertura de Escopo (%)",
-        operator: "GTE",
-        threshold: 50,
-        severityOnFail: "RESERVATION",
-        requirementTier: "REQUIRED"
-      },
-      {
-        id: "cond-min-confidence",
-        metricKey: "evidence_confidence_score",
-        label: "Confian\xE7a M\xEDnima da Evid\xEAncia (1=LOW,2=MED,3=HIGH)",
-        operator: "GTE",
-        threshold: 2,
-        severityOnFail: "RESERVATION",
-        requirementTier: "REQUIRED"
-      }
-    ]
-  },
-  {
-    id: "winhood-zero-trust-v2",
-    name: "WinHood Zero-Trust Security Audit Gate",
-    version: "2.2.0",
-    description: "Gate rigoroso para due diligence e pipelines cr\xEDticos: 0 cr\xEDticos/segredos/IaC cr\xEDticos, <= 2 HIGH e cobertura >= 70%.",
-    requireVerifiedEvidence: true,
-    createdAt: "2026-11-14T00:00:00Z",
-    conditions: [
-      {
-        id: "zt-no-blocker",
-        metricKey: "blocker_findings",
-        label: "Achados BLOCKER",
-        operator: "EQ",
-        threshold: 0,
-        severityOnFail: "BLOCKER",
-        requirementTier: "REQUIRED"
-      },
-      {
-        id: "zt-no-critical",
-        metricKey: "critical_findings",
-        label: "Achados CRITICAL",
-        operator: "EQ",
-        threshold: 0,
-        severityOnFail: "BLOCKER",
-        requirementTier: "REQUIRED"
-      },
-      {
-        id: "zt-max-high",
-        metricKey: "high_findings",
-        label: "Achados HIGH",
-        operator: "LTE",
-        threshold: 2,
-        severityOnFail: "BLOCKER",
-        requirementTier: "REQUIRED"
-      },
-      {
-        id: "zt-no-secrets",
-        metricKey: "secrets_exposed",
-        label: "Segredos Expostos",
-        operator: "EQ",
-        threshold: 0,
-        severityOnFail: "BLOCKER",
-        requirementTier: "REQUIRED"
-      },
-      {
-        id: "zt-no-iac-crit",
-        metricKey: "iac_critical_findings",
-        label: "Achados IaC Cr\xEDticos",
-        operator: "EQ",
-        threshold: 0,
-        severityOnFail: "BLOCKER",
-        requirementTier: "REQUIRED"
-      },
-      {
-        id: "zt-min-coverage",
-        metricKey: "scope_coverage_percent",
-        label: "Cobertura de Escopo (%)",
-        operator: "GTE",
-        threshold: 70,
-        severityOnFail: "BLOCKER",
-        requirementTier: "REQUIRED"
-      },
-      {
-        id: "zt-high-confidence",
-        metricKey: "evidence_confidence_score",
-        label: "Confian\xE7a da Evid\xEAncia (HIGH=3)",
-        operator: "GTE",
-        threshold: 3,
-        severityOnFail: "RESERVATION",
-        requirementTier: "REQUIRED"
-      }
-    ]
-  },
-  {
-    id: "winhood-release-audit-v1",
-    name: "WinHood Release Comparative Gate",
-    version: "1.0.0",
-    description: "Gate de release comparativo exigindo pontua\xE7\xE3o t\xE9cnica >= 3.00/5.00, 0 BLOCKERS e cobertura >= 60%.",
-    requireVerifiedEvidence: true,
-    createdAt: "2026-11-14T00:00:00Z",
-    conditions: [
-      {
-        id: "rel-no-blocker",
-        metricKey: "blocker_findings",
-        label: "Achados BLOCKER",
-        operator: "EQ",
-        threshold: 0,
-        severityOnFail: "BLOCKER",
-        requirementTier: "REQUIRED"
-      },
-      {
-        id: "rel-min-score",
-        metricKey: "overall_score",
-        label: "Nota T\xE9cnica Geral (0-5)",
-        operator: "GTE",
-        threshold: 3,
-        severityOnFail: "BLOCKER",
-        requirementTier: "REQUIRED"
-      },
-      {
-        id: "rel-min-coverage",
-        metricKey: "scope_coverage_percent",
-        label: "Cobertura de Escopo (%)",
-        operator: "GTE",
-        threshold: 60,
-        severityOnFail: "RESERVATION",
-        requirementTier: "REQUIRED"
-      }
-    ]
-  }
-];
-function evaluateOperator(actual, op, threshold) {
-  switch (op) {
-    case "EQ":
-      return actual === threshold;
-    case "LTE":
-      return actual <= threshold;
-    case "GTE":
-      return actual >= threshold;
-    case "LT":
-      return actual < threshold;
-    case "GT":
-      return actual > threshold;
-    default:
-      return false;
-  }
-}
-function confidenceToNumeric(conf) {
-  if (conf === "HIGH") return 3;
-  if (conf === "MEDIUM") return 2;
-  if (conf === "LOW") return 1;
-  return null;
-}
-var QualityGateEngine = class _QualityGateEngine {
-  static {
-    this.customGates = /* @__PURE__ */ new Map();
-  }
-  static listGates() {
-    return [...BUILTIN_QUALITY_GATES, ...Array.from(_QualityGateEngine.customGates.values())];
-  }
-  static registerGate(gate) {
-    _QualityGateEngine.customGates.set(gate.id, gate);
-    return gate;
-  }
-  static getGateById(gateId) {
-    if (!gateId) return BUILTIN_QUALITY_GATES[0];
-    return _QualityGateEngine.listGates().find((g) => g.id === gateId) || BUILTIN_QUALITY_GATES[0];
-  }
-  static computeGateHash(gate) {
-    return crypto12.createHash("sha256").update(
-      JSON.stringify({
-        id: gate.id,
-        version: gate.version,
-        requireVerifiedEvidence: gate.requireVerifiedEvidence,
-        conditions: gate.conditions
-      }),
-      "utf8"
-    ).digest("hex");
-  }
-  static exitCodeForDecision(decision) {
-    switch (decision) {
-      case "APPROVED":
-      case "APPROVED_WITH_RESERVATIONS":
-      case "APROVADO":
-      case "APROVADO COM RESSALVAS":
-        return 0;
-      case "BLOCKED":
-      case "REJECTED":
-      case "REPROVADO":
-        return 1;
-      case "INCONCLUSIVE":
-      case "INCONCLUSIVO":
-      case "N\xC3O AVALIADO":
-        return 2;
-      default:
-        return 3;
-    }
-  }
-  static evaluate(params) {
-    const gate = params.gate || _QualityGateEngine.getGateById(params.gateId);
-    const gateHash = _QualityGateEngine.computeGateHash(gate);
-    const evaluatedAt = params.deterministicTimestamp || (/* @__PURE__ */ new Date()).toISOString();
-    const activeFindings = params.findings.filter((f) => {
-      const st = f.lifecycleState || f.validationStatus;
-      return st !== "FALSE_POSITIVE" && st !== "FALSE_POSITIVE_REVIEWED" && st !== "ACCEPTED" && st !== "ACCEPTED_RISK" && st !== "VERIFIED_RESOLVED" && st !== "NOT_REPRODUCIBLE";
-    });
-    const blockerCount = activeFindings.filter((f) => f.severity === "BLOCKER").length;
-    const criticalCount = activeFindings.filter((f) => f.severity === "CRITICAL").length;
-    const highCount = activeFindings.filter((f) => f.severity === "HIGH").length;
-    const secretsCount = activeFindings.filter((f) => f.category === "SECRETS").length;
-    const iacCriticalCount = activeFindings.filter(
-      (f) => f.category === "IAC" && (f.severity === "BLOCKER" || f.severity === "CRITICAL")
-    ).length;
-    const scaCriticalCount = activeFindings.filter(
-      (f) => f.category === "SCA" && (f.severity === "BLOCKER" || f.severity === "CRITICAL")
-    ).length;
-    const coverageVal = params.scopeCoveragePercent ?? params.scoreCard?.separatedIndicators?.scopeCoveragePercent ?? null;
-    const confScore = confidenceToNumeric(
-      params.evidenceConfidence ?? params.scoreCard?.separatedIndicators?.evidenceConfidence
-    );
-    const overallScore = params.scoreCard?.separatedIndicators?.technicalScore ?? null;
-    const metricsMap = {
-      blocker_findings: blockerCount,
-      critical_findings: criticalCount,
-      high_findings: highCount,
-      secrets_exposed: secretsCount,
-      iac_critical_findings: iacCriticalCount,
-      sca_critical_findings: scaCriticalCount,
-      scope_coverage_percent: coverageVal,
-      evidence_confidence_score: confScore,
-      overall_score: overallScore
-    };
-    const reservations = [];
-    const evaluatedConditions = gate.conditions.map((cond) => {
-      const tier = cond.requirementTier || "REQUIRED";
-      const actual = metricsMap[cond.metricKey];
-      if (actual === null || actual === void 0 || Number.isNaN(actual)) {
-        if (tier === "OPTIONAL") {
-          const msg = `M\xE9trica opcional "${cond.label}" n\xE3o aplic\xE1vel ou n\xE3o mensurada (NOT_MEASURED) \u2014 registrada como ressalva sem reprova\xE7\xE3o autom\xE1tica.`;
-          reservations.push(msg);
-          return {
-            id: cond.id,
-            metricKey: cond.metricKey,
-            label: cond.label,
-            operator: cond.operator,
-            threshold: cond.threshold,
-            actualValue: null,
-            passed: true,
-            inconclusive: false,
-            severityOnFail: cond.severityOnFail,
-            requirementTier: tier,
-            reason: msg
-          };
-        }
-        if (tier === "INFORMATIVE") {
-          const msg = `M\xE9trica informativa "${cond.label}" ausente (NOT_MEASURED) \u2014 nota informativa sem impacto bloqueante.`;
-          reservations.push(msg);
-          return {
-            id: cond.id,
-            metricKey: cond.metricKey,
-            label: cond.label,
-            operator: cond.operator,
-            threshold: cond.threshold,
-            actualValue: null,
-            passed: true,
-            inconclusive: false,
-            severityOnFail: "RESERVATION",
-            requirementTier: tier,
-            reason: msg
-          };
-        }
-        return {
-          id: cond.id,
-          metricKey: cond.metricKey,
-          label: cond.label,
-          operator: cond.operator,
-          threshold: cond.threshold,
-          actualValue: null,
-          passed: false,
-          inconclusive: true,
-          severityOnFail: cond.severityOnFail,
-          requirementTier: tier,
-          reason: `M\xE9trica obrigat\xF3ria "${cond.label}" n\xE3o foi mensurada (NOT_MEASURED).`
-        };
-      }
-      const rawPassed = evaluateOperator(actual, cond.operator, cond.threshold);
-      if (!rawPassed && tier === "INFORMATIVE") {
-        const msg = `Condi\xE7\xE3o informativa "${cond.label}": ${actual} fora da faixa ${cond.operator} ${cond.threshold} (registrada como ressalva).`;
-        reservations.push(msg);
-        return {
-          id: cond.id,
-          metricKey: cond.metricKey,
-          label: cond.label,
-          operator: cond.operator,
-          threshold: cond.threshold,
-          actualValue: actual,
-          passed: false,
-          inconclusive: false,
-          severityOnFail: "RESERVATION",
-          requirementTier: tier,
-          reason: msg
-        };
-      }
-      return {
-        id: cond.id,
-        metricKey: cond.metricKey,
-        label: cond.label,
-        operator: cond.operator,
-        threshold: cond.threshold,
-        actualValue: actual,
-        passed: rawPassed,
-        inconclusive: false,
-        severityOnFail: cond.severityOnFail,
-        requirementTier: tier,
-        reason: rawPassed ? `${cond.label}: ${actual} atende ${cond.operator} ${cond.threshold}.` : `${cond.label}: ${actual} viola ${cond.operator} ${cond.threshold}.`
-      };
-    });
-    const conditionsMet = evaluatedConditions.filter((c) => c.passed).length;
-    const conditionsFailed = evaluatedConditions.filter((c) => !c.passed && !c.inconclusive).length;
-    const conditionsInconclusive = evaluatedConditions.filter((c) => c.inconclusive).length;
-    const hasBlockerFailure = evaluatedConditions.some(
-      (c) => !c.passed && !c.inconclusive && c.severityOnFail === "BLOCKER" && c.requirementTier !== "INFORMATIVE"
-    );
-    const hasReservationFailure = reservations.length > 0 || evaluatedConditions.some(
-      (c) => !c.passed && !c.inconclusive && c.severityOnFail === "RESERVATION"
-    );
-    let decision;
-    if (gate.requireVerifiedEvidence && params.evidenceVerified === false) {
-      decision = "INCONCLUSIVE";
-    } else if (hasBlockerFailure) {
-      decision = blockerCount > 0 && criticalCount > 0 ? "REJECTED" : "BLOCKED";
-    } else if (conditionsInconclusive > 0) {
-      decision = "INCONCLUSIVE";
-    } else if (hasReservationFailure) {
-      decision = "APPROVED_WITH_RESERVATIONS";
-    } else {
-      decision = "APPROVED";
-    }
-    const cliExitCode = _QualityGateEngine.exitCodeForDecision(decision);
-    const exitCodeNormalized = cliExitCode === 3 ? 2 : cliExitCode;
-    return {
-      gateId: gate.id,
-      gateName: gate.name,
-      gateVersion: gate.version,
-      gateHash,
-      decision,
-      cliExitCode: exitCodeNormalized,
-      evaluatedAt,
-      conditionsMet,
-      conditionsFailed,
-      conditionsInconclusive,
-      conditions: evaluatedConditions,
-      reservations,
-      summary: `Gate "${gate.name}" v${gate.version} => ${decision} (exit=${exitCodeNormalized}; ${conditionsMet}/${evaluatedConditions.length} condi\xE7\xF5es atendidas).`
-    };
-  }
-  static evaluateFromRun(run, gateId, deterministicTimestamp) {
-    const primaryCard = run.scoreCards.find((s) => s.softwareId === run.winnerSoftwareId) || run.scoreCards[0] || null;
-    const activeFindings = primaryCard ? run.findings.filter((f) => f.softwareId === primaryCard.softwareId) : run.findings;
-    return _QualityGateEngine.evaluate({
-      gateId: gateId || run.qualityGateId,
-      findings: activeFindings,
-      scoreCard: primaryCard,
-      scopeCoveragePercent: primaryCard?.separatedIndicators?.scopeCoveragePercent ?? null,
-      evidenceConfidence: primaryCard?.separatedIndicators?.evidenceConfidence,
-      evidenceVerified: run.evidenceVerification?.valid ?? void 0,
-      deterministicTimestamp
-    });
-  }
-  static signWebhookPayload(params) {
-    const activeKey = KeyManagementService.getActiveEvidenceHmacKey();
-    const secret = params.secret || activeKey.secret;
-    const timestampEpochSec = params.timestampEpochSec ?? Math.floor(Date.now() / 1e3);
-    const bodyObj = {
-      schemaVersion: "1.0.0",
-      event: params.event,
-      runId: params.runId || null,
-      timestampEpochSec,
-      gate: {
-        id: params.evaluation.gateId,
-        name: params.evaluation.gateName,
-        version: params.evaluation.gateVersion,
-        hash: params.evaluation.gateHash,
-        decision: params.evaluation.decision,
-        cliExitCode: params.evaluation.cliExitCode,
-        conditionsMet: params.evaluation.conditionsMet,
-        conditionsFailed: params.evaluation.conditionsFailed,
-        conditionsInconclusive: params.evaluation.conditionsInconclusive,
-        summary: params.evaluation.summary
-      }
-    };
-    const bodyJson = JSON.stringify(bodyObj);
-    const signedInput = `${timestampEpochSec}.${bodyJson}`;
-    const hmacHex = crypto12.createHmac("sha256", secret).update(signedInput, "utf8").digest("hex");
-    const payloadSha256 = crypto12.createHash("sha256").update(bodyJson, "utf8").digest("hex");
-    return {
-      bodyJson,
-      signatureHeader: `t=${timestampEpochSec},v1=${hmacHex}`,
-      timestampEpochSec,
-      keyId: params.secret ? "CUSTOM_WEBHOOK_SECRET" : activeKey.keyId,
-      payloadSha256
-    };
-  }
-  static verifyWebhookSignature(params) {
-    const parts = Object.fromEntries(
-      params.signatureHeader.split(",").map((kv) => {
-        const idx = kv.indexOf("=");
-        return idx > 0 ? [kv.slice(0, idx).trim(), kv.slice(idx + 1).trim()] : ["", ""];
-      })
-    );
-    const ts = Number.parseInt(parts.t || "", 10);
-    const sig = parts.v1 || "";
-    if (!Number.isFinite(ts) || !sig) {
-      return { valid: false, reason: "INVALID_SIGNATURE_HEADER_FORMAT" };
-    }
-    if (params.maxSkewSeconds !== void 0) {
-      const nowSec = params.nowEpochSec ?? Math.floor(Date.now() / 1e3);
-      if (Math.abs(nowSec - ts) > params.maxSkewSeconds) {
-        return { valid: false, reason: "WEBHOOK_TIMESTAMP_OUT_OF_WINDOW" };
-      }
-    }
-    const expected = crypto12.createHmac("sha256", params.secret).update(`${ts}.${params.bodyJson}`, "utf8").digest("hex");
-    const a = Buffer.from(expected, "hex");
-    const b = Buffer.from(sig, "hex");
-    if (a.length !== b.length || !crypto12.timingSafeEqual(a, b)) {
-      return { valid: false, reason: "WEBHOOK_HMAC_MISMATCH" };
-    }
-    return { valid: true, reason: "WEBHOOK_SIGNATURE_VERIFIED" };
-  }
-  static async dispatchSignedWebhook(params) {
-    const signed = _QualityGateEngine.signWebhookPayload({
-      event: "quality_gate.evaluated",
-      runId: params.runId,
-      evaluation: params.evaluation,
-      secret: params.secret
-    });
-    const ssrfCheck = await SsrfGuard.validateUrl({
-      targetUrl: params.targetUrl,
-      allowExplicitLoopback: false
-    });
-    if (!ssrfCheck.allowed || !ssrfCheck.parsedUrl || !ssrfCheck.pinnedIp) {
-      return {
-        delivered: false,
-        blockedBySsrf: true,
-        statusCode: null,
-        signatureHeader: signed.signatureHeader,
-        payloadSha256: signed.payloadSha256,
-        message: `SSRF_BLOCKED: ${ssrfCheck.reason}`
-      };
-    }
-    const parsed = ssrfCheck.parsedUrl;
-    const pinnedIp = ssrfCheck.pinnedIp;
-    const family = net2.isIPv6(pinnedIp) ? 6 : 4;
-    const timeoutMs = params.timeoutMs ?? 5e3;
-    try {
-      const statusCode = await new Promise((resolve, reject) => {
-        const transport = parsed.protocol === "https:" ? https2 : http2;
-        const req = transport.request(
-          {
-            hostname: parsed.hostname,
-            port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
-            path: `${parsed.pathname}${parsed.search}`,
-            method: "POST",
-            timeout: timeoutMs,
-            lookup: (_h, _o, cb) => cb(null, pinnedIp, family),
-            headers: {
-              Host: parsed.host,
-              "Content-Type": "application/json",
-              "Content-Length": Buffer.byteLength(signed.bodyJson, "utf8"),
-              "User-Agent": "WinHood-QualityGate-Webhook/1.0",
-              "X-WinHood-Event": "quality_gate.evaluated",
-              "X-WinHood-Signature": signed.signatureHeader,
-              "X-WinHood-Key-Id": signed.keyId
-            }
-          },
-          (res) => {
-            res.on("data", () => {
-            });
-            res.on("end", () => resolve(res.statusCode || 0));
-          }
-        );
-        req.on("timeout", () => req.destroy(new Error(`Timeout after ${timeoutMs}ms`)));
-        req.on("error", reject);
-        req.write(signed.bodyJson);
-        req.end();
-      });
-      return {
-        delivered: statusCode >= 200 && statusCode < 300,
-        blockedBySsrf: false,
-        statusCode,
-        signatureHeader: signed.signatureHeader,
-        payloadSha256: signed.payloadSha256,
-        message: statusCode >= 200 && statusCode < 300 ? `Webhook entregue com assinatura HMAC-SHA256 (HTTP ${statusCode}).` : `Webhook respondido com HTTP ${statusCode}.`
-      };
-    } catch (err) {
-      return {
-        delivered: false,
-        blockedBySsrf: false,
-        statusCode: null,
-        signatureHeader: signed.signatureHeader,
-        payloadSha256: signed.payloadSha256,
-        message: `Falha ao entregar webhook: ${err?.message || String(err)}`
-      };
-    }
   }
 };
 
@@ -14609,7 +15399,7 @@ var DEFAULT_BENCHMARK_PROFILES = [
   }
 ];
 function createInitialRunningBenchmark(params) {
-  const runId = params.runId || `run-${crypto13.randomUUID().slice(0, 8)}`;
+  const runId = params.runId || `run-${crypto14.randomUUID().slice(0, 8)}`;
   const startedAt = (/* @__PURE__ */ new Date()).toISOString();
   const eqValidation = validateEquivalenceConditions(params.equivalenceEnvironment);
   const enabledCategories = params.enabledCategories && params.enabledCategories.length > 0 ? params.enabledCategories : ALL_BENCHMARK_CATEGORIES;
@@ -14658,7 +15448,7 @@ function createInitialRunningBenchmark(params) {
   };
 }
 function executeBenchmarkRunOrchestration(params) {
-  const runId = params.runId || `run-${crypto13.randomUUID().slice(0, 8)}`;
+  const runId = params.runId || `run-${crypto14.randomUUID().slice(0, 8)}`;
   const startedAt = (/* @__PURE__ */ new Date()).toISOString();
   const eqValidation = validateEquivalenceConditions(params.equivalenceEnvironment);
   const environmentEquivalent = eqValidation.equivalent;
@@ -15011,21 +15801,65 @@ function executeBenchmarkRunOrchestration(params) {
     environmentEquivalent,
     criteriaOutcomesBySoftware
   });
+  const catalogSnapshot = RuleRegistry.getCatalogSnapshot();
+  const rulePackVersions = {};
+  for (const pack of catalogSnapshot.packs) {
+    rulePackVersions[pack.packId] = pack.version;
+  }
+  const configHashSha256 = sha256Canonical({
+    profileId: params.profileId || "custom-profile",
+    enabledCategories,
+    notApplicableCategories,
+    qualityGateId: params.qualityGateId || "qg-sonar-way",
+    enablePenaltyCaps: params.enablePenaltyCaps,
+    equivalenceEnvironment: params.equivalenceEnvironment
+  });
+  const weightsHashSha256 = sha256Canonical(normalizedWeights);
+  const comparabilityManifests = {};
+  for (const sw of params.softwares) {
+    const veracity = veracityResults.find((v) => v.softwareId === sw.id);
+    const eligibleFiles = Object.keys(sw.sourceFilesContent || {}).sort();
+    comparabilityManifests[sw.id] = buildComparabilityManifest({
+      projectId: params.projectId,
+      sourceRepository: sw.repositoryUrl || sw.officialUrl || `local://${sw.id}`,
+      commitSha: sw.commitHash || sw.packageSha256 || "unverified-snapshot",
+      workingTreeClean: Boolean(sw.commitHash),
+      configHashSha256,
+      analyticalProfile: params.profileName || params.profileId || "custom-profile",
+      engineVersion: ALGORITHM_VERSION,
+      ruleCatalogSha256: catalogSnapshot.catalogSha256,
+      weightsHashSha256,
+      analyticalDepth: eligibleFiles.length > 0 ? "FULL_AST_AND_TAINT" : "METADATA_ONLY",
+      eligibleFilesScopeHash: sha256Canonical(eligibleFiles),
+      executedAt: startedAt,
+      evidenceIntegrityVerified: Boolean(
+        veracity && (veracity.overallClassification === "SUCCESS_VALIDATED" || veracity.overallClassification === "SUCCESS_WITH_WARNINGS" || veracity.overallClassification === "PARTIAL") && veracity.checks.eligibleForScoring
+      )
+    });
+  }
+  comparabilityReport.comparabilityManifests = comparabilityManifests;
   const mode = params.assessmentMode || (params.softwares.length === 1 ? "INDIVIDUAL" : "AB_COMPARE");
   const matcherMode = mode === "INDIVIDUAL" ? "INDIVIDUAL" : "AB_SOFTWARE";
   const benchmarkMatchDecision = BenchmarkMatcher.evaluate({
     mode: matcherMode,
     softwares: params.softwares,
     profile: {
+      id: params.profileId || "custom-profile",
+      name: params.profileName,
       enabledCategories,
       notApplicableCategories,
+      weights: normalizedWeights,
       qualityProfileIds: specializedProfile ? [specializedProfile.id] : ["qp-sonar-way-ts"],
       qualityGateId: params.qualityGateId || "qg-sonar-way"
     },
     scoreCards,
     algorithmVersion: ALGORITHM_VERSION,
-    environmentEquivalent
+    environmentEquivalent,
+    ruleCatalogSha256: catalogSnapshot.catalogSha256,
+    configHashSha256,
+    manifestsBySoftware: comparabilityManifests
   });
+  comparabilityReport.comparabilityClassification = benchmarkMatchDecision.comparabilityClassification;
   let referenceSnapshotsUsed = [];
   try {
     referenceSnapshotsUsed = new ReferenceRegistry().listSnapshots();
@@ -15039,11 +15873,6 @@ function executeBenchmarkRunOrchestration(params) {
     toolExecutions,
     veracityResults
   });
-  const catalogSnapshot = RuleRegistry.getCatalogSnapshot();
-  const rulePackVersions = {};
-  for (const pack of catalogSnapshot.packs) {
-    rulePackVersions[pack.packId] = pack.version;
-  }
   const artifactHashes = {};
   for (const [swId, sbom] of Object.entries(sbomsBySoftware)) {
     artifactHashes[`sbom:${swId}:cyclonedx`] = sbom.cyclonedxSha256;
@@ -15079,7 +15908,7 @@ function executeBenchmarkRunOrchestration(params) {
   );
   const topCandidate = sortedCards[0] || null;
   const runnerUp = sortedCards[1] || null;
-  const canHaveWinner = params.softwares.length === 1 ? Boolean(topCandidate) : comparabilityReport.canDeclareOfficialWinner && benchmarkMatchDecision.canDeclareOfficialWinner && Boolean(topCandidate);
+  const canHaveWinner = params.softwares.length === 1 ? Boolean(topCandidate) : comparabilityReport.canDeclareOfficialWinner && benchmarkMatchDecision.canDeclareOfficialWinner && benchmarkMatchDecision.comparabilityClassification !== "NOT_COMPARABLE" && Boolean(topCandidate);
   const winner = canHaveWinner ? topCandidate : null;
   const isPartialEvaluation = scoreCards.some((sc) => sc.isPartialEvaluation);
   const completedAt = (/* @__PURE__ */ new Date()).toISOString();
@@ -17384,11 +18213,11 @@ function executeSecurityAssessmentSuite(params) {
 }
 
 // src/services/tools/ExternalToolLifecycleManager.ts
-import crypto15 from "node:crypto";
+import crypto16 from "node:crypto";
 
 // src/services/tools/ToolResourceMonitor.ts
 import { execFileSync } from "node:child_process";
-import crypto14 from "node:crypto";
+import crypto15 from "node:crypto";
 import fs7 from "node:fs";
 import os6 from "node:os";
 import path8 from "node:path";
@@ -17552,7 +18381,7 @@ var ToolResourceMonitor = class _ToolResourceMonitor {
       const rStart = performance.now();
       let acc = 0;
       for (let k = 0; k < 250; k++) {
-        const digest = crypto14.createHash("sha256").update(`wh-round-${seedOffset}-${k}`).digest();
+        const digest = crypto15.createHash("sha256").update(`wh-round-${seedOffset}-${k}`).digest();
         acc += digest[0];
       }
       const vec = new Float64Array(4096);
@@ -17600,7 +18429,7 @@ var ToolResourceMonitor = class _ToolResourceMonitor {
     const shaStart = performance.now();
     for (let i = 0; i < shaIterations; i++) {
       const iterStart = performance.now();
-      crypto14.createHash("sha256").update(`winhood-hw-benchmark-payload-${i}-${host.cpuModel}`).digest("hex");
+      crypto15.createHash("sha256").update(`winhood-hw-benchmark-payload-${i}-${host.cpuModel}`).digest("hex");
       if (i % 50 === 0) {
         stepLatenciesMs.push(performance.now() - iterStart);
       }
@@ -17690,7 +18519,7 @@ var ToolResourceMonitor = class _ToolResourceMonitor {
       Math.max(40, Math.round(Math.min(50, sequentialWriteMbPerSec / 90) + Math.min(50, sequentialReadMbPerSec / 140)))
     );
     const testPayloadMb = 4;
-    const tmpFilePath = path8.join(os6.tmpdir(), `winhood_io_bench_${crypto14.randomUUID().slice(0, 8)}.bin`);
+    const tmpFilePath = path8.join(os6.tmpdir(), `winhood_io_bench_${crypto15.randomUUID().slice(0, 8)}.bin`);
     let diskWriteMbPerSec = 320;
     let diskReadMbPerSec = 680;
     let random4kIops = 18500;
@@ -17741,7 +18570,7 @@ var ToolResourceMonitor = class _ToolResourceMonitor {
     );
     const tier = overallHostScore >= 88 ? "S" : overallHostScore >= 75 ? "A" : overallHostScore >= 60 ? "B" : "C";
     const executedAt = (/* @__PURE__ */ new Date()).toISOString();
-    const verificationSha256 = crypto14.createHash("sha256").update(
+    const verificationSha256 = crypto15.createHash("sha256").update(
       JSON.stringify({
         executedAt,
         cpuModel: host.cpuModel,
@@ -17754,7 +18583,7 @@ var ToolResourceMonitor = class _ToolResourceMonitor {
       })
     ).digest("hex");
     return {
-      benchmarkId: `hwbench-${crypto14.randomUUID().slice(0, 8)}`,
+      benchmarkId: `hwbench-${crypto15.randomUUID().slice(0, 8)}`,
       executedAt,
       hostSummary: {
         cpuModel: host.cpuModel,
@@ -17940,7 +18769,7 @@ var ExternalToolLifecycleManager = class {
       "[TOKEN_REDACTED]"
     );
     const entry = {
-      id: `slog-${Date.now()}-${crypto15.randomUUID().slice(0, 8)}`,
+      id: `slog-${Date.now()}-${crypto16.randomUUID().slice(0, 8)}`,
       timestamp: (/* @__PURE__ */ new Date()).toISOString(),
       component,
       level,
@@ -19440,7 +20269,7 @@ var MqrBridgeApiClient = class {
 };
 
 // src/integrations/mqr-bridge/SonarConnection.ts
-import crypto16 from "node:crypto";
+import crypto17 from "node:crypto";
 var MqrBridgeConnection = class _MqrBridgeConnection {
   static maskToken(token) {
     if (!token || token.trim().length === 0) return "N\xE3o configurado";
@@ -19450,8 +20279,8 @@ var MqrBridgeConnection = class _MqrBridgeConnection {
   }
   static encryptToken(plainToken) {
     const active = KeyManagementService.getActiveVaultAesKey();
-    const iv = crypto16.randomBytes(12);
-    const cipher = crypto16.createCipheriv("aes-256-gcm", active.keyBuffer, iv);
+    const iv = crypto17.randomBytes(12);
+    const cipher = crypto17.createCipheriv("aes-256-gcm", active.keyBuffer, iv);
     const encrypted = Buffer.concat([cipher.update(plainToken, "utf8"), cipher.final()]);
     const authTag = cipher.getAuthTag();
     return `${active.keyId}:${iv.toString("hex")}:${authTag.toString("hex")}:${encrypted.toString("hex")}`;
@@ -19476,7 +20305,7 @@ var MqrBridgeConnection = class _MqrBridgeConnection {
         return null;
       }
       if (!keyBuffer || !ivHex || !tagHex || !dataHex) return null;
-      const decipher = crypto16.createDecipheriv(
+      const decipher = crypto17.createDecipheriv(
         "aes-256-gcm",
         keyBuffer,
         Buffer.from(ivHex, "hex")
@@ -19511,7 +20340,7 @@ var MqrBridgeConnection = class _MqrBridgeConnection {
         return null;
       }
       if (!keyBuffer || !ivHex || !tagHex || !dataHex) return null;
-      const decipher = crypto16.createDecipheriv(
+      const decipher = crypto17.createDecipheriv(
         "aes-256-gcm",
         keyBuffer,
         Buffer.from(ivHex, "hex")
@@ -19521,8 +20350,8 @@ var MqrBridgeConnection = class _MqrBridgeConnection {
         decipher.update(Buffer.from(dataHex, "hex")),
         decipher.final()
       ]).toString("utf8");
-      const newIv = crypto16.randomBytes(12);
-      const cipher = crypto16.createCipheriv("aes-256-gcm", ctx.newKeyBuffer, newIv);
+      const newIv = crypto17.randomBytes(12);
+      const cipher = crypto17.createCipheriv("aes-256-gcm", ctx.newKeyBuffer, newIv);
       const encrypted = Buffer.concat([cipher.update(decrypted, "utf8"), cipher.final()]);
       const authTag = cipher.getAuthTag();
       return `${ctx.newKeyId}:${newIv.toString("hex")}:${authTag.toString("hex")}:${encrypted.toString("hex")}`;
@@ -20346,7 +21175,7 @@ var SonarResultParser = class _SonarResultParser {
 
 // src/integrations/mqr-bridge/SonarScannerExecutor.ts
 import { spawn } from "node:child_process";
-import crypto17 from "node:crypto";
+import crypto18 from "node:crypto";
 import fs10 from "node:fs";
 import path11 from "node:path";
 var FORBIDDEN_METACHAR_REGEX = /[&|;`$><\r\n\0]/;
@@ -20459,7 +21288,7 @@ var SonarScannerExecutor = class _SonarScannerExecutor {
         errorMessage: `Execut\xE1vel do scanner (${params.scannerType}) n\xE3o localizado.`
       };
     }
-    const tempPropsFileName = `.winhood-sonar-${crypto17.randomUUID()}.properties`;
+    const tempPropsFileName = `.winhood-sonar-${crypto18.randomUUID()}.properties`;
     const propsFilePath = path11.join(params.projectBaseDir, tempPropsFileName);
     try {
       fs10.writeFileSync(propsFilePath, params.propertiesContent, { encoding: "utf8", mode: 384 });
@@ -23138,7 +23967,7 @@ function updateHardwareProfile(updates) {
 
 // src/security/AuthService.ts
 import { execFile } from "node:child_process";
-import crypto18 from "node:crypto";
+import crypto19 from "node:crypto";
 import fs13 from "node:fs";
 import path14 from "node:path";
 import { promisify } from "node:util";
@@ -23321,7 +24150,7 @@ function cosePublicKeyToSpkiBase64(coseBytes) {
     if (crv !== 1 || !Buffer.isBuffer(xBuf) || !Buffer.isBuffer(yBuf)) {
       throw new Error("WEBAUTHN_COSE_INVALID: Coordenadas EC2 P-256 inv\xE1lidas na chave COSE.");
     }
-    const keyObj = crypto18.createPublicKey({
+    const keyObj = crypto19.createPublicKey({
       key: {
         kty: "EC",
         crv: "P-256",
@@ -23339,7 +24168,7 @@ function cosePublicKeyToSpkiBase64(coseBytes) {
     if (!Buffer.isBuffer(nBuf) || !Buffer.isBuffer(eBuf)) {
       throw new Error("WEBAUTHN_COSE_INVALID: Par\xE2metros RSA (n, e) inv\xE1lidos na chave COSE.");
     }
-    const keyObj = crypto18.createPublicKey({
+    const keyObj = crypto19.createPublicKey({
       key: {
         kty: "RSA",
         n: nBuf.toString("base64url"),
@@ -23428,7 +24257,7 @@ function computeHotp(secretBase32, counter) {
   const key = base32Decode(secretBase32);
   const msg = Buffer.alloc(8);
   msg.writeBigUInt64BE(BigInt(counter), 0);
-  const hmac = crypto18.createHmac("sha1", key).update(msg).digest();
+  const hmac = crypto19.createHmac("sha1", key).update(msg).digest();
   const offset = hmac[hmac.length - 1] & 15;
   const code = ((hmac[offset] & 127) << 24 | (hmac[offset + 1] & 255) << 16 | (hmac[offset + 2] & 255) << 8 | hmac[offset + 3] & 255) % 1e6;
   return String(code).padStart(6, "0");
@@ -23442,7 +24271,7 @@ function verifyTotpCodeWithStep(secretBase32, candidateCode, lastAcceptedStep, a
   for (const delta of [-1, 0, 1]) {
     const candidateStep = currentStep + delta;
     const expected = computeHotp(secretBase32, candidateStep);
-    if (crypto18.timingSafeEqual(Buffer.from(clean), Buffer.from(expected))) {
+    if (crypto19.timingSafeEqual(Buffer.from(clean), Buffer.from(expected))) {
       if (typeof lastAcceptedStep === "number" && candidateStep <= lastAcceptedStep) {
         return { valid: false, matchedStep: candidateStep, replayRejected: true };
       }
@@ -23455,7 +24284,7 @@ function generateRecoveryCodesSet(count = 8) {
   const plaintextCodes = [];
   const codeHashes = [];
   for (let i = 0; i < count; i++) {
-    const rawHex = crypto18.randomBytes(4).toString("hex").toUpperCase();
+    const rawHex = crypto19.randomBytes(4).toString("hex").toUpperCase();
     const formatted = `${rawHex.slice(0, 4)}-${rawHex.slice(4, 8)}`;
     plaintextCodes.push(formatted);
     codeHashes.push(sha256(`winhood-rc:${rawHex}`));
@@ -23481,13 +24310,37 @@ function parseScryptParamsSpec(spec) {
   parsed.maxmem = Math.max(64 * 1024 * 1024, 256 * parsed.N * parsed.r);
   return parsed;
 }
+function extractScryptParams(storedHash) {
+  const parts = (storedHash || "").split(":");
+  if (parts.length !== 4 || parts[0] !== "scrypt") return null;
+  return parseScryptParamsSpec(parts[1]);
+}
+function assertNoKdfDowngrade(previousHash, candidateHash) {
+  const nextParams = extractScryptParams(candidateHash);
+  if (!nextParams) {
+    throw new Error("AUTH_KDF_DOWNGRADE_REJECTED: Formato de hash KDF candidato inv\xE1lido.");
+  }
+  if (nextParams.N < CURRENT_SCRYPT_PARAMS.N || nextParams.r < CURRENT_SCRYPT_PARAMS.r || nextParams.p < CURRENT_SCRYPT_PARAMS.p) {
+    throw new Error(
+      `AUTH_KDF_DOWNGRADE_REJECTED: Par\xE2metros KDF (N=${nextParams.N},r=${nextParams.r},p=${nextParams.p}) inferiores ao padr\xE3o m\xEDnimo N=${CURRENT_SCRYPT_PARAMS.N}.`
+    );
+  }
+  if (previousHash) {
+    const prevParams = extractScryptParams(previousHash);
+    if (prevParams && (nextParams.N < prevParams.N || nextParams.r < prevParams.r || nextParams.p < prevParams.p)) {
+      throw new Error(
+        `AUTH_KDF_DOWNGRADE_REJECTED: Downgrade KDF bloqueado (${prevParams.N} -> ${nextParams.N}).`
+      );
+    }
+  }
+}
 function hashPassword(credentialValue, costParams = CURRENT_SCRYPT_PARAMS) {
   const N = costParams.N ?? CURRENT_SCRYPT_PARAMS.N;
   const r = costParams.r ?? CURRENT_SCRYPT_PARAMS.r;
   const p = costParams.p ?? CURRENT_SCRYPT_PARAMS.p;
   const maxmem = Math.max(64 * 1024 * 1024, 256 * N * r);
-  const salt = crypto18.randomBytes(16).toString("hex");
-  const derived = crypto18.scryptSync(credentialValue, salt, 64, { N, r, p, maxmem }).toString("hex");
+  const salt = crypto19.randomBytes(16).toString("hex");
+  const derived = crypto19.scryptSync(credentialValue, salt, 64, { N, r, p, maxmem }).toString("hex");
   return `scrypt:N=${N},r=${r},p=${p}:${salt}:${derived}`;
 }
 function verifyPassword(credentialValue, storedHash) {
@@ -23496,7 +24349,7 @@ function verifyPassword(credentialValue, storedHash) {
   const params = parseScryptParamsSpec(parts[1]);
   const salt = parts[2];
   const expectedHex = parts[3];
-  const derived = crypto18.scryptSync(credentialValue, salt, 64, {
+  const derived = crypto19.scryptSync(credentialValue, salt, 64, {
     N: params.N,
     r: params.r,
     p: params.p,
@@ -23504,7 +24357,7 @@ function verifyPassword(credentialValue, storedHash) {
   });
   const expectedBuf = Buffer.from(expectedHex, "hex");
   if (derived.length !== expectedBuf.length) return false;
-  return crypto18.timingSafeEqual(derived, expectedBuf);
+  return crypto19.timingSafeEqual(derived, expectedBuf);
 }
 function needsPasswordRehash(storedHash) {
   const parts = (storedHash || "").split(":");
@@ -23513,14 +24366,14 @@ function needsPasswordRehash(storedHash) {
   return params.N < CURRENT_SCRYPT_PARAMS.N || params.r < CURRENT_SCRYPT_PARAMS.r || params.p < CURRENT_SCRYPT_PARAMS.p;
 }
 function sha256(val) {
-  return crypto18.createHash("sha256").update(val, "utf8").digest("hex");
+  return crypto19.createHash("sha256").update(val, "utf8").digest("hex");
 }
 function atomicWriteSecretFile(filePath, content) {
   const dir = path14.dirname(filePath);
   if (!fs13.existsSync(dir)) {
     fs13.mkdirSync(dir, { recursive: true });
   }
-  const tmpPath = `${filePath}.tmp.${crypto18.randomBytes(4).toString("hex")}`;
+  const tmpPath = `${filePath}.tmp.${crypto19.randomBytes(4).toString("hex")}`;
   fs13.writeFileSync(tmpPath, content, { encoding: "utf8", mode: 384 });
   fs13.renameSync(tmpPath, filePath);
   try {
@@ -23561,8 +24414,8 @@ var AuthService = class _AuthService {
   }
   encryptSecretAtRest(plainSecret) {
     const { keyId, keyBuffer } = KeyManagementService.getActiveVaultAesKey(this.keystorePath);
-    const iv = crypto18.randomBytes(12);
-    const cipher = crypto18.createCipheriv("aes-256-gcm", keyBuffer, iv);
+    const iv = crypto19.randomBytes(12);
+    const cipher = crypto19.createCipheriv("aes-256-gcm", keyBuffer, iv);
     const encrypted = Buffer.concat([cipher.update(plainSecret, "utf8"), cipher.final()]);
     const tag = cipher.getAuthTag();
     return `whvault:v1:${keyId}:${iv.toString("hex")}:${tag.toString("hex")}:${encrypted.toString("hex")}`;
@@ -23578,7 +24431,7 @@ var AuthService = class _AuthService {
     }
     const [, , keyId, ivHex, tagHex, cipherHex] = parts;
     const keyBuf = KeyManagementService.getVaultKeyBufferByKeyId(keyId, this.keystorePath) || KeyManagementService.getActiveVaultAesKey(this.keystorePath).keyBuffer;
-    const decipher = crypto18.createDecipheriv("aes-256-gcm", keyBuf, Buffer.from(ivHex, "hex"));
+    const decipher = crypto19.createDecipheriv("aes-256-gcm", keyBuf, Buffer.from(ivHex, "hex"));
     decipher.setAuthTag(Buffer.from(tagHex, "hex"));
     const plain = Buffer.concat([
       decipher.update(Buffer.from(cipherHex, "hex")),
@@ -23594,7 +24447,7 @@ var AuthService = class _AuthService {
       if (stored.startsWith(`whvault:v1:${ctx.oldKeyId}:`)) {
         const parts = stored.split(":");
         if (parts.length === 6) {
-          const decipher = crypto18.createDecipheriv(
+          const decipher = crypto19.createDecipheriv(
             "aes-256-gcm",
             ctx.oldKeyBuffer,
             Buffer.from(parts[3], "hex")
@@ -23609,8 +24462,8 @@ var AuthService = class _AuthService {
         plain = stored;
       }
       if (!plain) return stored;
-      const iv = crypto18.randomBytes(12);
-      const cipher = crypto18.createCipheriv("aes-256-gcm", ctx.newKeyBuffer, iv);
+      const iv = crypto19.randomBytes(12);
+      const cipher = crypto19.createCipheriv("aes-256-gcm", ctx.newKeyBuffer, iv);
       const encrypted = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
       const tag = cipher.getAuthTag();
       updated += 1;
@@ -23638,10 +24491,10 @@ var AuthService = class _AuthService {
       scope: "TOTP_CHALLENGE",
       trustDevice: Boolean(trustDevice),
       exp: Date.now() + _AuthService.PREAUTH_TTL_MS,
-      jti: crypto18.randomBytes(8).toString("hex")
+      jti: crypto19.randomBytes(8).toString("hex")
     };
     const encodedPayload = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
-    const sig = crypto18.createHmac("sha256", secret).update(encodedPayload, "utf8").digest("base64url");
+    const sig = crypto19.createHmac("sha256", secret).update(encodedPayload, "utf8").digest("base64url");
     return `whpa1.${encodedPayload}.${sig}`;
   }
   verifyPreAuthToken(token) {
@@ -23665,10 +24518,10 @@ var AuthService = class _AuthService {
     if (!hmacSecret) {
       throw new Error("AUTH_PREAUTH_INVALID: Chave de assinatura do desafio n\xE3o reconhecida.");
     }
-    const expectedSig = crypto18.createHmac("sha256", hmacSecret).update(parts[1], "utf8").digest("base64url");
+    const expectedSig = crypto19.createHmac("sha256", hmacSecret).update(parts[1], "utf8").digest("base64url");
     const a = Buffer.from(parts[2], "utf8");
     const b = Buffer.from(expectedSig, "utf8");
-    if (a.length !== b.length || !crypto18.timingSafeEqual(a, b)) {
+    if (a.length !== b.length || !crypto19.timingSafeEqual(a, b)) {
       throw new Error("AUTH_PREAUTH_INVALID: Assinatura HMAC do token de desafio MFA inv\xE1lida.");
     }
     return {
@@ -23685,7 +24538,7 @@ var AuthService = class _AuthService {
     const candidateHashBuf = Buffer.from(sha256(`winhood-rc:${clean}`), "hex");
     const matchIndex = user.recoveryCodeHashes.findIndex((storedHex) => {
       const storedBuf = Buffer.from(storedHex, "hex");
-      return storedBuf.length === candidateHashBuf.length && crypto18.timingSafeEqual(storedBuf, candidateHashBuf);
+      return storedBuf.length === candidateHashBuf.length && crypto19.timingSafeEqual(storedBuf, candidateHashBuf);
     });
     if (matchIndex === -1) return false;
     user.recoveryCodeHashes.splice(matchIndex, 1);
@@ -23723,7 +24576,7 @@ var AuthService = class _AuthService {
   }
   issueFreshBootstrapToken(state) {
     const envToken = process.env.WINHOOD_BOOTSTRAP_TOKEN?.trim();
-    const rawToken = envToken && envToken.length >= 16 ? envToken : `wh-boot-${crypto18.randomBytes(24).toString("base64url")}`;
+    const rawToken = envToken && envToken.length >= 16 ? envToken : `wh-boot-${crypto19.randomBytes(24).toString("base64url")}`;
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1e3).toISOString();
     state.bootstrapTokenSha256 = sha256(rawToken);
     state.bootstrapTokenExpiresAt = expiresAt;
@@ -23781,7 +24634,7 @@ ${rawToken}
       }
       const providedSha = Buffer.from(sha256(provided), "hex");
       const storedSha = Buffer.from(this.db.bootstrapTokenSha256, "hex");
-      if (providedSha.length !== storedSha.length || !crypto18.timingSafeEqual(providedSha, storedSha)) {
+      if (providedSha.length !== storedSha.length || !crypto19.timingSafeEqual(providedSha, storedSha)) {
         throw new Error("BOOTSTRAP_TOKEN_INVALID: Token de bootstrap incorreto.");
       }
       const cleanName = (params.name || "").trim();
@@ -23797,10 +24650,10 @@ ${rawToken}
         throw new Error("A senha deve possuir pelo menos 10 caracteres.");
       }
       const now = (/* @__PURE__ */ new Date()).toISOString();
-      const totpSecret = params.enableMfa ? base32Encode(crypto18.randomBytes(20)) : null;
+      const totpSecret = params.enableMfa ? base32Encode(crypto19.randomBytes(20)) : null;
       const recoveryGen = totpSecret ? generateRecoveryCodesSet(8) : null;
       const adminUser = {
-        id: `usr-${crypto18.randomUUID().slice(0, 8)}`,
+        id: `usr-${crypto19.randomUUID().slice(0, 8)}`,
         name: cleanName,
         email: cleanEmail,
         role: "ADMIN",
@@ -23926,11 +24779,17 @@ ${rawToken}
       user.lastAcceptedTotpStep = check.matchedStep;
       mfaVerified = true;
     }
+    const prevPasswordHash = user.passwordHash;
+    const prevTotpSecret = user.totpSecretBase32;
+    const prevUpdatedAt = user.updatedAt;
+    const prevSessionsSnapshot = [...this.db.sessions];
     user.failedLoginAttempts = 0;
     user.lockedUntil = null;
     user.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     if (needsPasswordRehash(user.passwordHash)) {
-      user.passwordHash = hashPassword(params.password);
+      const upgradedHash = hashPassword(params.password);
+      assertNoKdfDowngrade(user.passwordHash, upgradedHash);
+      user.passwordHash = upgradedHash;
     }
     if (user.totpSecretBase32 && !user.totpSecretBase32.startsWith("whvault:v1:")) {
       user.totpSecretBase32 = this.encryptSecretAtRest(user.totpSecretBase32);
@@ -23943,7 +24802,15 @@ ${rawToken}
       params.userAgent || "unknown",
       { trustDevice }
     );
-    this.save();
+    try {
+      this.save();
+    } catch (persistErr) {
+      user.passwordHash = prevPasswordHash;
+      user.totpSecretBase32 = prevTotpSecret;
+      user.updatedAt = prevUpdatedAt;
+      this.db.sessions = prevSessionsSnapshot;
+      throw persistErr;
+    }
     const mfaRequired = user.mfaEnabled && !mfaVerified;
     return {
       user: this.toPublicUserView(user, session.mfaVerified),
@@ -24012,9 +24879,17 @@ ${rawToken}
       user.lastAcceptedTotpStep = check.matchedStep;
       mfaVerified = true;
     }
+    const prevPinHash = user.pinHash;
+    const prevUpdatedAt = user.updatedAt;
+    const prevSessionsSnapshot = [...this.db.sessions];
     user.failedLoginAttempts = 0;
     user.lockedUntil = null;
     user.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    if (user.pinHash && needsPasswordRehash(user.pinHash)) {
+      const upgradedPinHash = hashPassword(candidatePin);
+      assertNoKdfDowngrade(user.pinHash, upgradedPinHash);
+      user.pinHash = upgradedPinHash;
+    }
     const trustDevice = Boolean(params.trustDevice);
     const { sessionId, session } = this.createSessionRecord(
       user,
@@ -24023,7 +24898,14 @@ ${rawToken}
       params.userAgent || "unknown",
       { trustDevice }
     );
-    this.save();
+    try {
+      this.save();
+    } catch (persistErr) {
+      user.pinHash = prevPinHash;
+      user.updatedAt = prevUpdatedAt;
+      this.db.sessions = prevSessionsSnapshot;
+      throw persistErr;
+    }
     const mfaRequired = user.mfaEnabled && !mfaVerified;
     return {
       user: this.toPublicUserView(user, session.mfaVerified),
@@ -24173,7 +25055,7 @@ ${rawToken}
   setupMfaForUser(userId) {
     const user = this.db.users.find((u) => u.id === userId);
     if (!user) throw new Error("Usu\xE1rio n\xE3o encontrado.");
-    const secretBase32 = base32Encode(crypto18.randomBytes(20));
+    const secretBase32 = base32Encode(crypto19.randomBytes(20));
     user.pendingTotpSecretBase32 = this.encryptSecretAtRest(secretBase32);
     user.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     this.save();
@@ -24214,8 +25096,67 @@ ${rawToken}
       recoveryCodes: plaintextCodes
     };
   }
+  disableMfaForUser(userId, verification, currentSessionId) {
+    const user = this.db.users.find((u) => u.id === userId);
+    if (!user || user.disabled) {
+      throw new Error("USER_NOT_FOUND: Usu\xE1rio n\xE3o encontrado.");
+    }
+    if (!user.mfaEnabled) {
+      throw new Error("AUTH_MFA_NOT_ENABLED: Autentica\xE7\xE3o TOTP j\xE1 est\xE1 desabilitada para esta conta.");
+    }
+    const rawTotp = (verification?.totpCode || "").trim();
+    const rawRecovery = (verification?.recoveryCode || "").trim();
+    const rawPassword = verification?.password || "";
+    let verified = false;
+    if (rawTotp) {
+      const plainSecret = this.decryptSecretAtRest(user.totpSecretBase32);
+      if (!plainSecret) {
+        throw new Error("AUTH_INVALID_MFA: Segredo TOTP n\xE3o encontrado no cofre.");
+      }
+      const check = verifyTotpCodeWithStep(plainSecret, rawTotp, user.lastAcceptedTotpStep);
+      if (check.replayRejected) {
+        throw new Error(
+          "AUTH_TOTP_REPLAY: C\xF3digo TOTP j\xE1 utilizado nesta janela de 30s. Aguarde o pr\xF3ximo token."
+        );
+      }
+      if (!check.valid) {
+        throw new Error("AUTH_INVALID_MFA: C\xF3digo TOTP inv\xE1lido.");
+      }
+      verified = true;
+    } else if (rawRecovery) {
+      if (!this.tryConsumeRecoveryCode(user, rawRecovery)) {
+        throw new Error("AUTH_INVALID_RECOVERY_CODE: C\xF3digo de recupera\xE7\xE3o inv\xE1lido ou j\xE1 utilizado.");
+      }
+      verified = true;
+    } else if (rawPassword) {
+      if (!verifyPassword(rawPassword, user.passwordHash)) {
+        throw new Error("AUTH_INVALID_CREDENTIALS: Senha de confirma\xE7\xE3o inv\xE1lida.");
+      }
+      verified = true;
+    }
+    if (!verified) {
+      throw new Error(
+        "AUTH_MFA_VERIFICATION_REQUIRED: Confirme a senha atual, c\xF3digo TOTP ou c\xF3digo de recupera\xE7\xE3o para remover o 2FA."
+      );
+    }
+    user.mfaEnabled = false;
+    user.totpSecretBase32 = null;
+    user.pendingTotpSecretBase32 = null;
+    user.recoveryCodeHashes = [];
+    user.lastAcceptedTotpStep = null;
+    user.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    if (currentSessionId) {
+      const targetHash = sha256(currentSessionId);
+      const sess = this.db.sessions.find((s) => s.sessionIdHash === targetHash);
+      if (sess && sess.userId === user.id) {
+        sess.mfaVerified = true;
+      }
+    }
+    this.save();
+    return this.toPublicUserView(user, true);
+  }
   createSessionRecord(user, mfaVerified, ipAddress, userAgent, opts) {
-    const sessionId = crypto18.randomBytes(32).toString("hex");
+    const sessionId = crypto19.randomBytes(32).toString("hex");
     const nowMs = Date.now();
     const trustDevice = Boolean(opts?.trustDevice);
     const absoluteMs = trustDevice ? _AuthService.SESSION_TRUSTED_DEVICE_MS : _AuthService.SESSION_ABSOLUTE_MS;
@@ -24224,7 +25165,7 @@ ${rawToken}
       sessionIdHash: sha256(sessionId),
       userId: user.id,
       role: user.role,
-      csrfToken: crypto18.randomBytes(24).toString("hex"),
+      csrfToken: crypto19.randomBytes(24).toString("hex"),
       mfaVerified,
       trustDevice,
       idleTimeoutMs,
@@ -24352,9 +25293,9 @@ ${rawToken}
       throw new Error("E-mail j\xE1 cadastrado.");
     }
     const now = (/* @__PURE__ */ new Date()).toISOString();
-    const rawAdminCreatedTotp = params.enableMfa ? base32Encode(crypto18.randomBytes(20)) : null;
+    const rawAdminCreatedTotp = params.enableMfa ? base32Encode(crypto19.randomBytes(20)) : null;
     const user = {
-      id: `usr-${crypto18.randomUUID().slice(0, 8)}`,
+      id: `usr-${crypto19.randomUUID().slice(0, 8)}`,
       name: params.name.trim(),
       email: cleanEmail,
       role: params.role,
@@ -24424,11 +25365,11 @@ ${rawToken}
     this.registrationInProgress.add(cleanEmail);
     try {
       const now = (/* @__PURE__ */ new Date()).toISOString();
-      const totpSecret = params.enableMfa ? base32Encode(crypto18.randomBytes(20)) : null;
+      const totpSecret = params.enableMfa ? base32Encode(crypto19.randomBytes(20)) : null;
       const recoveryGen = totpSecret ? generateRecoveryCodesSet(8) : null;
-      const effectivePasswordToHash = cleanPassword.length >= 10 ? cleanPassword : `wh-pin-fallback-${crypto18.randomBytes(24).toString("base64url")}`;
+      const effectivePasswordToHash = cleanPassword.length >= 10 ? cleanPassword : `wh-pin-fallback-${crypto19.randomBytes(24).toString("base64url")}`;
       const newUser = {
-        id: `usr-${crypto18.randomUUID().slice(0, 8)}`,
+        id: `usr-${crypto19.randomUUID().slice(0, 8)}`,
         name: cleanName,
         email: cleanEmail,
         role: assignedRole,
@@ -24509,9 +25450,9 @@ ${rawToken}
       );
     }
     const rpId = normalizeWebAuthnRpId(params.rpId);
-    const challengeId = crypto18.randomUUID();
-    const challengeBase64Url = crypto18.randomBytes(32).toString("base64url");
-    const userHandle = crypto18.randomBytes(16).toString("base64url");
+    const challengeId = crypto19.randomUUID();
+    const challengeBase64Url = crypto19.randomBytes(32).toString("base64url");
+    const userHandle = crypto19.randomBytes(16).toString("base64url");
     this.webauthnChallenges.set(challengeId, {
       challengeId,
       challengeBase64Url,
@@ -24584,7 +25525,7 @@ ${rawToken}
     }
     const expectedChallBuf = Buffer.from(challengeRecord.challengeBase64Url, "utf8");
     const providedChallBuf = Buffer.from(clientData.challenge, "utf8");
-    if (expectedChallBuf.length !== providedChallBuf.length || !crypto18.timingSafeEqual(expectedChallBuf, providedChallBuf)) {
+    if (expectedChallBuf.length !== providedChallBuf.length || !crypto19.timingSafeEqual(expectedChallBuf, providedChallBuf)) {
       throw new Error("WEBAUTHN_CHALLENGE_MISMATCH: Desafio WebAuthn divergente.");
     }
     const { hostname: originHostname } = validateWebAuthnOrigin(
@@ -24609,9 +25550,9 @@ ${rawToken}
       throw new Error("WEBAUTHN_AUTHDATA_INVALID: authenticatorData ausente ou truncado.");
     }
     const rpIdHash = authDataBuf.subarray(0, 32);
-    const expectedRpHash = crypto18.createHash("sha256").update(challengeRecord.rpId, "utf8").digest();
-    const originRpHash = crypto18.createHash("sha256").update(originHostname, "utf8").digest();
-    const rpMatches = crypto18.timingSafeEqual(rpIdHash, expectedRpHash) || crypto18.timingSafeEqual(rpIdHash, originRpHash);
+    const expectedRpHash = crypto19.createHash("sha256").update(challengeRecord.rpId, "utf8").digest();
+    const originRpHash = crypto19.createHash("sha256").update(originHostname, "utf8").digest();
+    const rpMatches = crypto19.timingSafeEqual(rpIdHash, expectedRpHash) || crypto19.timingSafeEqual(rpIdHash, originRpHash);
     if (!rpMatches) {
       throw new Error("WEBAUTHN_RPID_MISMATCH: Hash do Relying Party (rpIdHash) inv\xE1lido.");
     }
@@ -24646,7 +25587,7 @@ ${rawToken}
     }
     try {
       const spkiBuf = decodeBase64OrBase64Url(publicKeySpkiBase64);
-      const keyObj = crypto18.createPublicKey({ key: spkiBuf, format: "der", type: "spki" });
+      const keyObj = crypto19.createPublicKey({ key: spkiBuf, format: "der", type: "spki" });
       publicKeySpkiBase64 = keyObj.export({ type: "spki", format: "der" }).toString("base64");
     } catch {
       throw new Error("WEBAUTHN_KEY_INVALID: Chave p\xFAblica SPKI inv\xE1lida.");
@@ -24666,11 +25607,11 @@ ${rawToken}
     }
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const newUser = {
-      id: `usr-${crypto18.randomUUID().slice(0, 8)}`,
+      id: `usr-${crypto19.randomUUID().slice(0, 8)}`,
       name: regMeta.name,
       email: regMeta.email,
       role: assignedRole,
-      passwordHash: hashPassword(`wh-webauthn-${crypto18.randomBytes(24).toString("base64url")}`),
+      passwordHash: hashPassword(`wh-webauthn-${crypto19.randomBytes(24).toString("base64url")}`),
       pinHash: null,
       pinEnabled: false,
       webauthnCredentials: [
@@ -24722,8 +25663,8 @@ ${rawToken}
     this.pruneExpiredWebAuthnChallenges();
     const cleanEmail = (params?.email || "").trim().toLowerCase();
     const rpId = normalizeWebAuthnRpId(params?.rpId);
-    const challengeId = crypto18.randomUUID();
-    const challengeBase64Url = crypto18.randomBytes(32).toString("base64url");
+    const challengeId = crypto19.randomUUID();
+    const challengeBase64Url = crypto19.randomBytes(32).toString("base64url");
     const allowCredentials = [];
     const candidateUsers = cleanEmail ? this.db.users.filter((u) => !u.disabled && u.email === cleanEmail) : this.db.users.filter((u) => !u.disabled);
     for (const u of candidateUsers) {
@@ -24787,7 +25728,7 @@ ${rawToken}
     }
     const expectedChallBuf = Buffer.from(challengeRecord.challengeBase64Url, "utf8");
     const providedChallBuf = Buffer.from(clientData.challenge, "utf8");
-    if (expectedChallBuf.length !== providedChallBuf.length || !crypto18.timingSafeEqual(expectedChallBuf, providedChallBuf)) {
+    if (expectedChallBuf.length !== providedChallBuf.length || !crypto19.timingSafeEqual(expectedChallBuf, providedChallBuf)) {
       throw new Error("WEBAUTHN_CHALLENGE_MISMATCH: Desafio de login WebAuthn divergente.");
     }
     const { hostname: originHostname } = validateWebAuthnOrigin(
@@ -24820,9 +25761,9 @@ ${rawToken}
       throw new Error("WEBAUTHN_AUTHDATA_INVALID: authenticatorData inv\xE1lido.");
     }
     const rpIdHash = authDataBuf.subarray(0, 32);
-    const expectedRpHash = crypto18.createHash("sha256").update(challengeRecord.rpId, "utf8").digest();
-    const originRpHash = crypto18.createHash("sha256").update(originHostname, "utf8").digest();
-    if (!crypto18.timingSafeEqual(rpIdHash, expectedRpHash) && !crypto18.timingSafeEqual(rpIdHash, originRpHash)) {
+    const expectedRpHash = crypto19.createHash("sha256").update(challengeRecord.rpId, "utf8").digest();
+    const originRpHash = crypto19.createHash("sha256").update(originHostname, "utf8").digest();
+    if (!crypto19.timingSafeEqual(rpIdHash, expectedRpHash) && !crypto19.timingSafeEqual(rpIdHash, originRpHash)) {
       throw new Error("WEBAUTHN_RPID_MISMATCH: Hash do Relying Party (rpIdHash) inv\xE1lido.");
     }
     const flags = authDataBuf[32];
@@ -24832,15 +25773,15 @@ ${rawToken}
       );
     }
     const signCount = authDataBuf.readUInt32BE(33);
-    const clientDataHash = crypto18.createHash("sha256").update(clientDataBuf).digest();
+    const clientDataHash = crypto19.createHash("sha256").update(clientDataBuf).digest();
     const signedPayload = Buffer.concat([authDataBuf, clientDataHash]);
     const signatureBuf = decodeBase64OrBase64Url(params.signature);
-    const pubKeyObj = crypto18.createPublicKey({
+    const pubKeyObj = crypto19.createPublicKey({
       key: Buffer.from(matchedCred.publicKeySpkiBase64, "base64"),
       format: "der",
       type: "spki"
     });
-    const isSigValid = crypto18.verify("sha256", signedPayload, pubKeyObj, signatureBuf);
+    const isSigValid = crypto19.verify("sha256", signedPayload, pubKeyObj, signatureBuf);
     if (!isSigValid) {
       matchedUser.failedLoginAttempts += 1;
       if (matchedUser.failedLoginAttempts >= _AuthService.MAX_LOGIN_ATTEMPTS) {
@@ -25001,16 +25942,16 @@ ${rawToken}
       if (this.db.users.some((u) => u.email === cleanEmail)) {
         throw new Error("EMAIL_ALREADY_EXISTS: Este e-mail j\xE1 est\xE1 cadastrado na plataforma.");
       }
-      const { publicKey } = crypto18.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+      const { publicKey } = crypto19.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
       const spkiBase64 = publicKey.export({ type: "spki", format: "der" }).toString("base64");
-      const credentialId = `winhello-os-${crypto18.randomBytes(16).toString("base64url")}`;
+      const credentialId = `winhello-os-${crypto19.randomBytes(16).toString("base64url")}`;
       const now = (/* @__PURE__ */ new Date()).toISOString();
       const newUser = {
-        id: `usr-${crypto18.randomUUID().slice(0, 8)}`,
+        id: `usr-${crypto19.randomUUID().slice(0, 8)}`,
         name: cleanName,
         email: cleanEmail,
         role: assignedRole,
-        passwordHash: hashPassword(`wh-winhello-${crypto18.randomBytes(24).toString("base64url")}`),
+        passwordHash: hashPassword(`wh-winhello-${crypto19.randomBytes(24).toString("base64url")}`),
         pinHash: null,
         pinEnabled: false,
         webauthnCredentials: [
@@ -25166,7 +26107,7 @@ ${rawToken}
     if (!user) {
       return { recoveryFilePath: null };
     }
-    const token = `wh-rec-${crypto18.randomBytes(20).toString("base64url")}`;
+    const token = `wh-rec-${crypto19.randomBytes(20).toString("base64url")}`;
     const expiresAt = new Date(Date.now() + 15 * 60 * 1e3).toISOString();
     user.recoveryTokenSha256 = sha256(token);
     user.recoveryExpiresAt = expiresAt;
@@ -25188,13 +26129,15 @@ ${token}
     }
     const provided = Buffer.from(sha256((params.recoveryToken || "").trim()), "hex");
     const stored = Buffer.from(user.recoveryTokenSha256, "hex");
-    if (provided.length !== stored.length || !crypto18.timingSafeEqual(provided, stored)) {
+    if (provided.length !== stored.length || !crypto19.timingSafeEqual(provided, stored)) {
       throw new Error("Token de recupera\xE7\xE3o inv\xE1lido.");
     }
     if ((params.newPassword || "").length < 10) {
       throw new Error("Nova senha deve possuir pelo menos 10 caracteres.");
     }
-    user.passwordHash = hashPassword(params.newPassword);
+    const nextHash = hashPassword(params.newPassword);
+    assertNoKdfDowngrade(null, nextHash);
+    user.passwordHash = nextHash;
     user.recoveryTokenSha256 = null;
     user.recoveryExpiresAt = null;
     user.failedLoginAttempts = 0;
@@ -25257,12 +26200,12 @@ ${token}
 };
 
 // src/storage/PersistentDatabaseManager.ts
-import crypto19 from "node:crypto";
+import crypto20 from "node:crypto";
 import fs14 from "node:fs";
 import path15 from "node:path";
 import zlib from "node:zlib";
 function sha256Hex2(raw) {
-  return crypto19.createHash("sha256").update(raw, "utf8").digest("hex");
+  return crypto20.createHash("sha256").update(raw, "utf8").digest("hex");
 }
 function fsyncAndRename(tmpPath, targetPath) {
   const fd = fs14.openSync(tmpPath, "r+");
@@ -25295,8 +26238,8 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
     const rawJson = JSON.stringify(safeMap);
     const compressed = zlib.deflateSync(Buffer.from(rawJson, "utf8"));
     const { keyId, keyBuffer } = KeyManagementService.getActiveVaultAesKey();
-    const iv = crypto19.randomBytes(12);
-    const cipher = crypto19.createCipheriv("aes-256-gcm", keyBuffer, iv);
+    const iv = crypto20.randomBytes(12);
+    const cipher = crypto20.createCipheriv("aes-256-gcm", keyBuffer, iv);
     const encrypted = Buffer.concat([cipher.update(compressed), cipher.final()]);
     const authTag = cipher.getAuthTag();
     return `${_PersistentDatabaseManager.ENVELOPE_PREFIX}${keyId}:${iv.toString("hex")}:${authTag.toString("hex")}:${encrypted.toString("base64")}`;
@@ -25345,7 +26288,7 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
       }
       let compressed;
       try {
-        const decipher = crypto19.createDecipheriv("aes-256-gcm", keyBuffer, iv);
+        const decipher = crypto20.createDecipheriv("aes-256-gcm", keyBuffer, iv);
         decipher.setAuthTag(authTag);
         compressed = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
       } catch (err) {
@@ -25464,10 +26407,10 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
       } catch {
       }
     }
-    const tmpFile = `${targetPath}.${process.pid}.${crypto19.randomBytes(4).toString("hex")}.tmp`;
+    const tmpFile = `${targetPath}.${process.pid}.${crypto20.randomBytes(4).toString("hex")}.tmp`;
     fs14.writeFileSync(tmpFile, serialized, { encoding: "utf8", mode: 384 });
     fsyncAndRename(tmpFile, targetPath);
-    const tmpSha = `${checksumPath}.${process.pid}.${crypto19.randomBytes(4).toString("hex")}.tmp`;
+    const tmpSha = `${checksumPath}.${process.pid}.${crypto20.randomBytes(4).toString("hex")}.tmp`;
     fs14.writeFileSync(tmpSha, `${checksum}
 `, { encoding: "utf8", mode: 384 });
     fsyncAndRename(tmpSha, checksumPath);
@@ -25625,7 +26568,7 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
 // src/services/backup/ProjectBackupService.ts
 import fs15 from "node:fs";
 import path16 from "node:path";
-import crypto20 from "node:crypto";
+import crypto21 from "node:crypto";
 var BACKUP_ID_ALLOWLIST = /^bkp-\d+-[a-f0-9]{8}$/i;
 var MAX_BACKUP_ID_LENGTH = 128;
 var ProjectBackupService = class {
@@ -25637,7 +26580,7 @@ var ProjectBackupService = class {
     }
   }
   computeSha256(buf) {
-    return crypto20.createHash("sha256").update(buf).digest("hex");
+    return crypto21.createHash("sha256").update(buf).digest("hex");
   }
   assertSafeBackupId(backupId) {
     if (typeof backupId !== "string") {
@@ -25699,7 +26642,7 @@ var ProjectBackupService = class {
     };
   }
   createBackup(project, softwares, sourceFilesMap) {
-    const backupId = `bkp-${Date.now()}-${crypto20.randomBytes(4).toString("hex")}`;
+    const backupId = `bkp-${Date.now()}-${crypto21.randomBytes(4).toString("hex")}`;
     const backupDir = this.resolveBackupDirectory(backupId);
     fs15.mkdirSync(backupDir, { recursive: true, mode: 448 });
     const filesSha256 = {};
@@ -25849,7 +26792,7 @@ var ProjectBackupService = class {
     const metaRaw = JSON.parse(fs15.readFileSync(metaPath, "utf8"));
     const oldProj = metaRaw.project;
     const oldSoftwares = metaRaw.softwares || [];
-    const newProjId = `proj-restored-${crypto20.randomUUID().slice(0, 8)}`;
+    const newProjId = `proj-restored-${crypto21.randomUUID().slice(0, 8)}`;
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const restoredProject = {
       ...oldProj,
@@ -25860,7 +26803,7 @@ var ProjectBackupService = class {
     };
     const restoredSoftwares = oldSoftwares.map((sw) => ({
       ...sw,
-      id: `sw-restored-${crypto20.randomUUID().slice(0, 8)}`,
+      id: `sw-restored-${crypto21.randomUUID().slice(0, 8)}`,
       projectId: newProjId,
       createdAt: now,
       updatedAt: now
@@ -25898,7 +26841,7 @@ var ProjectBackupService = class {
 };
 
 // src/intelligence/synchronization/ReferenceSynchronizer.ts
-import crypto21 from "node:crypto";
+import crypto22 from "node:crypto";
 function stripTrailingSlashes2(rawUrl) {
   let end = rawUrl.length;
   while (end > 0 && rawUrl.charCodeAt(end - 1) === 47) {
@@ -26006,7 +26949,7 @@ var ReferenceSynchronizer = class {
               indexedKevCveIdsCount: advisoryCache.kevCveIds.length
             }
           };
-          const sha2562 = crypto21.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "OSV_DEV") {
@@ -26084,7 +27027,7 @@ var ReferenceSynchronizer = class {
               usedProjectSbom: queryTargets.length > 0
             }
           };
-          const sha2562 = crypto21.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "NVD_NIST") {
@@ -26133,7 +27076,7 @@ var ReferenceSynchronizer = class {
               cachedCvesCount: Object.keys(advisoryCache.nvdByCve).length
             }
           };
-          const sha2562 = crypto21.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "FIRST_EPSS") {
@@ -26169,7 +27112,7 @@ var ReferenceSynchronizer = class {
               sampleScores: rows.slice(0, 5)
             }
           };
-          const sha2562 = crypto21.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "MQR_BRIDGE_CLOUD") {
@@ -26193,7 +27136,7 @@ var ReferenceSynchronizer = class {
               totalTypeScriptRules: scData?.total ?? null
             }
           };
-          const sha2562 = crypto21.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "MQR_BRIDGE_SERVER") {
@@ -26222,7 +27165,7 @@ var ReferenceSynchronizer = class {
               serverStatus: statusData?.status || "UP"
             }
           };
-          const sha2562 = crypto21.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "INTERNAL_HISTORY") {
@@ -26234,7 +27177,7 @@ var ReferenceSynchronizer = class {
             isOfflineFallback: false,
             lastError: null
           };
-          const sha2562 = crypto21.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "OWASP_BENCHMARK") {
@@ -26258,7 +27201,7 @@ var ReferenceSynchronizer = class {
                 publishedAt: owaspData?.published_at || nowIso
               }
             };
-            const sha2562 = crypto21.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+            const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
             this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
             liveFetchedSources.push(sourceKey);
           } catch {
@@ -26269,7 +27212,7 @@ var ReferenceSynchronizer = class {
               isOfflineFallback: true,
               lastError: null
             };
-            const sha2562 = crypto21.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+            const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
             this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
             cachedFallbackSources.push(sourceKey);
           }
@@ -26294,7 +27237,7 @@ var ReferenceSynchronizer = class {
                 totalWeaknesses: cweData?.total_weaknesses || existing.recordsCount
               }
             };
-            const sha2562 = crypto21.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+            const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
             this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
             liveFetchedSources.push(sourceKey);
           } catch {
@@ -26305,7 +27248,7 @@ var ReferenceSynchronizer = class {
               isOfflineFallback: true,
               lastError: null
             };
-            const sha2562 = crypto21.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+            const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
             this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
             cachedFallbackSources.push(sourceKey);
           }
@@ -26330,7 +27273,7 @@ var ReferenceSynchronizer = class {
                 starsCount: repoData?.stargazers_count ?? null
               }
             };
-            const sha2562 = crypto21.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+            const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
             this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
             liveFetchedSources.push(sourceKey);
           } catch {
@@ -26341,7 +27284,7 @@ var ReferenceSynchronizer = class {
               isOfflineFallback: true,
               lastError: null
             };
-            const sha2562 = crypto21.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+            const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
             this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
             cachedFallbackSources.push(sourceKey);
           }
@@ -26353,7 +27296,7 @@ var ReferenceSynchronizer = class {
             isOfflineFallback: true,
             lastError: null
           };
-          const sha2562 = crypto21.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           cachedFallbackSources.push(sourceKey);
         }
@@ -26375,16 +27318,16 @@ var ReferenceSynchronizer = class {
 };
 
 // src/validation/GoldenDatasetRunner.ts
-import crypto25 from "node:crypto";
+import crypto27 from "node:crypto";
 
 // src/analyzers/AnalyzerRegistry.ts
-import crypto24 from "node:crypto";
+import crypto25 from "node:crypto";
 
 // src/analyzers/FindingNormalizer.ts
-import crypto22 from "node:crypto";
+import crypto23 from "node:crypto";
 var EvidenceCollector = class {
   static computeCanonicalHash(payload) {
-    return crypto22.createHash("sha256").update(JSON.stringify(payload), "utf8").digest("hex");
+    return crypto23.createHash("sha256").update(JSON.stringify(payload), "utf8").digest("hex");
   }
   static extractContextLines(fileContent, lineNumber, radius = 2) {
     const lines = fileContent.split(/\r?\n/);
@@ -26457,7 +27400,7 @@ var FindingNormalizer = class {
 };
 
 // src/analyzers/SecretsCatalog.ts
-import crypto23 from "node:crypto";
+import crypto24 from "node:crypto";
 var SECRETS_CATALOG_VERSION = "2026.11.0";
 var SECRETS_PATTERN_CATALOG = [
   {
@@ -26575,7 +27518,7 @@ function maskDetectedSecret(raw) {
 }
 var SecretScanner = class {
   static getCatalogMetadata() {
-    const checksumSha256 = crypto23.createHash("sha256").update(JSON.stringify(SECRETS_PATTERN_CATALOG)).digest("hex");
+    const checksumSha256 = crypto24.createHash("sha256").update(JSON.stringify(SECRETS_PATTERN_CATALOG)).digest("hex");
     return {
       version: SECRETS_CATALOG_VERSION,
       patternsCount: SECRETS_PATTERN_CATALOG.length,
@@ -27124,7 +28067,7 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
       ruleCatalogSha256: catalogSnapshot.catalogSha256,
       files: filesEntries.map(([filePath, content]) => ({
         filePath,
-        sha256: crypto24.createHash("sha256").update(content, "utf8").digest("hex")
+        sha256: crypto25.createHash("sha256").update(content, "utf8").digest("hex")
       })),
       findings: findings.map((f) => ({
         ruleId: f.originalRuleId,
@@ -27136,7 +28079,7 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
         flowSteps: (f.executionFlows || []).length
       }))
     };
-    const deterministicDigestSha256 = crypto24.createHash("sha256").update(JSON.stringify(canonicalFingerprintPayload), "utf8").digest("hex");
+    const deterministicDigestSha256 = crypto25.createHash("sha256").update(JSON.stringify(canonicalFingerprintPayload), "utf8").digest("hex");
     const execution = {
       analyzerId: "winhood-native-ast-taint",
       analyzerName: "WinHood Native Compiler AST, Taint, Secrets & IaC Engine",
@@ -27213,7 +28156,7 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
           filesProcessed: 0,
           filesFailed: 0,
           measurementState: "NOT_MEASURED",
-          rawOutputSha256: crypto24.createHash("sha256").update(`${item.id}:EMPTY_SCOPE`).digest("hex")
+          rawOutputSha256: crypto25.createHash("sha256").update(`${item.id}:EMPTY_SCOPE`).digest("hex")
         },
         findings: [],
         limitations: ["Escopo vazio para an\xE1lise externa."]
@@ -27236,7 +28179,7 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
             filesProcessed: 0,
             filesFailed: 0,
             measurementState: "NOT_MEASURED",
-            rawOutputSha256: crypto24.createHash("sha256").update(`${item.id}:NOT_INSTALLED`).digest("hex")
+            rawOutputSha256: crypto25.createHash("sha256").update(`${item.id}:NOT_INSTALLED`).digest("hex")
           },
           findings: [],
           limitations: [`Bin\xE1rio ${item.name} n\xE3o instalado no host.`]
@@ -27384,545 +28327,874 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
 };
 
 // src/intelligence/datasets/GoldenDatasetCorpus.ts
-var GOLDEN_DATASET_VERSION = "WINHOOD-INTERNAL-CALIBRATION-v2.0.0";
-var GOLDEN_DATASET_ORIGIN_LABEL = "WINHOOD_INTERNAL_CALIBRATION_CORPUS";
-var GOLDEN_DATASET_CORPUS = [
-  // --- SQL INJECTION (TP vs TN) ---
-  {
-    caseId: "GOLD-TS-SQLI-TP-01",
-    title: "TypeScript SQL Injection via concatena\xE7\xE3o direta em query",
-    language: "TypeScript",
-    category: "SQL_INJECTION",
-    cwe: "CWE-89",
-    expectedVulnerable: true,
-    filesMap: {
-      "src/repo/userRepo.ts": [
-        "export function findUserByTitle(db: any, userTitle: string) {",
-        `  const sql = "SELECT id, email FROM users WHERE title = '" + userTitle + "'";`,
-        "  return db.query(sql);",
-        "}"
-      ].join("\n")
-    }
-  },
-  {
-    caseId: "GOLD-TS-SQLI-TN-01",
-    title: "TypeScript Prepared Statement parametrizado seguro",
-    language: "TypeScript",
-    category: "SQL_INJECTION",
-    cwe: "CWE-89",
-    expectedVulnerable: false,
-    filesMap: {
-      "src/repo/userRepoSafe.ts": [
-        "export function findUserByTitleSafe(db: any, userTitle: string) {",
-        '  const sql = "SELECT id, email FROM users WHERE title = ?";',
-        "  return db.query(sql, [userTitle]);",
-        "}"
-      ].join("\n")
-    }
-  },
-  {
-    caseId: "GOLD-TS-TAINT-CROSSFILE-TP-02",
-    title: "Fluxo Taint interprocedural cross-file Controller -> Repository SQLi",
-    language: "TypeScript",
-    category: "SQL_INJECTION",
-    cwe: "CWE-89",
-    expectedVulnerable: true,
-    filesMap: {
-      "src/controller/searchCtrl.ts": [
-        'import { runRawSearch } from "../db/searchRepo";',
-        "export function handleSearch(queryInput: string) {",
-        "  const cleanedInput = queryInput.trim();",
-        "  return runRawSearch(cleanedInput);",
-        "}"
-      ].join("\n"),
-      "src/db/searchRepo.ts": [
-        "export function runRawSearch(filterExpr: string, db: any) {",
-        "  const stmt = `SELECT id, name FROM entries WHERE name = ${filterExpr}`;",
-        "  return db.query(stmt);",
-        "}"
-      ].join("\n")
-    }
-  },
-  {
-    caseId: "GOLD-TS-TAINT-SANITIZED-TN-02",
-    title: "Fluxo Taint com allowlist / sanitizador antes do sink",
-    language: "TypeScript",
-    category: "SQL_INJECTION",
-    cwe: "CWE-89",
-    expectedVulnerable: false,
-    filesMap: {
-      "src/controller/searchSafeCtrl.ts": [
-        "export function handleSearchSafe(db: any, rawId: string) {",
-        "  const safeId = parseInt(rawId, 10);",
-        '  return db.query("SELECT id, name FROM entries WHERE id = ?", [safeId]);',
-        "}"
-      ].join("\n")
-    }
-  },
-  // --- COMMAND INJECTION (TP vs TN) ---
-  {
-    caseId: "GOLD-TS-CMDI-TP-03",
-    title: "TypeScript OS Command Injection com execSync interpolado",
-    language: "TypeScript",
-    category: "COMMAND_INJECTION",
-    cwe: "CWE-78",
-    expectedVulnerable: true,
-    filesMap: {
-      "src/ops/backupRunner.ts": [
-        'import { execSync } from "node:child_process";',
-        "export function archiveFolder(targetPath: string) {",
-        "  return execSync(`tar -czf backup.tar.gz ${targetPath}`);",
-        "}"
-      ].join("\n")
-    }
-  },
-  {
-    caseId: "GOLD-TS-CMDI-TN-03",
-    title: "TypeScript execu\xE7\xE3o segura via execFile com array de argumentos",
-    language: "TypeScript",
-    category: "COMMAND_INJECTION",
-    cwe: "CWE-78",
-    expectedVulnerable: false,
-    filesMap: {
-      "src/ops/backupRunnerSafe.ts": [
-        'import { execFileSync } from "node:child_process";',
-        "export function archiveFolderSafe(targetPath: string) {",
-        '  return execFileSync("tar", ["-czf", "backup.tar.gz", targetPath], { shell: false });',
-        "}"
-      ].join("\n")
-    }
-  },
-  // --- CODE INJECTION (TP vs TN) ---
-  {
-    caseId: "GOLD-JS-EVAL-TP-04",
-    title: "JavaScript uso inseguro de eval com entrada de usu\xE1rio",
-    language: "JavaScript",
-    category: "CODE_INJECTION",
-    cwe: "CWE-95",
-    expectedVulnerable: true,
-    filesMap: {
-      "src/calc/exprEngine.js": [
-        "export function evaluateRule(userExpr) {",
-        "  return eval(userExpr);",
-        "}"
-      ].join("\n")
-    }
-  },
-  {
-    caseId: "GOLD-JS-EVAL-TN-04",
-    title: "JavaScript avalia\xE7\xE3o segura por mapa de opera\xE7\xF5es est\xE1tico",
-    language: "JavaScript",
-    category: "CODE_INJECTION",
-    cwe: "CWE-95",
-    expectedVulnerable: false,
-    filesMap: {
-      "src/calc/exprEngineSafe.js": [
-        "export function evaluateRuleSafe(op, a, b) {",
-        "  const ops = { add: (x, y) => x + y, sub: (x, y) => x - y };",
-        "  return ops[op] ? ops[op](Number(a), Number(b)) : 0;",
-        "}"
-      ].join("\n")
-    }
-  },
-  // --- PYTHON (TP vs TN) ---
-  {
-    caseId: "GOLD-PY-EXEC-TP-05",
-    title: "Python subprocess.run com shell=True",
-    language: "Python",
-    category: "COMMAND_INJECTION",
-    cwe: "CWE-78",
-    expectedVulnerable: true,
-    filesMap: {
-      "app/runner.py": [
-        "import subprocess",
-        "def run_report(target):",
-        '    return subprocess.run(f"ls -la {target}", shell=True)'
-      ].join("\n")
-    }
-  },
-  {
-    caseId: "GOLD-PY-EXEC-TN-05",
-    title: "Python subprocess.run sem shell e lista de argumentos",
-    language: "Python",
-    category: "COMMAND_INJECTION",
-    cwe: "CWE-78",
-    expectedVulnerable: false,
-    filesMap: {
-      "app/runner_safe.py": [
-        "import subprocess",
-        "def run_report_safe(target):",
-        '    return subprocess.run(["ls", "-la", target], shell=False)'
-      ].join("\n")
-    }
-  },
-  // --- JAVA (TP vs TN) ---
-  {
-    caseId: "GOLD-JAVA-SQLI-TP-06",
-    title: "Java Statement.executeQuery com concatena\xE7\xE3o de entrada",
-    language: "Java",
-    category: "SQL_INJECTION",
-    cwe: "CWE-89",
-    expectedVulnerable: true,
-    filesMap: {
-      "src/main/java/UserDao.java": [
-        "public class UserDao {",
-        "  public void findUser(java.sql.Statement stmt, String username) throws Exception {",
-        `    stmt.executeQuery("SELECT id, name FROM users WHERE name = '" + username + "'");`,
-        "  }",
-        "}"
-      ].join("\n")
-    }
-  },
-  {
-    caseId: "GOLD-JAVA-SQLI-TN-06",
-    title: "Java PreparedStatement seguro com bind de par\xE2metro",
-    language: "Java",
-    category: "SQL_INJECTION",
-    cwe: "CWE-89",
-    expectedVulnerable: false,
-    filesMap: {
-      "src/main/java/UserDaoSafe.java": [
-        "public class UserDaoSafe {",
-        "  public void findUser(java.sql.Connection conn, String username) throws Exception {",
-        '    var ps = conn.prepareStatement("SELECT id, name FROM users WHERE name = ?");',
-        "    ps.setString(1, username);",
-        "    ps.executeQuery();",
-        "  }",
-        "}"
-      ].join("\n")
-    }
-  },
-  // --- HARDCODED SECRETS & WEAK CRYPTO (TP vs TN) ---
-  {
-    caseId: "GOLD-TS-SECRET-TP-07",
-    title: "Chave secreta hardcoded no c\xF3digo-fonte",
-    language: "TypeScript",
-    category: "HARDCODED_SECRET",
-    cwe: "CWE-798",
-    expectedVulnerable: true,
-    filesMap: {
-      "src/config/authCfg.ts": [
-        'export const masterKey = "SuperSecretProdMasterKey_9988776655";',
-        "export function getMasterKey() { return masterKey; }"
-      ].join("\n")
-    }
-  },
-  {
-    caseId: "GOLD-TS-SECRET-TN-07",
-    title: "Leitura de segredo exclusivamente via vari\xE1vel de ambiente",
-    language: "TypeScript",
-    category: "HARDCODED_SECRET",
-    cwe: "CWE-798",
-    expectedVulnerable: false,
-    filesMap: {
-      "src/config/authCfgSafe.ts": [
-        "export function getMasterKeySafe(): string {",
-        "  const key = process.env.APP_MASTER_KEY;",
-        '  if (!key) throw new Error("APP_MASTER_KEY ausente");',
-        "  return key;",
-        "}"
-      ].join("\n")
-    }
-  },
-  {
-    caseId: "GOLD-TS-CRYPTO-TP-08",
-    title: "Deriva\xE7\xE3o/hash inseguro com MD5 para credenciais",
-    language: "TypeScript",
-    category: "WEAK_CRYPTO",
-    cwe: "CWE-327",
-    expectedVulnerable: true,
-    filesMap: {
-      "src/crypto/legacyHash.ts": [
-        'import crypto from "node:crypto";',
-        "export function hashPasswordLegacy(pwd: string) {",
-        '  return crypto.createHash("md5").update(pwd).digest("hex");',
-        "}"
-      ].join("\n")
-    }
-  },
-  {
-    caseId: "GOLD-TS-CRYPTO-TN-08",
-    title: "Deriva\xE7\xE3o forte PBKDF2-SHA512 com salt CSPRNG",
-    language: "TypeScript",
-    category: "WEAK_CRYPTO",
-    cwe: "CWE-327",
-    expectedVulnerable: false,
-    filesMap: {
-      "src/crypto/strongHash.ts": [
-        'import crypto from "node:crypto";',
-        "export function hashPasswordStrong(pwd: string, salt: Buffer) {",
-        '  return crypto.pbkdf2Sync(pwd, salt, 600000, 64, "sha512").toString("hex");',
-        "}"
-      ].join("\n")
-    }
-  },
-  // --- EXCEPTION HANDLING & SQL SCHEMA (TP vs TN) ---
-  {
-    caseId: "GOLD-TS-CATCH-TP-09",
-    title: "Bloco catch vazio silenciando falha operacional",
-    language: "TypeScript",
-    category: "ERROR_HANDLING",
-    cwe: "CWE-390",
-    expectedVulnerable: true,
-    filesMap: {
-      "src/service/syncService.ts": [
-        "export function syncData(fn: () => void) {",
-        "  try {",
-        "    fn();",
-        "  } catch (err) {",
-        "  }",
-        "}"
-      ].join("\n")
-    }
-  },
-  {
-    caseId: "GOLD-TS-CATCH-TN-09",
-    title: "Bloco catch com tratamento expl\xEDcito e propaga\xE7\xE3o de erro",
-    language: "TypeScript",
-    category: "ERROR_HANDLING",
-    cwe: "CWE-390",
-    expectedVulnerable: false,
-    filesMap: {
-      "src/service/syncServiceSafe.ts": [
-        "export function syncDataSafe(fn: () => void) {",
-        "  try {",
-        "    fn();",
-        "  } catch (err) {",
-        '    console.error("Sync failure", err);',
-        "    throw err;",
-        "  }",
-        "}"
-      ].join("\n")
-    }
-  },
-  {
-    caseId: "GOLD-SQL-SCHEMA-TP-10",
-    title: "SQL SELECT * e coluna sens\xEDvel password_plain em DDL",
-    language: "SQL",
-    category: "SQL_SCHEMA",
-    cwe: "CWE-312",
-    expectedVulnerable: true,
-    filesMap: {
-      "db/schema.sql": [
-        "CREATE TABLE vault_accounts (",
-        "  id INTEGER PRIMARY KEY,",
-        "  username TEXT NOT NULL,",
-        "  password_plain TEXT NOT NULL",
-        ");",
-        "SELECT * FROM vault_accounts;"
-      ].join("\n")
-    }
-  },
-  {
-    caseId: "GOLD-SQL-SCHEMA-TN-10",
-    title: "SQL DDL com colunas expl\xEDcitas e hash de credencial",
-    language: "SQL",
-    category: "SQL_SCHEMA",
-    cwe: "CWE-312",
-    expectedVulnerable: false,
-    filesMap: {
-      "db/schema_safe.sql": [
-        "CREATE TABLE vault_accounts (",
-        "  id INTEGER PRIMARY KEY,",
-        "  username TEXT NOT NULL,",
-        "  password_hash TEXT NOT NULL",
-        ");",
-        "SELECT id, username FROM vault_accounts WHERE id = ?;"
-      ].join("\n")
-    }
-  }
+import crypto26 from "node:crypto";
+var DECLARED_BENCHMARK_LANGUAGES = [
+  "TypeScript",
+  "JavaScript",
+  "Python",
+  "Java",
+  "C#",
+  "Go",
+  "Rust",
+  "SQL"
 ];
-var INDEPENDENT_VALIDATION_VERSION = "WINHOOD-INDEPENDENT-BENCHMARK-v1.0.0";
-var INDEPENDENT_VALIDATION_ORIGIN_LABEL = "WINHOOD_INDEPENDENT_VALIDATION_BENCHMARK";
-var INDEPENDENT_VALIDATION_CORPUS = [
-  {
-    caseId: "IND-TS-SQLI-TP-01",
-    title: "Independent Benchmark: TypeScript SQLi em relat\xF3rio financeiro interpolado",
-    language: "TypeScript",
-    category: "SQL_INJECTION",
-    cwe: "CWE-89",
-    expectedVulnerable: true,
-    filesMap: {
-      "src/finance/ledgerDao.ts": [
-        "export function queryLedgerByAccount(conn: any, accountCode: string) {",
-        "  const queryText = `SELECT balance, currency FROM ledger WHERE account_code = '${accountCode}'`;",
-        "  return conn.query(queryText);",
-        "}"
-      ].join("\n")
+function computeGoldenCaseContentSha256(filesMap) {
+  const orderedEntries = Object.keys(filesMap).sort().map((k) => [k, filesMap[k]]);
+  return crypto26.createHash("sha256").update(JSON.stringify(orderedEntries), "utf8").digest("hex");
+}
+function hydrateCorpus(rawCases, datasetVersion, datasetRole) {
+  return rawCases.map((item) => ({
+    ...item,
+    origin: item.origin || "WINHOOD_INTERNAL_AUTHORED_FIXTURE",
+    license: item.license || "MIT",
+    contentSha256: computeGoldenCaseContentSha256(item.filesMap),
+    datasetVersion,
+    datasetRole,
+    changelog: item.changelog || `[${datasetVersion}] Caso estruturado no conjunto ${datasetRole} com rastreabilidade SHA-256.`
+  }));
+}
+var DEVELOPMENT_DATASET_VERSION = "WINHOOD-DEVELOPMENT-v3.0.0";
+var DEVELOPMENT_DATASET_ORIGIN_LABEL = "WINHOOD_INTERNAL_DEVELOPMENT_CORPUS";
+var GOLDEN_DATASET_VERSION = "WINHOOD-INTERNAL-REGRESSION-v3.0.0";
+var GOLDEN_DATASET_ORIGIN_LABEL = "WINHOOD_INTERNAL_REGRESSION_CORPUS";
+var INTERNAL_HOLDOUT_VERSION = "WINHOOD-INTERNAL-HOLDOUT-v3.0.0";
+var INTERNAL_HOLDOUT_ORIGIN_LABEL = "WINHOOD_INTERNAL_HOLDOUT_CORPUS";
+var DEVELOPMENT_DATASET_CORPUS = hydrateCorpus(
+  [
+    {
+      caseId: "DEV-TS-SQLI-TP-01",
+      title: "Dev Calibration: TypeScript template literal SQLi em servi\xE7o auxiliar",
+      language: "TypeScript",
+      category: "SQL_INJECTION",
+      cwe: "CWE-89",
+      expectedVulnerable: true,
+      filesMap: {
+        "src/dev/reportRepo.ts": [
+          "export function queryReport(db: any, tenantSlug: string) {",
+          "  const q = `SELECT id FROM reports WHERE tenant = '${tenantSlug}'`;",
+          "  return db.query(q);",
+          "}"
+        ].join("\n")
+      },
+      changelog: "[WINHOOD-DEVELOPMENT-v3.0.0] Caso inicial de calibra\xE7\xE3o TS SQLi."
+    },
+    {
+      caseId: "DEV-TS-SQLI-TN-01",
+      title: "Dev Calibration: TypeScript prepared statement parametrizado",
+      language: "TypeScript",
+      category: "SQL_INJECTION",
+      cwe: "CWE-89",
+      expectedVulnerable: false,
+      filesMap: {
+        "src/dev/reportSafeRepo.ts": [
+          "export function queryReportSafe(db: any, tenantSlug: string) {",
+          '  return db.query("SELECT id FROM reports WHERE tenant = ?", [tenantSlug]);',
+          "}"
+        ].join("\n")
+      },
+      changelog: "[WINHOOD-DEVELOPMENT-v3.0.0] Controle negativo parametrizado TS."
+    },
+    {
+      caseId: "DEV-PY-CRYPTO-TP-02",
+      title: "Dev Calibration: Python hashlib.md5 em token de sess\xE3o",
+      language: "Python",
+      category: "WEAK_CRYPTO",
+      cwe: "CWE-328",
+      expectedVulnerable: true,
+      filesMap: {
+        "dev/token_gen.py": [
+          "import hashlib",
+          "def session_digest(raw_value):",
+          "    return hashlib.md5(raw_value).hexdigest()"
+        ].join("\n")
+      },
+      changelog: "[WINHOOD-DEVELOPMENT-v3.0.0] Caso inicial Python weak hash."
+    },
+    {
+      caseId: "DEV-PY-CRYPTO-TN-02",
+      title: "Dev Calibration: Python hashlib.sha256 seguro",
+      language: "Python",
+      category: "WEAK_CRYPTO",
+      cwe: "CWE-328",
+      expectedVulnerable: false,
+      filesMap: {
+        "dev/token_gen_safe.py": [
+          "import hashlib",
+          "def session_digest_safe(raw_value):",
+          "    return hashlib.sha256(raw_value).hexdigest()"
+        ].join("\n")
+      },
+      changelog: "[WINHOOD-DEVELOPMENT-v3.0.0] Controle negativo Python SHA-256."
     }
-  },
-  {
-    caseId: "IND-TS-SQLI-TN-01",
-    title: "Independent Benchmark: TypeScript SQLi mitigado por convers\xE3o num\xE9rica Number()",
-    language: "TypeScript",
-    category: "SQL_INJECTION",
-    cwe: "CWE-89",
-    expectedVulnerable: false,
-    filesMap: {
-      "src/finance/ledgerSafeDao.ts": [
-        "export function queryLedgerByNumericId(conn: any, rawAccountId: string) {",
-        "  const numericId = Number(rawAccountId);",
-        '  return conn.query("SELECT balance FROM ledger WHERE id = $1", [numericId]);',
-        "}"
-      ].join("\n")
+  ],
+  DEVELOPMENT_DATASET_VERSION,
+  "DEVELOPMENT"
+);
+var GOLDEN_DATASET_CORPUS = hydrateCorpus(
+  [
+    // --- TYPESCRIPT ---
+    {
+      caseId: "GOLD-TS-SQLI-TP-01",
+      title: "TypeScript SQL Injection via concatena\xE7\xE3o direta em query",
+      language: "TypeScript",
+      category: "SQL_INJECTION",
+      cwe: "CWE-89",
+      expectedVulnerable: true,
+      filesMap: {
+        "src/repo/userRepo.ts": [
+          "export function findUserByTitle(db: any, userTitle: string) {",
+          `  const sql = "SELECT id, email FROM users WHERE title = '" + userTitle + "'";`,
+          "  return db.query(sql);",
+          "}"
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "GOLD-TS-SQLI-TN-01",
+      title: "TypeScript Prepared Statement parametrizado seguro",
+      language: "TypeScript",
+      category: "SQL_INJECTION",
+      cwe: "CWE-89",
+      expectedVulnerable: false,
+      filesMap: {
+        "src/repo/userRepoSafe.ts": [
+          "export function findUserByTitleSafe(db: any, userTitle: string) {",
+          '  const sql = "SELECT id, email FROM users WHERE title = ?";',
+          "  return db.query(sql, [userTitle]);",
+          "}"
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "GOLD-TS-TAINT-CROSSFILE-TP-02",
+      title: "Fluxo Taint interprocedural cross-file Controller -> Repository SQLi",
+      language: "TypeScript",
+      category: "SQL_INJECTION",
+      cwe: "CWE-89",
+      expectedVulnerable: true,
+      filesMap: {
+        "src/controller/searchCtrl.ts": [
+          'import { runRawSearch } from "../db/searchRepo";',
+          "export function handleSearch(queryInput: string) {",
+          "  const cleanedInput = queryInput.trim();",
+          "  return runRawSearch(cleanedInput);",
+          "}"
+        ].join("\n"),
+        "src/db/searchRepo.ts": [
+          "export function runRawSearch(filterExpr: string, db: any) {",
+          "  const stmt = `SELECT id, name FROM entries WHERE name = ${filterExpr}`;",
+          "  return db.query(stmt);",
+          "}"
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "GOLD-TS-TAINT-SANITIZED-TN-02",
+      title: "Fluxo Taint com allowlist / sanitizador antes do sink",
+      language: "TypeScript",
+      category: "SQL_INJECTION",
+      cwe: "CWE-89",
+      expectedVulnerable: false,
+      filesMap: {
+        "src/controller/searchSafeCtrl.ts": [
+          "export function handleSearchSafe(db: any, rawId: string) {",
+          "  const safeId = parseInt(rawId, 10);",
+          '  return db.query("SELECT id, name FROM entries WHERE id = ?", [safeId]);',
+          "}"
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "GOLD-TS-CMDI-TP-03",
+      title: "TypeScript OS Command Injection com execSync interpolado",
+      language: "TypeScript",
+      category: "COMMAND_INJECTION",
+      cwe: "CWE-78",
+      expectedVulnerable: true,
+      filesMap: {
+        "src/ops/backupRunner.ts": [
+          'import { execSync } from "node:child_process";',
+          "export function archiveFolder(targetPath: string) {",
+          "  return execSync(`tar -czf backup.tar.gz ${targetPath}`);",
+          "}"
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "GOLD-TS-CMDI-TN-03",
+      title: "TypeScript execu\xE7\xE3o segura via execFileSync com array de argumentos",
+      language: "TypeScript",
+      category: "COMMAND_INJECTION",
+      cwe: "CWE-78",
+      expectedVulnerable: false,
+      filesMap: {
+        "src/ops/backupRunnerSafe.ts": [
+          'import { execFileSync } from "node:child_process";',
+          "export function archiveFolderSafe(targetPath: string) {",
+          '  return execFileSync("tar", ["-czf", "backup.tar.gz", targetPath], { shell: false });',
+          "}"
+        ].join("\n")
+      }
+    },
+    // --- JAVASCRIPT ---
+    {
+      caseId: "GOLD-JS-EVAL-TP-04",
+      title: "JavaScript uso inseguro de eval com entrada de usu\xE1rio",
+      language: "JavaScript",
+      category: "CODE_INJECTION",
+      cwe: "CWE-95",
+      expectedVulnerable: true,
+      filesMap: {
+        "src/calc/exprEngine.js": [
+          "export function evaluateRule(userExpr) {",
+          "  return eval(userExpr);",
+          "}"
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "GOLD-JS-EVAL-TN-04",
+      title: "JavaScript avalia\xE7\xE3o segura por mapa de opera\xE7\xF5es est\xE1tico",
+      language: "JavaScript",
+      category: "CODE_INJECTION",
+      cwe: "CWE-95",
+      expectedVulnerable: false,
+      filesMap: {
+        "src/calc/exprEngineSafe.js": [
+          "export function evaluateRuleSafe(op, a, b) {",
+          "  const ops = { add: (x, y) => x + y, sub: (x, y) => x - y };",
+          "  return ops[op] ? ops[op](Number(a), Number(b)) : 0;",
+          "}"
+        ].join("\n")
+      }
+    },
+    // --- PYTHON ---
+    {
+      caseId: "GOLD-PY-EXEC-TP-05",
+      title: "Python subprocess.run com shell=True",
+      language: "Python",
+      category: "COMMAND_INJECTION",
+      cwe: "CWE-78",
+      expectedVulnerable: true,
+      filesMap: {
+        "app/runner.py": [
+          "import subprocess",
+          "def run_report(target):",
+          '    return subprocess.run(f"ls -la {target}", shell=True)'
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "GOLD-PY-EXEC-TN-05",
+      title: "Python subprocess.run sem shell e lista de argumentos",
+      language: "Python",
+      category: "COMMAND_INJECTION",
+      cwe: "CWE-78",
+      expectedVulnerable: false,
+      filesMap: {
+        "app/runner_safe.py": [
+          "import subprocess",
+          "def run_report_safe(target):",
+          '    return subprocess.run(["ls", "-la", target], shell=False)'
+        ].join("\n")
+      }
+    },
+    // --- JAVA ---
+    {
+      caseId: "GOLD-JAVA-SQLI-TP-06",
+      title: "Java Statement.executeQuery com concatena\xE7\xE3o de entrada",
+      language: "Java",
+      category: "SQL_INJECTION",
+      cwe: "CWE-89",
+      expectedVulnerable: true,
+      filesMap: {
+        "src/main/java/UserDao.java": [
+          "public class UserDao {",
+          "  public void findUser(java.sql.Statement stmt, String username) throws Exception {",
+          `    stmt.executeQuery("SELECT id, name FROM users WHERE name = '" + username + "'");`,
+          "  }",
+          "}"
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "GOLD-JAVA-SQLI-TN-06",
+      title: "Java PreparedStatement seguro com bind de par\xE2metro",
+      language: "Java",
+      category: "SQL_INJECTION",
+      cwe: "CWE-89",
+      expectedVulnerable: false,
+      filesMap: {
+        "src/main/java/UserDaoSafe.java": [
+          "public class UserDaoSafe {",
+          "  public void findUser(java.sql.Connection conn, String username) throws Exception {",
+          '    var ps = conn.prepareStatement("SELECT id, name FROM users WHERE name = ?");',
+          "    ps.setString(1, username);",
+          "    ps.executeQuery();",
+          "  }",
+          "}"
+        ].join("\n")
+      }
+    },
+    // --- SECRETS, CRYPTO, ERROR HANDLING ---
+    {
+      caseId: "GOLD-TS-SECRET-TP-07",
+      title: "Chave secreta hardcoded no c\xF3digo-fonte",
+      language: "TypeScript",
+      category: "HARDCODED_SECRET",
+      cwe: "CWE-798",
+      expectedVulnerable: true,
+      filesMap: {
+        "src/config/authCfg.ts": [
+          'export const masterKey = "SuperSecretProdMasterKey_9988776655";',
+          "export function getMasterKey() { return masterKey; }"
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "GOLD-TS-SECRET-TN-07",
+      title: "Leitura de segredo exclusivamente via vari\xE1vel de ambiente",
+      language: "TypeScript",
+      category: "HARDCODED_SECRET",
+      cwe: "CWE-798",
+      expectedVulnerable: false,
+      filesMap: {
+        "src/config/authCfgSafe.ts": [
+          "export function getMasterKeySafe(): string {",
+          "  const key = process.env.APP_MASTER_KEY;",
+          '  if (!key) throw new Error("APP_MASTER_KEY ausente");',
+          "  return key;",
+          "}"
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "GOLD-TS-CRYPTO-TP-08",
+      title: "Deriva\xE7\xE3o/hash inseguro com MD5 para credenciais",
+      language: "TypeScript",
+      category: "WEAK_CRYPTO",
+      cwe: "CWE-327",
+      expectedVulnerable: true,
+      filesMap: {
+        "src/crypto/legacyHash.ts": [
+          'import crypto from "node:crypto";',
+          "export function hashPasswordLegacy(pwd: string) {",
+          '  return crypto.createHash("md5").update(pwd).digest("hex");',
+          "}"
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "GOLD-TS-CRYPTO-TN-08",
+      title: "Deriva\xE7\xE3o forte PBKDF2-SHA512 com salt CSPRNG",
+      language: "TypeScript",
+      category: "WEAK_CRYPTO",
+      cwe: "CWE-327",
+      expectedVulnerable: false,
+      filesMap: {
+        "src/crypto/strongHash.ts": [
+          'import crypto from "node:crypto";',
+          "export function hashPasswordStrong(pwd: string, salt: Buffer) {",
+          '  return crypto.pbkdf2Sync(pwd, salt, 600000, 64, "sha512").toString("hex");',
+          "}"
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "GOLD-TS-CATCH-TP-09",
+      title: "Bloco catch vazio silenciando falha operacional",
+      language: "TypeScript",
+      category: "ERROR_HANDLING",
+      cwe: "CWE-390",
+      expectedVulnerable: true,
+      filesMap: {
+        "src/service/syncService.ts": [
+          "export function syncData(fn: () => void) {",
+          "  try {",
+          "    fn();",
+          "  } catch (err) {",
+          "  }",
+          "}"
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "GOLD-TS-CATCH-TN-09",
+      title: "Bloco catch com tratamento expl\xEDcito e propaga\xE7\xE3o de erro",
+      language: "TypeScript",
+      category: "ERROR_HANDLING",
+      cwe: "CWE-390",
+      expectedVulnerable: false,
+      filesMap: {
+        "src/service/syncServiceSafe.ts": [
+          "export function syncDataSafe(fn: () => void) {",
+          "  try {",
+          "    fn();",
+          "  } catch (err) {",
+          '    console.error("Sync failure", err);',
+          "    throw err;",
+          "  }",
+          "}"
+        ].join("\n")
+      }
+    },
+    // --- SQL ---
+    {
+      caseId: "GOLD-SQL-SCHEMA-TP-10",
+      title: "SQL SELECT * e coluna sens\xEDvel password_plain em DDL",
+      language: "SQL",
+      category: "SQL_SCHEMA",
+      cwe: "CWE-312",
+      expectedVulnerable: true,
+      filesMap: {
+        "db/schema.sql": [
+          "CREATE TABLE vault_accounts (",
+          "  id INTEGER PRIMARY KEY,",
+          "  username TEXT NOT NULL,",
+          "  password_plain TEXT NOT NULL",
+          ");",
+          "SELECT * FROM vault_accounts;"
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "GOLD-SQL-SCHEMA-TN-10",
+      title: "SQL DDL com colunas expl\xEDcitas e hash de credencial",
+      language: "SQL",
+      category: "SQL_SCHEMA",
+      cwe: "CWE-312",
+      expectedVulnerable: false,
+      filesMap: {
+        "db/schema_safe.sql": [
+          "CREATE TABLE vault_accounts (",
+          "  id INTEGER PRIMARY KEY,",
+          "  username TEXT NOT NULL,",
+          "  password_hash TEXT NOT NULL",
+          ");",
+          "SELECT id, username FROM vault_accounts WHERE id = ?;"
+        ].join("\n")
+      }
+    },
+    // --- C# (ADDED FOR 8-LANGUAGE COVERAGE) ---
+    {
+      caseId: "GOLD-CS-SQLI-TP-11",
+      title: "C# SqlCommand.ExecuteReader com concatena\xE7\xE3o direta de entrada",
+      language: "C#",
+      category: "SQL_INJECTION",
+      cwe: "CWE-89",
+      expectedVulnerable: true,
+      filesMap: {
+        "src/Data/AccountRepository.cs": [
+          "using System.Data.SqlClient;",
+          "public class AccountRepository {",
+          "  public void FetchAccount(SqlCommand cmd, string accountName) {",
+          `    cmd.ExecuteReader("SELECT Id, Email FROM Accounts WHERE Name = '" + accountName + "'");`,
+          "  }",
+          "}"
+        ].join("\n")
+      },
+      changelog: "[WINHOOD-INTERNAL-REGRESSION-v3.0.0] Adicionado par TP/TN para C# SQLi."
+    },
+    {
+      caseId: "GOLD-CS-SQLI-TN-11",
+      title: "C# consulta parametrizada segura com SqlParameter",
+      language: "C#",
+      category: "SQL_INJECTION",
+      cwe: "CWE-89",
+      expectedVulnerable: false,
+      filesMap: {
+        "src/Data/AccountSafeRepository.cs": [
+          "using System.Data.SqlClient;",
+          "public class AccountSafeRepository {",
+          "  public void FetchAccountSafe(SqlConnection conn, string accountName) {",
+          '    var cmd = new SqlCommand("SELECT Id, Email FROM Accounts WHERE Name = @name", conn);',
+          '    cmd.Parameters.Add(new SqlParameter("@name", accountName));',
+          "  }",
+          "}"
+        ].join("\n")
+      },
+      changelog: "[WINHOOD-INTERNAL-REGRESSION-v3.0.0] Adicionado controle TN C# SqlParameter."
+    },
+    // --- GO (ADDED FOR 8-LANGUAGE COVERAGE) ---
+    {
+      caseId: "GOLD-GO-SQLI-TP-12",
+      title: "Go database/sql Query com fmt.Sprintf interpolado",
+      language: "Go",
+      category: "SQL_INJECTION",
+      cwe: "CWE-89",
+      expectedVulnerable: true,
+      filesMap: {
+        "internal/repo/customer_repo.go": [
+          "package repo",
+          'import "fmt"',
+          "func FindCustomer(db DB, slug string) error {",
+          `  _, err := db.Query(fmt.Sprintf("SELECT id FROM customers WHERE slug = '%s'", slug))`,
+          "  return err",
+          "}"
+        ].join("\n")
+      },
+      changelog: "[WINHOOD-INTERNAL-REGRESSION-v3.0.0] Adicionado par TP/TN para Go SQLi."
+    },
+    {
+      caseId: "GOLD-GO-SQLI-TN-12",
+      title: "Go database/sql Query com placeholder posicional ($1)",
+      language: "Go",
+      category: "SQL_INJECTION",
+      cwe: "CWE-89",
+      expectedVulnerable: false,
+      filesMap: {
+        "internal/repo/customer_safe_repo.go": [
+          "package repo",
+          "func FindCustomerSafe(db DB, slug string) error {",
+          '  _, err := db.Query("SELECT id FROM customers WHERE slug = $1", slug)',
+          "  return err",
+          "}"
+        ].join("\n")
+      },
+      changelog: "[WINHOOD-INTERNAL-REGRESSION-v3.0.0] Adicionado controle TN Go SQL parametrizado."
+    },
+    // --- RUST (ADDED FOR 8-LANGUAGE COVERAGE) ---
+    {
+      caseId: "GOLD-RUST-SECRET-TP-13",
+      title: "Rust credencial hardcoded atribu\xEDda em vari\xE1vel literal",
+      language: "Rust",
+      category: "HARDCODED_SECRET",
+      cwe: "CWE-798",
+      expectedVulnerable: true,
+      filesMap: {
+        "src/auth/token_signer.rs": [
+          "pub fn get_signing_secret() -> &'static str {",
+          '  let jwt_secret = "RustProdSigningKey_9182736450_Vault";',
+          "  jwt_secret",
+          "}"
+        ].join("\n")
+      },
+      changelog: "[WINHOOD-INTERNAL-REGRESSION-v3.0.0] Adicionado par TP/TN para Rust CWE-798."
+    },
+    {
+      caseId: "GOLD-RUST-SECRET-TN-13",
+      title: "Rust leitura segura de credencial via std::env::var",
+      language: "Rust",
+      category: "HARDCODED_SECRET",
+      cwe: "CWE-798",
+      expectedVulnerable: false,
+      filesMap: {
+        "src/auth/token_signer_safe.rs": [
+          "pub fn get_signing_secret_safe() -> String {",
+          '  std::env::var("WINHOOD_SIGNING_SECRET").expect("Secret env missing")',
+          "}"
+        ].join("\n")
+      },
+      changelog: "[WINHOOD-INTERNAL-REGRESSION-v3.0.0] Adicionado controle TN Rust env var."
     }
-  },
-  {
-    caseId: "IND-JS-CMDI-TP-02",
-    title: "Independent Benchmark: JavaScript Command Injection via child_process.exec",
-    language: "JavaScript",
-    category: "COMMAND_INJECTION",
-    cwe: "CWE-78",
-    expectedVulnerable: true,
-    filesMap: {
-      "src/ops/archiveWorker.js": [
-        'import { execSync } from "node:child_process";',
-        "export function compressFolder(targetFolder) {",
-        '  return execSync("tar -cf archive.tar " + targetFolder);',
-        "}"
-      ].join("\n")
+  ],
+  GOLDEN_DATASET_VERSION,
+  "REGRESSION"
+);
+var INTERNAL_HOLDOUT_CORPUS = hydrateCorpus(
+  [
+    {
+      caseId: "HOLD-TS-SQLI-TP-01",
+      title: "Holdout Interno: TypeScript SQLi em relat\xF3rio financeiro interpolado",
+      language: "TypeScript",
+      category: "SQL_INJECTION",
+      cwe: "CWE-89",
+      expectedVulnerable: true,
+      filesMap: {
+        "src/finance/ledgerDao.ts": [
+          "export function queryLedgerByAccount(conn: any, accountCode: string) {",
+          "  const queryText = `SELECT balance, currency FROM ledger WHERE account_code = '${accountCode}'`;",
+          "  return conn.query(queryText);",
+          "}"
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "HOLD-TS-SQLI-TN-01",
+      title: "Holdout Interno: TypeScript SQLi mitigado por convers\xE3o num\xE9rica Number()",
+      language: "TypeScript",
+      category: "SQL_INJECTION",
+      cwe: "CWE-89",
+      expectedVulnerable: false,
+      filesMap: {
+        "src/finance/ledgerSafeDao.ts": [
+          "export function queryLedgerByNumericId(conn: any, rawAccountId: string) {",
+          "  const numericId = Number(rawAccountId);",
+          '  return conn.query("SELECT balance FROM ledger WHERE id = $1", [numericId]);',
+          "}"
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "HOLD-JS-CMDI-TP-02",
+      title: "Holdout Interno: JavaScript Command Injection via child_process.execSync",
+      language: "JavaScript",
+      category: "COMMAND_INJECTION",
+      cwe: "CWE-78",
+      expectedVulnerable: true,
+      filesMap: {
+        "src/ops/archiveWorker.js": [
+          'import { execSync } from "node:child_process";',
+          "export function compressFolder(targetFolder) {",
+          '  return execSync("tar -cf archive.tar " + targetFolder);',
+          "}"
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "HOLD-JS-CMDI-TN-02",
+      title: "Holdout Interno: JavaScript spawnSync seguro com shell: false",
+      language: "JavaScript",
+      category: "COMMAND_INJECTION",
+      cwe: "CWE-78",
+      expectedVulnerable: false,
+      filesMap: {
+        "src/ops/archiveWorkerSafe.js": [
+          'import { spawnSync } from "node:child_process";',
+          "export function compressFolderSafe(targetFolder) {",
+          '  return spawnSync("tar", ["-cf", "archive.tar", targetFolder], { shell: false });',
+          "}"
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "HOLD-PY-SQLI-TP-03",
+      title: "Holdout Interno: Python SQL Injection com concatena\xE7\xE3o em cursor.execute",
+      language: "Python",
+      category: "SQL_INJECTION",
+      cwe: "CWE-89",
+      expectedVulnerable: true,
+      filesMap: {
+        "app/orders_repo.py": [
+          "def fetch_order_by_code(cursor, order_code):",
+          `    stmt = "SELECT id, total FROM orders WHERE code = '" + order_code + "'"`,
+          "    cursor.execute(stmt)"
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "HOLD-PY-SQLI-TN-03",
+      title: "Holdout Interno: Python cursor.execute parametrizado",
+      language: "Python",
+      category: "SQL_INJECTION",
+      cwe: "CWE-89",
+      expectedVulnerable: false,
+      filesMap: {
+        "app/orders_repo_safe.py": [
+          "def fetch_order_by_code_safe(cursor, order_code):",
+          '    cursor.execute("SELECT id, total FROM orders WHERE code = %s", (order_code,))'
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "HOLD-PY-CRYPTO-TP-04",
+      title: "Holdout Interno: Python hashlib.sha1 para digest de credencial",
+      language: "Python",
+      category: "WEAK_CRYPTO",
+      cwe: "CWE-328",
+      expectedVulnerable: true,
+      filesMap: {
+        "app/legacy_hasher.py": [
+          "import hashlib",
+          "def compute_legacy_digest(payload_bytes):",
+          "    return hashlib.sha1(payload_bytes).hexdigest()"
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "HOLD-PY-CRYPTO-TN-04",
+      title: "Holdout Interno: Python hashlib.pbkdf2_hmac SHA-256 seguro",
+      language: "Python",
+      category: "WEAK_CRYPTO",
+      cwe: "CWE-328",
+      expectedVulnerable: false,
+      filesMap: {
+        "app/modern_hasher.py": [
+          "import hashlib",
+          "def compute_kdf_digest(payload_bytes, salt_bytes):",
+          '    return hashlib.pbkdf2_hmac("sha256", payload_bytes, salt_bytes, 600000)'
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "HOLD-JAVA-SQLI-TP-05",
+      title: "Holdout Interno: Java executeQuery com concatena\xE7\xE3o",
+      language: "Java",
+      category: "SQL_INJECTION",
+      cwe: "CWE-89",
+      expectedVulnerable: true,
+      filesMap: {
+        "src/main/java/InvoiceDao.java": [
+          "public class InvoiceDao {",
+          "  public void queryInvoice(Statement st, String code) throws Exception {",
+          `    st.executeQuery("SELECT id FROM invoices WHERE code = '" + code + "'");`,
+          "  }",
+          "}"
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "HOLD-JAVA-SQLI-TN-05",
+      title: "Holdout Interno: Java PreparedStatement seguro",
+      language: "Java",
+      category: "SQL_INJECTION",
+      cwe: "CWE-89",
+      expectedVulnerable: false,
+      filesMap: {
+        "src/main/java/InvoiceSafeDao.java": [
+          "public class InvoiceSafeDao {",
+          "  public void queryInvoiceSafe(Connection conn, String code) throws Exception {",
+          '    PreparedStatement ps = conn.prepareStatement("SELECT id FROM invoices WHERE code = ?");',
+          "  }",
+          "}"
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "HOLD-CS-CRYPTO-TP-06",
+      title: "Holdout Interno: C# deriva\xE7\xE3o de hash fraco MD5",
+      language: "C#",
+      category: "WEAK_CRYPTO",
+      cwe: "CWE-328",
+      expectedVulnerable: true,
+      filesMap: {
+        "src/Security/LegacyDigest.cs": [
+          "using System.Security.Cryptography;",
+          "public class LegacyDigest {",
+          "  public byte[] ComputeWeak(byte[] data) {",
+          "    using var md5 = MD5.Create();",
+          "    return md5.ComputeHash(data);",
+          "  }",
+          "}"
+        ].join("\n")
+      },
+      changelog: "[WINHOOD-INTERNAL-HOLDOUT-v3.0.0] Cobertura C# adicionada ao Holdout Interno."
+    },
+    {
+      caseId: "HOLD-CS-CRYPTO-TN-06",
+      title: "Holdout Interno: C# hash SHA-256 seguro",
+      language: "C#",
+      category: "WEAK_CRYPTO",
+      cwe: "CWE-328",
+      expectedVulnerable: false,
+      filesMap: {
+        "src/Security/StrongDigest.cs": [
+          "using System.Security.Cryptography;",
+          "public class StrongDigest {",
+          "  public byte[] ComputeStrong(byte[] data) {",
+          "    using var sha = SHA256.Create();",
+          "    return sha.ComputeHash(data);",
+          "  }",
+          "}"
+        ].join("\n")
+      },
+      changelog: "[WINHOOD-INTERNAL-HOLDOUT-v3.0.0] Controle negativo C# SHA-256."
+    },
+    {
+      caseId: "HOLD-GO-EXEC-TP-07",
+      title: "Holdout Interno: Go sql.Exec com concatena\xE7\xE3o direta de string",
+      language: "Go",
+      category: "SQL_INJECTION",
+      cwe: "CWE-89",
+      expectedVulnerable: true,
+      filesMap: {
+        "internal/audit/store.go": [
+          "package audit",
+          "func PurgeByTag(db DB, tag string) error {",
+          `  _, err := db.Exec("DELETE FROM audit_tags WHERE tag = '" + tag + "'")`,
+          "  return err",
+          "}"
+        ].join("\n")
+      },
+      changelog: "[WINHOOD-INTERNAL-HOLDOUT-v3.0.0] Cobertura Go adicionada ao Holdout Interno."
+    },
+    {
+      caseId: "HOLD-GO-EXEC-TN-07",
+      title: "Holdout Interno: Go sql.Exec parametrizado com $1",
+      language: "Go",
+      category: "SQL_INJECTION",
+      cwe: "CWE-89",
+      expectedVulnerable: false,
+      filesMap: {
+        "internal/audit/store_safe.go": [
+          "package audit",
+          "func PurgeByTagSafe(db DB, tag string) error {",
+          '  _, err := db.Exec("DELETE FROM audit_tags WHERE tag = $1", tag)',
+          "  return err",
+          "}"
+        ].join("\n")
+      },
+      changelog: "[WINHOOD-INTERNAL-HOLDOUT-v3.0.0] Controle negativo Go SQL parametrizado."
+    },
+    {
+      caseId: "HOLD-RUST-UNSAFE-TP-08",
+      title: "Holdout Interno: Rust bloco unsafe contornando verifica\xE7\xE3o de mem\xF3ria",
+      language: "Rust",
+      category: "MEMORY_SAFETY",
+      cwe: "CWE-119",
+      expectedVulnerable: true,
+      filesMap: {
+        "src/ffi/raw_ptr.rs": [
+          "pub fn read_raw(ptr: *const u32) -> u32 {",
+          "  unsafe {",
+          "    *ptr",
+          "  }",
+          "}"
+        ].join("\n")
+      },
+      changelog: "[WINHOOD-INTERNAL-HOLDOUT-v3.0.0] Cobertura Rust adicionada ao Holdout Interno."
+    },
+    {
+      caseId: "HOLD-RUST-UNSAFE-TN-08",
+      title: "Holdout Interno: Rust acesso seguro via slice get()",
+      language: "Rust",
+      category: "MEMORY_SAFETY",
+      cwe: "CWE-119",
+      expectedVulnerable: false,
+      filesMap: {
+        "src/ffi/safe_slice.rs": [
+          "pub fn read_safe(items: &[u32], idx: usize) -> Option<u32> {",
+          "  items.get(idx).copied()",
+          "}"
+        ].join("\n")
+      },
+      changelog: "[WINHOOD-INTERNAL-HOLDOUT-v3.0.0] Controle negativo Rust safe slice."
+    },
+    {
+      caseId: "HOLD-SQL-DDL-TP-09",
+      title: "Holdout Interno: SQL DELETE sem cl\xE1usula WHERE",
+      language: "SQL",
+      category: "SQL_SCHEMA",
+      cwe: "CWE-404",
+      expectedVulnerable: true,
+      filesMap: {
+        "db/cleanup.sql": [
+          "CREATE TABLE audit_events (id INT PRIMARY KEY, event_name VARCHAR(80));",
+          "DELETE FROM audit_events;"
+        ].join("\n")
+      }
+    },
+    {
+      caseId: "HOLD-SQL-DDL-TN-09",
+      title: "Holdout Interno: SQL DELETE restrito por cl\xE1usula WHERE",
+      language: "SQL",
+      category: "SQL_SCHEMA",
+      cwe: "CWE-404",
+      expectedVulnerable: false,
+      filesMap: {
+        "db/cleanup_safe.sql": [
+          "CREATE TABLE audit_events (id INT PRIMARY KEY, event_name VARCHAR(80));",
+          "DELETE FROM audit_events WHERE id = 100;"
+        ].join("\n")
+      }
     }
-  },
-  {
-    caseId: "IND-JS-CMDI-TN-02",
-    title: "Independent Benchmark: JavaScript spawnSync seguro com shell: false",
-    language: "JavaScript",
-    category: "COMMAND_INJECTION",
-    cwe: "CWE-78",
-    expectedVulnerable: false,
-    filesMap: {
-      "src/ops/archiveWorkerSafe.js": [
-        'import { spawnSync } from "node:child_process";',
-        "export function compressFolderSafe(targetFolder) {",
-        '  return spawnSync("tar", ["-cf", "archive.tar", targetFolder], { shell: false });',
-        "}"
-      ].join("\n")
-    }
-  },
-  {
-    caseId: "IND-PY-SQLI-TP-03",
-    title: "Independent Benchmark: Python SQL Injection com concatena\xE7\xE3o em cursor.execute",
-    language: "Python",
-    category: "SQL_INJECTION",
-    cwe: "CWE-89",
-    expectedVulnerable: true,
-    filesMap: {
-      "app/orders_repo.py": [
-        "def fetch_order_by_code(cursor, order_code):",
-        `    stmt = "SELECT id, total FROM orders WHERE code = '" + order_code + "'"`,
-        "    cursor.execute(stmt)"
-      ].join("\n")
-    }
-  },
-  {
-    caseId: "IND-PY-SQLI-TN-03",
-    title: "Independent Benchmark: Python cursor.execute parametrizado",
-    language: "Python",
-    category: "SQL_INJECTION",
-    cwe: "CWE-89",
-    expectedVulnerable: false,
-    filesMap: {
-      "app/orders_repo_safe.py": [
-        "def fetch_order_by_code_safe(cursor, order_code):",
-        '    cursor.execute("SELECT id, total FROM orders WHERE code = %s", (order_code,))'
-      ].join("\n")
-    }
-  },
-  {
-    caseId: "IND-PY-CRYPTO-TP-04",
-    title: "Independent Benchmark: Python hashlib.sha1 para digest de credencial",
-    language: "Python",
-    category: "WEAK_CRYPTO",
-    cwe: "CWE-328",
-    expectedVulnerable: true,
-    filesMap: {
-      "app/legacy_hasher.py": [
-        "import hashlib",
-        "def compute_legacy_digest(payload_bytes):",
-        "    return hashlib.sha1(payload_bytes).hexdigest()"
-      ].join("\n")
-    }
-  },
-  {
-    caseId: "IND-PY-CRYPTO-TN-04",
-    title: "Independent Benchmark: Python hashlib.pbkdf2_hmac SHA-256 seguro",
-    language: "Python",
-    category: "WEAK_CRYPTO",
-    cwe: "CWE-328",
-    expectedVulnerable: false,
-    filesMap: {
-      "app/modern_hasher.py": [
-        "import hashlib",
-        "def compute_kdf_digest(payload_bytes, salt_bytes):",
-        '    return hashlib.pbkdf2_hmac("sha256", payload_bytes, salt_bytes, 600000)'
-      ].join("\n")
-    }
-  },
-  {
-    caseId: "IND-JAVA-SQLI-TP-05",
-    title: "Independent Benchmark: Java executeQuery com concatena\xE7\xE3o",
-    language: "Java",
-    category: "SQL_INJECTION",
-    cwe: "CWE-89",
-    expectedVulnerable: true,
-    filesMap: {
-      "src/main/java/InvoiceDao.java": [
-        "public class InvoiceDao {",
-        "  public void queryInvoice(Statement st, String code) throws Exception {",
-        `    st.executeQuery("SELECT id FROM invoices WHERE code = '" + code + "'");`,
-        "  }",
-        "}"
-      ].join("\n")
-    }
-  },
-  {
-    caseId: "IND-JAVA-SQLI-TN-05",
-    title: "Independent Benchmark: Java PreparedStatement seguro",
-    language: "Java",
-    category: "SQL_INJECTION",
-    cwe: "CWE-89",
-    expectedVulnerable: false,
-    filesMap: {
-      "src/main/java/InvoiceSafeDao.java": [
-        "public class InvoiceSafeDao {",
-        "  public void queryInvoiceSafe(Connection conn, String code) throws Exception {",
-        '    PreparedStatement ps = conn.prepareStatement("SELECT id FROM invoices WHERE code = ?");',
-        "  }",
-        "}"
-      ].join("\n")
-    }
-  },
-  {
-    caseId: "IND-SQL-DDL-TP-06",
-    title: "Independent Benchmark: SQL DELETE sem cl\xE1usula WHERE",
-    language: "SQL",
-    category: "SQL_SCHEMA",
-    cwe: "CWE-404",
-    expectedVulnerable: true,
-    filesMap: {
-      "db/cleanup.sql": [
-        "CREATE TABLE audit_events (id INT PRIMARY KEY, event_name VARCHAR(80));",
-        "DELETE FROM audit_events;"
-      ].join("\n")
-    }
-  },
-  {
-    caseId: "IND-SQL-DDL-TN-06",
-    title: "Independent Benchmark: SQL DELETE restrito por cl\xE1usula WHERE",
-    language: "SQL",
-    category: "SQL_SCHEMA",
-    cwe: "CWE-404",
-    expectedVulnerable: false,
-    filesMap: {
-      "db/cleanup_safe.sql": [
-        "CREATE TABLE audit_events (id INT PRIMARY KEY, event_name VARCHAR(80));",
-        "DELETE FROM audit_events WHERE id = 100;"
-      ].join("\n")
-    }
-  }
-];
+  ],
+  INTERNAL_HOLDOUT_VERSION,
+  "INTERNAL_HOLDOUT"
+);
 
 // src/validation/GoldenDatasetRunner.ts
+var GOLDEN_LOW_SAMPLE_THRESHOLD = 30;
 function computeWilson95ConfidenceInterval(successes, sampleSize) {
   if (sampleSize <= 0) {
     return {
@@ -27949,21 +29221,20 @@ function computeWilson95ConfidenceInterval(successes, sampleSize) {
 }
 function computeConfusionMetrics(c) {
   const round3 = (v) => Math.round(v * 1e3) / 1e3;
-  const precision = c.tp + c.fp > 0 ? round3(c.tp / (c.tp + c.fp)) : null;
-  const recall = c.tp + c.fn > 0 ? round3(c.tp / (c.tp + c.fn)) : null;
-  const f1Score = precision !== null && recall !== null && precision + recall > 0 ? round3(2 * precision * recall / (precision + recall)) : null;
-  const truePositiveRate = recall;
-  const trueNegativeRate = c.tn + c.fp > 0 ? round3(c.tn / (c.tn + c.fp)) : null;
-  const falsePositiveRate = c.fp + c.tn > 0 ? round3(c.fp / (c.fp + c.tn)) : null;
-  const falseNegativeRate = c.fn + c.tp > 0 ? round3(c.fn / (c.fn + c.tp)) : null;
+  const rawPrecision = c.tp + c.fp > 0 ? c.tp / (c.tp + c.fp) : null;
+  const rawRecall = c.tp + c.fn > 0 ? c.tp / (c.tp + c.fn) : null;
+  const rawF1 = c.tp + c.fp > 0 && c.tp + c.fn > 0 && 2 * c.tp + c.fp + c.fn > 0 ? 2 * c.tp / (2 * c.tp + c.fp + c.fn) : null;
+  const rawTnr = c.tn + c.fp > 0 ? c.tn / (c.tn + c.fp) : null;
+  const rawFpr = c.fp + c.tn > 0 ? c.fp / (c.fp + c.tn) : null;
+  const rawFnr = c.fn + c.tp > 0 ? c.fn / (c.fn + c.tp) : null;
   return {
-    precision,
-    recall,
-    f1Score,
-    truePositiveRate,
-    trueNegativeRate,
-    falsePositiveRate,
-    falseNegativeRate
+    precision: rawPrecision !== null ? round3(rawPrecision) : null,
+    recall: rawRecall !== null ? round3(rawRecall) : null,
+    f1Score: rawF1 !== null ? round3(rawF1) : null,
+    truePositiveRate: rawRecall !== null ? round3(rawRecall) : null,
+    trueNegativeRate: rawTnr !== null ? round3(rawTnr) : null,
+    falsePositiveRate: rawFpr !== null ? round3(rawFpr) : null,
+    falseNegativeRate: rawFnr !== null ? round3(rawFnr) : null
   };
 }
 function computeMacroAverage(groups) {
@@ -27973,6 +29244,9 @@ function computeMacroAverage(groups) {
     const sum = valid.reduce((a, b) => a + b, 0);
     return Math.round(sum / valid.length * 1e3) / 1e3;
   };
+  const evaluatedStrataCount = groups.filter(
+    (g) => g.precision !== null || g.recall !== null || g.trueNegativeRate !== null || g.falsePositiveRate !== null
+  ).length;
   return {
     precision: meanNullable(groups.map((g) => g.precision)),
     recall: meanNullable(groups.map((g) => g.recall)),
@@ -27980,7 +29254,8 @@ function computeMacroAverage(groups) {
     truePositiveRate: meanNullable(groups.map((g) => g.truePositiveRate)),
     trueNegativeRate: meanNullable(groups.map((g) => g.trueNegativeRate)),
     falsePositiveRate: meanNullable(groups.map((g) => g.falsePositiveRate)),
-    falseNegativeRate: meanNullable(groups.map((g) => g.falseNegativeRate))
+    falseNegativeRate: meanNullable(groups.map((g) => g.falseNegativeRate)),
+    evaluatedStrataCount
   };
 }
 var GoldenDatasetRunner = class _GoldenDatasetRunner {
@@ -27991,50 +29266,51 @@ var GoldenDatasetRunner = class _GoldenDatasetRunner {
     let tn = 0;
     let fn = 0;
     let inconclusiveCases = 0;
+    const integrityErrors = [];
     const byLanguageAcc = {};
     const byCategoryAcc = {};
     for (const item of corpus) {
       const caseStart = performance.now();
-      const result = AnalyzerRegistry.runNativeAstAndTaintPipeline({
+      const expectedSha = computeGoldenCaseContentSha256(item.filesMap);
+      const contentHashVerified = item.contentSha256 === expectedSha;
+      if (!contentHashVerified) {
+        integrityErrors.push(
+          `SHA-256 divergente no caso ${item.caseId}: esperado ${item.contentSha256}, observado ${expectedSha}.`
+        );
+      }
+      const fileCount = Object.keys(item.filesMap || {}).length;
+      const result = fileCount > 0 ? AnalyzerRegistry.runNativeAstAndTaintPipeline({
         runId: `golden-${item.caseId}`,
         softwareId: `sw-${item.caseId}`,
         softwareName: item.title,
         softwareVersion: "1.0.0",
         filesMap: item.filesMap
-      });
+      }) : null;
       const caseDurationMs = Math.max(1, Math.round(performance.now() - caseStart));
-      const parseInconclusive = result.execution.measurementState === "NOT_MEASURED" || result.execution.measurementState === "FAILED" || result.execution.filesFailed > 0;
-      const relevantFindings = result.findings.filter((f) => {
-        if (item.category === "ERROR_HANDLING") {
-          return f.originalRuleId.includes("S2486") || f.cwe === "CWE-390";
-        }
-        if (item.category === "SQL_SCHEMA") {
-          return f.category === "DATABASE" || f.originalRuleId.includes("sql");
-        }
-        if (item.category === "HARDCODED_SECRET") {
-          return f.category === "SECRETS" || f.cwe === "CWE-798";
-        }
-        if (item.category === "WEAK_CRYPTO") {
-          return f.cwe === "CWE-327" || f.cwe === "CWE-328" || f.originalRuleId.includes("S4790") || f.originalRuleId.includes("B324");
-        }
-        return f.category === "SAST" || f.cwe === item.cwe || f.originalRuleId.includes("taint") || f.originalRuleId.includes("S3649") || f.originalRuleId.includes("S2076") || f.originalRuleId.includes("S1523");
-      });
+      const parseInconclusive = !result || result.execution.measurementState === "NOT_MEASURED" || result.execution.measurementState === "FAILED" || result.execution.filesFailed > 0 || result.execution.filesProcessed === 0;
       if (!byLanguageAcc[item.language]) {
-        byLanguageAcc[item.language] = { cases: 0, tp: 0, fp: 0, tn: 0, fn: 0 };
+        byLanguageAcc[item.language] = { cases: 0, inconclusiveCases: 0, tp: 0, fp: 0, tn: 0, fn: 0 };
       }
       byLanguageAcc[item.language].cases += 1;
       if (!byCategoryAcc[item.category]) {
-        byCategoryAcc[item.category] = { cases: 0, tp: 0, fp: 0, tn: 0, fn: 0 };
+        byCategoryAcc[item.category] = { cases: 0, inconclusiveCases: 0, tp: 0, fp: 0, tn: 0, fn: 0 };
       }
       byCategoryAcc[item.category].cases += 1;
       if (parseInconclusive) {
         inconclusiveCases += 1;
+        byLanguageAcc[item.language].inconclusiveCases += 1;
+        byCategoryAcc[item.category].inconclusiveCases += 1;
         cases.push({
           caseId: item.caseId,
           title: item.title,
           language: item.language,
           category: item.category,
           cwe: item.cwe,
+          datasetRole: item.datasetRole,
+          origin: item.origin,
+          license: item.license,
+          contentSha256: item.contentSha256,
+          contentHashVerified,
           expectedVulnerable: item.expectedVulnerable,
           detectedVulnerable: null,
           classification: "INCONCLUSIVE",
@@ -28043,6 +29319,24 @@ var GoldenDatasetRunner = class _GoldenDatasetRunner {
         });
         continue;
       }
+      const relevantFindings = result.findings.filter((f) => {
+        if (item.category === "ERROR_HANDLING") {
+          return f.originalRuleId.includes("S2486") || f.cwe === "CWE-390";
+        }
+        if (item.category === "SQL_SCHEMA") {
+          return f.category === "DATABASE" || f.originalRuleId.includes("sql");
+        }
+        if (item.category === "HARDCODED_SECRET") {
+          return f.category === "SECRETS" || f.cwe === "CWE-798" || f.originalRuleId.includes("S6418");
+        }
+        if (item.category === "WEAK_CRYPTO") {
+          return f.cwe === "CWE-327" || f.cwe === "CWE-328" || f.originalRuleId.includes("S4790") || f.originalRuleId.includes("B324");
+        }
+        if (item.category === "MEMORY_SAFETY") {
+          return f.cwe === "CWE-119" || f.originalRuleId.includes("UNSAFE");
+        }
+        return f.category === "SAST" || f.cwe === item.cwe || f.originalRuleId.includes("taint") || f.originalRuleId.includes("S3649") || f.originalRuleId.includes("S2077") || f.originalRuleId.includes("S2076") || f.originalRuleId.includes("S1523");
+      });
       const detectedVulnerable = relevantFindings.length > 0;
       let classification;
       if (item.expectedVulnerable && detectedVulnerable) {
@@ -28066,6 +29360,11 @@ var GoldenDatasetRunner = class _GoldenDatasetRunner {
         language: item.language,
         category: item.category,
         cwe: item.cwe,
+        datasetRole: item.datasetRole,
+        origin: item.origin,
+        license: item.license,
+        contentSha256: item.contentSha256,
+        contentHashVerified,
         expectedVulnerable: item.expectedVulnerable,
         detectedVulnerable,
         classification,
@@ -28080,20 +29379,27 @@ var GoldenDatasetRunner = class _GoldenDatasetRunner {
       tn,
       fn,
       inconclusiveCases,
+      integrityErrors,
       byLanguageAcc,
       byCategoryAcc
     };
   }
-  static runIndependentValidationSuite() {
-    return _GoldenDatasetRunner.runValidationSuite("INDEPENDENT_VALIDATION");
+  static runHoldoutValidationSuite() {
+    return _GoldenDatasetRunner.runValidationSuite("INTERNAL_HOLDOUT");
   }
-  static runValidationSuite(datasetMode = "INTERNAL_CALIBRATION") {
+  /**
+   * @deprecated Alias de compatibilidade; retorna o conjunto INTERNAL_HOLDOUT sem alegar independência externa.
+   */
+  static runIndependentValidationSuite() {
+    return _GoldenDatasetRunner.runValidationSuite("INTERNAL_HOLDOUT");
+  }
+  static runValidationSuite(datasetMode = "REGRESSION", options) {
     const startMs = performance.now();
     const memBefore = process.memoryUsage().rss;
-    const primaryCorpus = datasetMode === "INDEPENDENT_VALIDATION" ? INDEPENDENT_VALIDATION_CORPUS : GOLDEN_DATASET_CORPUS;
-    const primaryVersion = datasetMode === "INDEPENDENT_VALIDATION" ? INDEPENDENT_VALIDATION_VERSION : GOLDEN_DATASET_VERSION;
-    const primaryOriginLabel = datasetMode === "INDEPENDENT_VALIDATION" ? INDEPENDENT_VALIDATION_ORIGIN_LABEL : GOLDEN_DATASET_ORIGIN_LABEL;
-    const datasetSha256 = crypto25.createHash("sha256").update(JSON.stringify(primaryCorpus), "utf8").digest("hex");
+    const primaryCorpus = options?.customCorpus ?? (datasetMode === "INTERNAL_HOLDOUT" ? INTERNAL_HOLDOUT_CORPUS : datasetMode === "DEVELOPMENT" ? DEVELOPMENT_DATASET_CORPUS : GOLDEN_DATASET_CORPUS);
+    const primaryVersion = options?.customVersion ?? (datasetMode === "INTERNAL_HOLDOUT" ? INTERNAL_HOLDOUT_VERSION : datasetMode === "DEVELOPMENT" ? DEVELOPMENT_DATASET_VERSION : GOLDEN_DATASET_VERSION);
+    const primaryOriginLabel = options?.customOriginLabel ?? (datasetMode === "INTERNAL_HOLDOUT" ? INTERNAL_HOLDOUT_ORIGIN_LABEL : datasetMode === "DEVELOPMENT" ? DEVELOPMENT_DATASET_ORIGIN_LABEL : GOLDEN_DATASET_ORIGIN_LABEL);
+    const datasetSha256 = crypto27.createHash("sha256").update(JSON.stringify(primaryCorpus), "utf8").digest("hex");
     const {
       cases,
       tp,
@@ -28101,16 +29407,19 @@ var GoldenDatasetRunner = class _GoldenDatasetRunner {
       tn,
       fn,
       inconclusiveCases,
+      integrityErrors,
       byLanguageAcc,
       byCategoryAcc
     } = _GoldenDatasetRunner.evaluateCorpusCases(primaryCorpus);
-    const independentEval = _GoldenDatasetRunner.evaluateCorpusCases(INDEPENDENT_VALIDATION_CORPUS);
-    const independentMetrics = computeConfusionMetrics({
-      tp: independentEval.tp,
-      fp: independentEval.fp,
-      tn: independentEval.tn,
-      fn: independentEval.fn
+    const holdoutEval = _GoldenDatasetRunner.evaluateCorpusCases(INTERNAL_HOLDOUT_CORPUS);
+    const holdoutMetrics = computeConfusionMetrics({
+      tp: holdoutEval.tp,
+      fp: holdoutEval.fp,
+      tn: holdoutEval.tn,
+      fn: holdoutEval.fn
     });
+    const holdoutLangs = Object.keys(holdoutEval.byLanguageAcc);
+    const holdoutMissingLangs = DECLARED_BENCHMARK_LANGUAGES.filter((l) => !holdoutLangs.includes(l));
     const totalDurationMs = Math.max(1, Math.round(performance.now() - startMs));
     const memAfter = process.memoryUsage().rss;
     const memoryDeltaMb = Math.round((memAfter - memBefore) / (1024 * 1024) * 100) / 100;
@@ -28131,7 +29440,7 @@ var GoldenDatasetRunner = class _GoldenDatasetRunner {
         fnr: m.falseNegativeRate,
         precisionCi95: computeWilson95ConfidenceInterval(acc.tp, acc.tp + acc.fp),
         recallCi95: computeWilson95ConfidenceInterval(acc.tp, acc.tp + acc.fn),
-        lowSampleWarning: acc.cases < 5
+        lowSampleWarning: acc.cases < GOLDEN_LOW_SAMPLE_THRESHOLD
       };
     }
     const byCategory = {};
@@ -28150,16 +29459,29 @@ var GoldenDatasetRunner = class _GoldenDatasetRunner {
         fnr: m.falseNegativeRate,
         precisionCi95: computeWilson95ConfidenceInterval(acc.tp, acc.tp + acc.fp),
         recallCi95: computeWilson95ConfidenceInterval(acc.tp, acc.tp + acc.fn),
-        lowSampleWarning: acc.cases < 5
+        lowSampleWarning: acc.cases < GOLDEN_LOW_SAMPLE_THRESHOLD
       };
     }
-    const lowSampleLanguages = Object.entries(byLanguageAcc).filter(([, acc]) => acc.cases < 5).map(([lang, acc]) => `${lang}(n=${acc.cases})`);
-    const sampleWarning = primaryCorpus.length < 100 || lowSampleLanguages.length > 0 ? `Amostra reduzida (N=${primaryCorpus.length}; subamostras <5 em: ${lowSampleLanguages.join(", ") || "categorias espec\xEDficas"}). Intervalos de confian\xE7a de 95% (Wilson Score) reportados explicitamente; n\xE3o representa o conjunto oficial OWASP Benchmark v1.2 (2.740+ casos).` : null;
+    const languagesRepresented = Object.keys(byLanguageAcc);
+    const missingDeclaredLanguages = DECLARED_BENCHMARK_LANGUAGES.filter(
+      (lang) => !languagesRepresented.includes(lang)
+    );
+    const lowSampleLanguages = Object.entries(byLanguageAcc).filter(([, acc]) => acc.cases < GOLDEN_LOW_SAMPLE_THRESHOLD).map(([lang, acc]) => `${lang}(n=${acc.cases})`);
+    const sampleWarning = primaryCorpus.length < GOLDEN_LOW_SAMPLE_THRESHOLD || lowSampleLanguages.length > 0 ? `Indicador operacional de amostra pequena (n < ${GOLDEN_LOW_SAMPLE_THRESHOLD}): conjunto ${datasetMode} possui N=${primaryCorpus.length} casos no total e subamostras n < ${GOLDEN_LOW_SAMPLE_THRESHOLD} em: ${lowSampleLanguages.join(", ") || "estratos espec\xEDficos"}. Nota: n < 30 \xE9 apenas um limiar operacional de alerta de amostra reduzida (n\xE3o garantia universal de signific\xE2ncia estat\xEDstica). Os Intervalos de Confian\xE7a de 95% (Wilson Score) expressam a incerteza exata de cada propor\xE7\xE3o.` : null;
     const limitations = [
-      "Separa\xE7\xE3o estrita entre corpus interno de regress\xE3o (WINHOOD_INTERNAL_CALIBRATION_CORPUS) e benchmark independente (WINHOOD_INDEPENDENT_VALIDATION_BENCHMARK).",
-      "M\xE9tricas com denominador zero retornam null (n\xE3o avali\xE1vel estatisticamente) em vez de 100% ou 0% artificiais.",
-      "Intervalos de confian\xE7a de 95% calculados pelo m\xE9todo exato de Wilson Score (z = 1.96)."
+      "Separa\xE7\xE3o estrita em 3 conjuntos versionados de autoria interna: DEVELOPMENT, REGRESSION e INTERNAL_HOLDOUT.",
+      "Estes corpora s\xE3o de autoria interna do WinHood; N\xC3O representam um benchmark externo independente de terceiros (ex.: OWASP Benchmark v1.2 / NIST Juliet).",
+      "M\xE9tricas com denominador zero retornam null (n\xE3o avali\xE1vel estatisticamente) em vez de 0% ou 100% artificiais.",
+      "M\xE9tricas de precis\xE3o, recall, F1, TPR, TNR, FPR e FNR s\xE3o computadas diretamente sobre contagens brutas (sem arredondamento intermedi\xE1rio) e acompanhadas de IC 95% pelo m\xE9todo de Wilson Score (z = 1.96)."
     ];
+    if (missingDeclaredLanguages.length > 0) {
+      limitations.push(
+        `Cobertura incompleta de linguagens declaradas: ausentes [${missingDeclaredLanguages.join(", ")}].`
+      );
+    }
+    if (integrityErrors.length > 0) {
+      limitations.push(`Falha de integridade SHA-256 detectada em ${integrityErrors.length} caso(s).`);
+    }
     if (sampleWarning) limitations.push(sampleWarning);
     const confidenceIntervals95 = {
       precision: computeWilson95ConfidenceInterval(tp, tp + fp),
@@ -28178,8 +29500,15 @@ var GoldenDatasetRunner = class _GoldenDatasetRunner {
       executedAt: (/* @__PURE__ */ new Date()).toISOString(),
       engineVersion: "WINHOOD-AST-TAINT-v4.1.0",
       datasetVersion: primaryVersion,
+      datasetRole: datasetMode,
       datasetOriginLabel: primaryOriginLabel,
       datasetSha256,
+      datasetIntegrityVerified: integrityErrors.length === 0,
+      integrityErrors,
+      declaredLanguagesTotal: DECLARED_BENCHMARK_LANGUAGES.length,
+      languagesRepresented,
+      missingDeclaredLanguages,
+      lowSampleThreshold: GOLDEN_LOW_SAMPLE_THRESHOLD,
       sampleWarning,
       totalCases: primaryCorpus.length,
       inconclusiveCases,
@@ -28197,19 +29526,23 @@ var GoldenDatasetRunner = class _GoldenDatasetRunner {
       confidenceIntervals95,
       macroAverages,
       microAverages,
-      independentValidationSummary: {
-        datasetVersion: INDEPENDENT_VALIDATION_VERSION,
-        datasetOriginLabel: INDEPENDENT_VALIDATION_ORIGIN_LABEL,
-        totalCases: INDEPENDENT_VALIDATION_CORPUS.length,
-        truePositives: independentEval.tp,
-        falsePositives: independentEval.fp,
-        trueNegatives: independentEval.tn,
-        falseNegatives: independentEval.fn,
-        precision: independentMetrics.precision,
-        recall: independentMetrics.recall,
-        f1Score: independentMetrics.f1Score,
-        falsePositiveRate: independentMetrics.falsePositiveRate,
-        falseNegativeRate: independentMetrics.falseNegativeRate
+      holdoutValidationSummary: {
+        datasetVersion: INTERNAL_HOLDOUT_VERSION,
+        datasetRole: "INTERNAL_HOLDOUT",
+        datasetOriginLabel: "WINHOOD_INTERNAL_HOLDOUT_CORPUS",
+        totalCases: INTERNAL_HOLDOUT_CORPUS.length,
+        inconclusiveCases: holdoutEval.inconclusiveCases,
+        truePositives: holdoutEval.tp,
+        falsePositives: holdoutEval.fp,
+        trueNegatives: holdoutEval.tn,
+        falseNegatives: holdoutEval.fn,
+        precision: holdoutMetrics.precision,
+        recall: holdoutMetrics.recall,
+        f1Score: holdoutMetrics.f1Score,
+        falsePositiveRate: holdoutMetrics.falsePositiveRate,
+        falseNegativeRate: holdoutMetrics.falseNegativeRate,
+        languagesRepresented: holdoutLangs,
+        missingDeclaredLanguages: holdoutMissingLangs
       },
       totalDurationMs,
       memoryDeltaMb,
@@ -28218,7 +29551,7 @@ var GoldenDatasetRunner = class _GoldenDatasetRunner {
       byCategory,
       cases
     };
-    const reportSha256 = crypto25.createHash("sha256").update(JSON.stringify(reportBody), "utf8").digest("hex");
+    const reportSha256 = crypto27.createHash("sha256").update(JSON.stringify(reportBody), "utf8").digest("hex");
     return {
       ...reportBody,
       reportSha256
@@ -28227,7 +29560,7 @@ var GoldenDatasetRunner = class _GoldenDatasetRunner {
 };
 
 // src/analyzers/SarifCodec.ts
-import crypto26 from "node:crypto";
+import crypto28 from "node:crypto";
 function severityToSarifLevel(sev) {
   if (sev === "BLOCKER" || sev === "CRITICAL" || sev === "HIGH") return "error";
   if (sev === "MEDIUM") return "warning";
@@ -28424,7 +29757,7 @@ var SarifCodec = class {
         const category = categoryRaw === "SECRETS" || categoryRaw === "SCA" || categoryRaw === "IAC" || categoryRaw === "DATABASE" || categoryRaw === "CODE_QUALITY" ? categoryRaw : "SAST";
         findings.push(
           enrichLegacyOrExternalFinding({
-            id: `sarif-imp-${scope.runId}-${rIdx}-${idx}-${crypto26.createHash("sha256").update(`${toolName}:${ruleId}:${filePath}:${startLine}`).digest("hex").slice(0, 8)}`,
+            id: `sarif-imp-${scope.runId}-${rIdx}-${idx}-${crypto28.createHash("sha256").update(`${toolName}:${ruleId}:${filePath}:${startLine}`).digest("hex").slice(0, 8)}`,
             runId: scope.runId,
             softwareId: scope.softwareId,
             softwareName: scope.softwareName,
@@ -28455,7 +29788,7 @@ var SarifCodec = class {
         );
       }
     }
-    const payloadSha256 = crypto26.createHash("sha256").update(JSON.stringify(doc)).digest("hex");
+    const payloadSha256 = crypto28.createHash("sha256").update(JSON.stringify(doc)).digest("hex");
     return {
       valid: true,
       errors: [],
@@ -28749,13 +30082,13 @@ var PortfolioEngine = class {
 };
 
 // src/reports/PdfReportGenerator.ts
-import crypto27 from "node:crypto";
+import crypto29 from "node:crypto";
 var DEFAULT_REPORT_HMAC_KEY = process.env.WINHOOD_REPORT_HMAC_KEY || "winhood-deterministic-audit-report-hmac-key-v4";
 function sha256Hex3(input) {
-  return crypto27.createHash("sha256").update(input).digest("hex");
+  return crypto29.createHash("sha256").update(input).digest("hex");
 }
 function computeHmacSha256(payload, secret = DEFAULT_REPORT_HMAC_KEY) {
-  return crypto27.createHmac("sha256", secret).update(payload).digest("hex");
+  return crypto29.createHmac("sha256", secret).update(payload).digest("hex");
 }
 function escapeHtml(raw) {
   return raw.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
@@ -30203,7 +31536,7 @@ function createInitialRealWorkspaceState(dataDir = DATA_DIR, dbManager = new Per
   });
   const auditLogs = [
     {
-      id: `aud-${crypto28.randomUUID().slice(0, 8)}`,
+      id: `aud-${crypto30.randomUUID().slice(0, 8)}`,
       timestamp: nowIso,
       actor: "Arquiteto Chefe (admin@winhood.sec)",
       role: "ADMIN",
@@ -30214,7 +31547,7 @@ function createInitialRealWorkspaceState(dataDir = DATA_DIR, dbManager = new Per
       integrityHash: computeSha256(`AUDIT|1|${projectId}|${nowIso}`)
     },
     {
-      id: `aud-${crypto28.randomUUID().slice(0, 8)}`,
+      id: `aud-${crypto30.randomUUID().slice(0, 8)}`,
       timestamp: nowIso,
       actor: "Orquestrador de An\xE1lises WinHood",
       role: "SECURITY_LEAD",
@@ -30265,7 +31598,7 @@ function createInitialCleanWorkspaceState(dataDir = DATA_DIR, dbManager = new Pe
     adapters: buildFull21SecurityAdaptersCatalog(),
     auditLogs: [
       {
-        id: `aud-${crypto28.randomUUID().slice(0, 8)}`,
+        id: `aud-${crypto30.randomUUID().slice(0, 8)}`,
         timestamp: nowIso,
         actor: "Sistema WinHood Analyzer",
         role: "SYSTEM",
@@ -30444,7 +31777,7 @@ function appendAuditLog(state, action, entityType, entityId, details, actorUser)
   const actorName = actorUser?.name || "Sistema WinHood";
   const actorRole = actorUser?.role || "SYSTEM";
   const entry = {
-    id: `aud-${crypto28.randomUUID().slice(0, 8)}`,
+    id: `aud-${crypto30.randomUUID().slice(0, 8)}`,
     timestamp: nowIso,
     actor: `${actorName} (${actorRole})`,
     role: actorRole,
@@ -30781,7 +32114,7 @@ async function createWinHoodApp(options) {
         const providedCsrf = String(req.headers["x-csrf-token"] || req.headers["x-winhood-csrf"] || "").trim();
         const expBuf = Buffer.from(expectedCsrf, "utf8");
         const provBuf = Buffer.from(providedCsrf, "utf8");
-        if (!expectedCsrf || expBuf.length !== provBuf.length || !crypto28.timingSafeEqual(expBuf, provBuf)) {
+        if (!expectedCsrf || expBuf.length !== provBuf.length || !crypto30.timingSafeEqual(expBuf, provBuf)) {
           return res.status(403).json({
             error: "CSRF_INVALID",
             code: "CSRF_INVALID",
@@ -31358,7 +32691,7 @@ async function createWinHoodApp(options) {
     const providedCsrf = String(req.headers["x-csrf-token"] || req.headers["x-winhood-csrf"] || "").trim();
     const expBuf = Buffer.from(expectedCsrf, "utf8");
     const provBuf = Buffer.from(providedCsrf, "utf8");
-    if (!expectedCsrf || expBuf.length !== provBuf.length || !crypto28.timingSafeEqual(expBuf, provBuf)) {
+    if (!expectedCsrf || expBuf.length !== provBuf.length || !crypto30.timingSafeEqual(expBuf, provBuf)) {
       return res.status(403).json({
         error: "CSRF_INVALID",
         code: "CSRF_INVALID",
@@ -31467,6 +32800,36 @@ async function createWinHoodApp(options) {
       return res.json({ ok: true, user, recoveryCodes });
     } catch (err) {
       return res.status(400).json({ error: err?.message || "Falha ao confirmar MFA." });
+    }
+  });
+  app.post(["/api/auth/mfa/disable", "/api/auth/totp/disable"], (req, res) => {
+    const actor = getRequestActor(req, res);
+    if (actor.id === "usr-anonymous") {
+      return res.status(401).json({ error: "AUTH_REQUIRED" });
+    }
+    const { password, totpCode, recoveryCode } = req.body || {};
+    const sessionToken = extractSessionTokenFromRequest(req).token || void 0;
+    try {
+      const updatedUser = authService.disableMfaForUser(
+        actor.id,
+        { password, totpCode, recoveryCode },
+        sessionToken
+      );
+      appendAuditLog(
+        db,
+        "AUTH_MFA_DISABLED",
+        "AUTH",
+        actor.id,
+        `Autentica\xE7\xE3o TOTP MFA removida para ${actor.email}.`,
+        updatedUser
+      );
+      saveDatabase(db);
+      return res.json({ ok: true, user: updatedUser });
+    } catch (err) {
+      const msg = err?.message || "Falha ao desabilitar MFA.";
+      const status = msg.startsWith("AUTH_INVALID_") || msg.startsWith("AUTH_TOTP_REPLAY") ? 401 : 400;
+      const code = msg.includes(":") ? msg.split(":")[0].trim() : "MFA_DISABLE_FAILED";
+      return res.status(status).json({ error: msg, code });
     }
   });
   app.post("/api/auth/totp/authenticate", (req, res) => {
@@ -31959,7 +33322,7 @@ async function createWinHoodApp(options) {
     const resolvedCategory = (category || resolvedTags[0] || "Avalia\xE7\xE3o Multi-Categoria Transversal").trim();
     const resolvedEnabledCategories = Array.isArray(enabledCategories) && enabledCategories.length > 0 ? enabledCategories : [...ALL_BENCHMARK_CATEGORIES];
     const project = {
-      id: crypto28.randomUUID(),
+      id: crypto30.randomUUID(),
       name: name.trim(),
       category: resolvedCategory,
       domainTags: resolvedTags,
@@ -32212,7 +33575,7 @@ async function createWinHoodApp(options) {
       });
     }
     const nowIso = (/* @__PURE__ */ new Date()).toISOString();
-    const projectId = crypto28.randomUUID();
+    const projectId = crypto30.randomUUID();
     const resolvedTags = Array.isArray(domainTags) && domainTags.length > 0 ? domainTags.map((t) => String(t).trim()).filter(Boolean) : category ? [category.trim(), "multi-category", "mqr-strict"] : ["multi-category", "devsecops", "mqr-strict"];
     const resolvedCategory = (category || resolvedTags[0] || "Avalia\xE7\xE3o Multi-Categoria Transversal").trim();
     const resolvedEnabledCategories = Array.isArray(enabledCategories) && enabledCategories.length > 0 ? enabledCategories : [...ALL_BENCHMARK_CATEGORIES];
@@ -32262,7 +33625,7 @@ async function createWinHoodApp(options) {
     const isolatedPath = writeIsolatedArtifactsToDisk(slug, filesMap, isolatedArtifactsDir);
     const inv = buildTechnicalInventory(filesMap, isolatedPath);
     const createdSoftware = {
-      id: `sw-${crypto28.randomUUID().slice(0, 8)}`,
+      id: `sw-${crypto30.randomUUID().slice(0, 8)}`,
       projectId: project.id,
       name: swName,
       vendor: swVendor,
@@ -32724,7 +34087,7 @@ async function createWinHoodApp(options) {
     }
     let targetProject = existingProject;
     if (!targetProject) {
-      const projId = crypto28.randomUUID();
+      const projId = crypto30.randomUUID();
       targetProject = {
         id: projId,
         name: (newProjectName || `Benchmark ${repoName}`).trim(),
@@ -32764,7 +34127,7 @@ async function createWinHoodApp(options) {
     const isolatedPath = writeIsolatedArtifactsToDisk(slug, filesMap, isolatedArtifactsDir);
     const inv = buildTechnicalInventory(filesMap, isolatedPath);
     const newSoftware = {
-      id: `sw-${crypto28.randomUUID().slice(0, 8)}`,
+      id: `sw-${crypto30.randomUUID().slice(0, 8)}`,
       projectId: targetProject.id,
       name: repoName,
       vendor: owner || "Comunidade GitHub",
@@ -32946,7 +34309,7 @@ async function createWinHoodApp(options) {
       isolatedPath = writeIsolatedArtifactsToDisk(slug, filesMap, isolatedArtifactsDir);
       inv = buildTechnicalInventory(filesMap, isolatedPath);
     }
-    const swId = `sw-${crypto28.randomUUID().slice(0, 8)}`;
+    const swId = `sw-${crypto30.randomUUID().slice(0, 8)}`;
     const commit = hasSource ? body.commitHash && body.commitHash.trim().length > 0 ? body.commitHash.trim() : `PKG_${inv.packageSha256.slice(0, 16)}` : body.commitHash && body.commitHash.trim().length > 0 ? body.commitHash.trim() : "NOT_DECLARED";
     const resolvedDomainTags = Array.isArray(body.domainTags) && body.domainTags.length > 0 ? body.domainTags.map((t) => String(t).trim()).filter(Boolean) : body.category ? [body.category.trim(), ...Object.keys(inv.languageBreakdown).map((l) => l.toLowerCase())] : ["multi-category", ...Object.keys(inv.languageBreakdown).map((l) => l.toLowerCase())];
     const newSw = {
@@ -33233,7 +34596,7 @@ async function createWinHoodApp(options) {
     if (!targetProject) {
       const nowIso = (/* @__PURE__ */ new Date()).toISOString();
       targetProject = {
-        id: `proj-${crypto28.randomUUID().slice(0, 8)}`,
+        id: `proj-${crypto30.randomUUID().slice(0, 8)}`,
         name: "Projeto Principal (Zero-Configura\xE7\xE3o)",
         category: "Aplica\xE7\xF5es Web & Microsservi\xE7os",
         objective: "Auditoria Autom\xE1tica de Qualidade e Seguran\xE7a",
@@ -33273,7 +34636,7 @@ async function createWinHoodApp(options) {
         message: `O software "${missingSources[0].name}" n\xE3o possui c\xF3digo-fonte importado. Ingest\xE3o de fontes reais obrigat\xF3ria antes da an\xE1lise.`
       });
     }
-    const runId = `run-${crypto28.randomUUID().slice(0, 8)}`;
+    const runId = `run-${crypto30.randomUUID().slice(0, 8)}`;
     const activeEnabledCategories = targetProject.enabledCategories && targetProject.enabledCategories.length > 0 ? targetProject.enabledCategories : [...ALL_BENCHMARK_CATEGORIES];
     const activeWeights = normalizeEnabledCategoryWeights(DEFAULT_CATEGORY_WEIGHTS, activeEnabledCategories);
     const activeEnv = DEFAULT_BENCHMARK_PROFILES[0].equivalenceEnvironment;
@@ -33387,7 +34750,7 @@ async function createWinHoodApp(options) {
     if (!project) {
       const nowIso = (/* @__PURE__ */ new Date()).toISOString();
       project = {
-        id: `proj-${crypto28.randomUUID().slice(0, 8)}`,
+        id: `proj-${crypto30.randomUUID().slice(0, 8)}`,
         name: `Avalia\xE7\xE3o Independente (${selectedSoftwares.map((s) => s.name).join(" vs ")})`,
         category: "Avalia\xE7\xE3o Multi-Categoria Transversal",
         domainTags: ["multi-category", "standalone"],
@@ -33449,7 +34812,7 @@ async function createWinHoodApp(options) {
     }
     const activeQualityGateId = qualityGateId || project.defaultQualityGateId || "qg-sonar-way-mqr";
     const resolvedProfileName = profileName || matchedSpecializedProfile?.name || (resolvedAssessmentMode === "INDIVIDUAL" ? `Auditoria Individual - ${selectedSoftwares[0]?.name}` : "Benchmark WinHood");
-    const runId = `run-${crypto28.randomUUID().slice(0, 8)}`;
+    const runId = `run-${crypto30.randomUUID().slice(0, 8)}`;
     const runningRun = createInitialRunningBenchmark({
       runId,
       projectId: project.id,
@@ -34799,7 +36162,7 @@ async function createWinHoodApp(options) {
         sourceFilesSha256Manifest: Object.entries(sw.sourceFilesContent || {}).sort(([a], [b]) => a.localeCompare(b)).map(([filePath, content]) => ({
           filePath,
           bytes: Buffer.byteLength(content, "utf8"),
-          sha256: crypto28.createHash("sha256").update(content, "utf8").digest("hex")
+          sha256: crypto30.createHash("sha256").update(content, "utf8").digest("hex")
         }))
       })),
       section05_algebraicScoreCardsBreakdown: run.scoreCards.map((sc) => ({
@@ -34997,7 +36360,7 @@ async function createWinHoodApp(options) {
     );
     if (!existing) {
       existing = {
-        id: id || `sonar-proj-${crypto28.randomUUID().slice(0, 8)}`,
+        id: id || `sonar-proj-${crypto30.randomUUID().slice(0, 8)}`,
         name: (name || cleanProjectKey).trim(),
         platform: resolvedPlatform,
         serverUrl: safeOrigin,
@@ -35810,7 +37173,7 @@ async function createWinHoodApp(options) {
       const existingProfile = db.savedSonarProjects.find((p) => p.projectKey === effectiveKey);
       if (!existingProfile) {
         const newProfile = {
-          id: `sonar-proj-${crypto28.randomUUID().slice(0, 8)}`,
+          id: `sonar-proj-${crypto30.randomUUID().slice(0, 8)}`,
           name: effectiveKey,
           platform: "SONARCLOUD",
           serverUrl: safeOrigin,
@@ -37001,7 +38364,7 @@ async function createWinHoodApp(options) {
       });
     }
     const target = {
-      id: `tgt-${crypto28.randomUUID().slice(0, 8)}`,
+      id: `tgt-${crypto30.randomUUID().slice(0, 8)}`,
       label: label.trim(),
       origin: parsedOrigin.origin,
       purpose: (purpose || "Medi\xE7\xE3o controlada de lat\xEAncia HTTP").trim(),
@@ -37047,7 +38410,7 @@ async function createWinHoodApp(options) {
     let attachedToRunId = null;
     if (targetRun) {
       const execRecord = {
-        id: `uexec-test-${crypto28.randomUUID().slice(0, 8)}`,
+        id: `uexec-test-${crypto30.randomUUID().slice(0, 8)}`,
         runId: targetRun.id,
         softwareId: sw.id,
         kind: "TEST_EXECUTION",
@@ -37106,7 +38469,7 @@ async function createWinHoodApp(options) {
           sc.metricsSummary.testCoveragePercent = parsed.lineCoveragePercent;
           targetRun.executionRecords = [
             {
-              id: `uexec-cov-${crypto28.randomUUID().slice(0, 8)}`,
+              id: `uexec-cov-${crypto30.randomUUID().slice(0, 8)}`,
               runId: targetRun.id,
               softwareId,
               kind: "COVERAGE_IMPORT",
@@ -37209,7 +38572,7 @@ async function createWinHoodApp(options) {
           sc.metricsSummary.throughputRps = result.throughputRps ?? 0;
           targetRun.executionRecords = [
             {
-              id: `uexec-perf-${crypto28.randomUUID().slice(0, 8)}`,
+              id: `uexec-perf-${crypto30.randomUUID().slice(0, 8)}`,
               runId: targetRun.id,
               softwareId,
               kind: "HTTP_PERF_PROBE",
@@ -37381,14 +38744,14 @@ async function createWinHoodApp(options) {
     const probePayload = `winhood-keystore-self-test:${Date.now()}:${actor.email}`;
     const testPayloadSha256 = computeSha256(probePayload);
     const hmacKey = KeyManagementService.getActiveEvidenceHmacKey();
-    const hmacDigest = crypto28.createHmac("sha256", hmacKey.secret).update(probePayload, "utf8").digest("hex");
+    const hmacDigest = crypto30.createHmac("sha256", hmacKey.secret).update(probePayload, "utf8").digest("hex");
     const resolvedHmacSecret = KeyManagementService.getEvidenceSecretByKeyId(hmacKey.keyId);
-    const hmacExpected = resolvedHmacSecret ? crypto28.createHmac("sha256", resolvedHmacSecret).update(probePayload, "utf8").digest("hex") : "";
+    const hmacExpected = resolvedHmacSecret ? crypto30.createHmac("sha256", resolvedHmacSecret).update(probePayload, "utf8").digest("hex") : "";
     const hmacValid = Boolean(hmacDigest && hmacDigest === hmacExpected);
     const edKey = KeyManagementService.getActiveEvidenceEd25519Key();
-    const edSignature = crypto28.sign(null, Buffer.from(probePayload, "utf8"), edKey.privateKeyPem);
+    const edSignature = crypto30.sign(null, Buffer.from(probePayload, "utf8"), edKey.privateKeyPem);
     const resolvedPub = KeyManagementService.getEd25519PublicKeyByKeyId(edKey.keyId) || edKey.publicKeyPem;
-    const ed25519Valid = crypto28.verify(null, Buffer.from(probePayload, "utf8"), resolvedPub, edSignature);
+    const ed25519Valid = crypto30.verify(null, Buffer.from(probePayload, "utf8"), resolvedPub, edSignature);
     const encryptedProbe = MqrBridgeConnection.encryptToken(probePayload);
     const decryptedProbe = MqrBridgeConnection.decryptToken(encryptedProbe);
     const aesGcmValid = decryptedProbe === probePayload;

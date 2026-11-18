@@ -1904,16 +1904,33 @@ test('Phase 5, 6 & 7: Independent Validation Corpus + Wilson 95% CI, Bimodal Com
   assert.equal(ciFull.pointEstimate, 1);
   assert.ok((ciFull.lower ?? 0) > 0.7 && (ciFull.upper ?? 0) <= 1);
 
-  const indReport = GoldenDatasetRunner.runIndependentValidationSuite();
-  assert.equal(indReport.datasetOriginLabel, 'WINHOOD_INDEPENDENT_VALIDATION_BENCHMARK');
-  assert.ok(indReport.totalCases >= 12);
+  const indReport = GoldenDatasetRunner.runHoldoutValidationSuite();
+  assert.equal(indReport.datasetOriginLabel, 'WINHOOD_INTERNAL_HOLDOUT_CORPUS');
+  assert.equal(indReport.datasetRole, 'INTERNAL_HOLDOUT');
+  assert.equal(indReport.missingDeclaredLanguages.length, 0);
+  assert.ok(indReport.totalCases >= 18);
   assert.equal(indReport.precision, 1);
   assert.equal(indReport.recall, 1);
   assert.equal(indReport.falsePositiveRate, 0);
   assert.ok(indReport.confidenceIntervals95?.precision.lower !== null);
   assert.ok(indReport.macroAverages?.byLanguage.f1Score !== null);
 
-  // 2. Bimodal Comparability (SAME_ENGINE vs CROSS_TOOL)
+  // 2. Bimodal Comparability with Verifiable ComparabilityManifest (SAME_ENGINE vs CROSS_TOOL)
+  const { buildComparabilityManifest, CANONICAL_TAXONOMY_MAPPING_SHA256, sha256Canonical } = await import(
+    '../comparability'
+  );
+  const sameManA = buildComparabilityManifest({
+    projectId: 'proj-api',
+    sourceRepository: 'https://github.com/org/api',
+    commitSha: 'deadbeef1234',
+    configHashSha256: sha256Canonical({ cfg: 1 }),
+    analyticalProfile: 'api-standard',
+    engineVersion: '4.4.0',
+    ruleCatalogSha256: 'abc',
+    weightsHashSha256: sha256Canonical({ w: 1 }),
+    eligibleFilesScopeHash: sha256Canonical(['src/server.ts']),
+    evidenceIntegrityVerified: true,
+  });
   const sameEngineComp = validatePairComparability(
     {
       softwareId: 'sw-a',
@@ -1922,6 +1939,7 @@ test('Phase 5, 6 & 7: Independent Validation Corpus + Wilson 95% CI, Bimodal Com
       scopeCoveragePercent: 95,
       evidenceConfidence: 'HIGH',
       functionalCategory: 'API_SERVICE',
+      manifest: sameManA,
     },
     {
       softwareId: 'sw-b',
@@ -1930,9 +1948,11 @@ test('Phase 5, 6 & 7: Independent Validation Corpus + Wilson 95% CI, Bimodal Com
       scopeCoveragePercent: 92,
       evidenceConfidence: 'HIGH',
       functionalCategory: 'API_SERVICE',
+      manifest: { ...sameManA },
     }
   );
   assert.equal(sameEngineComp.comparabilityClassification, 'STRICTLY_COMPARABLE');
+  assert.equal(sameEngineComp.manifestsVerified, true);
 
   const crossToolComp = validatePairComparability(
     {
@@ -1943,6 +1963,13 @@ test('Phase 5, 6 & 7: Independent Validation Corpus + Wilson 95% CI, Bimodal Com
       evidenceConfidence: 'MEDIUM',
       functionalCategory: 'API_SERVICE',
       commitHash: 'deadbeef1234',
+      toolExecuted: true,
+      manifest: {
+        ...sameManA,
+        engineVersion: 'WINHOOD-4.4.0',
+        ruleCatalogSha256: 'cat-1',
+        taxonomyMappingSha256: CANONICAL_TAXONOMY_MAPPING_SHA256,
+      },
     },
     {
       softwareId: 'sw-a-ext',
@@ -1952,13 +1979,21 @@ test('Phase 5, 6 & 7: Independent Validation Corpus + Wilson 95% CI, Bimodal Com
       evidenceConfidence: 'HIGH',
       functionalCategory: 'API_SERVICE',
       commitHash: 'deadbeef1234',
+      toolExecuted: true,
+      manifest: {
+        ...sameManA,
+        engineVersion: 'MQR-BRIDGE-10.4',
+        ruleCatalogSha256: 'cat-2',
+        taxonomyMappingSha256: CANONICAL_TAXONOMY_MAPPING_SHA256,
+      },
     },
     { modality: 'CROSS_TOOL' }
   );
   assert.equal(crossToolComp.comparable, true);
   assert.equal(crossToolComp.comparabilityClassification, 'QUALIFIED_COMPARISON');
 
-  const crossToolIncomp = validatePairComparability(
+  // Reject bare normalizedTaxonomyApplied=true / sameCommitVerified=true without valid manifest proof
+  const crossToolFakeFlags = validatePairComparability(
     {
       softwareId: 'sw-a',
       engineVersion: 'WINHOOD-4.4.0',
@@ -1976,6 +2011,33 @@ test('Phase 5, 6 & 7: Independent Validation Corpus + Wilson 95% CI, Bimodal Com
       evidenceConfidence: 'HIGH',
       functionalCategory: 'API_SERVICE',
       commitHash: 'commit-2',
+    },
+    { modality: 'CROSS_TOOL', sameCommitVerified: true, normalizedTaxonomyApplied: true }
+  );
+  assert.equal(crossToolFakeFlags.comparable, false);
+  assert.equal(crossToolFakeFlags.comparabilityClassification, 'NOT_COMPARABLE');
+
+  const crossToolIncomp = validatePairComparability(
+    {
+      softwareId: 'sw-a',
+      engineVersion: 'WINHOOD-4.4.0',
+      ruleCatalogSha256: 'cat-1',
+      scopeCoveragePercent: 95,
+      evidenceConfidence: 'HIGH',
+      functionalCategory: 'API_SERVICE',
+      commitHash: 'commit-1',
+      toolExecuted: false,
+      manifest: { ...sameManA, commitSha: 'commit-1' },
+    },
+    {
+      softwareId: 'sw-b',
+      engineVersion: 'MQR-BRIDGE-10.4',
+      ruleCatalogSha256: 'cat-2',
+      scopeCoveragePercent: 90,
+      evidenceConfidence: 'HIGH',
+      functionalCategory: 'API_SERVICE',
+      commitHash: 'commit-2',
+      manifest: { ...sameManA, commitSha: 'commit-2' },
     },
     { modality: 'CROSS_TOOL', normalizedTaxonomyApplied: false }
   );
@@ -2072,6 +2134,97 @@ test('Phase 5, 6 & 7: Independent Validation Corpus + Wilson 95% CI, Bimodal Com
   assert.ok(names.includes('lodash'));
   assert.ok(names.includes('zod'));
 });
+
+test('Phase 6: Parametrized ToolAdapterInfo telemetry rejects fake OPERATIONAL states without binary/execution and updates cleanly when sandboxed binary exists in PATH', async () => {
+  const fsMod = await import('node:fs');
+  const osMod = await import('node:os');
+  const pathMod = await import('node:path');
+  const { buildToolAdaptersCatalog } = await import('./benchmarkOrchestrator');
+
+  const origPath = process.env.PATH || '';
+  const origZap = process.env.OWASP_ZAP_API_URL;
+  delete process.env.OWASP_ZAP_API_URL;
+
+  const emptyBinDir = fsMod.mkdtempSync(pathMod.join(osMod.tmpdir(), 'wh-empty-bin-'));
+  const fakeBinDir = fsMod.mkdtempSync(pathMod.join(osMod.tmpdir(), 'wh-fake-bin-'));
+
+  try {
+    // 1. No external security CLIs in PATH
+    process.env.PATH = `${emptyBinDir}${pathMod.delimiter}/usr/bin${pathMod.delimiter}/bin`;
+    const adaptersNoExt = buildToolAdaptersCatalog();
+    const trivyMissing = adaptersNoExt.find((a) => a.id === 'trivy-container-cli');
+    const zapMissing = adaptersNoExt.find((a) => a.id === 'owasp-zap-dast');
+    const winSandbox = adaptersNoExt.find((a) => a.id === 'win-sandbox-snapshot');
+    const opengrepNoExt = adaptersNoExt.find((a) => a.id === 'opengrep-sast');
+
+    assert.equal(trivyMissing?.binaryDetected, false);
+    assert.equal(trivyMissing?.configured, false);
+    assert.equal(trivyMissing?.adapterState, 'NOT_INSTALLED');
+    assert.equal(trivyMissing?.status, 'FERRAMENTA NÃO INSTALADA');
+    assert.equal(trivyMissing?.signatureHash, null);
+
+    assert.equal(zapMissing?.configured, false);
+    assert.equal(zapMissing?.adapterState, 'NOT_CONFIGURED');
+    assert.equal(zapMissing?.status, 'INTEGRAÇÃO NÃO CONFIGURADA');
+
+    if (osMod.platform() !== 'win32') {
+      assert.equal(winSandbox?.configured, false);
+      assert.equal(winSandbox?.adapterState, 'NOT_INSTALLED');
+      assert.equal(winSandbox?.status, 'FERRAMENTA NÃO INSTALADA');
+    }
+
+    assert.equal(opengrepNoExt?.externalBinaryDetected, false);
+    assert.equal(opengrepNoExt?.adapterState, 'NATIVE_AVAILABLE');
+    assert.equal(opengrepNoExt?.executionVerified, false);
+    assert.equal(opengrepNoExt?.resultCompleteness, 'NOT_EXECUTED');
+
+    // 2. Simulated external binary (`trivy` & `semgrep`) inside isolated temp PATH
+    const trivyBin = pathMod.join(fakeBinDir, osMod.platform() === 'win32' ? 'trivy.cmd' : 'trivy');
+    const semgrepBin = pathMod.join(fakeBinDir, osMod.platform() === 'win32' ? 'semgrep.cmd' : 'semgrep');
+    const scriptBody = osMod.platform() === 'win32'
+      ? '@echo trivy 0.58.0-sandbox\r\n'
+      : '#!/bin/sh\necho "0.58.0-sandbox"\n';
+    fsMod.writeFileSync(trivyBin, scriptBody, { mode: 0o755 });
+    fsMod.writeFileSync(semgrepBin, scriptBody, { mode: 0o755 });
+
+    process.env.PATH = `${fakeBinDir}${pathMod.delimiter}${origPath}`;
+    const adaptersWithExt = buildToolAdaptersCatalog([
+      {
+        id: 'exec-trivy-1',
+        toolId: 'trivy-container-cli',
+        toolName: 'Aqua Trivy',
+        toolVersion: '0.58.0-sandbox',
+        executionMethod: 'CLI_BINARY',
+        eligibleFilesCount: 5,
+        analyzedFilesCount: 5,
+        errorFilesCount: 0,
+        parsingErrorsCount: 0,
+        coveragePercent: 100,
+        exitCode: 0,
+        veracityStatus: 'VERIFIED',
+        rawOutputSha256: 'a'.repeat(64),
+        startedAt: '2026-11-17T12:00:00.000Z',
+        completedAt: '2026-11-17T12:00:01.000Z',
+      } as any,
+    ]);
+
+    const trivyFound = adaptersWithExt.find((a) => a.id === 'trivy-container-cli');
+    const opengrepFound = adaptersWithExt.find((a) => a.id === 'opengrep-sast');
+    assert.equal(trivyFound?.binaryDetected, true);
+    assert.equal(trivyFound?.configured, true);
+    assert.equal(trivyFound?.adapterState, 'EXTERNAL_EXECUTION_VERIFIED');
+    assert.equal(trivyFound?.executionVerified, true);
+    assert.equal(trivyFound?.lastExitCode, 0);
+    assert.equal(opengrepFound?.externalBinaryDetected, true);
+    assert.equal(opengrepFound?.adapterState, 'EXTERNAL_CONFIGURED');
+  } finally {
+    process.env.PATH = origPath;
+    if (origZap !== undefined) process.env.OWASP_ZAP_API_URL = origZap;
+    fsMod.rmSync(emptyBinDir, { recursive: true, force: true });
+    fsMod.rmSync(fakeBinDir, { recursive: true, force: true });
+  }
+});
+
 
 
 
