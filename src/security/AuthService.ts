@@ -90,12 +90,16 @@ export const PERMISSIONS_MATRIX: Record<RbacRole, ReadonlySet<RbacPermission>> =
   AUDITOR: new Set<RbacPermission>(['read:all', 'audit:read', 'reports:export']),
 };
 
+export type AuthProviderKind = 'password' | 'pin' | 'github' | 'webauthn' | 'windows-hello-native';
+
 export interface WebAuthnCredentialRecord {
   credentialId: string; // base64url
   publicKeySpkiBase64: string; // DER SubjectPublicKeyInfo in base64
   coseAlgorithm: -7 | -257; // -7 (ES256) or -257 (RS256)
   signCount: number;
   transports?: string[];
+  label?: string;
+  nativePrivateKeySealed?: string | null;
   createdAt: string;
   lastUsedAt?: string | null;
 }
@@ -109,6 +113,10 @@ export interface UserAccountRecord {
   pinHash?: string | null; // scrypt:N=32768,r=8,p=1:<saltHex>:<hashHex>
   pinEnabled?: boolean;
   webauthnCredentials?: WebAuthnCredentialRecord[];
+  githubId?: number | null;
+  githubLogin?: string | null;
+  githubAvatarUrl?: string | null;
+  authProviders?: AuthProviderKind[];
   mfaEnabled: boolean;
   totpSecretBase32: string | null; // AES-256-GCM encrypted payload (whvault:v1:...) or legacy Base32
   pendingTotpSecretBase32?: string | null;
@@ -132,6 +140,10 @@ export interface PublicUserView {
   mfaVerified: boolean;
   pinEnabled?: boolean;
   webauthnEnabled?: boolean;
+  githubLinked?: boolean;
+  githubLogin?: string | null;
+  githubAvatarUrl?: string | null;
+  authProviders?: AuthProviderKind[];
 }
 
 export interface AuthSessionRecord {
@@ -163,9 +175,10 @@ interface PersistedAuthDatabase {
 export interface WebAuthnChallengeRecord {
   challengeId: string;
   challengeBase64Url: string;
-  purpose: 'REGISTER_ACCOUNT' | 'LOGIN';
+  purpose: 'REGISTER_ACCOUNT' | 'LOGIN' | 'LINK_CREDENTIAL';
   rpId: string;
   expiresAtMs: number;
+  userId?: string;
   registrationMeta?: {
     name: string;
     email: string;
@@ -1686,7 +1699,17 @@ export class AuthService {
       mfaVerified,
       pinEnabled: Boolean(user.pinEnabled && user.pinHash),
       webauthnEnabled: Boolean(user.webauthnCredentials && user.webauthnCredentials.length > 0),
+      githubLinked: Boolean(user.githubId || user.githubLogin),
+      githubLogin: user.githubLogin || null,
+      githubAvatarUrl: user.githubAvatarUrl || null,
+      authProviders: user.authProviders || [],
     };
+  }
+
+  public hasAnyWebAuthnCredentials(): boolean {
+    return this.db.users.some(
+      (u) => !u.disabled && Array.isArray(u.webauthnCredentials) && u.webauthnCredentials.length > 0
+    );
   }
 
   private completeBootstrapOnFirstAccount(nowIso: string): void {
@@ -1966,7 +1989,8 @@ export class AuthService {
     attestation: 'none';
     authenticatorSelection: {
       authenticatorAttachment: 'platform';
-      residentKey: 'preferred';
+      residentKey: 'required';
+      requireResidentKey: true;
       userVerification: 'required';
     };
   } {
@@ -2030,7 +2054,8 @@ export class AuthService {
       attestation: 'none',
       authenticatorSelection: {
         authenticatorAttachment: 'platform',
-        residentKey: 'preferred',
+        residentKey: 'required',
+        requireResidentKey: true,
         userVerification: 'required',
       },
     };
@@ -2482,6 +2507,211 @@ export class AuthService {
     };
   }
 
+  public createWebAuthnLinkOptions(params: {
+    userId: string;
+    rpId?: string;
+    ipAddress?: string;
+  }) {
+    const ipAddress = params.ipAddress || '127.0.0.1';
+    this.checkIpRateLimit(ipAddress);
+    this.pruneExpiredWebAuthnChallenges();
+
+    const user = this.db.users.find((u) => u.id === params.userId && !u.disabled);
+    if (!user) {
+      throw new Error('USER_NOT_FOUND: Usuário não encontrado.');
+    }
+
+    const rpId = normalizeWebAuthnRpId(params.rpId);
+    const challengeId = crypto.randomUUID();
+    const challengeBase64Url = crypto.randomBytes(32).toString('base64url');
+    const excludeCredentials = (user.webauthnCredentials || []).map((c) => ({
+      type: 'public-key' as const,
+      id: c.credentialId,
+      transports: c.transports || ['internal'],
+    }));
+
+    this.webauthnChallenges.set(challengeId, {
+      challengeId,
+      challengeBase64Url,
+      purpose: 'LINK_CREDENTIAL',
+      rpId,
+      expiresAtMs: Date.now() + AuthService.PREAUTH_TTL_MS,
+      userId: user.id,
+      email: user.email,
+    });
+
+    return {
+      challengeId,
+      rp: { name: 'WinHood Benchmark Analyzer', id: rpId },
+      user: {
+        id: Buffer.from(user.id, 'utf8').toString('base64url'),
+        name: user.email,
+        displayName: user.name,
+      },
+      challenge: challengeBase64Url,
+      pubKeyCredParams: [
+        { type: 'public-key' as const, alg: -7 as const },
+        { type: 'public-key' as const, alg: -257 as const },
+      ],
+      timeout: 60000,
+      attestation: 'none' as const,
+      excludeCredentials,
+      authenticatorSelection: {
+        authenticatorAttachment: 'platform' as const,
+        residentKey: 'required' as const,
+        requireResidentKey: true,
+        userVerification: 'required' as const,
+      },
+    };
+  }
+
+  public verifyWebAuthnLinkCredential(params: {
+    userId: string;
+    challengeId?: string;
+    credentialId: string;
+    clientDataJSON: string;
+    attestationObject?: string;
+    authenticatorData?: string;
+    publicKeySpkiBase64?: string;
+    coseAlgorithm?: number;
+    transports?: string[];
+    label?: string;
+    ipAddress?: string;
+  }): { user: PublicUserView; credentialId: string } {
+    const ipAddress = params.ipAddress || '127.0.0.1';
+    this.checkIpRateLimit(ipAddress);
+    this.pruneExpiredWebAuthnChallenges();
+
+    const clientDataBuf = decodeBase64OrBase64Url(params.clientDataJSON);
+    let clientData: { type?: string; challenge?: string; origin?: string };
+    try {
+      clientData = JSON.parse(clientDataBuf.toString('utf8'));
+    } catch {
+      throw new Error('WEBAUTHN_CLIENT_DATA_INVALID: clientDataJSON malformado.');
+    }
+    if (clientData.type !== 'webauthn.create' || !clientData.challenge || !clientData.origin) {
+      throw new Error('WEBAUTHN_CLIENT_DATA_INVALID: Tipo ou campos de clientDataJSON inválidos.');
+    }
+
+    let challengeRecord: WebAuthnChallengeRecord | undefined;
+    if (params.challengeId) {
+      challengeRecord = this.webauthnChallenges.get(params.challengeId);
+    }
+    if (!challengeRecord || challengeRecord.purpose !== 'LINK_CREDENTIAL' || challengeRecord.userId !== params.userId) {
+      throw new Error('WEBAUTHN_CHALLENGE_INVALID: Desafio de vínculo WebAuthn inválido ou expirado.');
+    }
+    this.webauthnChallenges.delete(challengeRecord.challengeId);
+
+    if (Date.now() > challengeRecord.expiresAtMs) {
+      throw new Error('WEBAUTHN_CHALLENGE_EXPIRED: Desafio WebAuthn expirado.');
+    }
+
+    const expectedChallBuf = Buffer.from(challengeRecord.challengeBase64Url, 'utf8');
+    const providedChallBuf = Buffer.from(clientData.challenge, 'utf8');
+    if (
+      expectedChallBuf.length !== providedChallBuf.length ||
+      !crypto.timingSafeEqual(expectedChallBuf, providedChallBuf)
+    ) {
+      throw new Error('WEBAUTHN_CHALLENGE_MISMATCH: Desafio WebAuthn divergente.');
+    }
+
+    const { hostname: originHostname } = validateWebAuthnOrigin(
+      clientData.origin,
+      challengeRecord.rpId
+    );
+
+    let authDataBuf: Buffer | null = null;
+    let publicKeySpkiBase64 = (params.publicKeySpkiBase64 || '').trim();
+    let coseAlgorithm: -7 | -257 = params.coseAlgorithm === -257 ? -257 : -7;
+    let extractedCredId = (params.credentialId || '').trim();
+
+    if (params.attestationObject) {
+      const attBuf = decodeBase64OrBase64Url(params.attestationObject);
+      const attMap = decodeCborItem(attBuf, 0).value;
+      if (attMap instanceof Map && Buffer.isBuffer(attMap.get('authData'))) {
+        authDataBuf = attMap.get('authData') as Buffer;
+      }
+    }
+    if (!authDataBuf && params.authenticatorData) {
+      authDataBuf = decodeBase64OrBase64Url(params.authenticatorData);
+    }
+    if (!authDataBuf || authDataBuf.length < 37) {
+      throw new Error('WEBAUTHN_AUTHDATA_INVALID: authenticatorData ausente ou truncado.');
+    }
+
+    const rpIdHash = authDataBuf.subarray(0, 32);
+    const expectedRpHash = crypto.createHash('sha256').update(challengeRecord.rpId, 'utf8').digest();
+    const originRpHash = crypto.createHash('sha256').update(originHostname, 'utf8').digest();
+    if (
+      !crypto.timingSafeEqual(rpIdHash, expectedRpHash) &&
+      !crypto.timingSafeEqual(rpIdHash, originRpHash)
+    ) {
+      throw new Error('WEBAUTHN_RPID_MISMATCH: Hash do Relying Party (rpIdHash) inválido.');
+    }
+
+    const flags = authDataBuf[32]!;
+    if ((flags & 0x01) === 0 || (flags & 0x04) === 0) {
+      throw new Error(
+        'WEBAUTHN_UV_REQUIRED: Presença (UP) e verificação do usuário (UV) são obrigatórias.'
+      );
+    }
+
+    const signCount = authDataBuf.readUInt32BE(33);
+    if ((flags & 0x40) !== 0 && authDataBuf.length >= 55) {
+      const credIdLen = authDataBuf.readUInt16BE(53);
+      if (authDataBuf.length >= 55 + credIdLen) {
+        if (!extractedCredId) {
+          extractedCredId = authDataBuf.subarray(55, 55 + credIdLen).toString('base64url');
+        }
+        const coseKeySlice = authDataBuf.subarray(55 + credIdLen);
+        if (coseKeySlice.length > 0 && !publicKeySpkiBase64) {
+          const parsedKey = cosePublicKeyToSpkiBase64(coseKeySlice);
+          publicKeySpkiBase64 = parsedKey.publicKeySpkiBase64;
+          coseAlgorithm = parsedKey.coseAlgorithm;
+        }
+      }
+    }
+
+    if (!extractedCredId || !publicKeySpkiBase64) {
+      throw new Error('WEBAUTHN_KEY_MISSING: Chave pública ou identificador da credencial ausente.');
+    }
+
+    const spkiBuf = decodeBase64OrBase64Url(publicKeySpkiBase64);
+    const keyObj = crypto.createPublicKey({ key: spkiBuf, format: 'der', type: 'spki' });
+    publicKeySpkiBase64 = (keyObj.export({ type: 'spki', format: 'der' }) as Buffer).toString('base64');
+
+    const user = this.db.users.find((u) => u.id === params.userId && !u.disabled);
+    if (!user) {
+      throw new Error('USER_NOT_FOUND: Usuário não encontrado.');
+    }
+    user.webauthnCredentials = user.webauthnCredentials || [];
+    if (user.webauthnCredentials.some((c) => c.credentialId === extractedCredId)) {
+      throw new Error('WEBAUTHN_CREDENTIAL_EXISTS: Esta Passkey já está vinculada à conta.');
+    }
+
+    const now = new Date().toISOString();
+    user.webauthnCredentials.push({
+      credentialId: extractedCredId,
+      publicKeySpkiBase64,
+      coseAlgorithm,
+      signCount,
+      transports: params.transports || ['internal'],
+      label: (params.label || 'Windows Hello / Passkey').trim().slice(0, 60),
+      createdAt: now,
+      lastUsedAt: now,
+    });
+    const providers = new Set<AuthProviderKind>(user.authProviders || []);
+    providers.add('webauthn');
+    user.authProviders = Array.from(providers);
+    user.updatedAt = now;
+    this.save();
+
+    return {
+      user: this.toPublicUserView(user, true),
+      credentialId: extractedCredId,
+    };
+  }
+
   public static buildWindowsHelloPowerShellScript(): string {
     return [
       '$ErrorActionPreference = "Stop"',
@@ -2531,8 +2761,16 @@ export class AuthService {
     const encodedCommand = Buffer.from(script, 'utf16le').toString('base64');
 
     try {
+      const winSysRoot = process.env.SystemRoot || 'C:\\Windows';
+      const powerShellAbsPath = path.win32.join(
+        winSysRoot,
+        'System32',
+        'WindowsPowerShell',
+        'v1.0',
+        'powershell.exe'
+      );
       const { stdout } = await execFileAsync(
-        'powershell.exe',
+        powerShellAbsPath,
         ['-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodedCommand],
         {
           timeout: 65000,
@@ -2569,6 +2807,43 @@ export class AuthService {
       throw new Error(
         `WINDOWS_HELLO_EXECUTION_FAILED: Não foi possível acionar o prompt nativo do Windows Hello (${err?.message || 'Erro PowerShell'}).`
       );
+    }
+  }
+
+  private deriveNativeHelloSealKey(keyBuffer: Buffer): Buffer {
+    return crypto.createHash('sha256').update(keyBuffer).update(':winhello-native-ecdsa-v1').digest();
+  }
+
+  private sealNativeHelloPrivateKey(pkcs8Der: Buffer): string {
+    const { keyId, keyBuffer } = KeyManagementService.getActiveVaultAesKey(this.keystorePath);
+    const derivedKey = this.deriveNativeHelloSealKey(keyBuffer);
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', derivedKey, iv);
+    const encrypted = Buffer.concat([cipher.update(pkcs8Der), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    return `wh-hello-key-v1:${keyId}:${iv.toString('base64url')}:${tag.toString('base64url')}:${encrypted.toString('base64url')}`;
+  }
+
+  private unsealNativeHelloPrivateKey(sealed: string): crypto.KeyObject {
+    const parts = (sealed || '').split(':');
+    if (parts.length !== 5 || parts[0] !== 'wh-hello-key-v1') {
+      throw new Error('WINDOWS_HELLO_KEY_CORRUPTED: Formato inválido da chave privada selada do Windows Hello.');
+    }
+    const [, keyId, ivB64, tagB64, cipherB64] = parts;
+    const keyBuf =
+      KeyManagementService.getVaultKeyBufferByKeyId(keyId!, this.keystorePath) ||
+      KeyManagementService.getActiveVaultAesKey(this.keystorePath).keyBuffer;
+    const derivedKey = this.deriveNativeHelloSealKey(keyBuf);
+    try {
+      const iv = Buffer.from(ivB64!, 'base64url');
+      const tag = Buffer.from(tagB64!, 'base64url');
+      const ciphertext = Buffer.from(cipherB64!, 'base64url');
+      const decipher = crypto.createDecipheriv('aes-256-gcm', derivedKey, iv);
+      decipher.setAuthTag(tag);
+      const pkcs8Der = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+      return crypto.createPrivateKey({ key: pkcs8Der, format: 'der', type: 'pkcs8' });
+    } catch {
+      throw new Error('WINDOWS_HELLO_KEY_CORRUPTED: Chave criptográfica do Windows Hello inválida ou adulterada.');
     }
   }
 
@@ -2632,9 +2907,11 @@ export class AuthService {
         throw new Error('EMAIL_ALREADY_EXISTS: Este e-mail já está cadastrado na plataforma.');
       }
 
-      // Generate ECDSA P-256 (ES256) keypair bound to the Windows Hello verified account
-      const { publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+      // Gera par de chaves ECDSA P-256 (ES256) e sela a chave privada em repouso via AES-256-GCM
+      const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
       const spkiBase64 = (publicKey.export({ type: 'spki', format: 'der' }) as Buffer).toString('base64');
+      const pkcs8Der = privateKey.export({ type: 'pkcs8', format: 'der' }) as Buffer;
+      const nativePrivateKeySealed = this.sealNativeHelloPrivateKey(pkcs8Der);
       const credentialId = `winhello-os-${crypto.randomBytes(16).toString('base64url')}`;
 
       const now = new Date().toISOString();
@@ -2653,10 +2930,13 @@ export class AuthService {
             coseAlgorithm: -7,
             signCount: 1,
             transports: ['internal'],
+            label: 'Windows Hello Nativo (OS)',
+            nativePrivateKeySealed,
             createdAt: now,
             lastUsedAt: now,
           },
         ],
+        authProviders: ['windows-hello-native'],
         mfaEnabled: false,
         totpSecretBase32: null,
         recoveryCodeHashes: [],
@@ -2759,11 +3039,31 @@ export class AuthService {
       await this.verifyWindowsOsHelloPrompt(promptMsg);
     }
 
+    const targetCred =
+      matchedUser.webauthnCredentials?.find((c) => Boolean(c.nativePrivateKeySealed)) ||
+      matchedUser.webauthnCredentials?.[0];
+    if (targetCred?.nativePrivateKeySealed) {
+      const challenge = crypto.randomBytes(32);
+      const privKey = this.unsealNativeHelloPrivateKey(targetCred.nativePrivateKeySealed);
+      const signature = crypto.sign('sha256', challenge, privKey);
+      const pubKey = crypto.createPublicKey({
+        key: Buffer.from(targetCred.publicKeySpkiBase64, 'base64'),
+        format: 'der',
+        type: 'spki',
+      });
+      const verified = crypto.verify('sha256', challenge, pubKey, signature);
+      if (!verified) {
+        this.recordIpFailure(ipAddress);
+        throw new Error(
+          'WINDOWS_HELLO_SIGNATURE_INVALID: Verificação criptográfica ES256 da credencial Windows Hello falhou.'
+        );
+      }
+    }
+
     const now = new Date().toISOString();
-    const firstCred = matchedUser.webauthnCredentials?.[0];
-    if (firstCred) {
-      firstCred.signCount = (firstCred.signCount || 0) + 1;
-      firstCred.lastUsedAt = now;
+    if (targetCred) {
+      targetCred.signCount = (targetCred.signCount || 0) + 1;
+      targetCred.lastUsedAt = now;
     }
     matchedUser.failedLoginAttempts = 0;
     matchedUser.lockedUntil = null;
@@ -2941,6 +3241,203 @@ export class AuthService {
       email: user.email,
       revokedSessionsCount,
     };
+  }
+
+  public issueSoloLocalDesktopSession(params?: {
+    operatorName?: string;
+    ipAddress?: string;
+    userAgent?: string;
+  }): {
+    user: PublicUserView;
+    sessionId: string;
+    csrfToken: string;
+    trustDevice: boolean;
+  } {
+    const localEmail = 'solo-local@winhood.local';
+    const now = new Date().toISOString();
+    let user = this.db.users.find((u) => u.email === localEmail);
+    if (!user) {
+      const isFirstUser = this.db.users.length === 0;
+      const cleanName = (params?.operatorName || process.env.USERNAME || process.env.USER || 'Operador Local')
+        .replace(/[\r\n\0]/g, ' ')
+        .trim()
+        .slice(0, 80) || 'Operador Local';
+      user = {
+        id: `usr-local-${crypto.randomUUID().slice(0, 8)}`,
+        name: cleanName,
+        email: localEmail,
+        role: 'ADMIN',
+        passwordHash: hashPassword(`wh-solo-local-${crypto.randomBytes(24).toString('base64url')}`),
+        pinHash: null,
+        pinEnabled: false,
+        webauthnCredentials: [],
+        mfaEnabled: false,
+        totpSecretBase32: null,
+        recoveryCodeHashes: [],
+        lastAcceptedTotpStep: null,
+        disabled: false,
+        failedLoginAttempts: 0,
+        lockedUntil: null,
+        recoveryTokenSha256: null,
+        recoveryExpiresAt: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      this.db.users.push(user);
+      if (isFirstUser) {
+        this.completeBootstrapOnFirstAccount(now);
+      }
+    } else if (user.disabled) {
+      throw new Error('AUTH_ACCOUNT_DISABLED: Conta local desabilitada pelo administrador.');
+    }
+
+    const { sessionId, session } = this.createSessionRecord(
+      user,
+      true,
+      params?.ipAddress || '127.0.0.1',
+      params?.userAgent || 'WinHood-Electron-Desktop',
+      { trustDevice: true }
+    );
+    this.save();
+    return {
+      user: this.toPublicUserView(user, true),
+      sessionId,
+      csrfToken: session.csrfToken,
+      trustDevice: true,
+    };
+  }
+
+  public issueGitHubOAuthSession(params: {
+    githubId?: number;
+    githubLogin: string;
+    name?: string;
+    email?: string;
+    avatarUrl?: string | null;
+    ipAddress?: string;
+    userAgent?: string;
+  }): {
+    user: PublicUserView;
+    sessionId: string;
+    csrfToken: string;
+    trustDevice: boolean;
+    isNewAccount: boolean;
+  } {
+    const cleanLogin = (params.githubLogin || '').trim().replace(/[^a-zA-Z0-9._-]/g, '');
+    if (!cleanLogin) {
+      throw new Error('GITHUB_PROFILE_INVALID: Login GitHub ausente na resposta OAuth.');
+    }
+    const fallbackNoreply =
+      typeof params.githubId === 'number'
+        ? `${params.githubId}+${cleanLogin}@users.noreply.github.com`
+        : `${cleanLogin}@users.noreply.github.com`;
+    const candidateEmail = (params.email || fallbackNoreply).trim().toLowerCase();
+    const resolvedEmail = isValidEmailAddress(candidateEmail) ? candidateEmail : fallbackNoreply;
+    const cleanName =
+      (params.name || cleanLogin).replace(/[\r\n\0]/g, ' ').trim().slice(0, 80) || cleanLogin;
+    const now = new Date().toISOString();
+
+    let user =
+      (typeof params.githubId === 'number'
+        ? this.db.users.find((u) => u.githubId === params.githubId)
+        : undefined) ||
+      this.db.users.find((u) => u.githubLogin?.toLowerCase() === cleanLogin.toLowerCase()) ||
+      this.db.users.find((u) => u.email === resolvedEmail);
+
+    let isNewAccount = false;
+    if (!user) {
+      isNewAccount = true;
+      const isFirstUser = this.db.users.length === 0;
+      user = {
+        id: `usr-gh-${crypto.randomUUID().slice(0, 8)}`,
+        name: cleanName,
+        email: resolvedEmail,
+        role: isFirstUser ? 'ADMIN' : 'SECURITY_LEAD',
+        passwordHash: hashPassword(`wh-gh-oauth-${crypto.randomBytes(24).toString('base64url')}`),
+        pinHash: null,
+        pinEnabled: false,
+        webauthnCredentials: [],
+        githubId: typeof params.githubId === 'number' ? params.githubId : null,
+        githubLogin: cleanLogin,
+        githubAvatarUrl: params.avatarUrl || null,
+        authProviders: ['github'],
+        mfaEnabled: false,
+        totpSecretBase32: null,
+        recoveryCodeHashes: [],
+        lastAcceptedTotpStep: null,
+        disabled: false,
+        failedLoginAttempts: 0,
+        lockedUntil: null,
+        recoveryTokenSha256: null,
+        recoveryExpiresAt: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      this.db.users.push(user);
+      if (isFirstUser) {
+        this.completeBootstrapOnFirstAccount(now);
+      }
+    } else if (user.disabled) {
+      throw new Error('AUTH_ACCOUNT_DISABLED: Conta desabilitada pelo administrador.');
+    } else {
+      if (typeof params.githubId === 'number') {
+        user.githubId = params.githubId;
+      }
+      user.githubLogin = cleanLogin;
+      if (params.avatarUrl) {
+        user.githubAvatarUrl = params.avatarUrl;
+      }
+      const providers = new Set<AuthProviderKind>(user.authProviders || []);
+      providers.add('github');
+      user.authProviders = Array.from(providers);
+      user.updatedAt = now;
+    }
+
+    const { sessionId, session } = this.createSessionRecord(
+      user,
+      true,
+      params.ipAddress || '127.0.0.1',
+      params.userAgent || 'WinHood-GitHub-OAuth',
+      { trustDevice: true }
+    );
+    this.save();
+    return {
+      user: this.toPublicUserView(user, true),
+      sessionId,
+      csrfToken: session.csrfToken,
+      trustDevice: true,
+      isNewAccount,
+    };
+  }
+
+  public linkGitHubAccountToUser(
+    userId: string,
+    params: { githubId: number; githubLogin: string; avatarUrl?: string | null }
+  ): PublicUserView {
+    const user = this.db.users.find((u) => u.id === userId && !u.disabled);
+    if (!user) {
+      throw new Error('USER_NOT_FOUND: Usuário não encontrado.');
+    }
+    const cleanLogin = (params.githubLogin || '').trim().replace(/[^a-zA-Z0-9._-]/g, '');
+    if (!cleanLogin) {
+      throw new Error('GITHUB_PROFILE_INVALID: Login GitHub inválido.');
+    }
+    const conflictingUser = this.db.users.find(
+      (u) => u.id !== userId && (u.githubId === params.githubId || u.githubLogin?.toLowerCase() === cleanLogin.toLowerCase())
+    );
+    if (conflictingUser) {
+      throw new Error('GITHUB_ALREADY_LINKED: Esta conta GitHub já está vinculada a outro usuário.');
+    }
+    user.githubId = params.githubId;
+    user.githubLogin = cleanLogin;
+    if (params.avatarUrl) {
+      user.githubAvatarUrl = params.avatarUrl;
+    }
+    const providers = new Set<AuthProviderKind>(user.authProviders || []);
+    providers.add('github');
+    user.authProviders = Array.from(providers);
+    user.updatedAt = new Date().toISOString();
+    this.save();
+    return this.toPublicUserView(user, true);
   }
 
   public static hasPermission(role: RbacRole, permission: RbacPermission): boolean {

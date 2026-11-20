@@ -13,6 +13,7 @@ const ALLOWED_CHANNELS = new Set([
   'winhood:get-runtime-info',
   'winhood:get-backend-health',
   'winhood:open-logs-folder',
+  'winhood:open-external-url',
 ]);
 
 function invokeAllowedChannel(
@@ -34,6 +35,8 @@ export function createWinHoodPreloadBridge(ipcRenderer: {
     getRuntimeInfo: () => invokeAllowedChannel(ipcRenderer, 'winhood:get-runtime-info'),
     getBackendHealth: () => invokeAllowedChannel(ipcRenderer, 'winhood:get-backend-health'),
     openLogsFolder: () => invokeAllowedChannel(ipcRenderer, 'winhood:open-logs-folder'),
+    openExternalUrl: (url: string) =>
+      invokeAllowedChannel(ipcRenderer, 'winhood:open-external-url', { url }),
   });
 }
 

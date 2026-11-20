@@ -27,7 +27,8 @@ var import_meta = {};
 var ALLOWED_CHANNELS = /* @__PURE__ */ new Set([
   "winhood:get-runtime-info",
   "winhood:get-backend-health",
-  "winhood:open-logs-folder"
+  "winhood:open-logs-folder",
+  "winhood:open-external-url"
 ]);
 function invokeAllowedChannel(ipcRenderer, channel, payload) {
   if (!ALLOWED_CHANNELS.has(channel)) {
@@ -40,7 +41,8 @@ function createWinHoodPreloadBridge(ipcRenderer) {
     isElectronDesktop: true,
     getRuntimeInfo: () => invokeAllowedChannel(ipcRenderer, "winhood:get-runtime-info"),
     getBackendHealth: () => invokeAllowedChannel(ipcRenderer, "winhood:get-backend-health"),
-    openLogsFolder: () => invokeAllowedChannel(ipcRenderer, "winhood:open-logs-folder")
+    openLogsFolder: () => invokeAllowedChannel(ipcRenderer, "winhood:open-logs-folder"),
+    openExternalUrl: (url) => invokeAllowedChannel(ipcRenderer, "winhood:open-external-url", { url })
   });
 }
 try {

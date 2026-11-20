@@ -13,6 +13,7 @@ import { createWinHoodPreloadBridge } from '../../electron-preload';
 import {
   ELECTRON_SECURITY_WEB_PREFERENCES,
   bootstrapWindowsDesktop,
+  isAllowedExternalAuthUrl,
   isAuthorizedLoopbackSender,
   stripTrailingSlashes,
 } from '../../electron-main';
@@ -69,10 +70,27 @@ describe('Windows Desktop Architecture, Electron Security & Lifecycle Suite (FAS
     const res3 = (await bridge.openLogsFolder()) as { channel: string };
     assert.equal(res3.channel, 'winhood:open-logs-folder');
 
-    assert.equal(invoked.length, 3);
+    const res4 = (await bridge.openExternalUrl('https://github.com/login/oauth/authorize')) as unknown as {
+      channel: string;
+    };
+    assert.equal(res4.channel, 'winhood:open-external-url');
+
+    assert.equal(invoked.length, 4);
+    assert.deepEqual(invoked[3], {
+      channel: 'winhood:open-external-url',
+      payload: { url: 'https://github.com/login/oauth/authorize' },
+    });
     // Ensure raw ipcRenderer or require is NOT exposed on bridge
     assert.equal('ipcRenderer' in bridge, false);
     assert.equal('require' in bridge, false);
+
+    // Verify strict HTTPS GitHub allowlist for shell.openExternal
+    assert.equal(isAllowedExternalAuthUrl('https://github.com/login/oauth/authorize?client_id=abc'), true);
+    assert.equal(isAllowedExternalAuthUrl('https://www.github.com/login/device'), true);
+    assert.equal(isAllowedExternalAuthUrl('https://evil.example.com/login/oauth/authorize'), false);
+    assert.equal(isAllowedExternalAuthUrl('http://github.com/login/oauth/authorize'), false);
+    assert.equal(isAllowedExternalAuthUrl('javascript:alert(1)'), false);
+    assert.equal(isAllowedExternalAuthUrl('not-a-valid-url'), false);
   });
 
   it('3. Electron Main enforces hardened webPreferences and validates loopback IPC sender origin', () => {

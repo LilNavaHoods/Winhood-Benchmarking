@@ -5,8 +5,28 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import type { AddressInfo } from 'node:net';
 import QRCode from 'qrcode';
+import {
+  computeGitNewCodeDiffMap,
+  evaluateCleanAsYouCodeGate,
+} from '../gate/NewCodeDiffEngine';
+import {
+  parseSarifToNormalizedFindings,
+  runLocalRulesPack,
+} from '../analyzers/ExternalRulesBridge';
+import {
+  buildGitHubOAuthAuthorizeUrl,
+  evaluateSoloLocalAutoSession,
+  generateGitHubOAuthPkce,
+  GITHUB_OAUTH_APP_DOCS_URL,
+  inspectGitHubOAuthServerStatus,
+  startGitHubDeviceAuth,
+  validateOAuthCredentialInput,
+  verifyGitHubOAuthConnection,
+} from './ZeroFrictionAuthConfig';
+import { WINHOOD_SQLITE_SCHEMA_SQL } from '../storage/SqliteMigrationPlan';
 import {
   assertNoKdfDowngrade,
   AuthService,
@@ -2564,3 +2584,1018 @@ test('Phase 10 Auth/TOTP/Migration Matrix: QR PNG generation, restart persistenc
     assert.equal(postRestartLogin.user.email, 'legacy@winhood.local');
   });
 });
+
+test('AppSec Hardening v4.4: CSP, single Referrer-Policy, HttpOnly-only session header, RBAC on 8 POST routes, and S4036 PowerShell path', async () => {
+  await withIsolatedKeystoreEnv(async (tmpDir) => {
+    const { app, authService } = await createWinHoodApp({
+      dataDir: tmpDir,
+      enforceProductionAuth: true,
+    });
+    const server = await new Promise<http.Server>((resolve) => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    const addr = server.address() as AddressInfo;
+    const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+    try {
+      // 1. Strict CSP & single Referrer-Policy on /api/health
+      const healthRes = await fetch(`${baseUrl}/api/health`);
+      assert.equal(healthRes.status, 200);
+      const csp = healthRes.headers.get('content-security-policy') || '';
+      assert.ok(csp.includes("default-src 'self'"), 'CSP must include default-src self');
+      assert.ok(csp.includes("script-src 'self'"), 'CSP must include script-src self');
+      assert.ok(csp.includes("object-src 'none'"), 'CSP must include object-src none');
+      assert.ok(csp.includes("frame-ancestors 'self'"), 'Localhost CSP must restrict frame-ancestors to self');
+      assert.equal(healthRes.headers.get('referrer-policy'), 'no-referrer');
+      assert.equal(healthRes.headers.get('x-content-type-options'), 'nosniff');
+      assert.equal(healthRes.headers.get('x-frame-options'), 'SAMEORIGIN');
+
+      // 1b. Hosted preview iframe (*.run.app) allows https://*.google.com framing without X-Frame-Options conflict
+      const previewHealthRes = await fetch(`${baseUrl}/api/health`, {
+        headers: { 'x-forwarded-host': 'ais-dev-example.us-east1.run.app' },
+      });
+      assert.equal(previewHealthRes.status, 200);
+      assert.ok(
+        (previewHealthRes.headers.get('content-security-policy') || '').includes(
+          "frame-ancestors 'self' https://*.google.com"
+        ),
+        'Hosted preview CSP must allow https://*.google.com frame-ancestors'
+      );
+      assert.equal(
+        previewHealthRes.headers.get('x-frame-options'),
+        null,
+        'Hosted preview must omit X-Frame-Options so CSP frame-ancestors governs framing'
+      );
+
+      // 2. Standard loopback login must NOT leak X-WinHood-Session-Token outside cross-site iframe
+      const bootMeta = authService.getBootstrapMetadata();
+      const bootTok = readBootstrapTokenFromFile(bootMeta.bootstrapTokenFilePath);
+      const adminReg = await fetch(`${baseUrl}/api/auth/bootstrap-admin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bootstrapToken: bootTok,
+          name: 'Sec Admin',
+          email: 'sec-admin@winhood.local',
+          password: 'AdminPassword!2026',
+        }),
+      });
+      assert.equal(adminReg.status, 201);
+      assert.equal(
+        adminReg.headers.get('x-winhood-session-token'),
+        null,
+        'Standard loopback auth must not expose X-WinHood-Session-Token header'
+      );
+      const adminCookies = adminReg.headers.getSetCookie?.() || [];
+      assert.ok(
+        adminCookies.some((c) => c.includes('winhood_session=') && c.includes('HttpOnly') && c.includes('SameSite=Strict')),
+        'Session cookie must be HttpOnly and SameSite=Strict'
+      );
+
+      // 3. Cross-site HTTPS iframe context MAY emit X-WinHood-Session-Token for iframe compatibility
+      const iframeLogin = await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-forwarded-proto': 'https',
+          'sec-fetch-site': 'cross-site',
+          'sec-fetch-dest': 'iframe',
+        },
+        body: JSON.stringify({
+          email: 'sec-admin@winhood.local',
+          password: 'AdminPassword!2026',
+        }),
+      });
+      assert.equal(iframeLogin.status, 200);
+      assert.ok(
+        (iframeLogin.headers.get('x-winhood-session-token') || '').length >= 32,
+        'Cross-site HTTPS iframe may emit X-WinHood-Session-Token'
+      );
+
+      // 3b. Hosted preview internal fetch (sec-fetch-site: same-origin, sec-fetch-dest: empty, *.run.app)
+      // MUST still emit SameSite=None; Secure; Partitioned, X-WinHood-Session-Token and sessionId on solo-local
+      const previewSoloRes = await fetch(`${baseUrl}/api/auth/solo-local`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-forwarded-host': 'ais-dev-preview.us-east1.run.app',
+          'x-forwarded-proto': 'https',
+          'sec-fetch-site': 'same-origin',
+          'sec-fetch-dest': 'empty',
+        },
+      });
+      assert.equal(previewSoloRes.status, 200);
+      const previewSoloCookies = previewSoloRes.headers.getSetCookie?.() || [];
+      assert.ok(
+        previewSoloCookies.some(
+          (c) =>
+            c.includes('winhood_session=') &&
+            c.includes('HttpOnly') &&
+            c.includes('SameSite=None; Secure; Partitioned')
+        ),
+        'Hosted preview internal fetch must emit SameSite=None; Secure; Partitioned cookie'
+      );
+      const previewSoloHeaderToken = previewSoloRes.headers.get('x-winhood-session-token') || '';
+      assert.ok(
+        previewSoloHeaderToken.length >= 32,
+        'Hosted preview internal fetch must emit X-WinHood-Session-Token'
+      );
+      const previewSoloJson = (await previewSoloRes.json()) as {
+        authenticated?: boolean;
+        sessionId?: string;
+        user?: { id?: string };
+      };
+      assert.equal(previewSoloJson.authenticated, true);
+      assert.ok((previewSoloJson.sessionId || '').length >= 32);
+
+      // Verify Bearer session works immediately on /api/auth/session without cookies
+      const previewMeRes = await fetch(`${baseUrl}/api/auth/session`, {
+        headers: { Authorization: `Bearer ${previewSoloHeaderToken}` },
+      });
+      assert.equal(previewMeRes.status, 200);
+      const previewMeJson = (await previewMeRes.json()) as { authenticated?: boolean };
+      assert.equal(previewMeJson.authenticated, true);
+
+      // 3c. Loopback solo-local (browser localhost) succeeds with HttpOnly SameSite=Strict and omits header/body sessionId
+      const localSoloRes = await fetch(`${baseUrl}/api/auth/solo-local`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      assert.equal(localSoloRes.status, 200);
+      assert.equal(localSoloRes.headers.get('x-winhood-session-token'), null);
+      const localSoloJson = (await localSoloRes.json()) as {
+        authenticated?: boolean;
+        sessionId?: string;
+      };
+      assert.equal(localSoloJson.authenticated, true);
+      assert.equal(localSoloJson.sessionId, undefined);
+
+      // 3d. GitHub Device Flow without Client ID returns 400 (not 503) and PAT endpoint rejects invalid token with 400
+      const ghStartNoClient = await fetch(`${baseUrl}/api/auth/github/device/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      assert.equal(ghStartNoClient.status, 400);
+      const ghStartJson = (await ghStartNoClient.json()) as { code?: string };
+      assert.equal(ghStartJson.code, 'GITHUB_CLIENT_ID_MISSING');
+
+      const ghPatShort = await fetch(`${baseUrl}/api/auth/github/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: 'short' }),
+      });
+      assert.equal(ghPatShort.status, 400);
+      const ghPatShortJson = (await ghPatShort.json()) as { code?: string };
+      assert.equal(ghPatShortJson.code, 'GITHUB_TOKEN_INVALID');
+
+      // 4. Register AUDITOR (read-only) and verify 403 on all 8 newly RBAC-protected POST routes
+      const auditorReg = await fetch(`${baseUrl}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Read Only Auditor',
+          email: 'auditor-ro@winhood.local',
+          password: 'AuditorPassword!2026',
+          role: 'AUDITOR',
+        }),
+      });
+      assert.equal(auditorReg.status, 201);
+      const auditorSetCookies = auditorReg.headers.getSetCookie?.() || [];
+      const auditorJar: Record<string, string> = {};
+      for (const line of auditorSetCookies) {
+        const pair = line.split(';')[0] || '';
+        const idx = pair.indexOf('=');
+        if (idx > 0) {
+          auditorJar[pair.slice(0, idx).trim()] = decodeURIComponent(pair.slice(idx + 1));
+        }
+      }
+      const auditorHeaders = {
+        'Content-Type': 'application/json',
+        Cookie: `winhood_session=${auditorJar.winhood_session}; winhood_csrf=${auditorJar.winhood_csrf}`,
+        'x-csrf-token': auditorJar.winhood_csrf || '',
+      };
+
+      const protectedPostRoutes = [
+        '/api/sonar/generate-command',
+        '/api/benchmarks/pre-analysis',
+        '/api/market/discover',
+        '/api/intelligence/match',
+        '/api/security/keys/verify',
+        '/api/quality-gates/evaluate',
+        '/api/integrations/pr-decoration',
+        '/api/analyze/sarif',
+      ];
+      for (const route of protectedPostRoutes) {
+        const res = await fetch(`${baseUrl}${route}`, {
+          method: 'POST',
+          headers: auditorHeaders,
+          body: JSON.stringify({}),
+        });
+        assert.equal(res.status, 403, `AUDITOR must be denied (403) on ${route}`);
+      }
+
+      // 5. Global 2MB JSON limit blocks oversized public auth payload (413)
+      const hugePayload = JSON.stringify({ email: 'a@b.com', password: 'x'.repeat(2_300_000) });
+      const oversizedRes = await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: hugePayload,
+      });
+      assert.equal(oversizedRes.status, 413, 'Public auth routes must reject >2MB JSON payloads');
+
+      // 6. Verify AuthService.ts uses absolute System32 PowerShell path (S4036)
+      const authSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/security/AuthService.ts'), 'utf8');
+      assert.ok(
+        authSrc.includes("'WindowsPowerShell'") && authSrc.includes('powerShellAbsPath'),
+        'AuthService must resolve absolute WindowsPowerShell path'
+      );
+      assert.ok(
+        !authSrc.includes("execFileAsync(\n        'powershell.exe'"),
+        'AuthService must not invoke bare powershell.exe via PATH'
+      );
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+test('Clean as You Code (NewCodeDiffEngine), ExternalRulesBridge, ZeroFrictionAuthConfig, and SqliteMigrationPlan', async () => {
+  await withIsolatedKeystoreEnv(async (tmpDir) => {
+    // 1. Real git repo for NewCodeDiffEngine (zero mocks)
+    const repoDir = path.join(tmpDir, 'git-repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+    execFileSync('git', ['init', '-b', 'main'], { cwd: repoDir, shell: false });
+    execFileSync('git', ['config', 'user.email', 'ci@winhood.local'], { cwd: repoDir, shell: false });
+    execFileSync('git', ['config', 'user.name', 'WinHood CI'], { cwd: repoDir, shell: false });
+    fs.writeFileSync(path.join(repoDir, 'app.ts'), 'const a = 1;\nconst b = 2;\n', 'utf8');
+    execFileSync('git', ['add', 'app.ts'], { cwd: repoDir, shell: false });
+    execFileSync('git', ['commit', '-m', 'base commit'], { cwd: repoDir, shell: false });
+
+    execFileSync('git', ['checkout', '-b', 'feature/test'], { cwd: repoDir, shell: false });
+    fs.writeFileSync(path.join(repoDir, 'app.ts'), 'const a = 1;\nconst b = 2;\nconst unsafe = eval("1+1");\n', 'utf8');
+    execFileSync('git', ['add', 'app.ts'], { cwd: repoDir, shell: false });
+    execFileSync('git', ['commit', '-m', 'introduce eval on line 3'], { cwd: repoDir, shell: false });
+
+    const diffMap = computeGitNewCodeDiffMap({ cwd: repoDir, baseRef: 'main', headRef: 'HEAD' });
+    assert.ok(diffMap.mergeBaseSha.length >= 7);
+    assert.equal(diffMap.totalAddedOrModifiedLines, 1);
+    assert.ok(diffMap.changedFiles['app.ts']?.has(3));
+
+    const gateFail = evaluateCleanAsYouCodeGate(
+      [
+        { filePath: 'app.ts', lineNumber: 1, severity: 'HIGH', ruleId: 'legacy-rule' },
+        { filePath: 'app.ts', lineNumber: 3, severity: 'CRITICAL', ruleId: 'new-eval-rule' },
+      ],
+      diffMap
+    );
+    assert.equal(gateFail.passed, false);
+    assert.equal(gateFail.newCodeFindings.length, 1);
+    assert.equal(gateFail.overallOnlyFindings.length, 1);
+    assert.equal(gateFail.blockingNewFindings.length, 1);
+
+    const gatePass = evaluateCleanAsYouCodeGate(
+      [{ filePath: 'app.ts', lineNumber: 1, severity: 'CRITICAL', ruleId: 'legacy-only' }],
+      diffMap
+    );
+    assert.equal(gatePass.passed, true);
+
+    // 2. ExternalRulesBridge SARIF parsing & allowlist enforcement
+    const sampleSarif = JSON.stringify({
+      version: '2.1.0',
+      runs: [
+        {
+          tool: {
+            driver: {
+              rules: [
+                {
+                  id: 'semgrep.sql-injection',
+                  properties: { tags: ['security', 'CWE-89'] },
+                },
+              ],
+            },
+          },
+          results: [
+            {
+              ruleId: 'semgrep.sql-injection',
+              level: 'error',
+              message: { text: 'Unsanitized SQL query' },
+              locations: [
+                {
+                  physicalLocation: {
+                    artifactLocation: { uri: 'src/db.ts' },
+                    region: { startLine: 42 },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    const parsed = parseSarifToNormalizedFindings(sampleSarif, 'semgrep');
+    assert.equal(parsed.length, 1);
+    assert.equal(parsed[0]?.severity, 'HIGH');
+    assert.deepEqual(parsed[0]?.cweIds, ['CWE-89']);
+    assert.equal(parsed[0]?.lineNumber, 42);
+
+    assert.throws(
+      () =>
+        runLocalRulesPack({
+          engine: 'bash' as any,
+          targetDir: repoDir,
+          localRulesConfigPath: path.join(repoDir, 'rules.yml'),
+        }),
+      /EXTERNAL_ENGINE_FORBIDDEN/
+    );
+    assert.throws(
+      () =>
+        runLocalRulesPack({
+          engine: 'semgrep',
+          targetDir: repoDir,
+          localRulesConfigPath: path.join(repoDir, 'missing-rules.yml'),
+        }),
+      /RULES_CONFIG_NOT_FOUND/
+    );
+
+    // 3. ZeroFrictionAuthConfig policy & GitHub clientId validation
+    const soloOk = evaluateSoloLocalAutoSession({
+      runtimeEnv: 'ELECTRON_DESKTOP',
+      remoteAddress: '::ffff:127.0.0.1',
+      vaultLockEnabled: false,
+      teamServerMode: false,
+    });
+    assert.equal(soloOk.allowed, true);
+    assert.equal(soloOk.mode, 'SOLO_LOCAL_DESKTOP');
+
+    const soloLocked = evaluateSoloLocalAutoSession({
+      runtimeEnv: 'ELECTRON_DESKTOP',
+      remoteAddress: '127.0.0.1',
+      vaultLockEnabled: true,
+      teamServerMode: false,
+    });
+    assert.equal(soloLocked.allowed, false);
+    assert.equal(soloLocked.mode, 'LOCKED_VAULT');
+
+    const soloRemote = evaluateSoloLocalAutoSession({
+      runtimeEnv: 'WEB',
+      remoteAddress: '192.168.1.50',
+      hostHeader: 'winhood.corp.internal',
+      isHostedPreview: false,
+      nodeEnv: 'production',
+      vaultLockEnabled: false,
+      teamServerMode: false,
+    });
+    assert.equal(soloRemote.allowed, false);
+    assert.equal(soloRemote.mode, 'TEAM_SERVER');
+
+    const soloBrowserLoopback = evaluateSoloLocalAutoSession({
+      runtimeEnv: 'WEB',
+      remoteAddress: '127.0.0.1',
+      hostHeader: 'localhost:3000',
+      isHostedPreview: false,
+      nodeEnv: 'production',
+      vaultLockEnabled: false,
+      teamServerMode: false,
+    });
+    assert.equal(soloBrowserLoopback.allowed, true);
+    assert.equal(soloBrowserLoopback.mode, 'SOLO_LOCAL_DESKTOP');
+
+    const soloHostedPreview = evaluateSoloLocalAutoSession({
+      runtimeEnv: 'WEB',
+      remoteAddress: '10.0.0.5',
+      hostHeader: 'ais-dev-example.us-east1.run.app',
+      isHostedPreview: true,
+      nodeEnv: 'production',
+      vaultLockEnabled: false,
+      teamServerMode: false,
+    });
+    assert.equal(soloHostedPreview.allowed, true);
+    assert.equal(soloHostedPreview.mode, 'SOLO_LOCAL_DESKTOP');
+
+    await assert.rejects(() => startGitHubDeviceAuth(''), /GITHUB_CLIENT_ID_MISSING/);
+
+    // 4. SqliteMigrationPlan WAL schema verification
+    assert.ok(WINHOOD_SQLITE_SCHEMA_SQL.includes('PRAGMA journal_mode = WAL;'));
+    assert.ok(WINHOOD_SQLITE_SCHEMA_SQL.includes('PRAGMA foreign_keys = ON;'));
+    assert.ok(WINHOOD_SQLITE_SCHEMA_SQL.includes('CREATE INDEX IF NOT EXISTS idx_runs_project_branch'));
+    assert.ok(WINHOOD_SQLITE_SCHEMA_SQL.includes('CREATE INDEX IF NOT EXISTS idx_findings_project_fp'));
+    assert.ok(WINHOOD_SQLITE_SCHEMA_SQL.includes('CREATE INDEX IF NOT EXISTS idx_findings_run_sev'));
+  });
+});
+
+test('GitHub OAuth 2.0 PKCE, /api/auth/github/oauth/start|status, AuthService GitHub identity matching, Native Windows Hello sealed key tamper detection, and WebAuthn link-credential API', async () => {
+  await withIsolatedKeystoreEnv(async (tmpDir) => {
+    // 1. PKCE S256 generation & authorize URL builder
+    const pkce = generateGitHubOAuthPkce();
+    assert.equal(Buffer.from(pkce.state, 'base64url').length, 32);
+    assert.equal(pkce.codeChallengeMethod, 'S256');
+    const expectedChallenge = crypto
+      .createHash('sha256')
+      .update(pkce.codeVerifier, 'ascii')
+      .digest('base64url');
+    assert.equal(pkce.codeChallenge, expectedChallenge);
+
+    const authUrl = new URL(
+      buildGitHubOAuthAuthorizeUrl({
+        clientId: 'Iv1.testclientid1234',
+        redirectUri: 'http://localhost:3000/api/auth/github/oauth/callback',
+        state: pkce.state,
+        codeChallenge: pkce.codeChallenge,
+      })
+    );
+    assert.equal(authUrl.origin, 'https://github.com');
+    assert.equal(authUrl.pathname, '/login/oauth/authorize');
+    assert.equal(authUrl.searchParams.get('code_challenge_method'), 'S256');
+    assert.equal(authUrl.searchParams.get('code_challenge'), pkce.codeChallenge);
+    assert.equal(authUrl.searchParams.get('state'), pkce.state);
+    assert.equal(authUrl.searchParams.get('allow_signup'), 'true');
+
+    // 2. HTTP /api/auth/github/oauth/start & /status + WebAuthn link-credential
+    const prevClientId = process.env.WINHOOD_GITHUB_OAUTH_CLIENT_ID;
+    const prevClientSecret = process.env.WINHOOD_GITHUB_OAUTH_CLIENT_SECRET;
+    delete process.env.WINHOOD_GITHUB_OAUTH_CLIENT_ID;
+    delete process.env.WINHOOD_GITHUB_OAUTH_CLIENT_SECRET;
+
+    const { app, authService } = await createWinHoodApp({
+      dataDir: tmpDir,
+      enforceProductionAuth: true,
+    });
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      const unconfiguredRes = await fetch(`${baseUrl}/api/auth/github/oauth/start?mode=popup`);
+      assert.equal(unconfiguredRes.status, 400);
+      const unconfiguredJson = (await unconfiguredRes.json()) as { code: string };
+      assert.equal(unconfiguredJson.code, 'GITHUB_OAUTH_NOT_CONFIGURED');
+
+      process.env.WINHOOD_GITHUB_OAUTH_CLIENT_ID = 'Iv1.testclientid1234';
+      process.env.WINHOOD_GITHUB_OAUTH_CLIENT_SECRET = 'test-github-oauth-secret-5678';
+
+      const startRes = await fetch(`${baseUrl}/api/auth/github/oauth/start?mode=popup`, {
+        headers: { Host: `127.0.0.1:${port}` },
+      });
+      assert.equal(startRes.status, 200);
+      const startJson = (await startRes.json()) as {
+        authorizeUrl: string;
+        state: string;
+        codeChallengeMethod: string;
+        redirectUri: string;
+      };
+      assert.equal(startJson.codeChallengeMethod, 'S256');
+      assert.ok(startJson.state.length >= 32);
+      assert.ok(startJson.authorizeUrl.startsWith('https://github.com/login/oauth/authorize?'));
+      assert.equal(startJson.redirectUri, `http://127.0.0.1:${port}/api/auth/github/oauth/callback`);
+
+      const statusRes = await fetch(
+        `${baseUrl}/api/auth/github/oauth/status?state=${encodeURIComponent(startJson.state)}`
+      );
+      assert.equal(statusRes.status, 200);
+      const statusJson = (await statusRes.json()) as { status: string; authorized: boolean };
+      assert.equal(statusJson.status, 'PENDING');
+      assert.equal(statusJson.authorized, false);
+
+      // 3. AuthService GitHub session creation & matching by githubId even when email changes
+      const ghFirst = authService.issueGitHubOAuthSession({
+        githubId: 99123456,
+        githubLogin: 'octo-auditor',
+        name: 'Octo Auditor',
+        email: 'octo1@example.com',
+        avatarUrl: 'https://avatars.githubusercontent.com/u/99123456?v=4',
+      });
+      assert.equal(ghFirst.isNewAccount, true);
+      assert.equal(ghFirst.user.githubLinked, true);
+      assert.equal(ghFirst.user.githubLogin, 'octo-auditor');
+      assert.equal(ghFirst.user.role, 'ADMIN');
+      assert.ok(ghFirst.user.authProviders?.includes('github'));
+
+      const ghSecond = authService.issueGitHubOAuthSession({
+        githubId: 99123456,
+        githubLogin: 'octo-auditor-renamed',
+        name: 'Octo Auditor',
+        email: 'octo-updated@example.com',
+        avatarUrl: 'https://avatars.githubusercontent.com/u/99123456?v=4',
+      });
+      assert.equal(ghSecond.isNewAccount, false);
+      assert.equal(ghSecond.user.id, ghFirst.user.id);
+      assert.equal(ghSecond.user.githubLogin, 'octo-auditor-renamed');
+
+      // 4. WebAuthn link-credential endpoint links ES256 credential to the authenticated GitHub user
+      const ghCookies = `winhood_session=${encodeURIComponent(ghSecond.sessionId)}; winhood_csrf=${encodeURIComponent(ghSecond.csrfToken)}`;
+      const linkOptRes = await fetch(`${baseUrl}/api/auth/webauthn/link-credential/options`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Host: `127.0.0.1:${port}`,
+          Cookie: ghCookies,
+          'x-csrf-token': ghSecond.csrfToken,
+        },
+        body: JSON.stringify({}),
+      });
+      assert.equal(linkOptRes.status, 200);
+      const linkOptJson = (await linkOptRes.json()) as {
+        challengeId: string;
+        publicKey: { challenge: string; rp: { id: string } };
+      };
+
+      const { publicKey: linkPubKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+      const jwk = linkPubKey.export({ format: 'jwk' }) as { x: string; y: string };
+      const coseKey = Buffer.concat([
+        Buffer.from([0xa5, 0x01, 0x02, 0x03, 0x26, 0x20, 0x01, 0x21, 0x58, 0x20]),
+        Buffer.from(jwk.x, 'base64url'),
+        Buffer.from([0x22, 0x58, 0x20]),
+        Buffer.from(jwk.y, 'base64url'),
+      ]);
+      const rpIdHash = crypto.createHash('sha256').update(linkOptJson.publicKey.rp.id, 'utf8').digest();
+      const signCountBuf = Buffer.alloc(4);
+      signCountBuf.writeUInt32BE(1, 0);
+      const credIdBytes = crypto.randomBytes(24);
+      const credLenBuf = Buffer.alloc(2);
+      credLenBuf.writeUInt16BE(credIdBytes.length, 0);
+      const authData = Buffer.concat([
+        rpIdHash,
+        Buffer.from([0x45]),
+        signCountBuf,
+        Buffer.alloc(16, 0),
+        credLenBuf,
+        credIdBytes,
+        coseKey,
+      ]);
+      const attKey = Buffer.from('authData', 'utf8');
+      const attObj = Buffer.concat([
+        Buffer.from([0xa1, 0x60 | attKey.length]),
+        attKey,
+        Buffer.from([0x58, authData.length]),
+        authData,
+      ]);
+      const clientData = Buffer.from(
+        JSON.stringify({
+          type: 'webauthn.create',
+          challenge: linkOptJson.publicKey.challenge,
+          origin: `http://127.0.0.1:${port}`,
+        }),
+        'utf8'
+      );
+
+      const linkVerifyRes = await fetch(`${baseUrl}/api/auth/webauthn/link-credential/verify`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Host: `127.0.0.1:${port}`,
+          Cookie: ghCookies,
+          'x-csrf-token': ghSecond.csrfToken,
+        },
+        body: JSON.stringify({
+          challengeId: linkOptJson.challengeId,
+          label: 'Windows Hello Secundário',
+          credential: {
+            id: credIdBytes.toString('base64url'),
+            rawId: credIdBytes.toString('base64url'),
+            type: 'public-key',
+            response: {
+              clientDataJSON: clientData.toString('base64url'),
+              attestationObject: attObj.toString('base64url'),
+            },
+          },
+        }),
+      });
+      assert.equal(linkVerifyRes.status, 200);
+      const linkVerifyJson = (await linkVerifyRes.json()) as {
+        ok: boolean;
+        user: { webauthnEnabled?: boolean; authProviders?: string[] };
+      };
+      assert.equal(linkVerifyJson.ok, true);
+      assert.equal(linkVerifyJson.user.webauthnEnabled, true);
+      assert.ok(linkVerifyJson.user.authProviders?.includes('webauthn'));
+      assert.equal(authService.hasAnyWebAuthnCredentials(), true);
+
+      // 5. Native Windows Hello AES-256-GCM sealed private key persistence + tamper rejection
+      const nativeReg = await authService.registerNativeWindowsHelloAccount({
+        name: 'Native Hello Tamper Test',
+        email: 'native.sealed@winhood.local',
+        role: 'SECURITY_LEAD',
+        promptVerifier: async () => {},
+      });
+      assert.equal(nativeReg.keyAlgorithm, 'ES256');
+      assert.ok(nativeReg.user.authProviders?.includes('windows-hello-native'));
+
+      const authUsersPath = path.join(tmpDir, 'security', 'auth_users.json');
+      const persistedRaw = JSON.parse(fs.readFileSync(authUsersPath, 'utf8')) as {
+        users: Array<{
+          email: string;
+          webauthnCredentials?: Array<{ nativePrivateKeySealed?: string | null }>;
+        }>;
+      };
+      const targetUser = persistedRaw.users.find((u) => u.email === 'native.sealed@winhood.local');
+      const sealedKey = targetUser?.webauthnCredentials?.[0]?.nativePrivateKeySealed || '';
+      assert.ok(sealedKey.startsWith('wh-hello-key-v1:'));
+
+      const nativeLoginOk = await authService.loginNativeWindowsHelloAccount({
+        email: 'native.sealed@winhood.local',
+        promptVerifier: async () => {},
+      });
+      assert.equal(nativeLoginOk.user.email, 'native.sealed@winhood.local');
+
+      // Tamper sealed ciphertext on disk and reload AuthService -> must reject with WINDOWS_HELLO_KEY_CORRUPTED
+      const parts = sealedKey.split(':');
+      parts[4] = `${parts[4]!.slice(0, -4)}AAAA`;
+      targetUser!.webauthnCredentials![0]!.nativePrivateKeySealed = parts.join(':');
+      fs.writeFileSync(authUsersPath, JSON.stringify(persistedRaw, null, 2), 'utf8');
+
+      const reloadedAuth = new AuthService(tmpDir);
+      await assert.rejects(
+        () =>
+          reloadedAuth.loginNativeWindowsHelloAccount({
+            email: 'native.sealed@winhood.local',
+            promptVerifier: async () => {},
+          }),
+        /WINDOWS_HELLO_KEY_CORRUPTED/
+      );
+    } finally {
+      if (prevClientId === undefined) delete process.env.WINHOOD_GITHUB_OAUTH_CLIENT_ID;
+      else process.env.WINHOOD_GITHUB_OAUTH_CLIENT_ID = prevClientId;
+      if (prevClientSecret === undefined) delete process.env.WINHOOD_GITHUB_OAUTH_CLIENT_SECRET;
+      else process.env.WINHOOD_GITHUB_OAUTH_CLIENT_SECRET = prevClientSecret;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+test('inspectGitHubOAuthServerStatus and GET /api/admin/integrations/github-oauth enforce ADMIN RBAC and never expose client secret', async () => {
+  const emptyStatus = inspectGitHubOAuthServerStatus({ env: {} as NodeJS.ProcessEnv });
+  assert.equal(emptyStatus.connectionStatus, 'NOT_CONFIGURED');
+  assert.equal(emptyStatus.clientIdConfigured, false);
+  assert.equal(emptyStatus.clientSecretConfigured, false);
+  assert.equal(emptyStatus.clientIdPreview, null);
+  assert.equal(emptyStatus.docsUrl, GITHUB_OAUTH_APP_DOCS_URL);
+
+  const partialStatus = inspectGitHubOAuthServerStatus({
+    env: { WINHOOD_GITHUB_OAUTH_CLIENT_ID: 'Ov23liTestClientId99' } as NodeJS.ProcessEnv,
+  });
+  assert.equal(partialStatus.connectionStatus, 'PARTIAL');
+  assert.equal(partialStatus.clientIdConfigured, true);
+  assert.equal(partialStatus.clientSecretConfigured, false);
+  assert.equal(partialStatus.deviceFlowReady, true);
+  assert.equal(partialStatus.oauthDirectReady, false);
+  assert.equal(partialStatus.clientIdPreview, 'Ov23••••Id99');
+
+  const secretValue = 'super-secret-oauth-value-must-never-leak';
+  const activeStatus = inspectGitHubOAuthServerStatus({
+    env: {
+      WINHOOD_GITHUB_OAUTH_CLIENT_ID: 'Ov23liTestClientId99',
+      WINHOOD_GITHUB_OAUTH_CLIENT_SECRET: secretValue,
+    } as NodeJS.ProcessEnv,
+    callbackUrl: 'https://winhood.example.com/api/auth/github/oauth/callback',
+  });
+  assert.equal(activeStatus.connectionStatus, 'ACTIVE');
+  assert.equal(activeStatus.oauthDirectReady, true);
+  assert.equal(activeStatus.callbackUrlEffective, 'https://winhood.example.com/api/auth/github/oauth/callback');
+  assert.equal(JSON.stringify(activeStatus).includes(secretValue), false);
+
+  await withIsolatedKeystoreEnv(async (tmpDir) => {
+    const prevId = process.env.WINHOOD_GITHUB_OAUTH_CLIENT_ID;
+    const prevSec = process.env.WINHOOD_GITHUB_OAUTH_CLIENT_SECRET;
+    process.env.WINHOOD_GITHUB_OAUTH_CLIENT_ID = 'Ov23liAdminCheck1234';
+    process.env.WINHOOD_GITHUB_OAUTH_CLIENT_SECRET = secretValue;
+
+    const { app, authService } = await createWinHoodApp({
+      dataDir: tmpDir,
+      enforceProductionAuth: true,
+    });
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      // Unauthenticated -> 401
+      const anonRes = await fetch(`${baseUrl}/api/admin/integrations/github-oauth`);
+      assert.equal(anonRes.status, 401);
+
+      // 1st user -> ADMIN
+      const adminSession = authService.issueGitHubOAuthSession({
+        githubId: 77001,
+        githubLogin: 'admin-octo',
+        email: 'admin-octo@example.com',
+      });
+      // 2nd user -> SECURITY_LEAD (non-admin)
+      const leadSession = authService.issueGitHubOAuthSession({
+        githubId: 77002,
+        githubLogin: 'lead-octo',
+        email: 'lead-octo@example.com',
+      });
+      assert.equal(adminSession.user.role, 'ADMIN');
+      assert.equal(leadSession.user.role, 'SECURITY_LEAD');
+
+      // Non-admin -> 403 ADMIN_REQUIRED
+      const leadRes = await fetch(`${baseUrl}/api/admin/integrations/github-oauth`, {
+        headers: {
+          Cookie: `winhood_session=${encodeURIComponent(leadSession.sessionId)}`,
+        },
+      });
+      assert.equal(leadRes.status, 403);
+      const leadJson = (await leadRes.json()) as { code: string };
+      assert.equal(leadJson.code, 'ADMIN_REQUIRED');
+
+      // Admin -> 200 with active flags and zero secret exposure
+      const adminRes = await fetch(`${baseUrl}/api/admin/integrations/github-oauth`, {
+        headers: {
+          Host: `127.0.0.1:${port}`,
+          Cookie: `winhood_session=${encodeURIComponent(adminSession.sessionId)}`,
+        },
+      });
+      assert.equal(adminRes.status, 200);
+      const adminText = await adminRes.text();
+      assert.equal(adminText.includes(secretValue), false);
+      const adminJson = JSON.parse(adminText) as {
+        connectionStatus: string;
+        clientIdConfigured: boolean;
+        clientSecretConfigured: boolean;
+        clientIdPreview: string;
+        callbackUrlEffective: string;
+        docsUrl: string;
+      };
+      assert.equal(adminJson.connectionStatus, 'ACTIVE');
+      assert.equal(adminJson.clientIdConfigured, true);
+      assert.equal(adminJson.clientSecretConfigured, true);
+      assert.equal(adminJson.clientIdPreview, 'Ov23••••1234');
+      assert.equal(adminJson.callbackUrlEffective, `http://127.0.0.1:${port}/api/auth/github/oauth/callback`);
+      assert.equal(adminJson.docsUrl, GITHUB_OAUTH_APP_DOCS_URL);
+    } finally {
+      if (prevId === undefined) delete process.env.WINHOOD_GITHUB_OAUTH_CLIENT_ID;
+      else process.env.WINHOOD_GITHUB_OAUTH_CLIENT_ID = prevId;
+      if (prevSec === undefined) delete process.env.WINHOOD_GITHUB_OAUTH_CLIENT_SECRET;
+      else process.env.WINHOOD_GITHUB_OAUTH_CLIENT_SECRET = prevSec;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+test('validateOAuthCredentialInput and verifyGitHubOAuthConnection classify responses accurately without leaking secrets', async () => {
+  const shortRes = validateOAuthCredentialInput('short', 'CLIENT_ID');
+  assert.equal(shortRes.valid, false);
+  const spaceRes = validateOAuthCredentialInput('Ov23li valid with spaces', 'CLIENT_ID');
+  assert.equal(spaceRes.valid, false);
+  const okRes = validateOAuthCredentialInput('  Ov23liValidClientId99  ', 'CLIENT_ID');
+  assert.equal(okRes.valid, true);
+  if (okRes.valid) {
+    assert.equal(okRes.value, 'Ov23liValidClientId99');
+  }
+
+  // NOT_CONFIGURED when credentials are missing
+  const missingResult = await verifyGitHubOAuthConnection({
+    clientId: '',
+    clientSecret: '',
+    redirectUri: 'http://localhost:3000/api/auth/github/oauth/callback',
+  });
+  assert.equal(missingResult.verified, false);
+  assert.equal(missingResult.status, 'NOT_CONFIGURED');
+
+  const testSecret = 'gho_secret_never_leak_998877665544';
+
+  // VERIFIED when GitHub accepts client_id + client_secret and only rejects synthetic probe code
+  const verifiedResult = await verifyGitHubOAuthConnection({
+    clientId: 'Ov23liVerifiedClient99',
+    clientSecret: testSecret,
+    redirectUri: 'http://localhost:3000/api/auth/github/oauth/callback',
+    fetchImpl: (async () =>
+      new Response(JSON.stringify({ error: 'bad_verification_code' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch,
+  });
+  assert.equal(verifiedResult.verified, true);
+  assert.equal(verifiedResult.status, 'VERIFIED');
+  assert.equal(verifiedResult.githubErrorCode, 'bad_verification_code');
+  assert.equal(verifiedResult.pkceAuthorizeReady, true);
+  assert.equal(JSON.stringify(verifiedResult).includes(testSecret), false);
+
+  // INVALID_CREDENTIALS when GitHub returns incorrect_client_credentials
+  const invalidResult = await verifyGitHubOAuthConnection({
+    clientId: 'Ov23liInvalidClient99',
+    clientSecret: testSecret,
+    redirectUri: 'http://localhost:3000/api/auth/github/oauth/callback',
+    fetchImpl: (async () =>
+      new Response(
+        JSON.stringify({
+          error: 'incorrect_client_credentials',
+          error_description: 'The client_id and/or client_secret passed are incorrect.',
+        }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      )) as typeof fetch,
+  });
+  assert.equal(invalidResult.verified, false);
+  assert.equal(invalidResult.status, 'INVALID_CREDENTIALS');
+  assert.equal(invalidResult.githubErrorCode, 'incorrect_client_credentials');
+  assert.equal(JSON.stringify(invalidResult).includes(testSecret), false);
+
+  // INVALID_CREDENTIALS when GitHub returns HTTP 404 (unknown client_id)
+  const notFoundResult = await verifyGitHubOAuthConnection({
+    clientId: 'Ov23liUnknownClient99',
+    clientSecret: testSecret,
+    redirectUri: 'http://localhost:3000/api/auth/github/oauth/callback',
+    fetchImpl: (async () =>
+      new Response(JSON.stringify({ error: 'Not Found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch,
+  });
+  assert.equal(notFoundResult.verified, false);
+  assert.equal(notFoundResult.status, 'INVALID_CREDENTIALS');
+  assert.equal(notFoundResult.httpStatus, 404);
+  assert.equal(JSON.stringify(notFoundResult).includes(testSecret), false);
+
+  // NETWORK_UNREACHABLE on transport failure
+  const networkResult = await verifyGitHubOAuthConnection({
+    clientId: 'Ov23liOfflineClient99',
+    clientSecret: testSecret,
+    redirectUri: 'http://localhost:3000/api/auth/github/oauth/callback',
+    fetchImpl: (async () => {
+      throw new Error('ECONNREFUSED');
+    }) as unknown as typeof fetch,
+  });
+  assert.equal(networkResult.verified, false);
+  assert.equal(networkResult.status, 'NETWORK_UNREACHABLE');
+  assert.equal(JSON.stringify(networkResult).includes(testSecret), false);
+});
+
+test('PUT/POST verify/DELETE /api/admin/integrations/github-oauth enforce RBAC, encrypt secrets at rest, and update effective OAuth runtime', async () => {
+  await withIsolatedKeystoreEnv(async (tmpDir) => {
+    const prevId = process.env.WINHOOD_GITHUB_OAUTH_CLIENT_ID;
+    const prevSec = process.env.WINHOOD_GITHUB_OAUTH_CLIENT_SECRET;
+    delete process.env.WINHOOD_GITHUB_OAUTH_CLIENT_ID;
+    delete process.env.WINHOOD_GITHUB_OAUTH_CLIENT_SECRET;
+
+    const { app, authService } = await createWinHoodApp({
+      dataDir: tmpDir,
+      enforceProductionAuth: true,
+    });
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      const adminSession = authService.issueGitHubOAuthSession({
+        githubId: 88001,
+        githubLogin: 'oauth-vault-admin',
+        email: 'oauth-vault-admin@example.com',
+      });
+      const nonAdminSession = authService.issueGitHubOAuthSession({
+        githubId: 88002,
+        githubLogin: 'oauth-vault-lead',
+        email: 'oauth-vault-lead@example.com',
+      });
+      assert.equal(adminSession.user.role, 'ADMIN');
+      assert.equal(nonAdminSession.user.role, 'SECURITY_LEAD');
+
+      const makeHeaders = (session: { sessionId: string; csrfToken: string }) => ({
+        'Content-Type': 'application/json',
+        Host: `127.0.0.1:${port}`,
+        'x-csrf-token': session.csrfToken,
+        Cookie: `winhood_session=${encodeURIComponent(session.sessionId)}; winhood_csrf=${encodeURIComponent(session.csrfToken)}`,
+      });
+
+      // Non-admin blocked on PUT, POST verify, DELETE
+      const leadPut = await fetch(`${baseUrl}/api/admin/integrations/github-oauth`, {
+        method: 'PUT',
+        headers: makeHeaders(nonAdminSession),
+        body: JSON.stringify({
+          clientId: 'Ov23liBlockedId1234',
+          clientSecret: 'blocked_secret_value_12345',
+        }),
+      });
+      assert.equal(leadPut.status, 403);
+
+      const leadVerify = await fetch(`${baseUrl}/api/admin/integrations/github-oauth/verify`, {
+        method: 'POST',
+        headers: makeHeaders(nonAdminSession),
+        body: JSON.stringify({}),
+      });
+      assert.equal(leadVerify.status, 403);
+
+      const leadDelete = await fetch(`${baseUrl}/api/admin/integrations/github-oauth`, {
+        method: 'DELETE',
+        headers: makeHeaders(nonAdminSession),
+      });
+      assert.equal(leadDelete.status, 403);
+
+      // Verify before configuring -> NOT_CONFIGURED
+      const emptyVerifyRes = await fetch(`${baseUrl}/api/admin/integrations/github-oauth/verify`, {
+        method: 'POST',
+        headers: makeHeaders(adminSession),
+        body: JSON.stringify({}),
+      });
+      assert.equal(emptyVerifyRes.status, 200);
+      const emptyVerifyJson = (await emptyVerifyRes.json()) as { status: string; verified: boolean };
+      assert.equal(emptyVerifyJson.verified, false);
+      assert.equal(emptyVerifyJson.status, 'NOT_CONFIGURED');
+
+      // Admin saves credentials via PUT
+      const vaultClientId = 'Ov23liVaultClient7788';
+      const vaultSecretV1 = 'vault_secret_v1_must_be_encrypted_999';
+      const saveRes = await fetch(`${baseUrl}/api/admin/integrations/github-oauth`, {
+        method: 'PUT',
+        headers: makeHeaders(adminSession),
+        body: JSON.stringify({
+          clientId: vaultClientId,
+          clientSecret: vaultSecretV1,
+        }),
+      });
+      assert.equal(saveRes.status, 200);
+      const saveText = await saveRes.text();
+      assert.equal(saveText.includes(vaultSecretV1), false, 'Secret must never appear in PUT response');
+      const saveJson = JSON.parse(saveText) as {
+        connectionStatus: string;
+        configSource: string;
+        vaultOverrideConfigured: boolean;
+        clientIdConfigured: boolean;
+        clientSecretConfigured: boolean;
+        clientIdPreview: string;
+      };
+      assert.equal(saveJson.connectionStatus, 'ACTIVE');
+      assert.equal(saveJson.configSource, 'ADMIN_VAULT');
+      assert.equal(saveJson.vaultOverrideConfigured, true);
+      assert.equal(saveJson.clientIdConfigured, true);
+      assert.equal(saveJson.clientSecretConfigured, true);
+      assert.equal(saveJson.clientIdPreview, 'Ov23••••7788');
+
+      // Persisted files on disk must NEVER contain plaintext secret or clientId
+      const persistedJsonFiles = fs
+        .readdirSync(tmpDir)
+        .filter((f) => f.endsWith('.json'))
+        .map((f) => fs.readFileSync(path.join(tmpDir, f), 'utf8'));
+      assert.ok(persistedJsonFiles.length > 0, 'Expected persisted JSON database file in tmpDir');
+      const allDiskContent = persistedJsonFiles.join('\n');
+      assert.equal(allDiskContent.includes(vaultSecretV1), false, 'Plaintext secret must never be written to disk');
+      assert.equal(allDiskContent.includes(vaultClientId), false, 'Plaintext clientId must be encrypted at rest');
+
+      // Effective runtime routes now see configured credentials
+      const modeRes = await fetch(`${baseUrl}/api/auth/access-mode`, {
+        headers: { Host: `127.0.0.1:${port}` },
+      });
+      assert.equal(modeRes.status, 200);
+      const modeJson = (await modeRes.json()) as {
+        githubOAuthDirectConfigured: boolean;
+        githubDeviceFlowConfigured: boolean;
+      };
+      assert.equal(modeJson.githubOAuthDirectConfigured, true);
+      assert.equal(modeJson.githubDeviceFlowConfigured, true);
+
+      const startRes = await fetch(`${baseUrl}/api/auth/github/oauth/start`, {
+        headers: { Host: `127.0.0.1:${port}` },
+      });
+      assert.equal(startRes.status, 200);
+      const startJson = (await startRes.json()) as { authorizeUrl: string };
+      assert.ok(startJson.authorizeUrl.includes(`client_id=${vaultClientId}`));
+
+      // Partial update (only clientSecret) preserves existing clientId
+      const vaultSecretV2 = 'vault_secret_v2_rotated_value_888';
+      const partialSaveRes = await fetch(`${baseUrl}/api/admin/integrations/github-oauth`, {
+        method: 'PUT',
+        headers: makeHeaders(adminSession),
+        body: JSON.stringify({ clientSecret: vaultSecretV2 }),
+      });
+      assert.equal(partialSaveRes.status, 200);
+      const partialSaveText = await partialSaveRes.text();
+      assert.equal(partialSaveText.includes(vaultSecretV2), false);
+      const partialSaveJson = JSON.parse(partialSaveText) as {
+        connectionStatus: string;
+        clientIdPreview: string;
+      };
+      assert.equal(partialSaveJson.connectionStatus, 'ACTIVE');
+      assert.equal(partialSaveJson.clientIdPreview, 'Ov23••••7788');
+
+      // DELETE clears stored credentials cleanly
+      const deleteRes = await fetch(`${baseUrl}/api/admin/integrations/github-oauth`, {
+        method: 'DELETE',
+        headers: makeHeaders(adminSession),
+      });
+      assert.equal(deleteRes.status, 200);
+      const deleteJson = (await deleteRes.json()) as {
+        connectionStatus: string;
+        configSource: string;
+        vaultOverrideConfigured: boolean;
+      };
+      assert.equal(deleteJson.connectionStatus, 'NOT_CONFIGURED');
+      assert.equal(deleteJson.configSource, 'NONE');
+      assert.equal(deleteJson.vaultOverrideConfigured, false);
+    } finally {
+      if (prevId === undefined) delete process.env.WINHOOD_GITHUB_OAUTH_CLIENT_ID;
+      else process.env.WINHOOD_GITHUB_OAUTH_CLIENT_ID = prevId;
+      if (prevSec === undefined) delete process.env.WINHOOD_GITHUB_OAUTH_CLIENT_SECRET;
+      else process.env.WINHOOD_GITHUB_OAUTH_CLIENT_SECRET = prevSec;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+
+
+

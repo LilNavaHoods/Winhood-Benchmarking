@@ -15,6 +15,7 @@ import { AuthGateModal } from './AuthGateModal';
 import { PrivacyAndTermsModal } from './PrivacyAndTermsModal';
 import { GovernancePortfolioModule } from './GovernancePortfolioModule';
 import { ToolsAndIntegrationsModule } from './ToolsAndIntegrationsModule';
+import { GitHubOAuthAdminPanel } from './GitHubOAuthAdminPanel';
 import { SecurityAssessmentSuiteModule } from './SecurityAssessmentSuiteModule';
 import { VeracityAdaptersReportsModule } from './VeracityAdaptersReportsModule';
 import { DEFAULT_SECURITY_SUITE_FILTERS } from '../utils/securityFindingsFilter';
@@ -368,6 +369,83 @@ test('Phase 11 UI Honesty & Automated WCAG 2.2 AA structural DOM audit (SSR)', (
     React.createElement(ToolsAndIntegrationsModule, { softwares: [], onNotify: () => {} })
   );
   assert.ok(toolsHtml.length > 100);
+  assert.equal(
+    toolsHtml.includes('Configuração e Status do GitHub OAuth 2.0'),
+    false,
+    'Non-admin/anonymous ToolsAndIntegrationsModule must not render Admin GitHub OAuth panel'
+  );
+
+  const toolsAuditorHtml = renderToStaticMarkup(
+    React.createElement(ToolsAndIntegrationsModule, {
+      softwares: [],
+      currentUserRole: 'AUDITOR',
+      onNotify: () => {},
+    })
+  );
+  assert.equal(toolsAuditorHtml.includes('Configuração e Status do GitHub OAuth 2.0'), false);
+
+  const oauthPanelActiveHtml = renderToStaticMarkup(
+    React.createElement(GitHubOAuthAdminPanel, {
+      status: {
+        connectionStatus: 'ACTIVE',
+        configSource: 'ADMIN_VAULT',
+        vaultOverrideConfigured: true,
+        oauthDirectReady: true,
+        deviceFlowReady: true,
+        clientIdConfigured: true,
+        clientSecretConfigured: true,
+        callbackUrlOverrideConfigured: false,
+        clientIdPreview: 'Ov23••••1234',
+        callbackUrlEffective: 'http://localhost:3000/api/auth/github/oauth/callback',
+        requiredScopes: ['read:user', 'user:email'],
+        pkceMethod: 'S256',
+        docsUrl: 'https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app',
+        githubDeveloperSettingsUrl: 'https://github.com/settings/developers',
+        updatedAt: '2026-11-19T23:00:00.000Z',
+        checkedAt: '2026-11-19T23:00:00.000Z',
+      },
+      loading: false,
+      saving: false,
+      verifying: false,
+      clearing: false,
+      error: null,
+      verificationResult: {
+        verified: true,
+        status: 'VERIFIED',
+        httpStatus: 200,
+        githubErrorCode: 'bad_verification_code',
+        latencyMs: 142,
+        endpointTested: 'https://github.com/login/oauth/access_token',
+        pkceAuthorizeReady: true,
+        clientIdPreview: 'Ov23••••1234',
+        message: 'Credenciais aceitas pela API oficial do GitHub OAuth 2.0.',
+        checkedAt: '2026-11-19T23:00:05.000Z',
+      },
+      copiedCallbackUrl: false,
+      onRefresh: () => {},
+      onCopyCallbackUrl: () => {},
+      onSaveCredentials: async () => true,
+      onVerifyConnection: async () => {},
+      onClearCredentials: async () => {},
+    })
+  );
+  assert.ok(oauthPanelActiveHtml.includes('Configuração e Status do GitHub OAuth 2.0'));
+  assert.ok(oauthPanelActiveHtml.includes('CONECTADO · ATIVO (PKCE S256)'));
+  assert.ok(oauthPanelActiveHtml.includes('WINHOOD_GITHUB_OAUTH_CLIENT_ID'));
+  assert.ok(oauthPanelActiveHtml.includes('WINHOOD_GITHUB_OAUTH_CLIENT_SECRET'));
+  assert.ok(oauthPanelActiveHtml.includes('aria-label="Formulário de configuração GitHub OAuth 2.0"'));
+  assert.ok(oauthPanelActiveHtml.includes('id="winhood-admin-github-client-id"'));
+  assert.ok(oauthPanelActiveHtml.includes('id="winhood-admin-github-client-secret"'));
+  assert.ok(oauthPanelActiveHtml.includes('type="password"'));
+  assert.ok(oauthPanelActiveHtml.includes('Salvar Credenciais'));
+  assert.ok(oauthPanelActiveHtml.includes('Verificar Conexão'));
+  assert.ok(oauthPanelActiveHtml.includes('Limpar Credenciais Salvas'));
+  assert.ok(oauthPanelActiveHtml.includes('VERIFIED'));
+  assert.ok(
+    oauthPanelActiveHtml.includes(
+      'https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app'
+    )
+  );
 
   const secHtml = renderToStaticMarkup(
     React.createElement(SecurityAssessmentSuiteModule, {

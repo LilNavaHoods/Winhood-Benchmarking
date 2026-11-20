@@ -28,7 +28,8 @@
     "test:security": "tsx --test src/security/security.test.ts",
     "test:mqr": "tsx --test src/integrations/mqr-bridge/mqrMethodology.test.ts",
     "test:desktop": "tsx --test src/desktop/desktop.test.ts",
-    "test:golden": "tsx --test src/intelligence/intelligence.test.ts"
+    "test:golden": "tsx --test src/intelligence/intelligence.test.ts",
+    "analyze:new-code": "tsx src/gate/NewCodeDiffEngine.ts"
   },
   "c8": {
     "check-coverage": true,
@@ -68,7 +69,6 @@
   },
   "dependencies": {
     "@babel/parser": "^8.1.2",
-    "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.3.3",
     "@types/qrcode": "^1.5.6",
     "@vitejs/plugin-react": "^6.1.1",

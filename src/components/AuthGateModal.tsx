@@ -1,24 +1,22 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Check,
-  ChevronDown,
-  ChevronUp,
-  Clock,
+  ChevronRight,
   Copy,
-  Download,
+  ExternalLink,
   Eye,
   EyeOff,
   Fingerprint,
+  Github,
   Hash,
   KeyRound,
+  Laptop,
   Lock,
   LogOut,
   ShieldCheck,
-  UserPlus,
 } from 'lucide-react';
 import { WinHoodLogo } from './WinHoodLogo';
-import { HairlineAnimatedFigure } from './HairlineAnimatedFigure';
 import { PrivacyAndTermsModal } from './PrivacyAndTermsModal';
 import {
   clearClientAuthTokens,
@@ -26,7 +24,7 @@ import {
   setGlobalCsrfToken,
   setGlobalSessionToken,
 } from '../utils/csrfFetch';
-import QRCode from 'qrcode';
+import type { WinHoodAccessMode } from '../security/ZeroFrictionAuthConfig';
 
 export interface AuthUserView {
   id: string;
@@ -37,20 +35,51 @@ export interface AuthUserView {
   mfaVerified: boolean;
   pinEnabled?: boolean;
   webauthnEnabled?: boolean;
+  githubLinked?: boolean;
+  githubLogin?: string | null;
+  githubAvatarUrl?: string | null;
+  authProviders?: Array<'password' | 'pin' | 'github' | 'webauthn' | 'windows-hello-native'>;
+}
+
+interface WinHoodDesktopBridge {
+  isElectronDesktop?: boolean;
+  openExternalUrl?: (url: string) => Promise<unknown>;
 }
 
 interface AuthGateModalProps {
   bootstrapRequired: boolean;
-  bootstrapTokenFileHint: string;
+  bootstrapTokenFileHint?: string | null;
   mfaRequired: boolean;
   pendingUser: AuthUserView | null;
   onAuthenticated: (user: AuthUserView) => void;
   onRefreshSession: () => Promise<void>;
 }
 
-type GateMode = 'BOOTSTRAP' | 'LOGIN' | 'REGISTER' | 'MFA' | 'RECOVERY';
-type RegisterAuthMethod = 'PASSWORD' | 'PIN' | 'WEBAUTHN';
-type LoginAuthMethod = 'PASSWORD' | 'PIN';
+interface AccessModeStatus {
+  mode: WinHoodAccessMode;
+  soloLocalAllowed: boolean;
+  reason: string;
+  vaultLockEnabled: boolean;
+  teamServerMode: boolean;
+  githubDeviceFlowConfigured: boolean;
+  githubOAuthDirectConfigured?: boolean;
+  githubPatSupported?: boolean;
+  windowsHelloNativeSupported?: boolean;
+  hasRegisteredWebAuthnCredentials?: boolean;
+  runtimeEnv: string;
+}
+
+interface GitHubDeviceSessionState {
+  deviceCode: string;
+  userCode: string;
+  verificationUri: string;
+  expiresAtMs: number;
+  intervalSec: number;
+}
+
+type TeamCredentialTab = 'PASSWORD' | 'PIN';
+type TeamActionTab = 'LOGIN' | 'REGISTER';
+type WindowsHelloTab = 'LOGIN' | 'REGISTER';
 
 function base64UrlToUint8Array(base64Url: string): Uint8Array<ArrayBuffer> {
   const padding = '='.repeat((4 - (base64Url.length % 4)) % 4);
@@ -72,841 +101,870 @@ function arrayBufferToBase64Url(buffer: ArrayBuffer): string {
   return window.btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
 
-function evaluatePinClientStatus(pin: string): { valid: boolean; reason: string } {
-  const clean = pin.trim();
-  if (clean.length < 6 || clean.length > 8 || !/^\d{6,8}$/.test(clean)) {
-    return { valid: false, reason: 'Digite de 6 a 8 dígitos numéricos' };
+function isRunningInIframe(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.self !== window.top;
+  } catch {
+    return true;
   }
-  if (/^(\d)\1+$/.test(clean)) {
-    return { valid: false, reason: 'Dígitos repetidos (ex.: 111111) não são permitidos' };
-  }
-  let asc = true;
-  let desc = true;
-  for (let i = 1; i < clean.length; i++) {
-    const prev = clean.charCodeAt(i - 1) - 48;
-    const curr = clean.charCodeAt(i) - 48;
-    if (curr - prev !== 1) asc = false;
-    if (prev - curr !== 1) desc = false;
-  }
-  if (asc || desc) {
-    return { valid: false, reason: 'Sequências simples (ex.: 123456) não são permitidas' };
-  }
-  return { valid: true, reason: 'PIN forte válido (Scrypt N=32768)' };
 }
 
-interface PasswordStrengthReport {
-  level: 0 | 1 | 2 | 3 | 4;
-  label: string;
-  barColor: string;
-  textColor: string;
-  checks: {
-    minLength: boolean;
-    mixedCase: boolean;
-    hasDigit: boolean;
-    hasSymbol: boolean;
-  };
-}
-
-function evaluatePasswordStrength(password: string): PasswordStrengthReport {
-  const checks = {
-    minLength: password.length >= 10,
-    mixedCase: /[a-z]/.test(password) && /[A-Z]/.test(password),
-    hasDigit: /\d/.test(password),
-    hasSymbol: /[^a-zA-Z0-9\s]/.test(password),
-  };
-
-  if (!password) {
-    return {
-      level: 0,
-      label: 'Aguardando senha (mín. 10 caracteres)',
-      barColor: 'bg-slate-300 dark:bg-slate-700',
-      textColor: 'text-slate-500',
-      checks,
-    };
-  }
-
-  let score = 0;
-  if (checks.minLength) score += 1;
-  if (checks.mixedCase) score += 1;
-  if (checks.hasDigit) score += 1;
-  if (checks.hasSymbol) score += 1;
-  if (password.length >= 14 && score >= 3) score += 1;
-
-  if (!checks.minLength || score <= 1) {
-    return {
-      level: 1,
-      label: 'Fraca',
-      barColor: 'bg-rose-500',
-      textColor: 'text-rose-500',
-      checks,
-    };
-  }
-  if (score === 2) {
-    return {
-      level: 2,
-      label: 'Razoável',
-      barColor: 'bg-amber-500',
-      textColor: 'text-amber-500',
-      checks,
-    };
-  }
-  if (score === 3 || score === 4) {
-    return {
-      level: 3,
-      label: 'Forte',
-      barColor: 'bg-emerald-500',
-      textColor: 'text-emerald-500',
-      checks,
-    };
-  }
-  return {
-    level: 4,
-    label: 'Excelente — Pronta para Cofre AES-256',
-    barColor: 'bg-[#31d6c4]',
-    textColor: 'text-[#0e9f8e] dark:text-[#31d6c4]',
-    checks,
-  };
-}
+const FOCUS_RING =
+  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#14b8a6] dark:focus-visible:ring-[#31d6c4] focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-[#0c1017]';
 
 export const AuthGateModal: React.FC<AuthGateModalProps> = ({
   bootstrapRequired,
-  bootstrapTokenFileHint,
   mfaRequired,
   pendingUser,
   onAuthenticated,
   onRefreshSession,
 }) => {
-  const initialMode: GateMode = mfaRequired
-    ? 'MFA'
-    : bootstrapRequired
-      ? 'REGISTER'
-      : 'LOGIN';
-
-  const [mode, setMode] = useState<GateMode>(initialMode);
+  const [accessPolicy, setAccessPolicy] = useState<AccessModeStatus | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const submittingRef = useRef(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [infoMsg, setInfoMsg] = useState<string | null>(null);
   const [isPrivacyModalOpen, setIsPrivacyModalOpen] = useState(false);
-  const [webAuthnIframeFallback, setWebAuthnIframeFallback] = useState<'register' | 'login' | null>(
-    null
-  );
 
-  const isRunningInIframe = (): boolean => {
-    if (typeof window === 'undefined') return false;
-    try {
-      return window.self !== window.top;
-    } catch {
-      return true;
-    }
-  };
-
-  const ensureWebAuthnEnvironmentReady = (): boolean => {
-    if (typeof window === 'undefined') return false;
-
-    if (window.location.hostname === '127.0.0.1' && !isRunningInIframe()) {
-      const targetPort = window.location.port ? `:${window.location.port}` : ':3000';
-      const targetUrl = `http://localhost${targetPort}${window.location.pathname}${window.location.search}`;
-      setInfoMsg(
-        `O Windows Hello exige o hostname válido "localhost" (não aceita IP literal 127.0.0.1). Redirecionando para ${targetUrl}...`
-      );
-      window.location.assign(targetUrl);
-      return false;
-    }
-
-    return true;
-  };
-
-  // Bootstrap fields
-  const [bsName, setBsName] = useState('');
-  const [bsEmail, setBsEmail] = useState('');
-  const [bsPassword, setBsPassword] = useState('');
-  const [showBsPassword, setShowBsPassword] = useState(false);
-  const [bsToken, setBsToken] = useState('');
-  const [bsEnableMfa, setBsEnableMfa] = useState(false);
-  const [totpSetupInfo, setTotpSetupInfo] = useState<{
-    secret: string;
-    otpauthUrl: string;
-    recoveryCodes?: string[];
+  // GitHub OAuth 2.0 PKCE, Device Flow (RFC 8628) & GitHub PAT Login
+  const [ghDevice, setGhDevice] = useState<GitHubDeviceSessionState | null>(null);
+  const [copiedDeviceCode, setCopiedDeviceCode] = useState(false);
+  const [showGitHubConnectBox, setShowGitHubConnectBox] = useState(false);
+  const [githubPatInput, setGithubPatInput] = useState('');
+  const [githubClientIdInput, setGithubClientIdInput] = useState('');
+  const [oauthPendingState, setOauthPendingState] = useState<{
+    state: string;
+    authorizeUrl: string;
   } | null>(null);
-  const [qrCodeDataUrl, setQrCodeDataUrl] = useState<string | null>(null);
-  const [copiedRecovery, setCopiedRecovery] = useState(false);
+  const pollTimerRef = useRef<number | null>(null);
+  const oauthPollTimerRef = useRef<number | null>(null);
+  const oauthMsgListenerRef = useRef<((ev: MessageEvent) => void) | null>(null);
 
-  React.useEffect(() => {
-    if (totpSetupInfo?.otpauthUrl) {
-      QRCode.toDataURL(totpSetupInfo.otpauthUrl, { width: 180, margin: 2 })
-        .then((url) => setQrCodeDataUrl(url))
-        .catch(() => setQrCodeDataUrl(null));
-    } else {
-      setQrCodeDataUrl(null);
-    }
-  }, [totpSetupInfo]);
+  // Windows Hello / Passkey tabbed panel (Login vs Register)
+  const [showWindowsHelloPanel, setShowWindowsHelloPanel] = useState(false);
+  const [helloMode, setHelloMode] = useState<WindowsHelloTab>('REGISTER');
+  const [helloNameInput, setHelloNameInput] = useState('');
+  const [helloEmailInput, setHelloEmailInput] = useState('');
 
-  // Login fields
-  const [loginMethod, setLoginMethod] = useState<LoginAuthMethod>('PASSWORD');
-  const [loginEmail, setLoginEmail] = useState('');
-  const [loginPassword, setLoginPassword] = useState('');
-  const [loginPin, setLoginPin] = useState('');
-  const [showLoginPassword, setShowLoginPassword] = useState(false);
+  // Team Server progressive disclosure (<details>)
+  const [teamAction, setTeamAction] = useState<TeamActionTab>(
+    bootstrapRequired ? 'REGISTER' : 'LOGIN'
+  );
+  const [teamMethod, setTeamMethod] = useState<TeamCredentialTab>('PASSWORD');
+  const [nameInput, setNameInput] = useState('');
+  const [emailInput, setEmailInput] = useState('');
+  const [passwordInput, setPasswordInput] = useState('');
+  const [pinInput, setPinInput] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [trustDevice, setTrustDevice] = useState(true);
 
-  // Streamlined Register (Cadastro) + Method Selector (Senha, PIN 6-8, Win Hello)
-  const [regMethod, setRegMethod] = useState<RegisterAuthMethod>('PASSWORD');
-  const [regName, setRegName] = useState('');
-  const [regEmail, setRegEmail] = useState('');
-  const [regPassword, setRegPassword] = useState('');
-  const [regPin, setRegPin] = useState('');
-  const [showRegPassword, setShowRegPassword] = useState(false);
-  const [showAdvancedRegister, setShowAdvancedRegister] = useState(false);
-  const [regRole, setRegRole] = useState<'SECURITY_LEAD' | 'QA_ENGINEER' | 'AUDITOR'>(
-    'SECURITY_LEAD'
-  );
-  const [regEnableMfa, setRegEnableMfa] = useState(false);
-
-  // MFA verification state & two-step preAuth challenge
-  const [mfaCode, setMfaCode] = useState('');
+  // Pending TOTP challenge (only if account already has MFA enabled post-login)
+  const [showMfaChallenge, setShowMfaChallenge] = useState(mfaRequired);
   const [preAuthToken, setPreAuthToken] = useState<string | null>(null);
-  const [serverTimeIso, setServerTimeIso] = useState<string | null>(null);
-  const [useRecoveryMode, setUseRecoveryMode] = useState(false);
+  const [mfaCode, setMfaCode] = useState('');
+  const [useRecoveryCode, setUseRecoveryCode] = useState(false);
   const [recoveryBackupCode, setRecoveryBackupCode] = useState('');
+  const mfaSubmittingRef = useRef(false);
 
-  // Recovery fields
-  const [recEmail, setRecEmail] = useState('');
-  const [recToken, setRecToken] = useState('');
-  const [recNewPassword, setRecNewPassword] = useState('');
-  const [showRecPassword, setShowRecPassword] = useState(false);
-  const [recStepRequested, setRecStepRequested] = useState(false);
-  const [recHintPath, setRecHintPath] = useState<string | null>(null);
+  useEffect(() => {
+    setShowMfaChallenge(mfaRequired);
+  }, [mfaRequired]);
 
-  const regStrength = useMemo(() => evaluatePasswordStrength(regPassword), [regPassword]);
-  const regPinStatus = useMemo(() => evaluatePinClientStatus(regPin), [regPin]);
+  useEffect(() => {
+    let active = true;
+    fetch('/api/auth/access-mode')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: AccessModeStatus | null) => {
+        if (active && data) {
+          setAccessPolicy(data);
+          if (typeof data.hasRegisteredWebAuthnCredentials === 'boolean') {
+            setHelloMode(data.hasRegisteredWebAuthnCredentials ? 'LOGIN' : 'REGISTER');
+          }
+        }
+      })
+      .catch(() => {
+        // Policy endpoint optional if server is restarting
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
-  const clockDriftSeconds = useMemo(() => {
-    if (!serverTimeIso) return 0;
-    const parsed = Date.parse(serverTimeIso);
-    if (!Number.isFinite(parsed)) return 0;
-    return Math.round(Math.abs(Date.now() - parsed) / 1000);
-  }, [serverTimeIso]);
+  useEffect(() => {
+    return () => {
+      if (pollTimerRef.current !== null) {
+        window.clearTimeout(pollTimerRef.current);
+      }
+      if (oauthPollTimerRef.current !== null) {
+        window.clearTimeout(oauthPollTimerRef.current);
+      }
+      if (oauthMsgListenerRef.current) {
+        window.removeEventListener('message', oauthMsgListenerRef.current);
+      }
+    };
+  }, []);
 
-  React.useEffect(() => {
-    if (mfaRequired && mode !== 'MFA') {
-      setMode('MFA');
-    } else if (!bootstrapRequired && !mfaRequired && mode === 'BOOTSTRAP') {
-      setMode('LOGIN');
+  const persistTokensAndComplete = async (data: {
+    user?: AuthUserView;
+    sessionId?: string;
+    csrfToken?: string;
+  }) => {
+    // Sessão em ambiente padrão/Desktop usa cookie HttpOnly; header/storage fallback apenas em iframe cross-site.
+    if (data.sessionId && isRunningInIframe()) {
+      setGlobalSessionToken(data.sessionId, trustDevice);
     }
-  }, [bootstrapRequired, mfaRequired, mode]);
+    if (data.csrfToken) {
+      setGlobalCsrfToken(data.csrfToken, trustDevice);
+    }
+    if (data.user) {
+      onAuthenticated(data.user);
+    } else {
+      await onRefreshSession();
+    }
+  };
 
-  const handleBootstrapSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSoloLocalWorkspace = async () => {
     setErrorMsg(null);
     setInfoMsg(null);
-    setWebAuthnIframeFallback(null);
     setSubmitting(true);
     try {
-      const res = await fetch('/api/auth/bootstrap-admin', {
+      const res = await fetch('/api/auth/solo-local', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: bsName.trim(),
-          email: bsEmail.trim(),
-          password: bsPassword,
-          bootstrapToken: bsToken.trim(),
-          enableMfa: bsEnableMfa,
-        }),
       });
       const data = await res.json();
       if (!res.ok) {
-        setErrorMsg(data.error || 'Falha no provisionamento do administrador.');
-        return;
-      }
-      if (data.sessionId) {
-        setGlobalSessionToken(data.sessionId, trustDevice);
-      }
-      if (data.csrfToken) {
-        setGlobalCsrfToken(data.csrfToken, trustDevice);
-      }
-      if (data.totpSetup) {
-        setTotpSetupInfo({
-          secret: data.totpSetup.secret || data.totpSetup.secretBase32,
-          otpauthUrl: data.totpSetup.otpauthUrl || data.totpSetup.otpauthUri,
-          recoveryCodes: data.totpSetup.recoveryCodes || [],
-        });
-        setPreAuthToken(null);
-        setMode('MFA');
-        setInfoMsg(
-          'Administrador criado! Escaneie o QR Code, salve os códigos de recuperação e informe o token de 6 dígitos.'
+        setErrorMsg(
+          data?.error ||
+            'Sessão Solo Local indisponível neste modo de servidor. Utilize GitHub, Windows Hello ou Acesso Avançado.'
         );
         return;
       }
-      if (data.user) {
-        onAuthenticated(data.user);
-      } else {
-        await onRefreshSession();
-      }
+      await persistTokensAndComplete(data);
     } catch {
-      setErrorMsg('Erro de comunicação ao executar bootstrap inicial.');
+      setErrorMsg('Erro de comunicação ao inicializar o Workspace Local.');
     } finally {
       setSubmitting(false);
     }
   };
 
-  const tryNativeWindowsHelloRegister = async (): Promise<{
-    ok: boolean;
-    osUnsupported?: boolean;
-    errorMessage?: string;
-  }> => {
-    try {
-      const nativeRes = await fetch('/api/auth/windows-hello/native-register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: regName.trim(),
-          email: regEmail.trim(),
-          role: regRole,
-          trustDevice,
-        }),
-      });
-      const nativeData = await nativeRes.json();
-      if (!nativeRes.ok) {
-        return {
-          ok: false,
-          osUnsupported:
-            nativeRes.status === 501 || nativeData?.code === 'WINDOWS_HELLO_OS_UNSUPPORTED',
-          errorMessage: nativeData?.error || 'Falha na verificação nativa do Windows Hello.',
-        };
-      }
-      if (nativeData.sessionId) {
-        setGlobalSessionToken(nativeData.sessionId, trustDevice);
-      }
-      if (nativeData.csrfToken) {
-        setGlobalCsrfToken(nativeData.csrfToken, trustDevice);
-      }
-      if (nativeData.user) {
-        onAuthenticated(nativeData.user);
-      } else {
-        await onRefreshSession();
-      }
-      return { ok: true };
-    } catch {
-      return {
-        ok: false,
-        osUnsupported: false,
-        errorMessage: 'Erro de comunicação ao acionar o Windows Hello nativo no servidor local.',
-      };
+  const stopGitHubPolling = () => {
+    if (pollTimerRef.current !== null) {
+      window.clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
     }
+    setGhDevice(null);
   };
 
-  const tryNativeWindowsHelloLogin = async (): Promise<{
-    ok: boolean;
-    osUnsupported?: boolean;
-    errorMessage?: string;
-  }> => {
-    try {
-      const nativeRes = await fetch('/api/auth/windows-hello/native-login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: loginEmail.trim() || undefined,
-          trustDevice,
-        }),
-      });
-      const nativeData = await nativeRes.json();
-      if (!nativeRes.ok) {
-        return {
-          ok: false,
-          osUnsupported:
-            nativeRes.status === 501 || nativeData?.code === 'WINDOWS_HELLO_OS_UNSUPPORTED',
-          errorMessage: nativeData?.error || 'Falha na autenticação nativa do Windows Hello.',
-        };
-      }
-      if (nativeData.sessionId) {
-        setGlobalSessionToken(nativeData.sessionId, trustDevice);
-      }
-      if (nativeData.csrfToken) {
-        setGlobalCsrfToken(nativeData.csrfToken, trustDevice);
-      }
-      if (nativeData.requiresTotp || nativeData.mfaRequired) {
-        setPreAuthToken(nativeData.preAuthToken || null);
-        setServerTimeIso(nativeData.serverTimeIso || null);
-        setMfaCode('');
-        setRecoveryBackupCode('');
-        setUseRecoveryMode(false);
-        setMode('MFA');
-        setInfoMsg('Informe o código TOTP de 6 dígitos do seu aplicativo autenticador.');
-        return { ok: true };
-      }
-      if (nativeData.user) {
-        onAuthenticated(nativeData.user);
-      } else {
-        await onRefreshSession();
-      }
-      return { ok: true };
-    } catch {
-      return {
-        ok: false,
-        osUnsupported: false,
-        errorMessage: 'Erro de comunicação ao autenticar com Windows Hello nativo.',
-      };
-    }
-  };
-
-  const handleWebAuthnRegister = async () => {
-    setErrorMsg(null);
-    setInfoMsg(null);
-    setWebAuthnIframeFallback(null);
-
-    if (regName.trim().length < 2) {
-      setErrorMsg('Informe seu nome de exibição (mínimo 2 caracteres).');
+  const scheduleGitHubPoll = (session: GitHubDeviceSessionState, explicitClientId?: string) => {
+    if (Date.now() >= session.expiresAtMs) {
+      stopGitHubPolling();
+      setErrorMsg('Código de autorização do GitHub expirou. Solicite um novo código.');
       return;
     }
-    if (!regEmail.trim()) {
+
+    pollTimerRef.current = window.setTimeout(async () => {
+      try {
+        const res = await fetch('/api/auth/github/device/poll', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            deviceCode: session.deviceCode,
+            clientId: explicitClientId || undefined,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          stopGitHubPolling();
+          setErrorMsg(data?.error || 'Falha ao verificar autorização no GitHub.');
+          return;
+        }
+        if (data.authorized) {
+          stopGitHubPolling();
+          setShowGitHubConnectBox(false);
+          setInfoMsg('Autorização GitHub confirmada. Abrindo workspace...');
+          await persistTokensAndComplete(data);
+          return;
+        }
+        if (data.status === 'EXPIRED' || data.status === 'ACCESS_DENIED' || data.status === 'ERROR') {
+          stopGitHubPolling();
+          setErrorMsg(data.errorDescription || 'Autorização GitHub cancelada ou expirada.');
+          return;
+        }
+        const nextInterval = data.status === 'SLOW_DOWN' ? session.intervalSec + 5 : session.intervalSec;
+        scheduleGitHubPoll({ ...session, intervalSec: nextInterval }, explicitClientId);
+      } catch {
+        stopGitHubPolling();
+        setErrorMsg('Erro de rede ao consultar status do GitHub OAuth Device Flow.');
+      }
+    }, Math.max(session.intervalSec, 5) * 1000);
+  };
+
+  const handleStartGitHubDeviceFlow = async (explicitClientId?: string) => {
+    setErrorMsg(null);
+    setInfoMsg(null);
+    stopGitHubPolling();
+
+    const candidateClientId = (explicitClientId ?? githubClientIdInput).trim();
+    if (!accessPolicy?.githubDeviceFlowConfigured && candidateClientId.length < 8) {
+      setShowGitHubConnectBox(true);
+      setInfoMsg(
+        'Cole um Personal Access Token (PAT) do GitHub para entrar imediatamente, ou informe um Client ID de OAuth App para Device Flow.'
+      );
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const res = await fetch('/api/auth/github/device/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(candidateClientId ? { clientId: candidateClientId } : {}),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setShowGitHubConnectBox(true);
+        setErrorMsg(
+          data?.error ||
+            'Não foi possível iniciar o GitHub Device Flow. Use um Personal Access Token (PAT) ou informe um Client ID válido.'
+        );
+        return;
+      }
+      const nextSession: GitHubDeviceSessionState = {
+        deviceCode: String(data.device_code),
+        userCode: String(data.user_code),
+        verificationUri: String(data.verification_uri || 'https://github.com/login/device'),
+        expiresAtMs: Date.now() + Number(data.expires_in || 900) * 1000,
+        intervalSec: Number(data.interval || 5),
+      };
+      setShowGitHubConnectBox(false);
+      setGhDevice(nextSession);
+      setInfoMsg('Insira o código abaixo na página oficial do GitHub para concluir o acesso.');
+      scheduleGitHubPoll(nextSession, candidateClientId || undefined);
+    } catch {
+      setShowGitHubConnectBox(true);
+      setErrorMsg('Não foi possível conectar ao endpoint de GitHub OAuth Device Flow.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleGitHubPatLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg(null);
+    setInfoMsg(null);
+
+    const cleanToken = githubPatInput.trim();
+    if (cleanToken.length < 10) {
+      setErrorMsg(
+        'Informe um GitHub Personal Access Token válido (ghp_... ou github_pat_...) com escopo read:user.'
+      );
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const res = await fetch('/api/auth/github/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: cleanToken, trustDevice }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setErrorMsg(data?.error || 'Token GitHub recusado pela API oficial.');
+        return;
+      }
+      setGithubPatInput('');
+      setShowGitHubConnectBox(false);
+      setInfoMsg('Conta GitHub validada na API oficial. Abrindo workspace...');
+      await persistTokensAndComplete(data);
+    } catch {
+      setErrorMsg('Erro de rede ao validar token na API oficial do GitHub.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const stopGitHubOAuthPolling = () => {
+    if (oauthPollTimerRef.current !== null) {
+      window.clearTimeout(oauthPollTimerRef.current);
+      oauthPollTimerRef.current = null;
+    }
+    if (oauthMsgListenerRef.current) {
+      window.removeEventListener('message', oauthMsgListenerRef.current);
+      oauthMsgListenerRef.current = null;
+    }
+    setOauthPendingState(null);
+  };
+
+  const scheduleGitHubOAuthStatusPoll = (state: string, attemptsLeft = 90) => {
+    if (attemptsLeft <= 0) {
+      stopGitHubOAuthPolling();
+      setErrorMsg('Tempo limite para autorização no GitHub excedido. Tente novamente.');
+      return;
+    }
+    oauthPollTimerRef.current = window.setTimeout(async () => {
+      try {
+        const res = await fetch(
+          `/api/auth/github/oauth/status?state=${encodeURIComponent(state)}`
+        );
+        const data = await res.json();
+        if (res.ok && data.authorized) {
+          stopGitHubOAuthPolling();
+          setShowGitHubConnectBox(false);
+          setInfoMsg(
+            data.isNewAccount
+              ? 'Conta criada e autenticada via GitHub. Abrindo workspace...'
+              : 'Login GitHub confirmado. Abrindo workspace...'
+          );
+          await persistTokensAndComplete(data);
+          return;
+        }
+        if (res.status >= 400) {
+          stopGitHubOAuthPolling();
+          setErrorMsg(data?.error || 'Autorização GitHub expirada ou recusada.');
+          return;
+        }
+        scheduleGitHubOAuthStatusPoll(state, attemptsLeft - 1);
+      } catch {
+        scheduleGitHubOAuthStatusPoll(state, attemptsLeft - 1);
+      }
+    }, 2000);
+  };
+
+  const handleGitHubDirectAuth = async () => {
+    setErrorMsg(null);
+    setInfoMsg(null);
+    setShowWindowsHelloPanel(false);
+    stopGitHubPolling();
+    stopGitHubOAuthPolling();
+
+    if (accessPolicy?.githubOAuthDirectConfigured) {
+      const desktopBridge = (window as unknown as { winhoodDesktop?: WinHoodDesktopBridge })
+        .winhoodDesktop;
+      const isElectron = Boolean(
+        desktopBridge?.isElectronDesktop && typeof desktopBridge.openExternalUrl === 'function'
+      );
+      setSubmitting(true);
+      try {
+        const mode = isElectron ? 'desktop' : 'popup';
+        const res = await fetch(`/api/auth/github/oauth/start?mode=${mode}`);
+        const data = (await res.json()) as {
+          authorizeUrl?: string;
+          state?: string;
+          error?: string;
+        };
+        if (!res.ok || !data.authorizeUrl || !data.state) {
+          setShowGitHubConnectBox(true);
+          setErrorMsg(
+            data?.error ||
+              'Não foi possível iniciar o GitHub OAuth 2.0. Utilize Personal Access Token (PAT).'
+          );
+          return;
+        }
+
+        const oauthState = data.state;
+        const authorizeUrl = data.authorizeUrl;
+        setOauthPendingState({ state: oauthState, authorizeUrl });
+
+        if (isElectron && desktopBridge?.openExternalUrl) {
+          await desktopBridge.openExternalUrl(authorizeUrl);
+          setInfoMsg(
+            'Conclua o login no GitHub pelo navegador externo aberto. O WinHood continuará automaticamente.'
+          );
+          scheduleGitHubOAuthStatusPoll(oauthState);
+          return;
+        }
+
+        const onMessage = async (event: MessageEvent) => {
+          if (event.origin !== window.location.origin) return;
+          const payload = event.data as {
+            type?: string;
+            ok?: boolean;
+            state?: string;
+            error?: string;
+            user?: AuthUserView;
+            csrfToken?: string;
+            isNewAccount?: boolean;
+          } | null;
+          if (!payload || payload.type !== 'winhood-github-oauth-result') return;
+
+          if (!payload.ok) {
+            stopGitHubOAuthPolling();
+            setErrorMsg(payload.error || 'Autorização GitHub cancelada ou recusada.');
+            return;
+          }
+
+          try {
+            const statusRes = await fetch(
+              `/api/auth/github/oauth/status?state=${encodeURIComponent(payload.state || oauthState)}`
+            );
+            const statusData = await statusRes.json();
+            stopGitHubOAuthPolling();
+            setShowGitHubConnectBox(false);
+            if (statusRes.ok && statusData.authorized) {
+              setInfoMsg(
+                statusData.isNewAccount
+                  ? 'Conta criada e conectada com GitHub. Abrindo workspace...'
+                  : 'Conta GitHub autenticada. Abrindo workspace...'
+              );
+              await persistTokensAndComplete(statusData);
+            } else {
+              await persistTokensAndComplete({
+                user: payload.user,
+                csrfToken: payload.csrfToken,
+              });
+            }
+          } catch {
+            stopGitHubOAuthPolling();
+            await onRefreshSession();
+          }
+        };
+
+        oauthMsgListenerRef.current = onMessage;
+        window.addEventListener('message', onMessage);
+
+        const popup =
+          typeof window.open === 'function'
+            ? window.open(authorizeUrl, 'winhood_github_oauth', 'width=560,height=720')
+            : null;
+        if (!popup) {
+          setInfoMsg(
+            'Clique no botão "Continuar autorização no GitHub" abaixo caso o navegador tenha bloqueado a janela automática.'
+          );
+        } else {
+          setInfoMsg('Autorize o WinHood na janela oficial do GitHub para entrar ou criar sua conta.');
+        }
+        scheduleGitHubOAuthStatusPoll(oauthState);
+      } catch {
+        setShowGitHubConnectBox(true);
+        setErrorMsg('Erro de comunicação ao iniciar fluxo OAuth do GitHub.');
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
+
+    if (accessPolicy?.githubDeviceFlowConfigured) {
+      await handleStartGitHubDeviceFlow();
+      return;
+    }
+
+    setShowGitHubConnectBox((prev) => {
+      const next = !prev;
+      if (next) {
+        setInfoMsg(
+          'Entre ou cadastre-se instantaneamente com um Personal Access Token (PAT) do GitHub, ou informe um OAuth App Client ID para Device Flow.'
+        );
+      }
+      return next;
+    });
+  };
+
+  const handleCopyDeviceCode = async () => {
+    if (!ghDevice) return;
+    try {
+      await navigator.clipboard.writeText(ghDevice.userCode);
+      setCopiedDeviceCode(true);
+      window.setTimeout(() => setCopiedDeviceCode(false), 2000);
+    } catch {
+      // Clipboard API unavailable
+    }
+  };
+
+  const handleWindowsHelloLogin = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setErrorMsg(null);
+    setInfoMsg(null);
+    setSubmitting(true);
+
+    const inIframe = isRunningInIframe();
+    const targetEmail = helloEmailInput.trim();
+    let webAuthnBlockedInIframe = false;
+
+    try {
+      if (window.PublicKeyCredential && navigator.credentials) {
+        const optRes = await fetch('/api/auth/webauthn/login/options', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: targetEmail || undefined,
+            rpId: window.location.hostname,
+          }),
+        });
+
+        if (optRes.ok) {
+          const optData = await optRes.json();
+          const allowCredentials: PublicKeyCredentialDescriptor[] = Array.isArray(
+            optData.allowCredentials
+          )
+            ? optData.allowCredentials.map(
+                (c: { id: string; transports?: AuthenticatorTransport[] }) => ({
+                  type: 'public-key' as const,
+                  id: base64UrlToUint8Array(c.id),
+                  transports: c.transports,
+                })
+              )
+            : [];
+
+          if (allowCredentials.length > 0) {
+            try {
+              const assertion = (await navigator.credentials.get({
+                publicKey: {
+                  challenge: base64UrlToUint8Array(optData.challenge),
+                  rpId: optData.rpId || window.location.hostname,
+                  timeout: optData.timeout || 60000,
+                  userVerification: 'required',
+                  allowCredentials,
+                },
+              })) as PublicKeyCredential | null;
+
+              if (assertion) {
+                const assertResp = assertion.response as AuthenticatorAssertionResponse;
+                const verifyRes = await fetch('/api/auth/webauthn/login/verify', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    challengeId: optData.challengeId,
+                    credentialId: arrayBufferToBase64Url(assertion.rawId),
+                    clientDataJSON: arrayBufferToBase64Url(assertResp.clientDataJSON),
+                    authenticatorData: arrayBufferToBase64Url(assertResp.authenticatorData),
+                    signature: arrayBufferToBase64Url(assertResp.signature),
+                    email: targetEmail || undefined,
+                    trustDevice,
+                  }),
+                });
+                const data = await verifyRes.json();
+                if (!verifyRes.ok) {
+                  setErrorMsg(
+                    data?.error || 'Falha na validação da credencial Passkey/Windows Hello.'
+                  );
+                  return;
+                }
+                if (data.requiresTotp || data.mfaRequired) {
+                  setPreAuthToken(data.preAuthToken || null);
+                  setShowMfaChallenge(true);
+                  setInfoMsg('Informe o código TOTP de 6 dígitos do seu aplicativo autenticador.');
+                  return;
+                }
+                await persistTokensAndComplete(data);
+                return;
+              }
+            } catch (webAuthnErr: unknown) {
+              const errName = webAuthnErr instanceof Error ? webAuthnErr.name : '';
+              if (errName === 'NotAllowedError' && !inIframe) {
+                setErrorMsg('Verificação Windows Hello / Passkey cancelada ou tempo esgotado.');
+                return;
+              }
+              if (inIframe && (errName === 'SecurityError' || errName === 'NotAllowedError')) {
+                webAuthnBlockedInIframe = true;
+              }
+            }
+          } else if (!accessPolicy?.windowsHelloNativeSupported) {
+            setHelloMode('REGISTER');
+            setShowWindowsHelloPanel(true);
+            setInfoMsg(
+              targetEmail
+                ? `Nenhuma Passkey vinculada a "${targetEmail}". Preencha seu nome e e-mail para criar sua conta com Windows Hello.`
+                : 'Nenhuma Passkey Windows Hello cadastrada ainda. Crie sua conta com Windows Hello abaixo.'
+            );
+            return;
+          }
+        }
+      }
+
+      if (accessPolicy?.windowsHelloNativeSupported) {
+        const nativeRes = await fetch('/api/auth/windows-hello/native-login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: targetEmail || undefined,
+            trustDevice,
+          }),
+        });
+        const nativeData = await nativeRes.json();
+        if (nativeRes.status === 404 && nativeData?.code === 'WEBAUTHN_CREDENTIAL_NOT_FOUND') {
+          setHelloMode('REGISTER');
+          setShowWindowsHelloPanel(true);
+          setInfoMsg(
+            'Nenhuma credencial Windows Hello cadastrada para este e-mail. Crie sua conta na aba "Criar Conta com Windows Hello".'
+          );
+          return;
+        }
+        if (!nativeRes.ok) {
+          setErrorMsg(
+            nativeData?.error || 'Falha ao autenticar via Windows Hello nativo do Windows.'
+          );
+          return;
+        }
+        if (nativeData.requiresTotp || nativeData.mfaRequired) {
+          setPreAuthToken(nativeData.preAuthToken || null);
+          setShowMfaChallenge(true);
+          setInfoMsg('Informe o código TOTP de 6 dígitos do seu aplicativo autenticador.');
+          return;
+        }
+        await persistTokensAndComplete(nativeData);
+        return;
+      }
+
+      if (inIframe || webAuthnBlockedInIframe) {
+        setErrorMsg(
+          'Navegadores bloqueiam WebAuthn/Passkey dentro de iframes de preview. Utilize "Continuar no Workspace Local (1 clique)", "Entrar ou Cadastrar com GitHub" ou abra em aba própria.'
+        );
+        return;
+      }
+
+      setErrorMsg(
+        'Nenhum autenticador Passkey/Windows Hello disponível neste navegador. Use "Continuar no Workspace Local (1 clique)" ou "Entrar ou Cadastrar com GitHub".'
+      );
+    } catch (err: unknown) {
+      setErrorMsg(
+        err instanceof Error
+          ? err.message
+          : 'Não foi possível autenticar via Windows Hello / Passkey.'
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleWindowsHelloRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg(null);
+    setInfoMsg(null);
+
+    const cleanName = helloNameInput.trim();
+    const cleanEmail = helloEmailInput.trim().toLowerCase();
+    if (cleanName.length < 2) {
+      setErrorMsg('Informe seu nome completo (mínimo 2 caracteres) para cadastrar com Windows Hello.');
+      return;
+    }
+    if (!cleanEmail.includes('@') || !cleanEmail.includes('.')) {
+      setErrorMsg('Informe um endereço de e-mail válido para associar à sua Passkey.');
+      return;
+    }
+
+    const inIframe = isRunningInIframe();
+    let webAuthnFailedOrBlocked = false;
+    setSubmitting(true);
+
+    try {
+      if (window.PublicKeyCredential && navigator.credentials && !inIframe) {
+        const regOptRes = await fetch('/api/auth/webauthn/register-account/options', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: cleanName,
+            email: cleanEmail,
+            rpId: window.location.hostname,
+          }),
+        });
+        const regOptData = await regOptRes.json();
+        if (!regOptRes.ok) {
+          if (regOptRes.status === 409) {
+            setHelloMode('LOGIN');
+          }
+          setErrorMsg(regOptData?.error || 'Não foi possível iniciar o cadastro com Windows Hello.');
+          return;
+        }
+
+        const pk = regOptData.publicKey || regOptData;
+        try {
+          const created = (await navigator.credentials.create({
+            publicKey: {
+              challenge: base64UrlToUint8Array(pk.challenge),
+              rp: {
+                name: pk.rp?.name || 'WinHood Benchmark Analyzer',
+                id: pk.rp?.id || window.location.hostname,
+              },
+              user: {
+                id: base64UrlToUint8Array(pk.user?.id),
+                name: pk.user?.name || cleanEmail,
+                displayName: pk.user?.displayName || cleanName,
+              },
+              pubKeyCredParams: Array.isArray(pk.pubKeyCredParams)
+                ? pk.pubKeyCredParams
+                : [
+                    { type: 'public-key', alg: -7 },
+                    { type: 'public-key', alg: -257 },
+                  ],
+              authenticatorSelection: pk.authenticatorSelection || {
+                authenticatorAttachment: 'platform',
+                userVerification: 'required',
+                residentKey: 'required',
+                requireResidentKey: true,
+              },
+              timeout: pk.timeout || 60000,
+              attestation: 'none',
+            },
+          })) as PublicKeyCredential | null;
+
+          if (created) {
+            const attResp = created.response as AuthenticatorAttestationResponse & {
+              getAuthenticatorData?: () => ArrayBuffer;
+              getPublicKey?: () => ArrayBuffer | null;
+              getPublicKeyAlgorithm?: () => number;
+              getTransports?: () => string[];
+            };
+            const authDataBuf =
+              typeof attResp.getAuthenticatorData === 'function'
+                ? attResp.getAuthenticatorData()
+                : undefined;
+            const pubKeyBuf =
+              typeof attResp.getPublicKey === 'function' ? attResp.getPublicKey() : null;
+            const regVerifyRes = await fetch('/api/auth/webauthn/register-account/verify', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                challengeId: regOptData.challengeId,
+                credentialId: arrayBufferToBase64Url(created.rawId),
+                clientDataJSON: arrayBufferToBase64Url(attResp.clientDataJSON),
+                attestationObject: arrayBufferToBase64Url(attResp.attestationObject),
+                authenticatorData: authDataBuf
+                  ? arrayBufferToBase64Url(authDataBuf)
+                  : undefined,
+                publicKeySpkiBase64: pubKeyBuf ? arrayBufferToBase64Url(pubKeyBuf) : undefined,
+                coseAlgorithm:
+                  typeof attResp.getPublicKeyAlgorithm === 'function'
+                    ? attResp.getPublicKeyAlgorithm()
+                    : -7,
+                transports:
+                  typeof attResp.getTransports === 'function'
+                    ? attResp.getTransports()
+                    : ['internal'],
+                trustDevice,
+              }),
+            });
+            const regVerifyData = await regVerifyRes.json();
+            if (!regVerifyRes.ok) {
+              setErrorMsg(
+                regVerifyData?.error || 'Falha ao concluir o cadastro da Passkey/Windows Hello.'
+              );
+              return;
+            }
+            setInfoMsg('Conta e Passkey Windows Hello criadas com sucesso. Abrindo workspace...');
+            await persistTokensAndComplete(regVerifyData);
+            return;
+          }
+        } catch (regErr: unknown) {
+          const errName = regErr instanceof Error ? regErr.name : '';
+          if (errName === 'NotAllowedError' && !accessPolicy?.windowsHelloNativeSupported) {
+            setErrorMsg(
+              'Cadastro de Passkey / Windows Hello cancelado ou nenhum autenticador biométrico configurado neste dispositivo.'
+            );
+            return;
+          }
+          webAuthnFailedOrBlocked = true;
+        }
+      } else {
+        webAuthnFailedOrBlocked = true;
+      }
+
+      if (webAuthnFailedOrBlocked && accessPolicy?.windowsHelloNativeSupported) {
+        const nativeRegRes = await fetch('/api/auth/windows-hello/native-register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: cleanName,
+            email: cleanEmail,
+            trustDevice,
+          }),
+        });
+        const nativeRegData = await nativeRegRes.json();
+        if (!nativeRegRes.ok) {
+          if (nativeRegRes.status === 409) {
+            setHelloMode('LOGIN');
+          }
+          setErrorMsg(
+            nativeRegData?.error ||
+              'Não foi possível cadastrar o Windows Hello nativo neste dispositivo.'
+          );
+          return;
+        }
+        setInfoMsg('Conta cadastrada via Windows Hello nativo. Abrindo workspace...');
+        await persistTokensAndComplete(nativeRegData);
+        return;
+      }
+
+      if (inIframe) {
+        setErrorMsg(
+          'Navegadores bloqueiam criação de Passkey WebAuthn dentro de iframes de preview. Abra o WinHood em aba dedicada ou use "Continuar no Workspace Local (1 clique)" / "Entrar ou Cadastrar com GitHub".'
+        );
+        return;
+      }
+
+      setErrorMsg(
+        'Nenhum autenticador biométrico WebAuthn/Windows Hello disponível neste dispositivo.'
+      );
+    } catch (err: unknown) {
+      setErrorMsg(
+        err instanceof Error
+          ? err.message
+          : 'Erro ao cadastrar conta com Windows Hello / Passkey.'
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleTeamAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg(null);
+    setInfoMsg(null);
+
+    const cleanEmail = emailInput.trim();
+    if (!cleanEmail) {
       setErrorMsg('Informe um endereço de e-mail válido.');
       return;
     }
-    if (!ensureWebAuthnEnvironmentReady()) {
+
+    if (teamAction === 'REGISTER') {
+      if (nameInput.trim().length < 2) {
+        setErrorMsg('Informe seu nome de exibição (mínimo 2 caracteres).');
+        return;
+      }
+      if (passwordInput.length < 10) {
+        setErrorMsg('A senha deve possuir no mínimo 10 caracteres.');
+        return;
+      }
+    } else if (teamMethod === 'PIN') {
+      if (!/^\d{6,8}$/.test(pinInput.trim())) {
+        setErrorMsg('Informe um PIN numérico válido de 6 a 8 dígitos.');
+        return;
+      }
+    } else if (!passwordInput) {
+      setErrorMsg('Informe sua senha de acesso.');
       return;
     }
 
-    setSubmitting(true);
-    try {
-      if (!window.PublicKeyCredential || !navigator.credentials) {
-        const nativeFallback = await tryNativeWindowsHelloRegister();
-        if (nativeFallback.ok) return;
-        if (nativeFallback.osUnsupported && isRunningInIframe()) {
-          setWebAuthnIframeFallback('register');
-        }
-        setErrorMsg(
-          nativeFallback.osUnsupported
-            ? 'O preview do navegador bloqueia biometria em iframe sem allow="publickey-credentials-create" e este servidor remoto executa em container Linux.'
-            : nativeFallback.errorMessage
-        );
-        return;
-      }
-
-      const optRes = await fetch('/api/auth/webauthn/register-account/options', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: regName.trim(),
-          email: regEmail.trim(),
-          role: regRole,
-          rpId: window.location.hostname,
-        }),
-      });
-      const optData = await optRes.json();
-      if (!optRes.ok) {
-        setErrorMsg(optData.error || 'Falha ao iniciar registro com Windows Hello.');
-        return;
-      }
-
-      const publicKeyOptions: PublicKeyCredentialCreationOptions = {
-        rp: {
-          name: optData.rp?.name || 'WinHood Benchmark Analyzer',
-          id: optData.rp?.id || window.location.hostname,
-        },
-        user: {
-          id: base64UrlToUint8Array(optData.user.id),
-          name: optData.user.name,
-          displayName: optData.user.displayName,
-        },
-        challenge: base64UrlToUint8Array(optData.challenge),
-        pubKeyCredParams: optData.pubKeyCredParams,
-        timeout: optData.timeout || 60000,
-        attestation: optData.attestation || 'none',
-        authenticatorSelection: optData.authenticatorSelection,
-      };
-
-      const cred = (await navigator.credentials.create({
-        publicKey: publicKeyOptions,
-      })) as PublicKeyCredential | null;
-
-      if (!cred) {
-        setErrorMsg('Operação Windows Hello cancelada pelo usuário.');
-        return;
-      }
-
-      const attResp = cred.response as AuthenticatorAttestationResponse & {
-        getAuthenticatorData?: () => ArrayBuffer;
-        getPublicKey?: () => ArrayBuffer | null;
-        getPublicKeyAlgorithm?: () => number;
-        getTransports?: () => string[];
-      };
-
-      const pubKeyDer =
-        typeof attResp.getPublicKey === 'function' ? attResp.getPublicKey() : null;
-      const authDataBuf =
-        typeof attResp.getAuthenticatorData === 'function'
-          ? attResp.getAuthenticatorData()
-          : null;
-
-      const verifyRes = await fetch('/api/auth/webauthn/register-account/verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          challengeId: optData.challengeId,
-          credentialId: arrayBufferToBase64Url(cred.rawId),
-          clientDataJSON: arrayBufferToBase64Url(attResp.clientDataJSON),
-          attestationObject: arrayBufferToBase64Url(attResp.attestationObject),
-          authenticatorData: authDataBuf ? arrayBufferToBase64Url(authDataBuf) : undefined,
-          publicKeySpkiBase64: pubKeyDer ? arrayBufferToBase64Url(pubKeyDer) : undefined,
-          coseAlgorithm:
-            typeof attResp.getPublicKeyAlgorithm === 'function'
-              ? attResp.getPublicKeyAlgorithm()
-              : -7,
-          transports:
-            typeof attResp.getTransports === 'function' ? attResp.getTransports() : ['internal'],
-          trustDevice,
-        }),
-      });
-      const verifyData = await verifyRes.json();
-      if (!verifyRes.ok) {
-        setErrorMsg(verifyData.error || 'Falha ao validar credencial Windows Hello.');
-        return;
-      }
-      if (verifyData.sessionId) {
-        setGlobalSessionToken(verifyData.sessionId, trustDevice);
-      }
-      if (verifyData.csrfToken) {
-        setGlobalCsrfToken(verifyData.csrfToken, trustDevice);
-      }
-      if (verifyData.user) {
-        onAuthenticated(verifyData.user);
-      } else {
-        await onRefreshSession();
-      }
-    } catch (err: any) {
-      if (err?.name === 'NotAllowedError' || err?.name === 'SecurityError') {
-        const nativeFallback = await tryNativeWindowsHelloRegister();
-        if (nativeFallback.ok) {
-          return;
-        }
-        if (nativeFallback.osUnsupported && isRunningInIframe()) {
-          setWebAuthnIframeFallback('register');
-          setErrorMsg(
-            'O preview do navegador bloqueia biometria (WebAuthn) dentro de iframe sem allow="publickey-credentials-create". Use o botão abaixo para concluir com PIN Rápido em 1 clique ou execute localmente em http://localhost:3000 / aplicativo .exe.'
-          );
-          return;
-        }
-        if (!nativeFallback.osUnsupported) {
-          setErrorMsg(nativeFallback.errorMessage);
-          return;
-        }
-      }
-      if (err?.name === 'NotAllowedError') {
-        setErrorMsg(
-          'Operação do Windows Hello cancelada na janela do Windows ou tempo esgotado.'
-        );
-      } else {
-        setErrorMsg(err?.message || 'Não foi possível concluir o cadastro com Windows Hello.');
-      }
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const handleWebAuthnLogin = async () => {
-    setErrorMsg(null);
-    setInfoMsg(null);
-    setWebAuthnIframeFallback(null);
-
-    if (!ensureWebAuthnEnvironmentReady()) {
-      return;
-    }
-
-    setSubmitting(true);
-    try {
-      if (!window.PublicKeyCredential || !navigator.credentials) {
-        const nativeFallback = await tryNativeWindowsHelloLogin();
-        if (nativeFallback.ok) return;
-        if (nativeFallback.osUnsupported && isRunningInIframe()) {
-          setWebAuthnIframeFallback('login');
-        }
-        setErrorMsg(
-          nativeFallback.osUnsupported
-            ? 'O preview do navegador bloqueia biometria em iframe sem allow="publickey-credentials-get" e este servidor remoto executa em container Linux.'
-            : nativeFallback.errorMessage
-        );
-        return;
-      }
-
-      const optRes = await fetch('/api/auth/webauthn/login/options', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: loginEmail.trim() || undefined,
-          rpId: window.location.hostname,
-        }),
-      });
-      const optData = await optRes.json();
-      if (!optRes.ok) {
-        setErrorMsg(optData.error || 'Falha ao iniciar autenticação com Windows Hello.');
-        return;
-      }
-
-      const allowCredentials: PublicKeyCredentialDescriptor[] = Array.isArray(
-        optData.allowCredentials
-      )
-        ? optData.allowCredentials.map((c: { id: string; transports?: AuthenticatorTransport[] }) => ({
-            type: 'public-key' as const,
-            id: base64UrlToUint8Array(c.id),
-            transports: c.transports,
-          }))
-        : [];
-
-      const assertion = (await navigator.credentials.get({
-        publicKey: {
-          challenge: base64UrlToUint8Array(optData.challenge),
-          rpId: optData.rpId || window.location.hostname,
-          timeout: optData.timeout || 60000,
-          userVerification: 'required',
-          ...(allowCredentials.length > 0 ? { allowCredentials } : {}),
-        },
-      })) as PublicKeyCredential | null;
-
-      if (!assertion) {
-        setErrorMsg('Autenticação Windows Hello cancelada.');
-        return;
-      }
-
-      const assertResp = assertion.response as AuthenticatorAssertionResponse;
-      const verifyRes = await fetch('/api/auth/webauthn/login/verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          challengeId: optData.challengeId,
-          credentialId: arrayBufferToBase64Url(assertion.rawId),
-          clientDataJSON: arrayBufferToBase64Url(assertResp.clientDataJSON),
-          authenticatorData: arrayBufferToBase64Url(assertResp.authenticatorData),
-          signature: arrayBufferToBase64Url(assertResp.signature),
-          email: loginEmail.trim() || undefined,
-          trustDevice,
-        }),
-      });
-      const data = await verifyRes.json();
-      if (!verifyRes.ok) {
-        setErrorMsg(data.error || 'Falha na verificação do Windows Hello.');
-        return;
-      }
-      if (data.sessionId) {
-        setGlobalSessionToken(data.sessionId, trustDevice);
-      }
-      if (data.csrfToken) {
-        setGlobalCsrfToken(data.csrfToken, trustDevice);
-      }
-      if (data.requiresTotp || data.mfaRequired) {
-        setPreAuthToken(data.preAuthToken || null);
-        setServerTimeIso(data.serverTimeIso || null);
-        setMfaCode('');
-        setRecoveryBackupCode('');
-        setUseRecoveryMode(false);
-        setMode('MFA');
-        setInfoMsg('Informe o código TOTP de 6 dígitos do seu aplicativo autenticador.');
-        return;
-      }
-      if (data.user) {
-        onAuthenticated(data.user);
-      } else {
-        await onRefreshSession();
-      }
-    } catch (err: any) {
-      if (err?.name === 'NotAllowedError' || err?.name === 'SecurityError') {
-        const nativeFallback = await tryNativeWindowsHelloLogin();
-        if (nativeFallback.ok) {
-          return;
-        }
-        if (nativeFallback.osUnsupported && isRunningInIframe()) {
-          setWebAuthnIframeFallback('login');
-          setErrorMsg(
-            'O preview do navegador bloqueia biometria (WebAuthn) dentro de iframe sem allow="publickey-credentials-get". Use o botão abaixo para entrar com PIN Rápido em 1 clique ou execute localmente em http://localhost:3000 / aplicativo .exe.'
-          );
-          return;
-        }
-        if (!nativeFallback.osUnsupported) {
-          setErrorMsg(nativeFallback.errorMessage);
-          return;
-        }
-      }
-      if (err?.name === 'NotAllowedError') {
-        setErrorMsg(
-          'Operação do Windows Hello cancelada na janela do Windows ou tempo esgotado.'
-        );
-      } else {
-        setErrorMsg(err?.message || 'Erro ao autenticar com Windows Hello.');
-      }
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const handleRegisterSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setErrorMsg(null);
-    setInfoMsg(null);
-
-    if (regMethod === 'WEBAUTHN') {
-      await handleWebAuthnRegister();
-      return;
-    }
-
-    if (regName.trim().length < 2) {
-      setErrorMsg('Informe seu nome de exibição (mínimo 2 caracteres).');
-      return;
-    }
-
-    if (regMethod === 'PIN') {
-      if (!regPinStatus.valid) {
-        setErrorMsg(regPinStatus.reason);
-        return;
-      }
-    } else if (regPassword.length < 10) {
-      setErrorMsg('A senha deve possuir no mínimo 10 caracteres.');
-      return;
-    }
-
-    setSubmitting(true);
-    try {
-      const res = await fetch('/api/auth/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: regName.trim(),
-          email: regEmail.trim(),
-          role: regRole,
-          password: regMethod === 'PASSWORD' ? regPassword : '',
-          pin: regMethod === 'PIN' ? regPin.trim() : undefined,
-          enableMfa: regEnableMfa,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setErrorMsg(data.error || 'Não foi possível concluir o cadastro.');
-        return;
-      }
-      if (data.sessionId) {
-        setGlobalSessionToken(data.sessionId, trustDevice);
-      }
-      if (data.csrfToken) {
-        setGlobalCsrfToken(data.csrfToken, trustDevice);
-      }
-      if (data.totpSetup) {
-        setTotpSetupInfo({
-          secret: data.totpSetup.secret || data.totpSetup.secretBase32,
-          otpauthUrl: data.totpSetup.otpauthUrl || data.totpSetup.otpauthUri,
-          recoveryCodes: data.totpSetup.recoveryCodes || [],
-        });
-        setPreAuthToken(null);
-        setMode('MFA');
-        setInfoMsg(
-          'Conta criada! Escaneie o QR Code abaixo no seu autenticador, guarde os códigos de backup e digite os 6 dígitos.'
-        );
-        return;
-      }
-      if (data.user) {
-        onAuthenticated(data.user);
-      } else {
-        await onRefreshSession();
-      }
-    } catch {
-      setErrorMsg('Erro de comunicação ao realizar o cadastro.');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const handleLoginSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setErrorMsg(null);
-    setInfoMsg(null);
-    setSubmitting(true);
-    try {
-      const endpoint = loginMethod === 'PIN' ? '/api/auth/login-pin' : '/api/auth/login';
-      const payload =
-        loginMethod === 'PIN'
-          ? {
-              email: loginEmail.trim(),
-              pin: loginPin.trim(),
-              trustDevice,
-            }
-          : {
-              email: loginEmail.trim(),
-              password: loginPassword,
-              trustDevice,
-            };
-
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setErrorMsg(data.error || 'Credenciais inválidas ou conta bloqueada.');
-        return;
-      }
-      if (data.sessionId) {
-        setGlobalSessionToken(data.sessionId, trustDevice);
-      }
-      if (data.csrfToken) {
-        setGlobalCsrfToken(data.csrfToken, trustDevice);
-      }
-      if (data.requiresTotp || data.mfaRequired) {
-        setPreAuthToken(data.preAuthToken || null);
-        setServerTimeIso(data.serverTimeIso || null);
-        setMfaCode('');
-        setRecoveryBackupCode('');
-        setUseRecoveryMode(false);
-        setMode('MFA');
-        setInfoMsg('Informe o código TOTP de 6 dígitos do seu aplicativo autenticador.');
-        return;
-      }
-      if (data.user) {
-        onAuthenticated(data.user);
-      } else {
-        await onRefreshSession();
-      }
-    } catch {
-      setErrorMsg('Erro de comunicação ao autenticar.');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const submitMfaChallenge = async (overrideCode?: string) => {
-    if (submittingRef.current) return;
-    const totpClean = (overrideCode ?? mfaCode).replace(/\D/g, '').slice(0, 6);
-    const recoveryClean = recoveryBackupCode.trim();
-
-    if (!useRecoveryMode && totpClean.length !== 6) {
-      setErrorMsg('Informe os 6 dígitos numéricos do aplicativo autenticador.');
-      return;
-    }
-    if (useRecoveryMode && recoveryClean.replace(/[\s-]/g, '').length < 8) {
-      setErrorMsg('Informe o código de recuperação no formato XXXX-XXXX.');
-      return;
-    }
-
-    submittingRef.current = true;
-    setErrorMsg(null);
     setSubmitting(true);
     try {
       const endpoint =
-        preAuthToken && !totpSetupInfo
-          ? '/api/auth/totp/authenticate'
-          : '/api/auth/mfa/verify';
+        teamAction === 'REGISTER'
+          ? '/api/auth/register'
+          : teamMethod === 'PIN'
+            ? '/api/auth/login-pin'
+            : '/api/auth/login';
 
       const payload =
-        preAuthToken && !totpSetupInfo
+        teamAction === 'REGISTER'
           ? {
-              preAuthToken,
-              totpCode: useRecoveryMode ? undefined : totpClean,
-              recoveryCode: useRecoveryMode ? recoveryClean : undefined,
-              trustDevice,
+              name: nameInput.trim(),
+              email: cleanEmail,
+              password: passwordInput,
+              enableMfa: false,
             }
-          : {
-              totpCode: useRecoveryMode ? '' : totpClean,
-              recoveryCode: useRecoveryMode ? recoveryClean : undefined,
-              trustDevice,
-            };
+          : teamMethod === 'PIN'
+            ? {
+                email: cleanEmail,
+                pin: pinInput.trim(),
+                trustDevice,
+              }
+            : {
+                email: cleanEmail,
+                password: passwordInput,
+                trustDevice,
+              };
 
       const res = await fetch(endpoint, {
         method: 'POST',
@@ -915,157 +973,91 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
       });
       const data = await res.json();
       if (!res.ok) {
-        setErrorMsg(data.error || 'Código TOTP inválido ou expirado.');
+        setErrorMsg(data?.error || 'Credenciais inválidas ou operação não autorizada.');
         return;
       }
-      if (data.sessionId) {
-        setGlobalSessionToken(data.sessionId, trustDevice);
+      if (data.requiresTotp || data.mfaRequired) {
+        setPreAuthToken(data.preAuthToken || null);
+        setMfaCode('');
+        setRecoveryBackupCode('');
+        setUseRecoveryCode(false);
+        setShowMfaChallenge(true);
+        setInfoMsg('Informe o código TOTP de 6 dígitos do seu aplicativo autenticador.');
+        return;
       }
-      if (data.csrfToken) {
-        setGlobalCsrfToken(data.csrfToken, trustDevice);
-      }
-      if (data.user) {
-        onAuthenticated(data.user);
-      } else {
-        await onRefreshSession();
-      }
+      await persistTokensAndComplete(data);
     } catch {
-      setErrorMsg('Erro ao verificar token MFA.');
+      setErrorMsg('Erro de comunicação com o servidor de autenticação.');
     } finally {
-      submittingRef.current = false;
       setSubmitting(false);
     }
   };
 
   const handleVerifyMfaSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    await submitMfaChallenge();
-  };
+    if (mfaSubmittingRef.current) return;
 
-  const handleMfaCodeChange = (rawVal: string) => {
-    const clean = rawVal.replace(/\D/g, '').slice(0, 6);
-    setMfaCode(clean);
-    if (clean.length === 6 && !useRecoveryMode) {
-      void submitMfaChallenge(clean);
+    const cleanTotp = mfaCode.replace(/\D/g, '').slice(0, 6);
+    const cleanRecovery = recoveryBackupCode.trim();
+
+    if (!useRecoveryCode && cleanTotp.length !== 6) {
+      setErrorMsg('Informe os 6 dígitos numéricos do seu aplicativo autenticador.');
+      return;
     }
-  };
-
-  const handleMfaPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
-    const pasted = e.clipboardData.getData('text');
-    const digits = pasted.replace(/[\s-]/g, '').replace(/\D/g, '').slice(0, 6);
-    if (digits.length > 0) {
-      e.preventDefault();
-      setMfaCode(digits);
-      if (digits.length === 6 && !useRecoveryMode) {
-        void submitMfaChallenge(digits);
-      }
+    if (useRecoveryCode && cleanRecovery.replace(/[\s-]/g, '').length < 8) {
+      setErrorMsg('Informe um código de recuperação válido (XXXX-XXXX).');
+      return;
     }
-  };
 
-  const handleCopyRecoveryCodes = async (codes: string[]) => {
+    mfaSubmittingRef.current = true;
+    setErrorMsg(null);
+    setSubmitting(true);
     try {
-      await navigator.clipboard.writeText(codes.join('\n'));
-      setCopiedRecovery(true);
-      setTimeout(() => setCopiedRecovery(false), 2500);
+      const endpoint = preAuthToken ? '/api/auth/totp/authenticate' : '/api/auth/mfa/verify';
+      const payload = preAuthToken
+        ? {
+            preAuthToken,
+            totpCode: useRecoveryCode ? undefined : cleanTotp,
+            recoveryCode: useRecoveryCode ? cleanRecovery : undefined,
+            trustDevice,
+          }
+        : {
+            totpCode: useRecoveryCode ? '' : cleanTotp,
+            recoveryCode: useRecoveryCode ? cleanRecovery : undefined,
+            trustDevice,
+          };
+
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setErrorMsg(data?.error || 'Código TOTP inválido ou expirado.');
+        return;
+      }
+      await persistTokensAndComplete(data);
     } catch {
-      // Clipboard fallback ignored
+      setErrorMsg('Erro de comunicação ao verificar código MFA.');
+    } finally {
+      mfaSubmittingRef.current = false;
+      setSubmitting(false);
     }
   };
 
-  const handleDownloadRecoveryCodes = (codes: string[]) => {
-    const content = [
-      '# WinHood Security Benchmark — Códigos de Recuperação TOTP (Uso Único)',
-      `# Gerado em: ${new Date().toISOString()}`,
-      '',
-      ...codes,
-      '',
-    ].join('\n');
-    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'winhood-recovery-codes.txt';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-
-  const handleCancelMfaLogout = async () => {
+  const handleCancelMfa = async () => {
     await fetch('/api/auth/logout', { method: 'POST' });
     clearClientAuthTokens();
-    setTotpSetupInfo(null);
     setPreAuthToken(null);
-    setMode('LOGIN');
+    setShowMfaChallenge(false);
+    setErrorMsg(null);
+    setInfoMsg(null);
     await onRefreshSession();
   };
 
-  const handleRequestRecovery = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setErrorMsg(null);
-    setInfoMsg(null);
-    setSubmitting(true);
-    try {
-      const res = await fetch('/api/auth/recovery/request', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: recEmail.trim() }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setErrorMsg(data.error || 'Erro ao solicitar recuperação.');
-        return;
-      }
-      setRecStepRequested(true);
-      setRecHintPath(data.recoveryChannelHint || null);
-      setInfoMsg(
-        data.message ||
-          'Token temporário emitido no canal local seguro (.winhood_data).'
-      );
-    } catch {
-      setErrorMsg('Erro ao solicitar recuperação de senha.');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const handleConfirmRecovery = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setErrorMsg(null);
-    setSubmitting(true);
-    try {
-      const res = await fetch('/api/auth/recovery/confirm', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: recEmail.trim(),
-          recoveryToken: recToken.trim(),
-          newPassword: recNewPassword,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setErrorMsg(data.error || 'Token inválido ou nova senha fraca.');
-        return;
-      }
-      setMode('LOGIN');
-      setRecStepRequested(false);
-      setRecToken('');
-      setRecNewPassword('');
-      setInfoMsg('Senha redefinida com sucesso. Faça login com a nova senha.');
-    } catch {
-      setErrorMsg('Erro ao confirmar redefinição de senha.');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const switchModeClean = (nextMode: GateMode) => {
-    setErrorMsg(null);
-    setInfoMsg(null);
-    setWebAuthnIframeFallback(null);
-    setMode(nextMode);
-  };
+  const vaultLocked = Boolean(accessPolicy?.vaultLockEnabled);
+  const soloLocalAvailable = Boolean(accessPolicy?.soloLocalAllowed);
 
   return (
     <div
@@ -1074,1104 +1066,824 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
       aria-labelledby="winhood-auth-title"
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/92 p-4 overflow-y-auto"
     >
-      <div className="w-full max-w-lg rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0c1017] shadow-2xl overflow-hidden my-auto">
-        {/* Header + 3D Isometric Padlock Showcase */}
-        <div className="px-6 pt-5 pb-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10]">
-          <div className="flex flex-col items-center justify-center mb-3.5">
-            <HairlineAnimatedFigure
-              type="padlock"
-              variant="hero"
-              width={184}
-              height={142}
-              active={true}
-              unlocked={Boolean(infoMsg)}
-              typingProgress={Math.min(
-                1,
-                ((mode === 'REGISTER'
-                  ? regPassword.length + regEmail.length + regName.length
-                  : mode === 'BOOTSTRAP'
-                    ? bsPassword.length + bsEmail.length
-                    : loginPassword.length + loginEmail.length) || 0) / 18
-              )}
-              accentColor={mode === 'REGISTER' ? '#10b981' : '#31d6c4'}
-              subtitle={
-                infoMsg
-                  ? 'COFRE KMS DESBLOQUEADO'
-                  : mode === 'REGISTER'
-                    ? 'SCRYPT · COFRE AES-256-GCM'
-                    : 'KMS · SESSÃO HTTPONLY'
-              }
-            />
-          </div>
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <WinHoodLogo size={36} className="shrink-0" />
-              <div>
-                <h2
-                  id="winhood-auth-title"
-                  className="text-base font-bold text-slate-900 dark:text-slate-100"
-                >
-                  {mode === 'BOOTSTRAP' && 'Provisionamento Inicial do Administrador'}
-                  {mode === 'LOGIN' && 'Autenticação WinHood Platform'}
-                  {mode === 'REGISTER' && 'Criar Nova Conta WinHood'}
-                  {mode === 'MFA' && 'Verificação em Duas Etapas (TOTP MFA)'}
-                  {mode === 'RECOVERY' && 'Recuperação Segura de Senha'}
-                </h2>
-                <p className="text-[11px] font-mono text-[#0e9f8e] dark:text-[#31d6c4]">
-                  Sessão HttpOnly · Cofre AES-256-GCM · Scrypt + TOTP RFC 6238
-                </p>
-              </div>
-            </div>
-            <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-[#31d6c4]/30 bg-[#31d6c4]/10 text-[10px] font-mono font-semibold text-[#0e9f8e] dark:text-[#31d6c4] shrink-0">
-              <Lock className="w-3.5 h-3.5" />
-              <span>whdb:enc:v2</span>
+      <div className="w-full max-w-[460px] rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0c1017] shadow-2xl overflow-hidden my-auto">
+        {/* Clean Single-Elevation Header */}
+        <header className="px-6 pt-6 pb-5 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10]">
+          <div className="flex items-center gap-3.5">
+            <WinHoodLogo size={38} className="shrink-0" />
+            <div className="min-w-0">
+              <h1
+                id="winhood-auth-title"
+                className="text-lg font-bold tracking-tight text-slate-950 dark:text-slate-50"
+              >
+                {showMfaChallenge
+                  ? 'Verificação em Duas Etapas'
+                  : 'Acessar WinHood Platform'}
+              </h1>
+              <p className="mt-0.5 text-[11px] text-slate-700 dark:text-slate-300 font-mono whitespace-nowrap truncate">
+                HttpOnly Strict · AES-256-GCM · Scrypt N=32768
+              </p>
             </div>
           </div>
-        </div>
+        </header>
 
-        {/* Mode Switcher Tabs (Entrar vs Criar Conta) */}
-        {mode !== 'MFA' && (
-          <div
-            role="tablist"
-            aria-label="Opções de acesso"
-            className="grid grid-cols-2 border-b border-slate-200 dark:border-slate-800 bg-slate-100/70 dark:bg-[#080b10]/60 text-xs font-bold"
-          >
-            <button
-              type="button"
-              role="tab"
-              aria-selected={mode === 'LOGIN' || mode === 'RECOVERY'}
-              onClick={() => switchModeClean('LOGIN')}
-              className={`py-2.5 px-4 flex items-center justify-center gap-1.5 border-b-2 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-                mode === 'LOGIN' || mode === 'RECOVERY'
-                  ? 'border-[#31d6c4] text-[#0e9f8e] dark:text-[#31d6c4] bg-white dark:bg-[#0c1017]'
-                  : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
-              }`}
-            >
-              <Lock className="w-3.5 h-3.5" />
-              <span>Entrar</span>
-            </button>
-
-            <button
-              type="button"
-              role="tab"
-              aria-selected={mode === 'REGISTER'}
-              onClick={() => switchModeClean('REGISTER')}
-              className={`py-2.5 px-4 flex items-center justify-center gap-1.5 border-b-2 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-                mode === 'REGISTER'
-                  ? 'border-[#31d6c4] text-[#0e9f8e] dark:text-[#31d6c4] bg-white dark:bg-[#0c1017]'
-                  : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
-              }`}
-            >
-              <UserPlus className="w-3.5 h-3.5" />
-              <span>Criar Conta</span>
-            </button>
-          </div>
-        )}
-
-        {/* Body */}
-        <div className="p-6 space-y-4">
-          {errorMsg && (
-            <div
-              role="alert"
-              className="p-3 rounded-lg border border-rose-500/40 bg-rose-500/10 text-xs text-rose-600 dark:text-rose-300 space-y-2"
-            >
-              <div className="flex items-start gap-2">
-                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+        {/* Progressive Single-Card Body */}
+        <div className="p-5 space-y-4">
+          {/* Accessible Live Status / Error Region */}
+          <div aria-live="polite" className="space-y-2.5 empty:hidden">
+            {errorMsg && (
+              <div
+                role="alert"
+                className="p-3.5 rounded-lg border border-rose-600/50 dark:border-rose-400/50 bg-rose-50 dark:bg-rose-950/50 text-xs leading-relaxed text-rose-950 dark:text-rose-100 flex items-start gap-2.5"
+              >
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-rose-700 dark:text-rose-300" aria-hidden="true" />
                 <span>{errorMsg}</span>
               </div>
+            )}
 
-              {webAuthnIframeFallback && (
-                <div className="pl-6 pt-1 space-y-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const flow = webAuthnIframeFallback;
-                      setErrorMsg(null);
-                      setWebAuthnIframeFallback(null);
-                      if (flow === 'register') {
-                        setMode('REGISTER');
-                        setRegMethod('PIN');
-                        setInfoMsg(
-                          'Modo PIN Rápido ativado: digite um PIN de 6 a 8 dígitos para concluir o cadastro agora.'
-                        );
-                      } else {
-                        setMode('LOGIN');
-                        setLoginMethod('PIN');
-                        setInfoMsg(
-                          'Modo PIN Rápido ativado: digite seu PIN de 6 a 8 dígitos para entrar.'
-                        );
-                      }
-                    }}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] transition-colors cursor-pointer"
-                  >
-                    <Hash className="w-3.5 h-3.5" />
-                    <span>
-                      {webAuthnIframeFallback === 'register'
-                        ? 'Concluir Cadastro com PIN Rápido (1 clique)'
-                        : 'Entrar com PIN Rápido (1 clique)'}
-                    </span>
-                  </button>
-                  <p className="text-[11px] text-slate-600 dark:text-slate-300">
-                    Para usar a biometria/PIN nativa do Windows Hello sem restrição de iframe, abra localmente em{' '}
-                    <code className="font-mono font-semibold">http://localhost:3000</code> ou execute o instalador Desktop (<code className="font-mono font-semibold">.exe</code>).
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
-
-          {infoMsg && (
-            <div className="p-3 rounded-lg border border-[#31d6c4]/40 bg-[#31d6c4]/10 text-xs text-emerald-700 dark:text-[#31d6c4] flex items-start gap-2">
-              <ShieldCheck className="w-4 h-4 shrink-0 mt-0.5" />
-              <span>{infoMsg}</span>
-            </div>
-          )}
-
-          {mode === 'BOOTSTRAP' && (
-            <form onSubmit={handleBootstrapSubmit} className="space-y-3.5 text-xs">
-              <div className="p-3 rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300 space-y-2">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="font-bold flex items-center gap-1.5">
-                    <KeyRound className="w-3.5 h-3.5" />
-                    <span>Provisionamento Admin via Token CLI</span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => switchModeClean('REGISTER')}
-                    className="text-[11px] font-semibold underline hover:text-amber-900 dark:hover:text-amber-100 cursor-pointer whitespace-nowrap shrink-0"
-                  >
-                    Voltar ao Cadastro Direto
-                  </button>
-                </div>
-                <p className="text-[11px]">
-                  Leia o token CSPRNG de uso único gerado no arquivo local:{' '}
-                  <code className="font-mono font-bold underline">
-                    {bootstrapTokenFileHint || '.winhood_data/bootstrap_admin_token.txt'}
-                  </code>
-                </p>
-              </div>
-
-              <div>
-                <label
-                  htmlFor="bs-name-input"
-                  className="block font-semibold text-slate-700 dark:text-slate-300 mb-1"
-                >
-                  Nome Completo do Administrador
-                </label>
-                <input
-                  id="bs-name-input"
-                  name="name"
-                  type="text"
-                  autoComplete="name"
-                  required
-                  value={bsName}
-                  onChange={(e) => setBsName(e.target.value)}
-                  placeholder="Ex.: Engenheiro Responsável"
-                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 text-slate-900 dark:text-slate-100"
-                />
-              </div>
-
-              <div>
-                <label
-                  htmlFor="bs-email-input"
-                  className="block font-semibold text-slate-700 dark:text-slate-300 mb-1"
-                >
-                  E-mail Corporativo
-                </label>
-                <input
-                  id="bs-email-input"
-                  name="email"
-                  type="email"
-                  autoComplete="email"
-                  required
-                  value={bsEmail}
-                  onChange={(e) => setBsEmail(e.target.value)}
-                  placeholder="admin@organizacao.com"
-                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 text-slate-900 dark:text-slate-100"
-                />
-              </div>
-
-              <div>
-                <label
-                  htmlFor="bs-password-input"
-                  className="block font-semibold text-slate-700 dark:text-slate-300 mb-1"
-                >
-                  Senha Forte (mínimo 10 caracteres)
-                </label>
-                <div className="relative">
-                  <input
-                    id="bs-password-input"
-                    name="new-password"
-                    type={showBsPassword ? 'text' : 'password'}
-                    autoComplete="new-password"
-                    required
-                    minLength={10}
-                    value={bsPassword}
-                    onChange={(e) => setBsPassword(e.target.value)}
-                    placeholder="Mínimo 10 caracteres"
-                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] pl-3 pr-10 py-2 text-slate-900 dark:text-slate-100"
-                  />
-                  <button
-                    type="button"
-                    aria-label={showBsPassword ? 'Ocultar senha' : 'Visualizar senha'}
-                    onClick={() => setShowBsPassword((v) => !v)}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 cursor-pointer"
-                  >
-                    {showBsPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
-                </div>
-              </div>
-
-              <div>
-                <label
-                  htmlFor="bs-token-input"
-                  className="block font-semibold text-slate-700 dark:text-slate-300 mb-1"
-                >
-                  Token Single-Use de Bootstrap
-                </label>
-                <input
-                  id="bs-token-input"
-                  name="bootstrap-token"
-                  type="text"
-                  autoComplete="off"
-                  required
-                  value={bsToken}
-                  onChange={(e) => setBsToken(e.target.value)}
-                  placeholder="Cole o token de bootstrap_admin_token.txt"
-                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 font-mono text-slate-900 dark:text-slate-100"
-                />
-              </div>
-
-              <label className="flex items-center gap-2 text-slate-700 dark:text-slate-300 cursor-pointer pt-1">
-                <input
-                  type="checkbox"
-                  checked={bsEnableMfa}
-                  onChange={(e) => setBsEnableMfa(e.target.checked)}
-                  className="rounded border-slate-400"
-                />
-                <span>Ativar autenticação multifator (TOTP MFA) imediatamente</span>
-              </label>
-
-              <button
-                type="submit"
-                disabled={submitting}
-                className="w-full py-2.5 rounded-lg font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
-              >
-                <UserPlus className="w-4 h-4" />
-                <span>
-                  {submitting ? 'Provisionando...' : 'Criar Conta ADMIN & Iniciar Sessão'}
-                </span>
-              </button>
-            </form>
-          )}
-
-          {mode === 'LOGIN' && (
-            <form onSubmit={handleLoginSubmit} className="space-y-3.5 text-xs">
-              <button
-                type="button"
-                disabled={submitting}
-                onClick={handleWebAuthnLogin}
-                className="w-full py-2.5 px-4 rounded-lg font-bold border border-[#31d6c4]/50 bg-[#31d6c4]/10 text-[#0e9f8e] dark:text-[#31d6c4] hover:bg-[#31d6c4]/20 transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 whitespace-nowrap shrink-0"
-              >
-                <Fingerprint className="w-4 h-4 shrink-0" />
-                <span>Entrar com Windows Hello</span>
-              </button>
-
-              <div className="grid grid-cols-2 gap-1 p-1 rounded-lg bg-slate-100 dark:bg-[#080b10] border border-slate-200 dark:border-slate-800">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setErrorMsg(null);
-                    setLoginMethod('PASSWORD');
-                  }}
-                  className={`py-1.5 px-3 rounded-md font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-                    loginMethod === 'PASSWORD'
-                      ? 'bg-white dark:bg-[#131924] text-slate-900 dark:text-slate-100 shadow-xs'
-                      : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
-                  }`}
-                >
-                  E-mail e Senha
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setErrorMsg(null);
-                    setLoginMethod('PIN');
-                  }}
-                  className={`py-1.5 px-3 rounded-md font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-                    loginMethod === 'PIN'
-                      ? 'bg-white dark:bg-[#131924] text-slate-900 dark:text-slate-100 shadow-xs'
-                      : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
-                  }`}
-                >
-                  PIN Rápido
-                </button>
-              </div>
-
-              <div>
-                <label
-                  htmlFor="login-email-input"
-                  className="block font-semibold text-slate-700 dark:text-slate-300 mb-1"
-                >
-                  E-mail
-                </label>
-                <input
-                  id="login-email-input"
-                  name="email"
-                  type="email"
-                  autoComplete="username"
-                  required={loginMethod === 'PASSWORD'}
-                  value={loginEmail}
-                  onChange={(e) => setLoginEmail(e.target.value)}
-                  placeholder="usuario@organizacao.com"
-                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 text-slate-900 dark:text-slate-100"
-                />
-              </div>
-
-              {loginMethod === 'PASSWORD' ? (
-                <div>
-                  <label
-                    htmlFor="login-password-input"
-                    className="block font-semibold text-slate-700 dark:text-slate-300 mb-1"
-                  >
-                    Senha
-                  </label>
-                  <div className="relative">
-                    <input
-                      id="login-password-input"
-                      name="password"
-                      type={showLoginPassword ? 'text' : 'password'}
-                      autoComplete="current-password"
-                      required
-                      value={loginPassword}
-                      onChange={(e) => setLoginPassword(e.target.value)}
-                      placeholder="••••••••••"
-                      className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] pl-3 pr-10 py-2 text-slate-900 dark:text-slate-100"
-                    />
-                    <button
-                      type="button"
-                      aria-label={showLoginPassword ? 'Ocultar senha' : 'Visualizar senha'}
-                      onClick={() => setShowLoginPassword((v) => !v)}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 cursor-pointer"
-                    >
-                      {showLoginPassword ? (
-                        <EyeOff className="w-4 h-4" />
-                      ) : (
-                        <Eye className="w-4 h-4" />
-                      )}
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div>
-                  <label
-                    htmlFor="login-pin-input"
-                    className="block font-semibold text-slate-700 dark:text-slate-300 mb-1"
-                  >
-                    PIN Rápido (6 a 8 dígitos)
-                  </label>
-                  <input
-                    id="login-pin-input"
-                    name="pin"
-                    type="password"
-                    inputMode="numeric"
-                    pattern="[0-9]*"
-                    autoComplete="off"
-                    required
-                    minLength={6}
-                    maxLength={8}
-                    value={loginPin}
-                    onChange={(e) => setLoginPin(e.target.value.replace(/\D/g, '').slice(0, 8))}
-                    placeholder="••••••"
-                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 font-mono text-base tracking-[0.3em] text-center text-slate-900 dark:text-slate-100 tabular-nums"
-                  />
-                </div>
-              )}
-
-              <label
-                htmlFor="login-trust-device"
-                className="flex items-center gap-2 text-slate-700 dark:text-slate-300 cursor-pointer"
-              >
-                <input
-                  id="login-trust-device"
-                  type="checkbox"
-                  checked={trustDevice}
-                  onChange={(e) => setTrustDevice(e.target.checked)}
-                  className="rounded border-slate-400"
-                />
-                <span>Manter sessão ativa neste computador por 30 dias (cookie HttpOnly)</span>
-              </label>
-
-              <button
-                type="submit"
-                disabled={submitting}
-                className="w-full py-2.5 rounded-lg font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] transition-colors cursor-pointer disabled:opacity-50"
-              >
-                {submitting
-                  ? 'Autenticando...'
-                  : loginMethod === 'PIN'
-                    ? 'Entrar com PIN Rápido'
-                    : 'Entrar no WinHood'}
-              </button>
-
-              <div className="flex items-center justify-between pt-2 border-t border-slate-200 dark:border-slate-800/80">
-                <button
-                  type="button"
-                  onClick={() => switchModeClean('RECOVERY')}
-                  className="text-[11px] font-semibold text-slate-600 dark:text-slate-400 hover:text-[#0e9f8e] dark:hover:text-[#31d6c4] hover:underline cursor-pointer"
-                >
-                  Esqueci minha senha / Recuperar acesso
-                </button>
-                <button
-                  type="button"
-                  onClick={() => switchModeClean('REGISTER')}
-                  className="text-[11px] font-bold text-[#0e9f8e] dark:text-[#31d6c4] hover:underline flex items-center gap-1 cursor-pointer"
-                >
-                  <UserPlus className="w-3.5 h-3.5" />
-                  <span>Não possui conta? Cadastre-se</span>
-                </button>
-              </div>
-            </form>
-          )}
-
-          {mode === 'REGISTER' && (
-            <form onSubmit={handleRegisterSubmit} className="space-y-3.5 text-xs">
-              <div className="p-2.5 rounded-lg border border-[#31d6c4]/30 bg-[#31d6c4]/10 text-[11px] text-slate-700 dark:text-slate-200 flex items-center justify-between gap-2">
-                <span>
-                  {bootstrapRequired
-                    ? 'Primeiro acesso local: a 1ª conta cadastrada recebe perfil ADMIN automaticamente.'
-                    : 'Cadastro autenticado com derivação Scrypt e sessão persistente de 30 dias.'}
-                </span>
-                {bootstrapRequired && (
-                  <button
-                    type="button"
-                    onClick={() => switchModeClean('BOOTSTRAP')}
-                    className="text-[11px] font-mono font-semibold text-[#0e9f8e] dark:text-[#31d6c4] hover:underline whitespace-nowrap shrink-0 cursor-pointer"
-                  >
-                    Usar Token
-                  </button>
-                )}
-              </div>
-
-              {/* Method Selector: Senha | PIN (6-8) | Win Hello */}
+            {infoMsg && (
               <div
-                role="group"
-                aria-label="Método de credencial para cadastro"
-                className="grid grid-cols-3 gap-1 p-1 rounded-lg bg-slate-100 dark:bg-[#080b10] border border-slate-200 dark:border-slate-800"
+                role="status"
+                className="p-3.5 rounded-lg border border-teal-700/40 dark:border-teal-400/40 bg-teal-50 dark:bg-teal-950/40 text-xs leading-relaxed text-teal-950 dark:text-teal-100 flex items-start gap-2.5"
               >
-                <button
-                  type="button"
-                  onClick={() => {
-                    setErrorMsg(null);
-                    setRegMethod('PASSWORD');
-                  }}
-                  className={`py-1.5 px-2.5 rounded-md font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-                    regMethod === 'PASSWORD'
-                      ? 'bg-white dark:bg-[#131924] text-slate-900 dark:text-slate-100 shadow-xs'
-                      : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
-                  }`}
-                >
-                  <Lock className="w-3.5 h-3.5 shrink-0" />
-                  <span>Senha</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setErrorMsg(null);
-                    setRegMethod('PIN');
-                  }}
-                  className={`py-1.5 px-2.5 rounded-md font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-                    regMethod === 'PIN'
-                      ? 'bg-white dark:bg-[#131924] text-slate-900 dark:text-slate-100 shadow-xs'
-                      : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
-                  }`}
-                >
-                  <Hash className="w-3.5 h-3.5 shrink-0" />
-                  <span>PIN (6-8)</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setErrorMsg(null);
-                    setRegMethod('WEBAUTHN');
-                  }}
-                  className={`py-1.5 px-2.5 rounded-md font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-                    regMethod === 'WEBAUTHN'
-                      ? 'bg-white dark:bg-[#131924] text-slate-900 dark:text-slate-100 shadow-xs'
-                      : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
-                  }`}
-                >
-                  <Fingerprint className="w-3.5 h-3.5 shrink-0" />
-                  <span>Win Hello</span>
-                </button>
+                <ShieldCheck className="w-4 h-4 shrink-0 mt-0.5 text-teal-700 dark:text-teal-300" aria-hidden="true" />
+                <span>{infoMsg}</span>
               </div>
+            )}
+          </div>
 
-              <div>
-                <label
-                  htmlFor="reg-name-input"
-                  className="block font-semibold text-slate-700 dark:text-slate-300 mb-1"
-                >
-                  Nome de Exibição
-                </label>
-                <input
-                  id="reg-name-input"
-                  name="name"
-                  type="text"
-                  autoComplete="name"
-                  required
-                  minLength={2}
-                  value={regName}
-                  onChange={(e) => setRegName(e.target.value)}
-                  placeholder="Ex.: Ana Costa"
-                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 text-slate-900 dark:text-slate-100"
-                />
-              </div>
-
-              <div>
-                <label
-                  htmlFor="reg-email-input"
-                  className="block font-semibold text-slate-700 dark:text-slate-300 mb-1"
-                >
-                  E-mail
-                </label>
-                <input
-                  id="reg-email-input"
-                  name="email"
-                  type="email"
-                  autoComplete="email"
-                  required
-                  value={regEmail}
-                  onChange={(e) => setRegEmail(e.target.value)}
-                  placeholder="ana.costa@organizacao.com"
-                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 text-slate-900 dark:text-slate-100"
-                />
-              </div>
-
-              {regMethod === 'PASSWORD' && (
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label
-                      htmlFor="reg-password-input"
-                      className="font-semibold text-slate-700 dark:text-slate-300"
-                    >
-                      Senha
-                    </label>
-                    <span className={`text-[11px] font-mono font-semibold ${regStrength.textColor}`}>
-                      {regStrength.label}
-                    </span>
-                  </div>
-                  <div className="relative">
-                    <input
-                      id="reg-password-input"
-                      name="new-password"
-                      type={showRegPassword ? 'text' : 'password'}
-                      autoComplete="new-password"
-                      required
-                      minLength={10}
-                      value={regPassword}
-                      onChange={(e) => setRegPassword(e.target.value)}
-                      placeholder="Mínimo 10 caracteres (use o ícone para conferir)"
-                      className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] pl-3 pr-10 py-2 text-slate-900 dark:text-slate-100"
-                    />
-                    <button
-                      type="button"
-                      aria-label={showRegPassword ? 'Ocultar senha' : 'Visualizar senha'}
-                      onClick={() => setShowRegPassword((v) => !v)}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 cursor-pointer"
-                    >
-                      {showRegPassword ? (
-                        <EyeOff className="w-4 h-4" />
-                      ) : (
-                        <Eye className="w-4 h-4" />
-                      )}
-                    </button>
-                  </div>
-
-                  {/* 4-Level Entropy Meter */}
-                  <div className="grid grid-cols-4 gap-1.5 mt-2" aria-label="Medidor de força da senha">
-                    {[1, 2, 3, 4].map((step) => (
-                      <div
-                        key={step}
-                        className={`h-1.5 rounded-full transition-colors ${
-                          regStrength.level >= step
-                            ? regStrength.barColor
-                            : 'bg-slate-200 dark:bg-slate-800'
-                        }`}
-                      />
-                    ))}
-                  </div>
-
-                  {/* Criteria Checklist */}
-                  <div className="grid grid-cols-2 gap-1.5 mt-2 text-[11px] text-slate-500 dark:text-slate-400">
-                    <span className={regStrength.checks.minLength ? 'text-emerald-500 font-medium' : ''}>
-                      {regStrength.checks.minLength ? '✓' : '○'} Mínimo 10 caracteres
-                    </span>
-                    <span className={regStrength.checks.mixedCase ? 'text-emerald-500 font-medium' : ''}>
-                      {regStrength.checks.mixedCase ? '✓' : '○'} Maiúsculas &amp; minúsculas
-                    </span>
-                    <span className={regStrength.checks.hasDigit ? 'text-emerald-500 font-medium' : ''}>
-                      {regStrength.checks.hasDigit ? '✓' : '○'} Ao menos 1 número
-                    </span>
-                    <span className={regStrength.checks.hasSymbol ? 'text-emerald-500 font-medium' : ''}>
-                      {regStrength.checks.hasSymbol ? '✓' : '○'} Símbolo especial (!@#$)
-                    </span>
-                  </div>
-                </div>
-              )}
-
-              {regMethod === 'PIN' && (
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label
-                      htmlFor="reg-pin-input"
-                      className="font-semibold text-slate-700 dark:text-slate-300"
-                    >
-                      PIN Rápido (6 a 8 dígitos)
-                    </label>
-                    <span
-                      className={`text-[11px] font-mono font-semibold ${
-                        regPinStatus.valid ? 'text-emerald-500' : 'text-amber-500'
-                      }`}
-                    >
-                      {regPinStatus.reason}
-                    </span>
-                  </div>
-                  <input
-                    id="reg-pin-input"
-                    name="pin"
-                    type="password"
-                    inputMode="numeric"
-                    pattern="[0-9]*"
-                    autoComplete="off"
-                    required
-                    minLength={6}
-                    maxLength={8}
-                    value={regPin}
-                    onChange={(e) => setRegPin(e.target.value.replace(/\D/g, '').slice(0, 8))}
-                    placeholder="Ex.: 482917"
-                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 font-mono text-base tracking-[0.3em] text-center text-slate-900 dark:text-slate-100 tabular-nums"
-                  />
-                  <p className="mt-1.5 text-[11px] text-slate-500 dark:text-slate-400">
-                    Armazenado com Scrypt (N=32768, r=8, p=1) e bloqueio automático contra força bruta após 5 tentativas.
-                  </p>
-                </div>
-              )}
-
-              {regMethod === 'WEBAUTHN' && (
-                <div className="p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10] space-y-1.5">
-                  <div className="font-semibold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
-                    <Fingerprint className="w-4 h-4 text-[#0e9f8e] dark:text-[#31d6c4]" />
-                    <span>Credencial FIDO2 / Windows Hello (TPM Plataforma)</span>
-                  </div>
-                  <p className="text-[11px] text-slate-600 dark:text-slate-400">
-                    Utiliza biometria, reconhecimento facial ou PIN do sistema operacional Windows com chave criptográfica assimétrica ES256/RS256 sem envio de senha pela rede.
-                  </p>
-                </div>
-              )}
-
-              {/* Progressive Profiling Toggle */}
-              {regMethod !== 'WEBAUTHN' && (
-                <div className="border-t border-slate-200 dark:border-slate-800 pt-2.5">
-                  <button
-                    type="button"
-                    onClick={() => setShowAdvancedRegister((v) => !v)}
-                    className="w-full flex items-center justify-between text-[11px] font-semibold text-slate-600 dark:text-slate-400 hover:text-[#31d6c4] cursor-pointer"
-                  >
-                    <span>Configurações opcionais de perfil (RBAC &amp; 2FA)</span>
-                    {showAdvancedRegister ? (
-                      <ChevronUp className="w-3.5 h-3.5" />
-                    ) : (
-                      <ChevronDown className="w-3.5 h-3.5" />
-                    )}
-                  </button>
-
-                  {showAdvancedRegister && (
-                    <div className="mt-2.5 space-y-2.5 p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10]">
-                      <div>
-                        <label
-                          htmlFor="reg-role-select"
-                          className="block font-semibold text-slate-700 dark:text-slate-300 mb-1"
-                        >
-                          Perfil Funcional (RBAC)
-                        </label>
-                        <select
-                          id="reg-role-select"
-                          value={regRole}
-                          onChange={(e) =>
-                            setRegRole(
-                              e.target.value as 'SECURITY_LEAD' | 'QA_ENGINEER' | 'AUDITOR'
-                            )
-                          }
-                          className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0c1017] px-2.5 py-1.5 text-slate-900 dark:text-slate-100"
-                        >
-                          <option value="SECURITY_LEAD">
-                            SECURITY_LEAD — AppSec, SAST, MqrBridge &amp; Benchmarks
-                          </option>
-                          <option value="QA_ENGINEER">
-                            QA_ENGINEER — Qualidade, Testes &amp; Performance
-                          </option>
-                          <option value="AUDITOR">
-                            AUDITOR — Auditoria de Evidências &amp; Relatórios
-                          </option>
-                        </select>
-                      </div>
-
-                      <label className="flex items-center gap-2 text-slate-700 dark:text-slate-300 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={regEnableMfa}
-                          onChange={(e) => setRegEnableMfa(e.target.checked)}
-                          className="rounded border-slate-400"
-                        />
-                        <span>Ativar autenticação 2FA (TOTP) já na criação da conta</span>
-                      </label>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <button
-                type="submit"
-                disabled={submitting}
-                className="w-full py-2.5 rounded-lg font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
-              >
-                {regMethod === 'WEBAUTHN' ? (
-                  <Fingerprint className="w-4 h-4" />
-                ) : (
-                  <UserPlus className="w-4 h-4" />
-                )}
-                <span>
-                  {submitting
-                    ? 'Cadastrando conta...'
-                    : regMethod === 'WEBAUTHN'
-                      ? 'Registrar com Windows Hello'
-                      : regMethod === 'PIN'
-                        ? 'Criar Conta com PIN & Acessar'
-                        : 'Criar Conta & Acessar WinHood'}
-                </span>
-              </button>
-
-              <div className="flex items-center justify-between pt-2 border-t border-slate-200 dark:border-slate-800/80">
-                {bootstrapRequired ? (
-                  <button
-                    type="button"
-                    onClick={() => switchModeClean('BOOTSTRAP')}
-                    className="text-[11px] font-semibold text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 hover:underline cursor-pointer"
-                  >
-                    Usar Token de Bootstrap (CLI)
-                  </button>
-                ) : (
-                  <span />
-                )}
-                <button
-                  type="button"
-                  onClick={() => switchModeClean('LOGIN')}
-                  className="text-[11px] font-bold text-[#0e9f8e] dark:text-[#31d6c4] hover:underline cursor-pointer"
-                >
-                  Já possui uma conta? Fazer login
-                </button>
-              </div>
-            </form>
-          )}
-
-          {mode === 'MFA' && (
-            <form onSubmit={handleVerifyMfaSubmit} className="space-y-4 text-xs">
+          {showMfaChallenge ? (
+            <form onSubmit={handleVerifyMfaSubmit} className="space-y-4">
               {pendingUser && (
-                <div className="p-2.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10] font-mono text-[11px]">
-                  Sessão pendente para: <strong>{pendingUser.email}</strong> ({pendingUser.role})
-                </div>
+                <p className="text-xs text-slate-800 dark:text-slate-200">
+                  Confirmando identidade para{' '}
+                  <strong className="font-semibold text-slate-950 dark:text-white">
+                    {pendingUser.email}
+                  </strong>
+                </p>
               )}
 
-              {clockDriftSeconds > 25 && (
-                <div className="p-2.5 rounded-lg border border-amber-500/40 bg-amber-500/10 text-[11px] text-amber-600 dark:text-amber-300 flex items-start gap-2">
-                  <Clock className="w-4 h-4 shrink-0 mt-0.5" />
-                  <span>
-                    Dessincronização de relógio detectada ({clockDriftSeconds}s de diferença em relação ao servidor). Se o código falhar, sincronize a hora automática do seu dispositivo.
-                  </span>
-                </div>
-              )}
-
-              {totpSetupInfo && (
-                <div className="p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10] space-y-2.5 text-[11px] text-center">
-                  <div className="font-bold text-slate-800 dark:text-slate-200">
-                    Escaneie o QR Code no Google Authenticator, Authy ou 1Password:
-                  </div>
-                  {qrCodeDataUrl ? (
-                    <div className="flex justify-center p-2 bg-white rounded shadow-inner">
-                      <img src={qrCodeDataUrl} alt="QR Code TOTP MFA" className="w-36 h-36 object-contain" />
-                    </div>
-                  ) : (
-                    <div className="text-slate-400">Gerando QR Code criptográfico offline...</div>
-                  )}
-                  <div className="text-left space-y-1 pt-1">
-                    <div className="text-slate-500 font-semibold">Chave Base32 (Configuração Manual):</div>
-                    <div className="font-mono text-[#0e9f8e] dark:text-[#31d6c4] break-all select-all p-1.5 bg-slate-100 dark:bg-slate-900 rounded">
-                      {totpSetupInfo.secret}
-                    </div>
-                  </div>
-
-                  {totpSetupInfo.recoveryCodes && totpSetupInfo.recoveryCodes.length > 0 && (
-                    <div className="text-left space-y-1.5 pt-2 border-t border-slate-200 dark:border-slate-800">
-                      <div className="flex items-center justify-between">
-                        <span className="font-bold text-amber-600 dark:text-amber-400">
-                          8 Códigos de Recuperação de Uso Único (Salve em local seguro):
-                        </span>
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              void handleCopyRecoveryCodes(totpSetupInfo.recoveryCodes!)
-                            }
-                            className="px-2 py-0.5 rounded border border-slate-300 dark:border-slate-700 hover:border-[#31d6c4] inline-flex items-center gap-1 cursor-pointer"
-                          >
-                            {copiedRecovery ? (
-                              <Check className="w-3 h-3 text-emerald-500" />
-                            ) : (
-                              <Copy className="w-3 h-3" />
-                            )}
-                            <span>{copiedRecovery ? 'Copiado' : 'Copiar'}</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleDownloadRecoveryCodes(totpSetupInfo.recoveryCodes!)
-                            }
-                            className="px-2 py-0.5 rounded border border-slate-300 dark:border-slate-700 hover:border-[#31d6c4] inline-flex items-center gap-1 cursor-pointer"
-                          >
-                            <Download className="w-3 h-3" />
-                            <span>.TXT</span>
-                          </button>
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 font-mono text-[11px]">
-                        {totpSetupInfo.recoveryCodes.map((code) => (
-                          <div
-                            key={code}
-                            className="px-2 py-1 rounded bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-center select-all"
-                          >
-                            {code}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {!useRecoveryMode ? (
-                <div>
+              {!useRecoveryCode ? (
+                <div className="space-y-1.5">
                   <label
-                    htmlFor="mfa-code-input"
-                    className="block font-semibold text-slate-700 dark:text-slate-300 mb-1"
+                    htmlFor="winhood-mfa-code"
+                    className="block text-xs font-semibold text-slate-900 dark:text-slate-100"
                   >
-                    Código TOTP (6 dígitos — validação automática ao preencher)
+                    Código TOTP de 6 dígitos
                   </label>
                   <input
-                    id="mfa-code-input"
-                    name="one-time-code"
+                    id="winhood-mfa-code"
                     type="text"
-                    required
                     inputMode="numeric"
-                    pattern="[0-9]*"
                     autoComplete="one-time-code"
-                    autoFocus
                     maxLength={6}
                     value={mfaCode}
-                    onChange={(e) => handleMfaCodeChange(e.target.value)}
-                    onPaste={handleMfaPaste}
+                    onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
                     placeholder="000000"
-                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2.5 font-mono text-lg tracking-[0.35em] text-center text-slate-900 dark:text-slate-100 tabular-nums"
+                    className={`w-full px-3.5 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#080b10] text-slate-950 dark:text-slate-50 font-mono text-base tracking-[0.35em] text-center tabular-nums ${FOCUS_RING}`}
+                    required
                   />
                 </div>
               ) : (
-                <div>
+                <div className="space-y-1.5">
                   <label
-                    htmlFor="mfa-recovery-input"
-                    className="block font-semibold text-slate-700 dark:text-slate-300 mb-1"
+                    htmlFor="winhood-recovery-code"
+                    className="block text-xs font-semibold text-slate-900 dark:text-slate-100"
                   >
-                    Código de Recuperação de Uso Único (XXXX-XXXX)
+                    Código de recuperação de uso único
                   </label>
                   <input
-                    id="mfa-recovery-input"
-                    name="recovery-code"
+                    id="winhood-recovery-code"
                     type="text"
-                    required
-                    autoFocus
-                    maxLength={12}
                     value={recoveryBackupCode}
                     onChange={(e) => setRecoveryBackupCode(e.target.value.toUpperCase())}
-                    placeholder="A1B2-C3D4"
-                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 font-mono text-base tracking-widest text-center text-slate-900 dark:text-slate-100 uppercase"
+                    placeholder="XXXX-XXXX"
+                    className={`w-full px-3.5 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#080b10] text-slate-950 dark:text-slate-50 font-mono text-sm tracking-widest text-center ${FOCUS_RING}`}
+                    required
                   />
                 </div>
               )}
 
-              <div className="flex items-center justify-between gap-2">
-                <label
-                  htmlFor="mfa-trust-device"
-                  className="flex items-center gap-2 text-slate-600 dark:text-slate-400 cursor-pointer"
-                >
-                  <input
-                    id="mfa-trust-device"
-                    type="checkbox"
-                    checked={trustDevice}
-                    onChange={(e) => setTrustDevice(e.target.checked)}
-                    className="rounded border-slate-400"
-                  />
-                  <span>Lembrar este computador (30d)</span>
-                </label>
+              <button
+                type="submit"
+                disabled={submitting}
+                className={`w-full min-h-[44px] px-4 py-2.5 rounded-lg text-sm font-bold bg-[#14b8a6] hover:bg-[#0d9488] dark:bg-[#31d6c4] dark:hover:bg-[#22c4b2] text-slate-950 transition-colors cursor-pointer disabled:opacity-50 ${FOCUS_RING}`}
+              >
+                {submitting ? 'Verificando...' : 'Confirmar código'}
+              </button>
 
+              <div className="flex items-center justify-between pt-1 text-xs">
                 <button
                   type="button"
                   onClick={() => {
+                    setUseRecoveryCode((v) => !v);
                     setErrorMsg(null);
-                    setUseRecoveryMode((v) => !v);
                   }}
-                  className="text-[11px] font-semibold text-[#0e9f8e] dark:text-[#31d6c4] hover:underline cursor-pointer"
+                  className={`font-medium text-teal-800 dark:text-teal-300 hover:underline cursor-pointer ${FOCUS_RING} rounded`}
                 >
-                  {useRecoveryMode
-                    ? 'Voltar para código TOTP (6 dígitos)'
-                    : 'Usar código de recuperação de uso único'}
-                </button>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <button
-                  type="submit"
-                  disabled={submitting}
-                  className="flex-1 py-2.5 rounded-lg font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] transition-colors cursor-pointer disabled:opacity-50"
-                >
-                  {submitting ? 'Validando...' : 'Validar MFA & Acessar'}
+                  {useRecoveryCode ? 'Usar código TOTP de 6 dígitos' : 'Usar código de recuperação'}
                 </button>
                 <button
                   type="button"
-                  onClick={handleCancelMfaLogout}
-                  className="px-3 py-2.5 rounded-lg font-semibold border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-rose-400 flex items-center gap-1 cursor-pointer"
+                  onClick={handleCancelMfa}
+                  className={`inline-flex items-center gap-1 font-medium text-slate-700 dark:text-slate-300 hover:text-slate-950 dark:hover:text-white cursor-pointer ${FOCUS_RING} rounded`}
                 >
-                  <LogOut className="w-3.5 h-3.5" />
-                  <span>Sair</span>
+                  <LogOut className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>Voltar</span>
                 </button>
               </div>
             </form>
-          )}
+          ) : (
+            <>
+              {/* Primary Zero-Friction Actions (single clear primary CTA matching real access mode) */}
+              <div className="space-y-3">
+                {soloLocalAvailable ? (
+                  <button
+                    type="button"
+                    disabled={submitting}
+                    onClick={handleSoloLocalWorkspace}
+                    aria-label="Continuar no Workspace Local em 1 clique"
+                    className={`w-full min-h-[44px] px-4 py-2.5 rounded-lg text-sm font-bold bg-[#14b8a6] hover:bg-[#0d9488] dark:bg-[#31d6c4] dark:hover:bg-[#22c4b2] text-slate-950 flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:opacity-50 ${FOCUS_RING}`}
+                  >
+                    <Laptop className="w-4 h-4 shrink-0" aria-hidden="true" />
+                    <span>Continuar no Workspace Local (1 clique)</span>
+                  </button>
+                ) : vaultLocked ? (
+                  <button
+                    type="button"
+                    disabled={submitting}
+                    onClick={() => {
+                      setShowWindowsHelloPanel((prev) => {
+                        const next = !prev;
+                        if (next) {
+                          setShowGitHubConnectBox(false);
+                          setGhDevice(null);
+                          setOauthPendingState(null);
+                          setInfoMsg(null);
+                        }
+                        return next;
+                      });
+                      setErrorMsg(null);
+                    }}
+                    aria-label="Entrar ou cadastrar com Windows Hello Passkey"
+                    aria-expanded={showWindowsHelloPanel}
+                    className={`w-full min-h-[44px] px-4 py-2.5 rounded-lg text-sm font-bold bg-[#14b8a6] hover:bg-[#0d9488] dark:bg-[#31d6c4] dark:hover:bg-[#22c4b2] text-slate-950 flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:opacity-50 ${FOCUS_RING}`}
+                  >
+                    <Fingerprint className="w-4 h-4 shrink-0" aria-hidden="true" />
+                    <span>Entrar ou Cadastrar com Windows Hello</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={submitting}
+                    onClick={handleGitHubDirectAuth}
+                    aria-label="Entrar ou cadastrar conta com GitHub"
+                    aria-expanded={
+                      showGitHubConnectBox || Boolean(ghDevice) || Boolean(oauthPendingState)
+                    }
+                    className={`w-full min-h-[44px] px-4 py-2.5 rounded-lg text-sm font-bold bg-[#14b8a6] hover:bg-[#0d9488] dark:bg-[#31d6c4] dark:hover:bg-[#22c4b2] text-slate-950 flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:opacity-50 ${FOCUS_RING}`}
+                  >
+                    <Github className="w-4 h-4 shrink-0" aria-hidden="true" />
+                    <span>Entrar ou Cadastrar com GitHub</span>
+                  </button>
+                )}
 
-          {mode === 'RECOVERY' && (
-            <div className="space-y-4 text-xs">
-              {!recStepRequested ? (
-                <form onSubmit={handleRequestRecovery} className="space-y-3">
-                  <p className="text-slate-600 dark:text-slate-400">
-                    Informe seu e-mail cadastrado. Um token temporário de uso único será gravado no canal local seguro (<code className="font-mono">.winhood_data</code>).
-                  </p>
-                  <input
-                    id="rec-email-input"
-                    name="email"
-                    type="email"
-                    autoComplete="email"
-                    required
-                    value={recEmail}
-                    onChange={(e) => setRecEmail(e.target.value)}
-                    placeholder="usuario@organizacao.com"
-                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 text-slate-900 dark:text-slate-100"
-                  />
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="submit"
-                      disabled={submitting}
-                      className="flex-1 py-2.5 rounded-lg font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] cursor-pointer disabled:opacity-50"
-                    >
-                      Emitir Token de Recuperação
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => switchModeClean('LOGIN')}
-                      className="px-3 py-2.5 rounded-lg font-semibold border border-slate-300 dark:border-slate-700 cursor-pointer"
-                    >
-                      Voltar
-                    </button>
-                  </div>
-                </form>
-              ) : (
-                <form onSubmit={handleConfirmRecovery} className="space-y-3">
-                  {recHintPath && (
-                    <div className="p-2.5 rounded border border-amber-500/30 bg-amber-500/10 font-mono text-[11px] text-amber-600 dark:text-amber-300">
-                      Arquivo local de recuperação: {recHintPath}
+                {(soloLocalAvailable || vaultLocked) && (
+                  <button
+                    type="button"
+                    disabled={submitting}
+                    onClick={handleGitHubDirectAuth}
+                    aria-label="Entrar ou cadastrar conta com GitHub"
+                    aria-expanded={
+                      showGitHubConnectBox || Boolean(ghDevice) || Boolean(oauthPendingState)
+                    }
+                    className={`w-full min-h-[44px] px-4 py-2.5 rounded-lg text-sm font-semibold border border-slate-300 dark:border-slate-700 bg-slate-50 hover:bg-slate-100 dark:bg-[#111827] dark:hover:bg-[#1a2234] text-slate-950 dark:text-slate-50 flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:opacity-50 ${FOCUS_RING}`}
+                  >
+                    <Github className="w-4 h-4 shrink-0" aria-hidden="true" />
+                    <span>Entrar ou Cadastrar com GitHub</span>
+                  </button>
+                )}
+
+                {/* Pending GitHub OAuth 2.0 PKCE Browser Authorization Card */}
+                {oauthPendingState && (
+                  <section
+                    aria-label="Autorização GitHub OAuth em andamento"
+                    className="p-3.5 rounded-lg border border-teal-700/40 dark:border-teal-400/40 bg-slate-50 dark:bg-[#080b10] space-y-2.5"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-slate-950 dark:text-slate-50">
+                        Aguardando confirmação no GitHub...
+                      </span>
+                      <button
+                        type="button"
+                        onClick={stopGitHubOAuthPolling}
+                        className={`text-xs font-medium text-slate-700 dark:text-slate-300 hover:underline cursor-pointer rounded ${FOCUS_RING}`}
+                      >
+                        Cancelar
+                      </button>
                     </div>
-                  )}
-                  <input
-                    id="rec-token-input"
-                    name="recovery-token"
-                    type="text"
-                    autoComplete="one-time-code"
-                    required
-                    value={recToken}
-                    onChange={(e) => setRecToken(e.target.value)}
-                    placeholder="Token de recuperação de uso único"
-                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 font-mono text-slate-900 dark:text-slate-100"
-                  />
-                  <div className="relative">
-                    <input
-                      id="rec-new-password-input"
-                      name="new-password"
-                      type={showRecPassword ? 'text' : 'password'}
-                      autoComplete="new-password"
-                      required
-                      minLength={10}
-                      value={recNewPassword}
-                      onChange={(e) => setRecNewPassword(e.target.value)}
-                      placeholder="Nova senha forte (mín. 10 caracteres)"
-                      className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] pl-3 pr-10 py-2 text-slate-900 dark:text-slate-100"
-                    />
+                    <a
+                      href={oauthPendingState.authorizeUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className={`w-full min-h-[40px] px-3 py-2 rounded-lg text-xs font-bold bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-white text-white dark:text-slate-950 flex items-center justify-center gap-1.5 transition-colors ${FOCUS_RING}`}
+                    >
+                      <span>Continuar autorização no GitHub</span>
+                      <ExternalLink className="w-3.5 h-3.5" aria-hidden="true" />
+                    </a>
+                  </section>
+                )}
+
+                {/* Inline GitHub PAT & Optional OAuth Device Flow Client ID Panel */}
+                {showGitHubConnectBox && !ghDevice && (
+                  <section
+                    aria-label="Conectar conta GitHub via Personal Access Token ou OAuth Client ID"
+                    className="p-3.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] space-y-3"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-slate-950 dark:text-slate-50">
+                        Autenticação Real GitHub (Login ou Cadastro)
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowGitHubConnectBox(false);
+                          setErrorMsg(null);
+                          setInfoMsg(null);
+                        }}
+                        className={`text-xs font-medium text-slate-700 dark:text-slate-300 hover:underline cursor-pointer rounded ${FOCUS_RING}`}
+                      >
+                        Fechar
+                      </button>
+                    </div>
+
+                    <form onSubmit={handleGitHubPatLogin} className="space-y-2.5">
+                      <div className="space-y-1">
+                        <label
+                          htmlFor="winhood-github-pat"
+                          className="block text-xs font-semibold text-slate-900 dark:text-slate-100"
+                        >
+                          GitHub Personal Access Token (PAT)
+                        </label>
+                        <input
+                          id="winhood-github-pat"
+                          type="password"
+                          autoComplete="off"
+                          value={githubPatInput}
+                          onChange={(e) => setGithubPatInput(e.target.value)}
+                          placeholder="ghp_... ou github_pat_..."
+                          className={`w-full min-h-[42px] px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0c1017] text-sm font-mono text-slate-950 dark:text-slate-50 placeholder:text-slate-500 dark:placeholder:text-slate-400 ${FOCUS_RING}`}
+                          required
+                        />
+                        <p className="text-[11px] text-slate-700 dark:text-slate-300 leading-relaxed">
+                          Validado diretamente em{' '}
+                          <code className="font-mono font-semibold text-slate-900 dark:text-slate-100">
+                            https://api.github.com/user
+                          </code>{' '}
+                          (escopo mínimo: <code className="font-mono">read:user</code>). Se ainda não
+                          tiver conta no WinHood, ela será criada automaticamente.
+                        </p>
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={submitting}
+                        className={`w-full min-h-[44px] px-4 py-2 rounded-lg text-xs font-bold bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-white text-white dark:text-slate-950 transition-colors cursor-pointer disabled:opacity-50 ${FOCUS_RING}`}
+                      >
+                        {submitting ? 'Validando no GitHub...' : 'Validar e Entrar com GitHub'}
+                      </button>
+                    </form>
+
+                    <div className="relative flex items-center py-0.5">
+                      <div className="flex-grow border-t border-slate-300 dark:border-slate-700" />
+                      <span className="shrink-0 px-2.5 text-[11px] font-medium text-slate-700 dark:text-slate-300">
+                        ou usar OAuth App Client ID
+                      </span>
+                      <div className="flex-grow border-t border-slate-300 dark:border-slate-700" />
+                    </div>
+
+                    <div className="space-y-2.5">
+                      <div className="space-y-1">
+                        <label
+                          htmlFor="winhood-github-client-id"
+                          className="block text-xs font-semibold text-slate-900 dark:text-slate-100"
+                        >
+                          GitHub OAuth App Client ID (opcional)
+                        </label>
+                        <input
+                          id="winhood-github-client-id"
+                          type="text"
+                          autoComplete="off"
+                          value={githubClientIdInput}
+                          onChange={(e) => setGithubClientIdInput(e.target.value)}
+                          placeholder="Ov23li..."
+                          className={`w-full min-h-[42px] px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0c1017] text-sm font-mono text-slate-950 dark:text-slate-50 placeholder:text-slate-500 dark:placeholder:text-slate-400 ${FOCUS_RING}`}
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        disabled={submitting || githubClientIdInput.trim().length < 8}
+                        onClick={() => handleStartGitHubDeviceFlow(githubClientIdInput.trim())}
+                        className={`w-full min-h-[40px] px-3 py-2 rounded-lg text-xs font-semibold border border-slate-300 dark:border-slate-700 bg-white hover:bg-slate-100 dark:bg-[#111827] dark:hover:bg-[#1a2234] text-slate-950 dark:text-slate-50 transition-colors cursor-pointer disabled:opacity-50 ${FOCUS_RING}`}
+                      >
+                        Iniciar Device Flow (RFC 8628)
+                      </button>
+                    </div>
+                  </section>
+                )}
+
+                {!vaultLocked && (
+                  <button
+                    type="button"
+                    disabled={submitting}
+                    onClick={() => {
+                      setShowWindowsHelloPanel((prev) => {
+                        const next = !prev;
+                        if (next) {
+                          setShowGitHubConnectBox(false);
+                          setGhDevice(null);
+                          setOauthPendingState(null);
+                          setInfoMsg(null);
+                        }
+                        return next;
+                      });
+                      setErrorMsg(null);
+                    }}
+                    aria-label="Entrar ou cadastrar com Windows Hello Passkey"
+                    aria-expanded={showWindowsHelloPanel}
+                    className={`w-full min-h-[44px] px-4 py-2.5 rounded-lg text-sm font-semibold border border-slate-300 dark:border-slate-700 bg-white hover:bg-slate-50 dark:bg-[#111827] dark:hover:bg-[#1a2234] text-slate-900 dark:text-slate-100 flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:opacity-50 ${FOCUS_RING}`}
+                  >
+                    <Fingerprint className="w-4 h-4 shrink-0" aria-hidden="true" />
+                    <span>Entrar ou Cadastrar com Windows Hello</span>
+                  </button>
+                )}
+
+                {/* Accessible Tabbed Windows Hello / Passkey Panel (Login & Register) */}
+                {showWindowsHelloPanel && (
+                  <section
+                    aria-label="Entrar ou criar conta com Windows Hello ou Passkey"
+                    className="p-3.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] space-y-3"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-slate-950 dark:text-slate-50">
+                        Windows Hello / Passkey FIDO2
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowWindowsHelloPanel(false);
+                          setErrorMsg(null);
+                          setInfoMsg(null);
+                        }}
+                        className={`text-xs font-medium text-slate-700 dark:text-slate-300 hover:underline cursor-pointer rounded ${FOCUS_RING}`}
+                      >
+                        Fechar
+                      </button>
+                    </div>
+
+                    <div
+                      role="tablist"
+                      aria-label="Modo de acesso Windows Hello"
+                      className="grid grid-cols-2 gap-1 p-1 rounded-lg bg-slate-200/80 dark:bg-[#0c1017] border border-slate-300 dark:border-slate-800"
+                    >
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={helloMode === 'LOGIN'}
+                        onClick={() => {
+                          setHelloMode('LOGIN');
+                          setErrorMsg(null);
+                        }}
+                        className={`py-1.5 px-2.5 rounded-md text-xs font-semibold transition-colors cursor-pointer ${FOCUS_RING} ${
+                          helloMode === 'LOGIN'
+                            ? 'bg-white dark:bg-slate-800 text-slate-950 dark:text-white shadow-xs'
+                            : 'text-slate-700 dark:text-slate-300 hover:text-slate-950 dark:hover:text-white'
+                        }`}
+                      >
+                        Entrar
+                      </button>
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={helloMode === 'REGISTER'}
+                        aria-label="Criar Conta com Windows Hello"
+                        onClick={() => {
+                          setHelloMode('REGISTER');
+                          setErrorMsg(null);
+                        }}
+                        className={`py-1.5 px-2.5 rounded-md text-xs font-semibold whitespace-nowrap transition-colors cursor-pointer ${FOCUS_RING} ${
+                          helloMode === 'REGISTER'
+                            ? 'bg-white dark:bg-slate-800 text-slate-950 dark:text-white shadow-xs'
+                            : 'text-slate-700 dark:text-slate-300 hover:text-slate-950 dark:hover:text-white'
+                        }`}
+                      >
+                        Criar Conta
+                      </button>
+                    </div>
+
+                    {helloMode === 'LOGIN' ? (
+                      <form onSubmit={handleWindowsHelloLogin} className="space-y-2.5">
+                        <div className="space-y-1">
+                          <label
+                            htmlFor="winhood-hello-login-email"
+                            className="block text-xs font-semibold text-slate-900 dark:text-slate-100"
+                          >
+                            E-mail da conta (opcional para Passkey residente)
+                          </label>
+                          <input
+                            id="winhood-hello-login-email"
+                            type="email"
+                            autoComplete="username webauthn"
+                            value={helloEmailInput}
+                            onChange={(e) => setHelloEmailInput(e.target.value)}
+                            placeholder="operador@empresa.com"
+                            className={`w-full min-h-[42px] px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0c1017] text-sm text-slate-950 dark:text-slate-50 placeholder:text-slate-500 dark:placeholder:text-slate-400 ${FOCUS_RING}`}
+                          />
+                        </div>
+                        <button
+                          type="submit"
+                          disabled={submitting}
+                          className={`w-full min-h-[44px] px-4 py-2 rounded-lg text-xs font-bold bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-white text-white dark:text-slate-950 transition-colors cursor-pointer disabled:opacity-50 ${FOCUS_RING}`}
+                        >
+                          {submitting
+                            ? 'Aguardando Windows Hello...'
+                            : 'Desbloquear com Windows Hello'}
+                        </button>
+                      </form>
+                    ) : (
+                      <form onSubmit={handleWindowsHelloRegister} className="space-y-2.5">
+                        <div className="space-y-1">
+                          <label
+                            htmlFor="winhood-hello-reg-name"
+                            className="block text-xs font-semibold text-slate-900 dark:text-slate-100"
+                          >
+                            Nome completo
+                          </label>
+                          <input
+                            id="winhood-hello-reg-name"
+                            type="text"
+                            autoComplete="name"
+                            value={helloNameInput}
+                            onChange={(e) => setHelloNameInput(e.target.value)}
+                            placeholder="Engenheiro(a) de Segurança"
+                            className={`w-full min-h-[42px] px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0c1017] text-sm text-slate-950 dark:text-slate-50 placeholder:text-slate-500 dark:placeholder:text-slate-400 ${FOCUS_RING}`}
+                            required
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label
+                            htmlFor="winhood-hello-reg-email"
+                            className="block text-xs font-semibold text-slate-900 dark:text-slate-100"
+                          >
+                            E-mail da conta
+                          </label>
+                          <input
+                            id="winhood-hello-reg-email"
+                            type="email"
+                            autoComplete="email"
+                            value={helloEmailInput}
+                            onChange={(e) => setHelloEmailInput(e.target.value)}
+                            placeholder="operador@empresa.com"
+                            className={`w-full min-h-[42px] px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0c1017] text-sm text-slate-950 dark:text-slate-50 placeholder:text-slate-500 dark:placeholder:text-slate-400 ${FOCUS_RING}`}
+                            required
+                          />
+                        </div>
+                        <button
+                          type="submit"
+                          disabled={submitting}
+                          className={`w-full min-h-[44px] px-4 py-2 rounded-lg text-xs font-bold bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-white text-white dark:text-slate-950 transition-colors cursor-pointer disabled:opacity-50 ${FOCUS_RING}`}
+                        >
+                          {submitting
+                            ? 'Registrando Passkey...'
+                            : 'Criar Conta e Registrar Windows Hello'}
+                        </button>
+                      </form>
+                    )}
+                  </section>
+                )}
+
+                {!soloLocalAvailable && !vaultLocked && (
+                  <button
+                    type="button"
+                    disabled={submitting}
+                    onClick={handleSoloLocalWorkspace}
+                    aria-label="Continuar no Workspace Local Desktop"
+                    className={`w-full min-h-[40px] px-4 py-2 rounded-lg text-xs font-medium border border-slate-200 dark:border-slate-800 bg-transparent hover:bg-slate-50 dark:hover:bg-slate-900/60 text-slate-700 dark:text-slate-300 flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:opacity-50 ${FOCUS_RING}`}
+                  >
+                    <Laptop className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                    <span>Continuar no Workspace Local (Desktop Electron)</span>
+                  </button>
+                )}
+
+                {accessPolicy && !soloLocalAvailable && !vaultLocked && (
+                  <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">
+                    Modo atual: <span className="font-mono font-semibold">{accessPolicy.mode}</span> —{' '}
+                    {accessPolicy.reason}
+                  </p>
+                )}
+              </div>
+
+              {/* Active GitHub OAuth Device Flow Verification Panel */}
+              {ghDevice && (
+                <section
+                  aria-label="Código de verificação GitHub Device Flow"
+                  className="p-4 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] space-y-3"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                      Código de Dispositivo GitHub
+                    </span>
                     <button
                       type="button"
-                      aria-label={showRecPassword ? 'Ocultar senha' : 'Visualizar senha'}
-                      onClick={() => setShowRecPassword((v) => !v)}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 cursor-pointer"
-                    >
-                      {showRecPassword ? (
-                        <EyeOff className="w-4 h-4" />
-                      ) : (
-                        <Eye className="w-4 h-4" />
-                      )}
-                    </button>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="submit"
-                      disabled={submitting}
-                      className="flex-1 py-2.5 rounded-lg font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] cursor-pointer disabled:opacity-50"
-                    >
-                      Confirmar Redefinição de Senha
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => switchModeClean('LOGIN')}
-                      className="px-3 py-2.5 rounded-lg font-semibold border border-slate-300 dark:border-slate-700 cursor-pointer"
+                      onClick={stopGitHubPolling}
+                      className={`text-xs font-medium text-slate-700 dark:text-slate-300 hover:underline cursor-pointer rounded ${FOCUS_RING}`}
                     >
                       Cancelar
                     </button>
                   </div>
-                </form>
-              )}
-            </div>
-          )}
 
-          {/* Discrete Footer Link: Privacidade & Termos (Microsoft Store Section 10.5) */}
-          <div className="mt-4 pt-3 border-t border-slate-200 dark:border-slate-800/80 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
-            <span className="font-mono">100% Local · MIT Open Source</span>
-            <button
-              type="button"
-              onClick={() => setIsPrivacyModalOpen(true)}
-              className="font-semibold text-slate-600 dark:text-slate-300 hover:text-[#31d6c4] underline underline-offset-2 cursor-pointer"
-            >
-              Privacidade &amp; Termos
-            </button>
-          </div>
+                  <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0c1017]">
+                    <code className="text-lg font-mono font-bold tracking-[0.2em] text-slate-950 dark:text-slate-50 tabular-nums">
+                      {ghDevice.userCode}
+                    </code>
+                    <button
+                      type="button"
+                      onClick={handleCopyDeviceCode}
+                      aria-label="Copiar código de verificação GitHub"
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-semibold border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer ${FOCUS_RING}`}
+                    >
+                      {copiedDeviceCode ? (
+                        <>
+                          <Check className="w-3.5 h-3.5" aria-hidden="true" />
+                          <span>Copiado</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5" aria-hidden="true" />
+                          <span>Copiar</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  <a
+                    href={ghDevice.verificationUri}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className={`w-full min-h-[40px] px-3 py-2 rounded-lg text-xs font-bold bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-white text-white dark:text-slate-950 flex items-center justify-center gap-1.5 transition-colors ${FOCUS_RING}`}
+                  >
+                    <span>Abrir {ghDevice.verificationUri}</span>
+                    <ExternalLink className="w-3.5 h-3.5" aria-hidden="true" />
+                  </a>
+                </section>
+              )}
+
+              {/* Progressive Disclosure for Team Server Credentials */}
+              <details
+                className="group border-t border-slate-200 dark:border-slate-800 pt-4"
+                open={Boolean(accessPolicy?.teamServerMode && !accessPolicy?.githubDeviceFlowConfigured)}
+              >
+                <summary
+                  className={`flex items-center justify-between cursor-pointer select-none text-xs font-semibold text-slate-800 dark:text-slate-200 py-1.5 rounded list-none ${FOCUS_RING}`}
+                >
+                  <span className="inline-flex items-center gap-2">
+                    <KeyRound className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                    <span>Acesso avançado (Servidor de Equipe)</span>
+                  </span>
+                  <ChevronRight
+                    className="w-4 h-4 shrink-0 transition-transform duration-150 group-open:rotate-90"
+                    aria-hidden="true"
+                  />
+                </summary>
+
+                <div className="pt-4 space-y-4">
+                  {/* Segmented Action Control: Entrar / Criar Conta */}
+                  <div
+                    role="group"
+                    aria-label="Modo de credencial de equipe"
+                    className="grid grid-cols-2 gap-1 p-1 rounded-lg bg-slate-100 dark:bg-[#080b10] border border-slate-200 dark:border-slate-800"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setTeamAction('LOGIN');
+                        setErrorMsg(null);
+                      }}
+                      className={`py-2 px-3 rounded-md text-xs font-semibold transition-colors cursor-pointer ${FOCUS_RING} ${
+                        teamAction === 'LOGIN'
+                          ? 'bg-white dark:bg-slate-800 text-slate-950 dark:text-white shadow-xs'
+                          : 'text-slate-700 dark:text-slate-300 hover:text-slate-950 dark:hover:text-white'
+                      }`}
+                    >
+                      Entrar com credencial
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setTeamAction('REGISTER');
+                        setTeamMethod('PASSWORD');
+                        setErrorMsg(null);
+                      }}
+                      className={`py-2 px-3 rounded-md text-xs font-semibold transition-colors cursor-pointer ${FOCUS_RING} ${
+                        teamAction === 'REGISTER'
+                          ? 'bg-white dark:bg-slate-800 text-slate-950 dark:text-white shadow-xs'
+                          : 'text-slate-700 dark:text-slate-300 hover:text-slate-950 dark:hover:text-white'
+                      }`}
+                    >
+                      Criar conta local
+                    </button>
+                  </div>
+
+                  {teamAction === 'LOGIN' && (
+                    <div
+                      role="group"
+                      aria-label="Método de autenticação"
+                      className="flex items-center gap-2 text-xs"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTeamMethod('PASSWORD');
+                          setErrorMsg(null);
+                        }}
+                        className={`flex-1 py-1.5 px-3 rounded-md border font-medium flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${FOCUS_RING} ${
+                          teamMethod === 'PASSWORD'
+                            ? 'border-teal-700 dark:border-teal-400 bg-teal-50 dark:bg-teal-950/40 text-teal-950 dark:text-teal-100'
+                            : 'border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300'
+                        }`}
+                      >
+                        <Lock className="w-3.5 h-3.5" aria-hidden="true" />
+                        <span>E-mail + Senha</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTeamMethod('PIN');
+                          setErrorMsg(null);
+                        }}
+                        className={`flex-1 py-1.5 px-3 rounded-md border font-medium flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${FOCUS_RING} ${
+                          teamMethod === 'PIN'
+                            ? 'border-teal-700 dark:border-teal-400 bg-teal-50 dark:bg-teal-950/40 text-teal-950 dark:text-teal-100'
+                            : 'border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300'
+                        }`}
+                      >
+                        <Hash className="w-3.5 h-3.5" aria-hidden="true" />
+                        <span>PIN (6–8 dígitos)</span>
+                      </button>
+                    </div>
+                  )}
+
+                  <form onSubmit={handleTeamAuthSubmit} className="space-y-3.5">
+                    {teamAction === 'REGISTER' && (
+                      <div className="space-y-1">
+                        <label
+                          htmlFor="winhood-team-name"
+                          className="block text-xs font-semibold text-slate-900 dark:text-slate-100"
+                        >
+                          Nome completo
+                        </label>
+                        <input
+                          id="winhood-team-name"
+                          type="text"
+                          autoComplete="name"
+                          value={nameInput}
+                          onChange={(e) => setNameInput(e.target.value)}
+                          placeholder="Engenheiro(a) de Segurança"
+                          className={`w-full min-h-[42px] px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#080b10] text-sm text-slate-950 dark:text-slate-50 placeholder:text-slate-500 dark:placeholder:text-slate-400 ${FOCUS_RING}`}
+                          required
+                        />
+                      </div>
+                    )}
+
+                    <div className="space-y-1">
+                      <label
+                        htmlFor="winhood-team-email"
+                        className="block text-xs font-semibold text-slate-900 dark:text-slate-100"
+                      >
+                        E-mail corporativo
+                      </label>
+                      <input
+                        id="winhood-team-email"
+                        type="email"
+                        autoComplete="email"
+                        value={emailInput}
+                        onChange={(e) => setEmailInput(e.target.value)}
+                        placeholder="operador@empresa.com"
+                        className={`w-full min-h-[42px] px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#080b10] text-sm text-slate-950 dark:text-slate-50 placeholder:text-slate-500 dark:placeholder:text-slate-400 ${FOCUS_RING}`}
+                        required
+                      />
+                    </div>
+
+                    {teamAction === 'LOGIN' && teamMethod === 'PIN' ? (
+                      <div className="space-y-1">
+                        <label
+                          htmlFor="winhood-team-pin"
+                          className="block text-xs font-semibold text-slate-900 dark:text-slate-100"
+                        >
+                          PIN numérico (6 a 8 dígitos)
+                        </label>
+                        <input
+                          id="winhood-team-pin"
+                          type="password"
+                          inputMode="numeric"
+                          autoComplete="current-password"
+                          maxLength={8}
+                          value={pinInput}
+                          onChange={(e) => setPinInput(e.target.value.replace(/\D/g, '').slice(0, 8))}
+                          placeholder="••••••"
+                          className={`w-full min-h-[42px] px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#080b10] text-sm font-mono tracking-widest text-slate-950 dark:text-slate-50 placeholder:text-slate-500 dark:placeholder:text-slate-400 tabular-nums ${FOCUS_RING}`}
+                          required
+                        />
+                      </div>
+                    ) : (
+                      <div className="space-y-1">
+                        <label
+                          htmlFor="winhood-team-password"
+                          className="block text-xs font-semibold text-slate-900 dark:text-slate-100"
+                        >
+                          Senha {teamAction === 'REGISTER' ? '(mínimo 10 caracteres)' : ''}
+                        </label>
+                        <div className="relative">
+                          <input
+                            id="winhood-team-password"
+                            type={showPassword ? 'text' : 'password'}
+                            autoComplete={
+                              teamAction === 'REGISTER' ? 'new-password' : 'current-password'
+                            }
+                            value={passwordInput}
+                            onChange={(e) => setPasswordInput(e.target.value)}
+                            placeholder="Digite sua senha"
+                            className={`w-full min-h-[42px] pl-3 pr-10 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#080b10] text-sm text-slate-950 dark:text-slate-50 placeholder:text-slate-500 dark:placeholder:text-slate-400 ${FOCUS_RING}`}
+                            required
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowPassword((v) => !v)}
+                            aria-label={showPassword ? 'Ocultar senha' : 'Mostrar senha'}
+                            className={`absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded text-slate-700 dark:text-slate-300 hover:text-slate-950 dark:hover:text-white cursor-pointer ${FOCUS_RING}`}
+                          >
+                            {showPassword ? (
+                              <EyeOff className="w-4 h-4" aria-hidden="true" />
+                            ) : (
+                              <Eye className="w-4 h-4" aria-hidden="true" />
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    <label className="flex items-center gap-2 text-xs text-slate-800 dark:text-slate-200 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={trustDevice}
+                        onChange={(e) => setTrustDevice(e.target.checked)}
+                        className={`w-4 h-4 rounded border-slate-400 dark:border-slate-600 accent-[#0d9488] ${FOCUS_RING}`}
+                      />
+                      <span>Manter dispositivo confiável (sessão HttpOnly de 30 dias)</span>
+                    </label>
+
+                    <button
+                      type="submit"
+                      disabled={submitting}
+                      className={`w-full min-h-[44px] px-4 py-2.5 rounded-lg text-sm font-bold bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-white text-white dark:text-slate-950 transition-colors cursor-pointer disabled:opacity-50 ${FOCUS_RING}`}
+                    >
+                      {submitting
+                        ? 'Processando...'
+                        : teamAction === 'REGISTER'
+                          ? 'Criar conta e entrar'
+                          : 'Entrar no Servidor de Equipe'}
+                    </button>
+                  </form>
+
+                  <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">
+                    MFA (TOTP), cadastro de PIN e permissões RBAC podem ser configurados em{' '}
+                    <strong className="font-semibold text-slate-900 dark:text-slate-100">
+                      Configurações da Conta
+                    </strong>{' '}
+                    após o acesso.
+                  </p>
+                </div>
+              </details>
+            </>
+          )}
         </div>
+
+        {/* Quiet Accessible Footer */}
+        <footer className="px-6 py-3.5 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10] flex items-center justify-between text-xs text-slate-700 dark:text-slate-300">
+          <span>WinHood Benchmarking v4.4.0</span>
+          <button
+            type="button"
+            onClick={() => setIsPrivacyModalOpen(true)}
+            className={`font-medium text-teal-800 dark:text-teal-300 hover:underline cursor-pointer rounded ${FOCUS_RING}`}
+          >
+            Privacidade e Segurança
+          </button>
+        </footer>
       </div>
 
       <PrivacyAndTermsModal
         isOpen={isPrivacyModalOpen}
         onClose={() => setIsPrivacyModalOpen(false)}
+        initialTab="PRIVACY"
       />
     </div>
   );

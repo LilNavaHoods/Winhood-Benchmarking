@@ -5,7 +5,7 @@ import path18 from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // server.ts
-import crypto30 from "node:crypto";
+import crypto31 from "node:crypto";
 import fs16 from "node:fs";
 import os10 from "node:os";
 import path17 from "node:path";
@@ -25222,8 +25222,17 @@ ${rawToken}
       mfaEnabled: user.mfaEnabled,
       mfaVerified,
       pinEnabled: Boolean(user.pinEnabled && user.pinHash),
-      webauthnEnabled: Boolean(user.webauthnCredentials && user.webauthnCredentials.length > 0)
+      webauthnEnabled: Boolean(user.webauthnCredentials && user.webauthnCredentials.length > 0),
+      githubLinked: Boolean(user.githubId || user.githubLogin),
+      githubLogin: user.githubLogin || null,
+      githubAvatarUrl: user.githubAvatarUrl || null,
+      authProviders: user.authProviders || []
     };
+  }
+  hasAnyWebAuthnCredentials() {
+    return this.db.users.some(
+      (u) => !u.disabled && Array.isArray(u.webauthnCredentials) && u.webauthnCredentials.length > 0
+    );
   }
   completeBootstrapOnFirstAccount(nowIso) {
     this.db.bootstrapTokenSha256 = null;
@@ -25486,7 +25495,8 @@ ${rawToken}
       attestation: "none",
       authenticatorSelection: {
         authenticatorAttachment: "platform",
-        residentKey: "preferred",
+        residentKey: "required",
+        requireResidentKey: true,
         userVerification: "required"
       }
     };
@@ -25825,6 +25835,168 @@ ${rawToken}
       totpPeriodSeconds: 30
     };
   }
+  createWebAuthnLinkOptions(params) {
+    const ipAddress = params.ipAddress || "127.0.0.1";
+    this.checkIpRateLimit(ipAddress);
+    this.pruneExpiredWebAuthnChallenges();
+    const user = this.db.users.find((u) => u.id === params.userId && !u.disabled);
+    if (!user) {
+      throw new Error("USER_NOT_FOUND: Usu\xE1rio n\xE3o encontrado.");
+    }
+    const rpId = normalizeWebAuthnRpId(params.rpId);
+    const challengeId = crypto19.randomUUID();
+    const challengeBase64Url = crypto19.randomBytes(32).toString("base64url");
+    const excludeCredentials = (user.webauthnCredentials || []).map((c) => ({
+      type: "public-key",
+      id: c.credentialId,
+      transports: c.transports || ["internal"]
+    }));
+    this.webauthnChallenges.set(challengeId, {
+      challengeId,
+      challengeBase64Url,
+      purpose: "LINK_CREDENTIAL",
+      rpId,
+      expiresAtMs: Date.now() + _AuthService.PREAUTH_TTL_MS,
+      userId: user.id,
+      email: user.email
+    });
+    return {
+      challengeId,
+      rp: { name: "WinHood Benchmark Analyzer", id: rpId },
+      user: {
+        id: Buffer.from(user.id, "utf8").toString("base64url"),
+        name: user.email,
+        displayName: user.name
+      },
+      challenge: challengeBase64Url,
+      pubKeyCredParams: [
+        { type: "public-key", alg: -7 },
+        { type: "public-key", alg: -257 }
+      ],
+      timeout: 6e4,
+      attestation: "none",
+      excludeCredentials,
+      authenticatorSelection: {
+        authenticatorAttachment: "platform",
+        residentKey: "required",
+        requireResidentKey: true,
+        userVerification: "required"
+      }
+    };
+  }
+  verifyWebAuthnLinkCredential(params) {
+    const ipAddress = params.ipAddress || "127.0.0.1";
+    this.checkIpRateLimit(ipAddress);
+    this.pruneExpiredWebAuthnChallenges();
+    const clientDataBuf = decodeBase64OrBase64Url(params.clientDataJSON);
+    let clientData;
+    try {
+      clientData = JSON.parse(clientDataBuf.toString("utf8"));
+    } catch {
+      throw new Error("WEBAUTHN_CLIENT_DATA_INVALID: clientDataJSON malformado.");
+    }
+    if (clientData.type !== "webauthn.create" || !clientData.challenge || !clientData.origin) {
+      throw new Error("WEBAUTHN_CLIENT_DATA_INVALID: Tipo ou campos de clientDataJSON inv\xE1lidos.");
+    }
+    let challengeRecord;
+    if (params.challengeId) {
+      challengeRecord = this.webauthnChallenges.get(params.challengeId);
+    }
+    if (!challengeRecord || challengeRecord.purpose !== "LINK_CREDENTIAL" || challengeRecord.userId !== params.userId) {
+      throw new Error("WEBAUTHN_CHALLENGE_INVALID: Desafio de v\xEDnculo WebAuthn inv\xE1lido ou expirado.");
+    }
+    this.webauthnChallenges.delete(challengeRecord.challengeId);
+    if (Date.now() > challengeRecord.expiresAtMs) {
+      throw new Error("WEBAUTHN_CHALLENGE_EXPIRED: Desafio WebAuthn expirado.");
+    }
+    const expectedChallBuf = Buffer.from(challengeRecord.challengeBase64Url, "utf8");
+    const providedChallBuf = Buffer.from(clientData.challenge, "utf8");
+    if (expectedChallBuf.length !== providedChallBuf.length || !crypto19.timingSafeEqual(expectedChallBuf, providedChallBuf)) {
+      throw new Error("WEBAUTHN_CHALLENGE_MISMATCH: Desafio WebAuthn divergente.");
+    }
+    const { hostname: originHostname } = validateWebAuthnOrigin(
+      clientData.origin,
+      challengeRecord.rpId
+    );
+    let authDataBuf = null;
+    let publicKeySpkiBase64 = (params.publicKeySpkiBase64 || "").trim();
+    let coseAlgorithm = params.coseAlgorithm === -257 ? -257 : -7;
+    let extractedCredId = (params.credentialId || "").trim();
+    if (params.attestationObject) {
+      const attBuf = decodeBase64OrBase64Url(params.attestationObject);
+      const attMap = decodeCborItem(attBuf, 0).value;
+      if (attMap instanceof Map && Buffer.isBuffer(attMap.get("authData"))) {
+        authDataBuf = attMap.get("authData");
+      }
+    }
+    if (!authDataBuf && params.authenticatorData) {
+      authDataBuf = decodeBase64OrBase64Url(params.authenticatorData);
+    }
+    if (!authDataBuf || authDataBuf.length < 37) {
+      throw new Error("WEBAUTHN_AUTHDATA_INVALID: authenticatorData ausente ou truncado.");
+    }
+    const rpIdHash = authDataBuf.subarray(0, 32);
+    const expectedRpHash = crypto19.createHash("sha256").update(challengeRecord.rpId, "utf8").digest();
+    const originRpHash = crypto19.createHash("sha256").update(originHostname, "utf8").digest();
+    if (!crypto19.timingSafeEqual(rpIdHash, expectedRpHash) && !crypto19.timingSafeEqual(rpIdHash, originRpHash)) {
+      throw new Error("WEBAUTHN_RPID_MISMATCH: Hash do Relying Party (rpIdHash) inv\xE1lido.");
+    }
+    const flags = authDataBuf[32];
+    if ((flags & 1) === 0 || (flags & 4) === 0) {
+      throw new Error(
+        "WEBAUTHN_UV_REQUIRED: Presen\xE7a (UP) e verifica\xE7\xE3o do usu\xE1rio (UV) s\xE3o obrigat\xF3rias."
+      );
+    }
+    const signCount = authDataBuf.readUInt32BE(33);
+    if ((flags & 64) !== 0 && authDataBuf.length >= 55) {
+      const credIdLen = authDataBuf.readUInt16BE(53);
+      if (authDataBuf.length >= 55 + credIdLen) {
+        if (!extractedCredId) {
+          extractedCredId = authDataBuf.subarray(55, 55 + credIdLen).toString("base64url");
+        }
+        const coseKeySlice = authDataBuf.subarray(55 + credIdLen);
+        if (coseKeySlice.length > 0 && !publicKeySpkiBase64) {
+          const parsedKey = cosePublicKeyToSpkiBase64(coseKeySlice);
+          publicKeySpkiBase64 = parsedKey.publicKeySpkiBase64;
+          coseAlgorithm = parsedKey.coseAlgorithm;
+        }
+      }
+    }
+    if (!extractedCredId || !publicKeySpkiBase64) {
+      throw new Error("WEBAUTHN_KEY_MISSING: Chave p\xFAblica ou identificador da credencial ausente.");
+    }
+    const spkiBuf = decodeBase64OrBase64Url(publicKeySpkiBase64);
+    const keyObj = crypto19.createPublicKey({ key: spkiBuf, format: "der", type: "spki" });
+    publicKeySpkiBase64 = keyObj.export({ type: "spki", format: "der" }).toString("base64");
+    const user = this.db.users.find((u) => u.id === params.userId && !u.disabled);
+    if (!user) {
+      throw new Error("USER_NOT_FOUND: Usu\xE1rio n\xE3o encontrado.");
+    }
+    user.webauthnCredentials = user.webauthnCredentials || [];
+    if (user.webauthnCredentials.some((c) => c.credentialId === extractedCredId)) {
+      throw new Error("WEBAUTHN_CREDENTIAL_EXISTS: Esta Passkey j\xE1 est\xE1 vinculada \xE0 conta.");
+    }
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    user.webauthnCredentials.push({
+      credentialId: extractedCredId,
+      publicKeySpkiBase64,
+      coseAlgorithm,
+      signCount,
+      transports: params.transports || ["internal"],
+      label: (params.label || "Windows Hello / Passkey").trim().slice(0, 60),
+      createdAt: now,
+      lastUsedAt: now
+    });
+    const providers = new Set(user.authProviders || []);
+    providers.add("webauthn");
+    user.authProviders = Array.from(providers);
+    user.updatedAt = now;
+    this.save();
+    return {
+      user: this.toPublicUserView(user, true),
+      credentialId: extractedCredId
+    };
+  }
   static buildWindowsHelloPowerShellScript() {
     return [
       '$ErrorActionPreference = "Stop"',
@@ -25863,8 +26035,16 @@ ${rawToken}
     const script = _AuthService.buildWindowsHelloPowerShellScript();
     const encodedCommand = Buffer.from(script, "utf16le").toString("base64");
     try {
+      const winSysRoot = process.env.SystemRoot || "C:\\Windows";
+      const powerShellAbsPath = path14.win32.join(
+        winSysRoot,
+        "System32",
+        "WindowsPowerShell",
+        "v1.0",
+        "powershell.exe"
+      );
       const { stdout } = await execFileAsync(
-        "powershell.exe",
+        powerShellAbsPath,
         ["-NoProfile", "-NonInteractive", "-STA", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodedCommand],
         {
           timeout: 65e3,
@@ -25900,6 +26080,38 @@ ${rawToken}
       throw new Error(
         `WINDOWS_HELLO_EXECUTION_FAILED: N\xE3o foi poss\xEDvel acionar o prompt nativo do Windows Hello (${err?.message || "Erro PowerShell"}).`
       );
+    }
+  }
+  deriveNativeHelloSealKey(keyBuffer) {
+    return crypto19.createHash("sha256").update(keyBuffer).update(":winhello-native-ecdsa-v1").digest();
+  }
+  sealNativeHelloPrivateKey(pkcs8Der) {
+    const { keyId, keyBuffer } = KeyManagementService.getActiveVaultAesKey(this.keystorePath);
+    const derivedKey = this.deriveNativeHelloSealKey(keyBuffer);
+    const iv = crypto19.randomBytes(12);
+    const cipher = crypto19.createCipheriv("aes-256-gcm", derivedKey, iv);
+    const encrypted = Buffer.concat([cipher.update(pkcs8Der), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    return `wh-hello-key-v1:${keyId}:${iv.toString("base64url")}:${tag.toString("base64url")}:${encrypted.toString("base64url")}`;
+  }
+  unsealNativeHelloPrivateKey(sealed) {
+    const parts = (sealed || "").split(":");
+    if (parts.length !== 5 || parts[0] !== "wh-hello-key-v1") {
+      throw new Error("WINDOWS_HELLO_KEY_CORRUPTED: Formato inv\xE1lido da chave privada selada do Windows Hello.");
+    }
+    const [, keyId, ivB64, tagB64, cipherB64] = parts;
+    const keyBuf = KeyManagementService.getVaultKeyBufferByKeyId(keyId, this.keystorePath) || KeyManagementService.getActiveVaultAesKey(this.keystorePath).keyBuffer;
+    const derivedKey = this.deriveNativeHelloSealKey(keyBuf);
+    try {
+      const iv = Buffer.from(ivB64, "base64url");
+      const tag = Buffer.from(tagB64, "base64url");
+      const ciphertext = Buffer.from(cipherB64, "base64url");
+      const decipher = crypto19.createDecipheriv("aes-256-gcm", derivedKey, iv);
+      decipher.setAuthTag(tag);
+      const pkcs8Der = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+      return crypto19.createPrivateKey({ key: pkcs8Der, format: "der", type: "pkcs8" });
+    } catch {
+      throw new Error("WINDOWS_HELLO_KEY_CORRUPTED: Chave criptogr\xE1fica do Windows Hello inv\xE1lida ou adulterada.");
     }
   }
   async registerNativeWindowsHelloAccount(params) {
@@ -25942,8 +26154,10 @@ ${rawToken}
       if (this.db.users.some((u) => u.email === cleanEmail)) {
         throw new Error("EMAIL_ALREADY_EXISTS: Este e-mail j\xE1 est\xE1 cadastrado na plataforma.");
       }
-      const { publicKey } = crypto19.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+      const { publicKey, privateKey } = crypto19.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
       const spkiBase64 = publicKey.export({ type: "spki", format: "der" }).toString("base64");
+      const pkcs8Der = privateKey.export({ type: "pkcs8", format: "der" });
+      const nativePrivateKeySealed = this.sealNativeHelloPrivateKey(pkcs8Der);
       const credentialId = `winhello-os-${crypto19.randomBytes(16).toString("base64url")}`;
       const now = (/* @__PURE__ */ new Date()).toISOString();
       const newUser = {
@@ -25961,10 +26175,13 @@ ${rawToken}
             coseAlgorithm: -7,
             signCount: 1,
             transports: ["internal"],
+            label: "Windows Hello Nativo (OS)",
+            nativePrivateKeySealed,
             createdAt: now,
             lastUsedAt: now
           }
         ],
+        authProviders: ["windows-hello-native"],
         mfaEnabled: false,
         totpSecretBase32: null,
         recoveryCodeHashes: [],
@@ -26039,11 +26256,28 @@ ${rawToken}
     } else {
       await this.verifyWindowsOsHelloPrompt(promptMsg);
     }
+    const targetCred = matchedUser.webauthnCredentials?.find((c) => Boolean(c.nativePrivateKeySealed)) || matchedUser.webauthnCredentials?.[0];
+    if (targetCred?.nativePrivateKeySealed) {
+      const challenge = crypto19.randomBytes(32);
+      const privKey = this.unsealNativeHelloPrivateKey(targetCred.nativePrivateKeySealed);
+      const signature = crypto19.sign("sha256", challenge, privKey);
+      const pubKey = crypto19.createPublicKey({
+        key: Buffer.from(targetCred.publicKeySpkiBase64, "base64"),
+        format: "der",
+        type: "spki"
+      });
+      const verified = crypto19.verify("sha256", challenge, pubKey, signature);
+      if (!verified) {
+        this.recordIpFailure(ipAddress);
+        throw new Error(
+          "WINDOWS_HELLO_SIGNATURE_INVALID: Verifica\xE7\xE3o criptogr\xE1fica ES256 da credencial Windows Hello falhou."
+        );
+      }
+    }
     const now = (/* @__PURE__ */ new Date()).toISOString();
-    const firstCred = matchedUser.webauthnCredentials?.[0];
-    if (firstCred) {
-      firstCred.signCount = (firstCred.signCount || 0) + 1;
-      firstCred.lastUsedAt = now;
+    if (targetCred) {
+      targetCred.signCount = (targetCred.signCount || 0) + 1;
+      targetCred.lastUsedAt = now;
     }
     matchedUser.failedLoginAttempts = 0;
     matchedUser.lockedUntil = null;
@@ -26194,18 +26428,568 @@ ${token}
       revokedSessionsCount
     };
   }
+  issueSoloLocalDesktopSession(params) {
+    const localEmail = "solo-local@winhood.local";
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    let user = this.db.users.find((u) => u.email === localEmail);
+    if (!user) {
+      const isFirstUser = this.db.users.length === 0;
+      const cleanName = (params?.operatorName || process.env.USERNAME || process.env.USER || "Operador Local").replace(/[\r\n\0]/g, " ").trim().slice(0, 80) || "Operador Local";
+      user = {
+        id: `usr-local-${crypto19.randomUUID().slice(0, 8)}`,
+        name: cleanName,
+        email: localEmail,
+        role: "ADMIN",
+        passwordHash: hashPassword(`wh-solo-local-${crypto19.randomBytes(24).toString("base64url")}`),
+        pinHash: null,
+        pinEnabled: false,
+        webauthnCredentials: [],
+        mfaEnabled: false,
+        totpSecretBase32: null,
+        recoveryCodeHashes: [],
+        lastAcceptedTotpStep: null,
+        disabled: false,
+        failedLoginAttempts: 0,
+        lockedUntil: null,
+        recoveryTokenSha256: null,
+        recoveryExpiresAt: null,
+        createdAt: now,
+        updatedAt: now
+      };
+      this.db.users.push(user);
+      if (isFirstUser) {
+        this.completeBootstrapOnFirstAccount(now);
+      }
+    } else if (user.disabled) {
+      throw new Error("AUTH_ACCOUNT_DISABLED: Conta local desabilitada pelo administrador.");
+    }
+    const { sessionId, session } = this.createSessionRecord(
+      user,
+      true,
+      params?.ipAddress || "127.0.0.1",
+      params?.userAgent || "WinHood-Electron-Desktop",
+      { trustDevice: true }
+    );
+    this.save();
+    return {
+      user: this.toPublicUserView(user, true),
+      sessionId,
+      csrfToken: session.csrfToken,
+      trustDevice: true
+    };
+  }
+  issueGitHubOAuthSession(params) {
+    const cleanLogin = (params.githubLogin || "").trim().replace(/[^a-zA-Z0-9._-]/g, "");
+    if (!cleanLogin) {
+      throw new Error("GITHUB_PROFILE_INVALID: Login GitHub ausente na resposta OAuth.");
+    }
+    const fallbackNoreply = typeof params.githubId === "number" ? `${params.githubId}+${cleanLogin}@users.noreply.github.com` : `${cleanLogin}@users.noreply.github.com`;
+    const candidateEmail = (params.email || fallbackNoreply).trim().toLowerCase();
+    const resolvedEmail = isValidEmailAddress(candidateEmail) ? candidateEmail : fallbackNoreply;
+    const cleanName = (params.name || cleanLogin).replace(/[\r\n\0]/g, " ").trim().slice(0, 80) || cleanLogin;
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    let user = (typeof params.githubId === "number" ? this.db.users.find((u) => u.githubId === params.githubId) : void 0) || this.db.users.find((u) => u.githubLogin?.toLowerCase() === cleanLogin.toLowerCase()) || this.db.users.find((u) => u.email === resolvedEmail);
+    let isNewAccount = false;
+    if (!user) {
+      isNewAccount = true;
+      const isFirstUser = this.db.users.length === 0;
+      user = {
+        id: `usr-gh-${crypto19.randomUUID().slice(0, 8)}`,
+        name: cleanName,
+        email: resolvedEmail,
+        role: isFirstUser ? "ADMIN" : "SECURITY_LEAD",
+        passwordHash: hashPassword(`wh-gh-oauth-${crypto19.randomBytes(24).toString("base64url")}`),
+        pinHash: null,
+        pinEnabled: false,
+        webauthnCredentials: [],
+        githubId: typeof params.githubId === "number" ? params.githubId : null,
+        githubLogin: cleanLogin,
+        githubAvatarUrl: params.avatarUrl || null,
+        authProviders: ["github"],
+        mfaEnabled: false,
+        totpSecretBase32: null,
+        recoveryCodeHashes: [],
+        lastAcceptedTotpStep: null,
+        disabled: false,
+        failedLoginAttempts: 0,
+        lockedUntil: null,
+        recoveryTokenSha256: null,
+        recoveryExpiresAt: null,
+        createdAt: now,
+        updatedAt: now
+      };
+      this.db.users.push(user);
+      if (isFirstUser) {
+        this.completeBootstrapOnFirstAccount(now);
+      }
+    } else if (user.disabled) {
+      throw new Error("AUTH_ACCOUNT_DISABLED: Conta desabilitada pelo administrador.");
+    } else {
+      if (typeof params.githubId === "number") {
+        user.githubId = params.githubId;
+      }
+      user.githubLogin = cleanLogin;
+      if (params.avatarUrl) {
+        user.githubAvatarUrl = params.avatarUrl;
+      }
+      const providers = new Set(user.authProviders || []);
+      providers.add("github");
+      user.authProviders = Array.from(providers);
+      user.updatedAt = now;
+    }
+    const { sessionId, session } = this.createSessionRecord(
+      user,
+      true,
+      params.ipAddress || "127.0.0.1",
+      params.userAgent || "WinHood-GitHub-OAuth",
+      { trustDevice: true }
+    );
+    this.save();
+    return {
+      user: this.toPublicUserView(user, true),
+      sessionId,
+      csrfToken: session.csrfToken,
+      trustDevice: true,
+      isNewAccount
+    };
+  }
+  linkGitHubAccountToUser(userId, params) {
+    const user = this.db.users.find((u) => u.id === userId && !u.disabled);
+    if (!user) {
+      throw new Error("USER_NOT_FOUND: Usu\xE1rio n\xE3o encontrado.");
+    }
+    const cleanLogin = (params.githubLogin || "").trim().replace(/[^a-zA-Z0-9._-]/g, "");
+    if (!cleanLogin) {
+      throw new Error("GITHUB_PROFILE_INVALID: Login GitHub inv\xE1lido.");
+    }
+    const conflictingUser = this.db.users.find(
+      (u) => u.id !== userId && (u.githubId === params.githubId || u.githubLogin?.toLowerCase() === cleanLogin.toLowerCase())
+    );
+    if (conflictingUser) {
+      throw new Error("GITHUB_ALREADY_LINKED: Esta conta GitHub j\xE1 est\xE1 vinculada a outro usu\xE1rio.");
+    }
+    user.githubId = params.githubId;
+    user.githubLogin = cleanLogin;
+    if (params.avatarUrl) {
+      user.githubAvatarUrl = params.avatarUrl;
+    }
+    const providers = new Set(user.authProviders || []);
+    providers.add("github");
+    user.authProviders = Array.from(providers);
+    user.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    this.save();
+    return this.toPublicUserView(user, true);
+  }
   static hasPermission(role, permission) {
     return PERMISSIONS_MATRIX[role]?.has(permission) ?? false;
   }
 };
 
-// src/storage/PersistentDatabaseManager.ts
+// src/security/ZeroFrictionAuthConfig.ts
 import crypto20 from "node:crypto";
+function evaluateSoloLocalAutoSession(params) {
+  if (params.teamServerMode) {
+    return {
+      allowed: false,
+      mode: "TEAM_SERVER",
+      reason: "Modo Servidor de Equipe ativo: autentica\xE7\xE3o expl\xEDcita e RBAC s\xE3o obrigat\xF3rios."
+    };
+  }
+  if (params.vaultLockEnabled) {
+    return {
+      allowed: false,
+      mode: "LOCKED_VAULT",
+      reason: "Bloqueio de cofre ativado pelo usu\xE1rio: desbloqueie com Windows Hello, Passkey ou PIN."
+    };
+  }
+  const isElectron = params.runtimeEnv === "ELECTRON_DESKTOP";
+  const ip = (params.remoteAddress || "").replace(/^::ffff:/, "").trim().toLowerCase();
+  const host = (params.hostHeader || "").split(":")[0].trim().toLowerCase();
+  const isLoopbackIp = ip === "127.0.0.1" || ip === "::1" || ip === "localhost";
+  const isLoopbackHost = host === "localhost" || host === "127.0.0.1" || host === "::1";
+  const isDevOrPreview = params.isHostedPreview === true || process.env.WINHOOD_ALLOW_PREVIEW_SOLO === "true" || (params.nodeEnv || process.env.NODE_ENV) !== "production";
+  if (isElectron && (isLoopbackIp || isLoopbackHost)) {
+    return {
+      allowed: true,
+      mode: "SOLO_LOCAL_DESKTOP",
+      reason: "Sess\xE3o local autorizada via conta do sistema operacional (loopback Electron)."
+    };
+  }
+  if (isLoopbackIp || isLoopbackHost) {
+    return {
+      allowed: true,
+      mode: "SOLO_LOCAL_DESKTOP",
+      reason: "Sess\xE3o local autorizada em loopback (127.0.0.1 / localhost)."
+    };
+  }
+  if (isDevOrPreview) {
+    return {
+      allowed: true,
+      mode: "SOLO_LOCAL_DESKTOP",
+      reason: "Sess\xE3o local autorizada em ambiente de desenvolvimento/preview."
+    };
+  }
+  return {
+    allowed: false,
+    mode: "TEAM_SERVER",
+    reason: "Acesso remoto em produ\xE7\xE3o exige autentica\xE7\xE3o expl\xEDcita (GitHub, Passkey ou Credenciais)."
+  };
+}
+async function startGitHubDeviceAuth(clientId, scope = "read:user user:email repo") {
+  if (!clientId || clientId.trim().length < 8) {
+    throw new Error("GITHUB_CLIENT_ID_MISSING: Configure WINHOOD_GITHUB_OAUTH_CLIENT_ID.");
+  }
+  const res = await fetch("https://github.com/login/device/code", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: new URLSearchParams({ client_id: clientId.trim(), scope })
+  });
+  if (!res.ok) {
+    throw new Error(`GITHUB_DEVICE_FLOW_HTTP_${res.status}`);
+  }
+  return await res.json();
+}
+async function pollGitHubDeviceToken(clientId, deviceCode) {
+  if (!clientId || clientId.trim().length < 8) {
+    throw new Error("GITHUB_CLIENT_ID_MISSING: Configure WINHOOD_GITHUB_OAUTH_CLIENT_ID.");
+  }
+  if (!deviceCode || deviceCode.trim().length < 8) {
+    throw new Error("GITHUB_DEVICE_CODE_INVALID: C\xF3digo de dispositivo ausente ou inv\xE1lido.");
+  }
+  const res = await fetch("https://github.com/login/oauth/access_token", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: new URLSearchParams({
+      client_id: clientId.trim(),
+      device_code: deviceCode.trim(),
+      grant_type: "urn:ietf:params:oauth:grant-type:device_code"
+    })
+  });
+  if (!res.ok) {
+    throw new Error(`GITHUB_DEVICE_POLL_HTTP_${res.status}`);
+  }
+  const data = await res.json();
+  if (data.access_token) {
+    return {
+      status: "AUTHORIZED",
+      accessToken: data.access_token,
+      tokenType: data.token_type || "bearer",
+      scope: data.scope || ""
+    };
+  }
+  switch (data.error) {
+    case "authorization_pending":
+      return { status: "PENDING", errorDescription: data.error_description };
+    case "slow_down":
+      return { status: "SLOW_DOWN", errorDescription: data.error_description };
+    case "expired_token":
+      return { status: "EXPIRED", errorDescription: data.error_description };
+    case "access_denied":
+      return { status: "ACCESS_DENIED", errorDescription: data.error_description };
+    default:
+      return {
+        status: "ERROR",
+        errorDescription: data.error_description || data.error || "Erro desconhecido no OAuth Device Flow."
+      };
+  }
+}
+function generateGitHubOAuthPkce() {
+  const state = crypto20.randomBytes(32).toString("base64url");
+  const codeVerifier = crypto20.randomBytes(48).toString("base64url");
+  const codeChallenge = crypto20.createHash("sha256").update(codeVerifier, "ascii").digest("base64url");
+  return {
+    state,
+    codeVerifier,
+    codeChallenge,
+    codeChallengeMethod: "S256"
+  };
+}
+function buildGitHubOAuthAuthorizeUrl(params) {
+  const qs = new URLSearchParams({
+    client_id: params.clientId.trim(),
+    redirect_uri: params.redirectUri,
+    scope: params.scope || "read:user user:email",
+    state: params.state,
+    code_challenge: params.codeChallenge,
+    code_challenge_method: "S256",
+    allow_signup: "true"
+  });
+  return `https://github.com/login/oauth/authorize?${qs.toString()}`;
+}
+async function exchangeGitHubOAuthCode(params) {
+  if (!params.clientId.trim() || !params.clientSecret.trim()) {
+    throw new Error(
+      "GITHUB_OAUTH_CONFIG_MISSING: Configure WINHOOD_GITHUB_OAUTH_CLIENT_ID e WINHOOD_GITHUB_OAUTH_CLIENT_SECRET."
+    );
+  }
+  const res = await fetch("https://github.com/login/oauth/access_token", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: new URLSearchParams({
+      client_id: params.clientId.trim(),
+      client_secret: params.clientSecret.trim(),
+      code: params.code.trim(),
+      redirect_uri: params.redirectUri,
+      code_verifier: params.codeVerifier
+    })
+  });
+  if (!res.ok) {
+    throw new Error(`GITHUB_OAUTH_EXCHANGE_HTTP_${res.status}`);
+  }
+  const data = await res.json();
+  if (!data.access_token) {
+    throw new Error(
+      `GITHUB_OAUTH_EXCHANGE_FAILED: ${data.error_description || data.error || "Token ausente."}`
+    );
+  }
+  return {
+    accessToken: data.access_token,
+    tokenType: data.token_type || "bearer",
+    scope: data.scope || ""
+  };
+}
+async function fetchGitHubAuthenticatedProfile(accessToken) {
+  const headers = {
+    Accept: "application/vnd.github+json",
+    Authorization: `Bearer ${accessToken.trim()}`,
+    "User-Agent": "WinHood-Benchmarking/4.4.0"
+  };
+  const userRes = await fetch("https://api.github.com/user", { headers });
+  if (userRes.status === 401 || userRes.status === 403) {
+    throw new Error(
+      "GITHUB_TOKEN_UNAUTHORIZED: Token GitHub rejeitado pela API oficial (HTTP 401/403)."
+    );
+  }
+  if (!userRes.ok) {
+    throw new Error(`GITHUB_PROFILE_FETCH_FAILED: HTTP ${userRes.status}`);
+  }
+  const userJson = await userRes.json();
+  if (!userJson.login || typeof userJson.id !== "number") {
+    throw new Error("GITHUB_PROFILE_INCOMPLETE: API do GitHub n\xE3o retornou id/login.");
+  }
+  let resolvedEmail = (userJson.email || "").trim().toLowerCase();
+  if (!resolvedEmail) {
+    try {
+      const emailsRes = await fetch("https://api.github.com/user/emails", { headers });
+      if (emailsRes.ok) {
+        const emails = await emailsRes.json();
+        if (Array.isArray(emails)) {
+          const primaryVerified = emails.find((e) => e.primary && e.verified && e.email);
+          const anyVerified = emails.find((e) => e.verified && e.email);
+          const primaryAny = emails.find((e) => e.primary && e.email);
+          resolvedEmail = String(
+            primaryVerified?.email || anyVerified?.email || primaryAny?.email || ""
+          ).trim().toLowerCase();
+        }
+      }
+    } catch {
+    }
+  }
+  if (!resolvedEmail) {
+    resolvedEmail = `${userJson.id}+${userJson.login}@users.noreply.github.com`;
+  }
+  return {
+    id: userJson.id,
+    login: userJson.login,
+    name: (userJson.name || userJson.login).trim(),
+    email: resolvedEmail,
+    avatarUrl: userJson.avatar_url || null
+  };
+}
+var GITHUB_OAUTH_APP_DOCS_URL = "https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app";
+var GITHUB_OAUTH_DEVELOPER_SETTINGS_URL = "https://github.com/settings/developers";
+function maskOAuthClientIdPreview(rawClientId) {
+  const clean = rawClientId.trim();
+  if (clean.length < 8) return null;
+  return `${clean.slice(0, 4)}\u2022\u2022\u2022\u2022${clean.slice(-4)}`;
+}
+function validateOAuthCredentialInput(raw, fieldLabel) {
+  const trimmed = raw.trim();
+  if (trimmed.length < 8 || trimmed.length > 256) {
+    return {
+      valid: false,
+      error: `${fieldLabel} deve possuir entre 8 e 256 caracteres.`
+    };
+  }
+  if (/[\s\r\n\0]/.test(trimmed)) {
+    return {
+      valid: false,
+      error: `${fieldLabel} n\xE3o pode conter espa\xE7os ou caracteres de controle.`
+    };
+  }
+  return { valid: true, value: trimmed };
+}
+function inspectGitHubOAuthServerStatus(params) {
+  const env = params?.env || process.env;
+  const overrideClientId = (params?.overrideCredentials?.clientId || "").trim();
+  const overrideClientSecret = (params?.overrideCredentials?.clientSecret || "").trim();
+  const envClientId = (env.WINHOOD_GITHUB_OAUTH_CLIENT_ID || "").trim();
+  const envClientSecret = (env.WINHOOD_GITHUB_OAUTH_CLIENT_SECRET || "").trim();
+  const rawCallbackOverride = (env.WINHOOD_GITHUB_OAUTH_CALLBACK_URL || "").trim();
+  const rawClientId = overrideClientId || envClientId;
+  const rawClientSecret = overrideClientSecret || envClientSecret;
+  const clientIdConfigured = rawClientId.length >= 8;
+  const clientSecretConfigured = rawClientSecret.length >= 8;
+  const oauthDirectReady = clientIdConfigured && clientSecretConfigured;
+  const deviceFlowReady = clientIdConfigured;
+  const vaultOverrideConfigured = overrideClientId.length >= 8 || overrideClientSecret.length >= 8;
+  let configSource = "NONE";
+  if (vaultOverrideConfigured) {
+    configSource = "ADMIN_VAULT";
+  } else if (envClientId.length >= 8 || envClientSecret.length >= 8) {
+    configSource = "ENVIRONMENT";
+  }
+  let connectionStatus = "NOT_CONFIGURED";
+  if (oauthDirectReady) {
+    connectionStatus = "ACTIVE";
+  } else if (clientIdConfigured || clientSecretConfigured) {
+    connectionStatus = "PARTIAL";
+  }
+  return {
+    connectionStatus,
+    configSource,
+    vaultOverrideConfigured,
+    oauthDirectReady,
+    deviceFlowReady,
+    clientIdConfigured,
+    clientSecretConfigured,
+    callbackUrlOverrideConfigured: rawCallbackOverride.length > 0,
+    clientIdPreview: maskOAuthClientIdPreview(rawClientId),
+    callbackUrlEffective: params?.callbackUrl || rawCallbackOverride || "http://localhost:3000/api/auth/github/oauth/callback",
+    requiredScopes: ["read:user", "user:email"],
+    pkceMethod: "S256",
+    docsUrl: GITHUB_OAUTH_APP_DOCS_URL,
+    githubDeveloperSettingsUrl: GITHUB_OAUTH_DEVELOPER_SETTINGS_URL,
+    updatedAt: vaultOverrideConfigured ? params?.overrideCredentials?.updatedAt || null : null,
+    checkedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+async function verifyGitHubOAuthConnection(params) {
+  const endpointTested = "https://github.com/login/oauth/access_token";
+  const checkedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const cleanClientId = (params.clientId || "").trim();
+  const cleanClientSecret = (params.clientSecret || "").trim();
+  if (cleanClientId.length < 8 || cleanClientSecret.length < 8) {
+    const missing = [];
+    if (cleanClientId.length < 8) missing.push("WINHOOD_GITHUB_OAUTH_CLIENT_ID");
+    if (cleanClientSecret.length < 8) missing.push("WINHOOD_GITHUB_OAUTH_CLIENT_SECRET");
+    return {
+      verified: false,
+      status: "NOT_CONFIGURED",
+      httpStatus: null,
+      githubErrorCode: "CREDENTIALS_MISSING",
+      latencyMs: 0,
+      endpointTested,
+      pkceAuthorizeReady: false,
+      clientIdPreview: maskOAuthClientIdPreview(cleanClientId),
+      message: `Configura\xE7\xE3o incompleta: informe ${missing.join(" e ")} antes de verificar a conex\xE3o.`,
+      checkedAt
+    };
+  }
+  const pkce = generateGitHubOAuthPkce();
+  const authorizeUrl = buildGitHubOAuthAuthorizeUrl({
+    clientId: cleanClientId,
+    redirectUri: params.redirectUri,
+    state: pkce.state,
+    codeChallenge: pkce.codeChallenge
+  });
+  const pkceAuthorizeReady = authorizeUrl.startsWith("https://github.com/login/oauth/authorize?");
+  const startedAt = Date.now();
+  const fetcher = params.fetchImpl || fetch;
+  try {
+    const res = await fetcher(endpointTested, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "WinHood-Benchmarking/4.4.0"
+      },
+      body: new URLSearchParams({
+        client_id: cleanClientId,
+        client_secret: cleanClientSecret,
+        code: "winhood_oauth_probe_0000000000",
+        redirect_uri: params.redirectUri
+      }),
+      signal: typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(1e4) : void 0
+    });
+    const latencyMs = Math.max(1, Date.now() - startedAt);
+    const data = await res.json().catch(() => ({}));
+    const errorCode = typeof data.error === "string" ? data.error : null;
+    if (res.ok && errorCode === "bad_verification_code") {
+      return {
+        verified: true,
+        status: "VERIFIED",
+        httpStatus: res.status,
+        githubErrorCode: errorCode,
+        latencyMs,
+        endpointTested,
+        pkceAuthorizeReady,
+        clientIdPreview: maskOAuthClientIdPreview(cleanClientId),
+        message: "Conex\xE3o verificada com o GitHub: Client ID e Client Secret foram autenticados pelo endpoint oficial OAuth 2.0 (PKCE S256 pronto).",
+        checkedAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+    if (errorCode === "incorrect_client_credentials" || errorCode === "application_suspended" || res.status === 401 || res.status === 403 || res.status === 404) {
+      const detailMessage = res.status === 404 ? "OAuth App n\xE3o encontrado no GitHub (HTTP 404). Verifique se WINHOOD_GITHUB_OAUTH_CLIENT_ID corresponde a um OAuth App v\xE1lido e ativo." : `Credenciais rejeitadas pelo GitHub (${errorCode || `HTTP ${res.status}`}). Revise WINHOOD_GITHUB_OAUTH_CLIENT_ID e WINHOOD_GITHUB_OAUTH_CLIENT_SECRET.`;
+      return {
+        verified: false,
+        status: "INVALID_CREDENTIALS",
+        httpStatus: res.status,
+        githubErrorCode: errorCode || `HTTP_${res.status}`,
+        latencyMs,
+        endpointTested,
+        pkceAuthorizeReady,
+        clientIdPreview: maskOAuthClientIdPreview(cleanClientId),
+        message: detailMessage,
+        checkedAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+    return {
+      verified: false,
+      status: "API_ERROR",
+      httpStatus: res.status,
+      githubErrorCode: errorCode || `HTTP_${res.status}`,
+      latencyMs,
+      endpointTested,
+      pkceAuthorizeReady,
+      clientIdPreview: maskOAuthClientIdPreview(cleanClientId),
+      message: `Resposta inesperada do GitHub OAuth (HTTP ${res.status}${errorCode ? ` \xB7 ${errorCode}` : ""}).`,
+      checkedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+  } catch (err) {
+    const latencyMs = Math.max(1, Date.now() - startedAt);
+    const errMsg = err instanceof Error ? err.message : "Erro de rede ao contatar github.com.";
+    return {
+      verified: false,
+      status: "NETWORK_UNREACHABLE",
+      httpStatus: null,
+      githubErrorCode: "NETWORK_ERROR",
+      latencyMs,
+      endpointTested,
+      pkceAuthorizeReady,
+      clientIdPreview: maskOAuthClientIdPreview(cleanClientId),
+      message: `N\xE3o foi poss\xEDvel alcan\xE7ar o endpoint oficial do GitHub (${errMsg}).`,
+      checkedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+  }
+}
+
+// src/storage/PersistentDatabaseManager.ts
+import crypto21 from "node:crypto";
 import fs14 from "node:fs";
 import path15 from "node:path";
 import zlib from "node:zlib";
 function sha256Hex2(raw) {
-  return crypto20.createHash("sha256").update(raw, "utf8").digest("hex");
+  return crypto21.createHash("sha256").update(raw, "utf8").digest("hex");
 }
 function fsyncAndRename(tmpPath, targetPath) {
   const fd = fs14.openSync(tmpPath, "r+");
@@ -26238,8 +27022,8 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
     const rawJson = JSON.stringify(safeMap);
     const compressed = zlib.deflateSync(Buffer.from(rawJson, "utf8"));
     const { keyId, keyBuffer } = KeyManagementService.getActiveVaultAesKey();
-    const iv = crypto20.randomBytes(12);
-    const cipher = crypto20.createCipheriv("aes-256-gcm", keyBuffer, iv);
+    const iv = crypto21.randomBytes(12);
+    const cipher = crypto21.createCipheriv("aes-256-gcm", keyBuffer, iv);
     const encrypted = Buffer.concat([cipher.update(compressed), cipher.final()]);
     const authTag = cipher.getAuthTag();
     return `${_PersistentDatabaseManager.ENVELOPE_PREFIX}${keyId}:${iv.toString("hex")}:${authTag.toString("hex")}:${encrypted.toString("base64")}`;
@@ -26288,7 +27072,7 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
       }
       let compressed;
       try {
-        const decipher = crypto20.createDecipheriv("aes-256-gcm", keyBuffer, iv);
+        const decipher = crypto21.createDecipheriv("aes-256-gcm", keyBuffer, iv);
         decipher.setAuthTag(authTag);
         compressed = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
       } catch (err) {
@@ -26407,10 +27191,10 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
       } catch {
       }
     }
-    const tmpFile = `${targetPath}.${process.pid}.${crypto20.randomBytes(4).toString("hex")}.tmp`;
+    const tmpFile = `${targetPath}.${process.pid}.${crypto21.randomBytes(4).toString("hex")}.tmp`;
     fs14.writeFileSync(tmpFile, serialized, { encoding: "utf8", mode: 384 });
     fsyncAndRename(tmpFile, targetPath);
-    const tmpSha = `${checksumPath}.${process.pid}.${crypto20.randomBytes(4).toString("hex")}.tmp`;
+    const tmpSha = `${checksumPath}.${process.pid}.${crypto21.randomBytes(4).toString("hex")}.tmp`;
     fs14.writeFileSync(tmpSha, `${checksum}
 `, { encoding: "utf8", mode: 384 });
     fsyncAndRename(tmpSha, checksumPath);
@@ -26568,7 +27352,7 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
 // src/services/backup/ProjectBackupService.ts
 import fs15 from "node:fs";
 import path16 from "node:path";
-import crypto21 from "node:crypto";
+import crypto22 from "node:crypto";
 var BACKUP_ID_ALLOWLIST = /^bkp-\d+-[a-f0-9]{8}$/i;
 var MAX_BACKUP_ID_LENGTH = 128;
 var ProjectBackupService = class {
@@ -26580,7 +27364,7 @@ var ProjectBackupService = class {
     }
   }
   computeSha256(buf) {
-    return crypto21.createHash("sha256").update(buf).digest("hex");
+    return crypto22.createHash("sha256").update(buf).digest("hex");
   }
   assertSafeBackupId(backupId) {
     if (typeof backupId !== "string") {
@@ -26642,7 +27426,7 @@ var ProjectBackupService = class {
     };
   }
   createBackup(project, softwares, sourceFilesMap) {
-    const backupId = `bkp-${Date.now()}-${crypto21.randomBytes(4).toString("hex")}`;
+    const backupId = `bkp-${Date.now()}-${crypto22.randomBytes(4).toString("hex")}`;
     const backupDir = this.resolveBackupDirectory(backupId);
     fs15.mkdirSync(backupDir, { recursive: true, mode: 448 });
     const filesSha256 = {};
@@ -26792,7 +27576,7 @@ var ProjectBackupService = class {
     const metaRaw = JSON.parse(fs15.readFileSync(metaPath, "utf8"));
     const oldProj = metaRaw.project;
     const oldSoftwares = metaRaw.softwares || [];
-    const newProjId = `proj-restored-${crypto21.randomUUID().slice(0, 8)}`;
+    const newProjId = `proj-restored-${crypto22.randomUUID().slice(0, 8)}`;
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const restoredProject = {
       ...oldProj,
@@ -26803,7 +27587,7 @@ var ProjectBackupService = class {
     };
     const restoredSoftwares = oldSoftwares.map((sw) => ({
       ...sw,
-      id: `sw-restored-${crypto21.randomUUID().slice(0, 8)}`,
+      id: `sw-restored-${crypto22.randomUUID().slice(0, 8)}`,
       projectId: newProjId,
       createdAt: now,
       updatedAt: now
@@ -26841,7 +27625,7 @@ var ProjectBackupService = class {
 };
 
 // src/intelligence/synchronization/ReferenceSynchronizer.ts
-import crypto22 from "node:crypto";
+import crypto23 from "node:crypto";
 function stripTrailingSlashes2(rawUrl) {
   let end = rawUrl.length;
   while (end > 0 && rawUrl.charCodeAt(end - 1) === 47) {
@@ -26949,7 +27733,7 @@ var ReferenceSynchronizer = class {
               indexedKevCveIdsCount: advisoryCache.kevCveIds.length
             }
           };
-          const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "OSV_DEV") {
@@ -27027,7 +27811,7 @@ var ReferenceSynchronizer = class {
               usedProjectSbom: queryTargets.length > 0
             }
           };
-          const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "NVD_NIST") {
@@ -27076,7 +27860,7 @@ var ReferenceSynchronizer = class {
               cachedCvesCount: Object.keys(advisoryCache.nvdByCve).length
             }
           };
-          const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "FIRST_EPSS") {
@@ -27112,7 +27896,7 @@ var ReferenceSynchronizer = class {
               sampleScores: rows.slice(0, 5)
             }
           };
-          const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "MQR_BRIDGE_CLOUD") {
@@ -27136,7 +27920,7 @@ var ReferenceSynchronizer = class {
               totalTypeScriptRules: scData?.total ?? null
             }
           };
-          const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "MQR_BRIDGE_SERVER") {
@@ -27165,7 +27949,7 @@ var ReferenceSynchronizer = class {
               serverStatus: statusData?.status || "UP"
             }
           };
-          const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "INTERNAL_HISTORY") {
@@ -27177,7 +27961,7 @@ var ReferenceSynchronizer = class {
             isOfflineFallback: false,
             lastError: null
           };
-          const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "OWASP_BENCHMARK") {
@@ -27201,7 +27985,7 @@ var ReferenceSynchronizer = class {
                 publishedAt: owaspData?.published_at || nowIso
               }
             };
-            const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+            const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
             this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
             liveFetchedSources.push(sourceKey);
           } catch {
@@ -27212,7 +27996,7 @@ var ReferenceSynchronizer = class {
               isOfflineFallback: true,
               lastError: null
             };
-            const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+            const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
             this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
             cachedFallbackSources.push(sourceKey);
           }
@@ -27237,7 +28021,7 @@ var ReferenceSynchronizer = class {
                 totalWeaknesses: cweData?.total_weaknesses || existing.recordsCount
               }
             };
-            const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+            const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
             this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
             liveFetchedSources.push(sourceKey);
           } catch {
@@ -27248,7 +28032,7 @@ var ReferenceSynchronizer = class {
               isOfflineFallback: true,
               lastError: null
             };
-            const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+            const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
             this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
             cachedFallbackSources.push(sourceKey);
           }
@@ -27273,7 +28057,7 @@ var ReferenceSynchronizer = class {
                 starsCount: repoData?.stargazers_count ?? null
               }
             };
-            const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+            const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
             this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
             liveFetchedSources.push(sourceKey);
           } catch {
@@ -27284,7 +28068,7 @@ var ReferenceSynchronizer = class {
               isOfflineFallback: true,
               lastError: null
             };
-            const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+            const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
             this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
             cachedFallbackSources.push(sourceKey);
           }
@@ -27296,7 +28080,7 @@ var ReferenceSynchronizer = class {
             isOfflineFallback: true,
             lastError: null
           };
-          const sha2562 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           cachedFallbackSources.push(sourceKey);
         }
@@ -27318,16 +28102,16 @@ var ReferenceSynchronizer = class {
 };
 
 // src/validation/GoldenDatasetRunner.ts
-import crypto27 from "node:crypto";
+import crypto28 from "node:crypto";
 
 // src/analyzers/AnalyzerRegistry.ts
-import crypto25 from "node:crypto";
+import crypto26 from "node:crypto";
 
 // src/analyzers/FindingNormalizer.ts
-import crypto23 from "node:crypto";
+import crypto24 from "node:crypto";
 var EvidenceCollector = class {
   static computeCanonicalHash(payload) {
-    return crypto23.createHash("sha256").update(JSON.stringify(payload), "utf8").digest("hex");
+    return crypto24.createHash("sha256").update(JSON.stringify(payload), "utf8").digest("hex");
   }
   static extractContextLines(fileContent, lineNumber, radius = 2) {
     const lines = fileContent.split(/\r?\n/);
@@ -27400,7 +28184,7 @@ var FindingNormalizer = class {
 };
 
 // src/analyzers/SecretsCatalog.ts
-import crypto24 from "node:crypto";
+import crypto25 from "node:crypto";
 var SECRETS_CATALOG_VERSION = "2026.11.0";
 var SECRETS_PATTERN_CATALOG = [
   {
@@ -27518,7 +28302,7 @@ function maskDetectedSecret(raw) {
 }
 var SecretScanner = class {
   static getCatalogMetadata() {
-    const checksumSha256 = crypto24.createHash("sha256").update(JSON.stringify(SECRETS_PATTERN_CATALOG)).digest("hex");
+    const checksumSha256 = crypto25.createHash("sha256").update(JSON.stringify(SECRETS_PATTERN_CATALOG)).digest("hex");
     return {
       version: SECRETS_CATALOG_VERSION,
       patternsCount: SECRETS_PATTERN_CATALOG.length,
@@ -28067,7 +28851,7 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
       ruleCatalogSha256: catalogSnapshot.catalogSha256,
       files: filesEntries.map(([filePath, content]) => ({
         filePath,
-        sha256: crypto25.createHash("sha256").update(content, "utf8").digest("hex")
+        sha256: crypto26.createHash("sha256").update(content, "utf8").digest("hex")
       })),
       findings: findings.map((f) => ({
         ruleId: f.originalRuleId,
@@ -28079,7 +28863,7 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
         flowSteps: (f.executionFlows || []).length
       }))
     };
-    const deterministicDigestSha256 = crypto25.createHash("sha256").update(JSON.stringify(canonicalFingerprintPayload), "utf8").digest("hex");
+    const deterministicDigestSha256 = crypto26.createHash("sha256").update(JSON.stringify(canonicalFingerprintPayload), "utf8").digest("hex");
     const execution = {
       analyzerId: "winhood-native-ast-taint",
       analyzerName: "WinHood Native Compiler AST, Taint, Secrets & IaC Engine",
@@ -28156,7 +28940,7 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
           filesProcessed: 0,
           filesFailed: 0,
           measurementState: "NOT_MEASURED",
-          rawOutputSha256: crypto25.createHash("sha256").update(`${item.id}:EMPTY_SCOPE`).digest("hex")
+          rawOutputSha256: crypto26.createHash("sha256").update(`${item.id}:EMPTY_SCOPE`).digest("hex")
         },
         findings: [],
         limitations: ["Escopo vazio para an\xE1lise externa."]
@@ -28179,7 +28963,7 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
             filesProcessed: 0,
             filesFailed: 0,
             measurementState: "NOT_MEASURED",
-            rawOutputSha256: crypto25.createHash("sha256").update(`${item.id}:NOT_INSTALLED`).digest("hex")
+            rawOutputSha256: crypto26.createHash("sha256").update(`${item.id}:NOT_INSTALLED`).digest("hex")
           },
           findings: [],
           limitations: [`Bin\xE1rio ${item.name} n\xE3o instalado no host.`]
@@ -28327,7 +29111,7 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
 };
 
 // src/intelligence/datasets/GoldenDatasetCorpus.ts
-import crypto26 from "node:crypto";
+import crypto27 from "node:crypto";
 var DECLARED_BENCHMARK_LANGUAGES = [
   "TypeScript",
   "JavaScript",
@@ -28340,7 +29124,7 @@ var DECLARED_BENCHMARK_LANGUAGES = [
 ];
 function computeGoldenCaseContentSha256(filesMap) {
   const orderedEntries = Object.keys(filesMap).sort().map((k) => [k, filesMap[k]]);
-  return crypto26.createHash("sha256").update(JSON.stringify(orderedEntries), "utf8").digest("hex");
+  return crypto27.createHash("sha256").update(JSON.stringify(orderedEntries), "utf8").digest("hex");
 }
 function hydrateCorpus(rawCases, datasetVersion, datasetRole) {
   return rawCases.map((item) => ({
@@ -29399,7 +30183,7 @@ var GoldenDatasetRunner = class _GoldenDatasetRunner {
     const primaryCorpus = options?.customCorpus ?? (datasetMode === "INTERNAL_HOLDOUT" ? INTERNAL_HOLDOUT_CORPUS : datasetMode === "DEVELOPMENT" ? DEVELOPMENT_DATASET_CORPUS : GOLDEN_DATASET_CORPUS);
     const primaryVersion = options?.customVersion ?? (datasetMode === "INTERNAL_HOLDOUT" ? INTERNAL_HOLDOUT_VERSION : datasetMode === "DEVELOPMENT" ? DEVELOPMENT_DATASET_VERSION : GOLDEN_DATASET_VERSION);
     const primaryOriginLabel = options?.customOriginLabel ?? (datasetMode === "INTERNAL_HOLDOUT" ? INTERNAL_HOLDOUT_ORIGIN_LABEL : datasetMode === "DEVELOPMENT" ? DEVELOPMENT_DATASET_ORIGIN_LABEL : GOLDEN_DATASET_ORIGIN_LABEL);
-    const datasetSha256 = crypto27.createHash("sha256").update(JSON.stringify(primaryCorpus), "utf8").digest("hex");
+    const datasetSha256 = crypto28.createHash("sha256").update(JSON.stringify(primaryCorpus), "utf8").digest("hex");
     const {
       cases,
       tp,
@@ -29551,7 +30335,7 @@ var GoldenDatasetRunner = class _GoldenDatasetRunner {
       byCategory,
       cases
     };
-    const reportSha256 = crypto27.createHash("sha256").update(JSON.stringify(reportBody), "utf8").digest("hex");
+    const reportSha256 = crypto28.createHash("sha256").update(JSON.stringify(reportBody), "utf8").digest("hex");
     return {
       ...reportBody,
       reportSha256
@@ -29560,7 +30344,7 @@ var GoldenDatasetRunner = class _GoldenDatasetRunner {
 };
 
 // src/analyzers/SarifCodec.ts
-import crypto28 from "node:crypto";
+import crypto29 from "node:crypto";
 function severityToSarifLevel(sev) {
   if (sev === "BLOCKER" || sev === "CRITICAL" || sev === "HIGH") return "error";
   if (sev === "MEDIUM") return "warning";
@@ -29757,7 +30541,7 @@ var SarifCodec = class {
         const category = categoryRaw === "SECRETS" || categoryRaw === "SCA" || categoryRaw === "IAC" || categoryRaw === "DATABASE" || categoryRaw === "CODE_QUALITY" ? categoryRaw : "SAST";
         findings.push(
           enrichLegacyOrExternalFinding({
-            id: `sarif-imp-${scope.runId}-${rIdx}-${idx}-${crypto28.createHash("sha256").update(`${toolName}:${ruleId}:${filePath}:${startLine}`).digest("hex").slice(0, 8)}`,
+            id: `sarif-imp-${scope.runId}-${rIdx}-${idx}-${crypto29.createHash("sha256").update(`${toolName}:${ruleId}:${filePath}:${startLine}`).digest("hex").slice(0, 8)}`,
             runId: scope.runId,
             softwareId: scope.softwareId,
             softwareName: scope.softwareName,
@@ -29788,7 +30572,7 @@ var SarifCodec = class {
         );
       }
     }
-    const payloadSha256 = crypto28.createHash("sha256").update(JSON.stringify(doc)).digest("hex");
+    const payloadSha256 = crypto29.createHash("sha256").update(JSON.stringify(doc)).digest("hex");
     return {
       valid: true,
       errors: [],
@@ -30082,13 +30866,13 @@ var PortfolioEngine = class {
 };
 
 // src/reports/PdfReportGenerator.ts
-import crypto29 from "node:crypto";
+import crypto30 from "node:crypto";
 var DEFAULT_REPORT_HMAC_KEY = process.env.WINHOOD_REPORT_HMAC_KEY || "winhood-deterministic-audit-report-hmac-key-v4";
 function sha256Hex3(input) {
-  return crypto29.createHash("sha256").update(input).digest("hex");
+  return crypto30.createHash("sha256").update(input).digest("hex");
 }
 function computeHmacSha256(payload, secret = DEFAULT_REPORT_HMAC_KEY) {
-  return crypto29.createHmac("sha256", secret).update(payload).digest("hex");
+  return crypto30.createHmac("sha256", secret).update(payload).digest("hex");
 }
 function escapeHtml(raw) {
   return raw.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
@@ -31536,7 +32320,7 @@ function createInitialRealWorkspaceState(dataDir = DATA_DIR, dbManager = new Per
   });
   const auditLogs = [
     {
-      id: `aud-${crypto30.randomUUID().slice(0, 8)}`,
+      id: `aud-${crypto31.randomUUID().slice(0, 8)}`,
       timestamp: nowIso,
       actor: "Arquiteto Chefe (admin@winhood.sec)",
       role: "ADMIN",
@@ -31547,7 +32331,7 @@ function createInitialRealWorkspaceState(dataDir = DATA_DIR, dbManager = new Per
       integrityHash: computeSha256(`AUDIT|1|${projectId}|${nowIso}`)
     },
     {
-      id: `aud-${crypto30.randomUUID().slice(0, 8)}`,
+      id: `aud-${crypto31.randomUUID().slice(0, 8)}`,
       timestamp: nowIso,
       actor: "Orquestrador de An\xE1lises WinHood",
       role: "SECURITY_LEAD",
@@ -31598,7 +32382,7 @@ function createInitialCleanWorkspaceState(dataDir = DATA_DIR, dbManager = new Pe
     adapters: buildFull21SecurityAdaptersCatalog(),
     auditLogs: [
       {
-        id: `aud-${crypto30.randomUUID().slice(0, 8)}`,
+        id: `aud-${crypto31.randomUUID().slice(0, 8)}`,
         timestamp: nowIso,
         actor: "Sistema WinHood Analyzer",
         role: "SYSTEM",
@@ -31777,7 +32561,7 @@ function appendAuditLog(state, action, entityType, entityId, details, actorUser)
   const actorName = actorUser?.name || "Sistema WinHood";
   const actorRole = actorUser?.role || "SYSTEM";
   const entry = {
-    id: `aud-${crypto30.randomUUID().slice(0, 8)}`,
+    id: `aud-${crypto31.randomUUID().slice(0, 8)}`,
     timestamp: nowIso,
     actor: `${actorName} (${actorRole})`,
     role: actorRole,
@@ -31816,14 +32600,9 @@ async function createWinHoodApp(options) {
     maxRequests: options?.rateLimits?.backupMax ?? 30
   });
   app.disable("x-powered-by");
-  app.use((_req, res, next) => {
-    res.setHeader("X-Content-Type-Options", "nosniff");
-    res.setHeader("X-Frame-Options", "SAMEORIGIN");
-    res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
-    next();
-  });
-  app.use(express.json({ limit: "50mb" }));
-  app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+  const heavyUploadJsonParser = express.json({ limit: "50mb" });
+  app.use(express.json({ limit: "2mb" }));
+  app.use(express.urlencoded({ extended: true, limit: "2mb" }));
   const loaded = loadDatabase(dataDir, dbManager);
   let db = loaded.state;
   if (loaded.recoveredFromBackup) {
@@ -31857,7 +32636,8 @@ async function createWinHoodApp(options) {
     pendingSaveTimer = setTimeout(() => {
       try {
         writeDatabaseAtomically(state);
-      } catch {
+      } catch (persistErr) {
+        console.error("[WinHood Persistence Error] Falha ao gravar banco at\xF4mico:", persistErr);
       }
       pendingSaveTimer = null;
     }, 80);
@@ -31948,24 +32728,42 @@ async function createWinHoodApp(options) {
       mfaVerified: false
     };
   };
+  const isHostedPreviewRequest = (reqObj) => {
+    if (!reqObj) return false;
+    const forwardedHost = String(
+      reqObj.headers["x-forwarded-host"] || reqObj.headers.host || ""
+    ).toLowerCase();
+    const referer = String(reqObj.headers.referer || "").toLowerCase();
+    if (/(^|\.)run\.app(:\d+)?$/i.test(forwardedHost) || referer.includes(".run.app")) {
+      return true;
+    }
+    const isLoopbackDirect = /^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(forwardedHost) && !reqObj.secure && reqObj.headers["x-forwarded-proto"] !== "https";
+    if (isLoopbackDirect && reqObj.headers["sec-fetch-site"] !== "cross-site" && reqObj.headers["sec-fetch-dest"] !== "iframe") {
+      return false;
+    }
+    return Boolean(process.env.NG_ALLOWED_HOSTS) || reqObj.headers["sec-fetch-site"] === "cross-site" || reqObj.headers["sec-fetch-dest"] === "iframe";
+  };
   const resolveCookieSecurityContext = (res) => {
     const reqObj = res.req;
     const hostHeader = String(reqObj?.headers?.host || "");
-    const isLoopbackHttp = /^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(hostHeader) && !reqObj?.secure && reqObj?.headers["x-forwarded-proto"] !== "https";
-    const isHttps = !isLoopbackHttp && (Boolean(reqObj?.secure) || reqObj?.headers["x-forwarded-proto"] === "https" || Boolean(reqObj?.headers?.referer?.startsWith("https://")));
-    const isCrossSiteIframe = isHttps && (reqObj?.headers["sec-fetch-site"] === "cross-site" || reqObj?.headers["sec-fetch-dest"] === "iframe");
+    const isHostedPreview = isHostedPreviewRequest(reqObj);
+    const isLoopbackHttp = /^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(hostHeader) && !reqObj?.secure && reqObj?.headers["x-forwarded-proto"] !== "https" && !isHostedPreview;
+    const isHttps = !isLoopbackHttp && (Boolean(reqObj?.secure) || reqObj?.headers["x-forwarded-proto"] === "https" || Boolean(reqObj?.headers?.referer?.startsWith("https://")) || isHostedPreview);
+    const isCrossSiteIframe = isHttps && isHostedPreview;
     const sameSiteAttr = isCrossSiteIframe ? "SameSite=None; Secure; Partitioned" : `SameSite=Strict${isHttps ? "; Secure" : ""}`;
-    return { sameSiteAttr };
+    return { sameSiteAttr, isCrossSiteIframe };
   };
   const setSessionCookies = (res, sessionId, csrfToken, opts) => {
-    const { sameSiteAttr } = resolveCookieSecurityContext(res);
+    const { sameSiteAttr, isCrossSiteIframe } = resolveCookieSecurityContext(res);
     const maxAgeSec = opts?.trustDevice ? Math.floor(AuthService.SESSION_TRUSTED_DEVICE_MS / 1e3) : Math.floor(AuthService.SESSION_ABSOLUTE_MS / 1e3);
     res.setHeader("Set-Cookie", [
       `winhood_session=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; ${sameSiteAttr}; Max-Age=${maxAgeSec}`,
       `winhood_csrf=${encodeURIComponent(csrfToken)}; Path=/; ${sameSiteAttr}; Max-Age=${maxAgeSec}`
     ]);
-    res.setHeader("X-WinHood-Session-Token", sessionId);
     res.setHeader("X-WinHood-CSRF-Token", csrfToken);
+    if (isCrossSiteIframe) {
+      res.setHeader("X-WinHood-Session-Token", sessionId);
+    }
   };
   const clearSessionCookies = (res) => {
     const { sameSiteAttr } = resolveCookieSecurityContext(res);
@@ -32012,13 +32810,23 @@ async function createWinHoodApp(options) {
     }
     return allowedOriginMap.get(origin) ?? null;
   };
-  app.use((_req, res, next) => {
+  app.use((req, res, next) => {
+    const isHostedPreviewIframe = isHostedPreviewRequest(req);
+    const isDevViteMode = process.env.NODE_ENV !== "production" && process.env.WINHOOD_RUNTIME_ENV !== "ELECTRON_DESKTOP";
     res.setHeader("X-Content-Type-Options", "nosniff");
-    res.setHeader("X-Frame-Options", "SAMEORIGIN");
+    if (!isHostedPreviewIframe) {
+      res.setHeader("X-Frame-Options", "SAMEORIGIN");
+    }
     res.setHeader("Referrer-Policy", "no-referrer");
     res.setHeader(
       "Permissions-Policy",
       "publickey-credentials-create=*, publickey-credentials-get=*"
+    );
+    const frameAncestorsDirective = isHostedPreviewIframe ? "frame-ancestors 'self' https://*.google.com https://*.googleusercontent.com" : "frame-ancestors 'self'";
+    const scriptSrcDirective = isDevViteMode ? "script-src 'self' 'unsafe-inline' 'unsafe-eval'" : "script-src 'self'";
+    res.setHeader(
+      "Content-Security-Policy",
+      `default-src 'self'; ${scriptSrcDirective}; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob: https://avatars.githubusercontent.com; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' ws: wss: https://api.github.com https://github.com https://sonarcloud.io https://api.osv.dev; ${frameAncestorsDirective}; object-src 'none'; base-uri 'self'`
     );
     next();
   });
@@ -32081,6 +32889,15 @@ async function createWinHoodApp(options) {
     const publicApiPaths = /* @__PURE__ */ new Set([
       "/health",
       "/openapi.json",
+      "/auth/access-mode",
+      "/auth/solo-local",
+      "/auth/github/oauth/start",
+      "/auth/github/oauth/callback",
+      "/auth/github/oauth/status",
+      "/auth/github/device/start",
+      "/auth/github/device/poll",
+      "/auth/github/token",
+      "/auth/windows-hello/status",
       "/auth/bootstrap-status",
       "/auth/bootstrap-admin",
       "/auth/register",
@@ -32114,7 +32931,7 @@ async function createWinHoodApp(options) {
         const providedCsrf = String(req.headers["x-csrf-token"] || req.headers["x-winhood-csrf"] || "").trim();
         const expBuf = Buffer.from(expectedCsrf, "utf8");
         const provBuf = Buffer.from(providedCsrf, "utf8");
-        if (!expectedCsrf || expBuf.length !== provBuf.length || !crypto30.timingSafeEqual(expBuf, provBuf)) {
+        if (!expectedCsrf || expBuf.length !== provBuf.length || !crypto31.timingSafeEqual(expBuf, provBuf)) {
           return res.status(403).json({
             error: "CSRF_INVALID",
             code: "CSRF_INVALID",
@@ -32177,6 +32994,504 @@ async function createWinHoodApp(options) {
       bootstrapTokenFileHint: path17.relative(process.cwd(), meta.bootstrapTokenFilePath),
       expiresAt: meta.expiresAt
     });
+  });
+  const resolveStoredGitHubOAuthOverride = () => {
+    const cfg = db.githubOAuthConfig;
+    if (!cfg) {
+      return { clientId: "", clientSecret: "", updatedAt: null };
+    }
+    const clientId = cfg.encryptedClientId ? (MqrBridgeConnection.decryptToken(cfg.encryptedClientId) || "").trim() : "";
+    const clientSecret = cfg.encryptedClientSecret ? (MqrBridgeConnection.decryptToken(cfg.encryptedClientSecret) || "").trim() : "";
+    return {
+      clientId,
+      clientSecret,
+      updatedAt: cfg.updatedAt || null
+    };
+  };
+  const resolveEffectiveGitHubOAuthCredentials = () => {
+    const override = resolveStoredGitHubOAuthOverride();
+    const clientId = override.clientId || (process.env.WINHOOD_GITHUB_OAUTH_CLIENT_ID || "").trim();
+    const clientSecret = override.clientSecret || (process.env.WINHOOD_GITHUB_OAUTH_CLIENT_SECRET || "").trim();
+    return { clientId, clientSecret, override };
+  };
+  app.get("/api/auth/access-mode", (req, res) => {
+    const policy = evaluateSoloLocalAutoSession({
+      runtimeEnv: process.env.WINHOOD_RUNTIME_ENV,
+      remoteAddress: req.socket.remoteAddress || req.ip,
+      hostHeader: String(req.headers["x-forwarded-host"] || req.headers.host || ""),
+      isHostedPreview: isHostedPreviewRequest(req),
+      nodeEnv: process.env.NODE_ENV,
+      vaultLockEnabled: process.env.WINHOOD_VAULT_LOCK === "true",
+      teamServerMode: process.env.WINHOOD_TEAM_SERVER === "true"
+    });
+    const { clientId: githubClientId, clientSecret: githubClientSecret } = resolveEffectiveGitHubOAuthCredentials();
+    res.json({
+      mode: policy.mode,
+      soloLocalAllowed: policy.allowed,
+      reason: policy.reason,
+      vaultLockEnabled: process.env.WINHOOD_VAULT_LOCK === "true",
+      teamServerMode: process.env.WINHOOD_TEAM_SERVER === "true",
+      githubDeviceFlowConfigured: githubClientId.length >= 8,
+      githubOAuthDirectConfigured: githubClientId.length >= 8 && githubClientSecret.length >= 8,
+      githubPatSupported: true,
+      windowsHelloNativeSupported: process.platform === "win32",
+      hasRegisteredWebAuthnCredentials: authService.hasAnyWebAuthnCredentials(),
+      runtimeEnv: process.env.WINHOOD_RUNTIME_ENV || "WEB"
+    });
+  });
+  app.post("/api/auth/solo-local", (req, res) => {
+    const policy = evaluateSoloLocalAutoSession({
+      runtimeEnv: process.env.WINHOOD_RUNTIME_ENV,
+      remoteAddress: req.socket.remoteAddress || req.ip,
+      hostHeader: String(req.headers["x-forwarded-host"] || req.headers.host || ""),
+      isHostedPreview: isHostedPreviewRequest(req),
+      nodeEnv: process.env.NODE_ENV,
+      vaultLockEnabled: process.env.WINHOOD_VAULT_LOCK === "true",
+      teamServerMode: process.env.WINHOOD_TEAM_SERVER === "true"
+    });
+    if (!policy.allowed) {
+      return res.status(403).json({
+        error: policy.reason,
+        code: "SOLO_LOCAL_DENIED",
+        mode: policy.mode
+      });
+    }
+    try {
+      const outcome = authService.issueSoloLocalDesktopSession({
+        ipAddress: req.socket.remoteAddress || req.ip || "127.0.0.1",
+        userAgent: String(req.headers["user-agent"] || "WinHood-Local-Workspace")
+      });
+      const { isCrossSiteIframe } = resolveCookieSecurityContext(res);
+      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
+        trustDevice: outcome.trustDevice
+      });
+      appendAuditLog(
+        db,
+        "AUTH_SOLO_LOCAL_DESKTOP",
+        "AUTH",
+        outcome.user.id,
+        `Sess\xE3o Solo Local emitida (${policy.mode}).`,
+        outcome.user
+      );
+      saveDatabase(db);
+      return res.json({
+        authenticated: true,
+        mode: policy.mode,
+        user: outcome.user,
+        csrfToken: outcome.csrfToken,
+        ...isCrossSiteIframe ? { sessionId: outcome.sessionId } : {}
+      });
+    } catch (err) {
+      return res.status(403).json({
+        error: err?.message || "Falha ao iniciar sess\xE3o local.",
+        code: "SOLO_LOCAL_FAILED"
+      });
+    }
+  });
+  const pendingGitHubOAuthTxs = /* @__PURE__ */ new Map();
+  const prunePendingGitHubOAuthTxs = () => {
+    const now = Date.now();
+    for (const [key, tx] of pendingGitHubOAuthTxs.entries()) {
+      if (now > tx.expiresAtMs) {
+        pendingGitHubOAuthTxs.delete(key);
+      }
+    }
+  };
+  const findGitHubOAuthTxByState = (rawState) => {
+    const providedBuf = Buffer.from(rawState, "utf8");
+    if (providedBuf.length === 0) return void 0;
+    for (const tx of pendingGitHubOAuthTxs.values()) {
+      const expectedBuf = Buffer.from(tx.state, "utf8");
+      if (expectedBuf.length === providedBuf.length && crypto31.timingSafeEqual(expectedBuf, providedBuf)) {
+        return tx;
+      }
+    }
+    return void 0;
+  };
+  const resolveGitHubCallbackUrl = (req) => {
+    const explicit = (process.env.WINHOOD_GITHUB_OAUTH_CALLBACK_URL || "").trim();
+    if (explicit) return explicit;
+    const rawProto = String(req.headers["x-forwarded-proto"] || (req.secure ? "https" : "http")).split(",")[0].trim().toLowerCase();
+    const proto = rawProto === "https" ? "https" : "http";
+    const rawHost = String(req.headers["x-forwarded-host"] || req.headers.host || "localhost:3000").split(",")[0].replace(/[\r\n\s]/g, "").trim();
+    const safeHost = /^[a-zA-Z0-9.:-]+$/.test(rawHost) ? rawHost : "localhost:3000";
+    return `${proto}://${safeHost}/api/auth/github/oauth/callback`;
+  };
+  const escapeHtmlForOAuth = (raw) => raw.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  const renderOAuthCallbackHtml = (res, statusCode, title, message, inlineScript) => {
+    res.setHeader("Cache-Control", "no-store");
+    if (inlineScript) {
+      const scriptHash = crypto31.createHash("sha256").update(inlineScript, "utf8").digest("base64");
+      res.setHeader(
+        "Content-Security-Policy",
+        `default-src 'self'; script-src 'self' 'sha256-${scriptHash}'; style-src 'self' 'unsafe-inline'; base-uri 'self'; object-src 'none'`
+      );
+    }
+    const html = [
+      "<!doctype html>",
+      '<html lang="pt-BR">',
+      "<head>",
+      '<meta charset="utf-8">',
+      `<title>${escapeHtmlForOAuth(title)}</title>`,
+      "<style>body{font-family:system-ui,-apple-system,sans-serif;background:#080b10;color:#f8fafc;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px;}main{max-width:440px;padding:24px;border:1px solid #1e293b;border-radius:12px;background:#0c1017;}h1{font-size:18px;margin:0 0 10px;}p{font-size:14px;line-height:1.5;color:#cbd5e1;margin:0;}</style>",
+      "</head>",
+      "<body>",
+      "<main>",
+      `<h1>${escapeHtmlForOAuth(title)}</h1>`,
+      `<p>${escapeHtmlForOAuth(message)}</p>`,
+      "</main>",
+      inlineScript ? `<script>${inlineScript}</script>` : "",
+      "</body>",
+      "</html>"
+    ].join("");
+    return res.status(statusCode).type("html").send(html);
+  };
+  app.get("/api/auth/github/oauth/start", (req, res) => {
+    prunePendingGitHubOAuthTxs();
+    const { clientId, clientSecret } = resolveEffectiveGitHubOAuthCredentials();
+    if (clientId.length < 8 || clientSecret.length < 8) {
+      return res.status(400).json({
+        error: "GITHUB_OAUTH_NOT_CONFIGURED: Configure WINHOOD_GITHUB_OAUTH_CLIENT_ID e WINHOOD_GITHUB_OAUTH_CLIENT_SECRET no ambiente, ou use Personal Access Token (PAT) / Device Flow.",
+        code: "GITHUB_OAUTH_NOT_CONFIGURED",
+        patLoginEndpoint: "/api/auth/github/token",
+        deviceFlowEndpoint: "/api/auth/github/device/start"
+      });
+    }
+    const rawMode = typeof req.query.mode === "string" ? req.query.mode.trim() : "popup";
+    const mode = rawMode === "desktop" || rawMode === "redirect" ? rawMode : "popup";
+    const redirectUri = resolveGitHubCallbackUrl(req);
+    const pkce = generateGitHubOAuthPkce();
+    let originHint = "";
+    const rawOrigin = typeof req.headers.origin === "string" ? req.headers.origin.trim() : "";
+    if (rawOrigin) {
+      try {
+        const parsedOrigin = new URL(rawOrigin);
+        if (parsedOrigin.protocol === "http:" || parsedOrigin.protocol === "https:") {
+          originHint = parsedOrigin.origin;
+        }
+      } catch {
+        originHint = "";
+      }
+    }
+    pendingGitHubOAuthTxs.set(pkce.state, {
+      state: pkce.state,
+      codeVerifier: pkce.codeVerifier,
+      redirectUri,
+      mode,
+      originHint,
+      expiresAtMs: Date.now() + 10 * 60 * 1e3,
+      status: "PENDING"
+    });
+    const authorizeUrl = buildGitHubOAuthAuthorizeUrl({
+      clientId,
+      redirectUri,
+      state: pkce.state,
+      codeChallenge: pkce.codeChallenge
+    });
+    return res.json({
+      authorizeUrl,
+      state: pkce.state,
+      mode,
+      redirectUri,
+      codeChallengeMethod: pkce.codeChallengeMethod
+    });
+  });
+  app.get("/api/auth/github/oauth/callback", async (req, res) => {
+    prunePendingGitHubOAuthTxs();
+    const rawState = typeof req.query.state === "string" ? req.query.state : "";
+    const rawCode = typeof req.query.code === "string" ? req.query.code : "";
+    const oauthError = typeof req.query.error === "string" ? req.query.error : "";
+    const oauthErrorDesc = typeof req.query.error_description === "string" ? req.query.error_description : "";
+    const tx = rawState ? findGitHubOAuthTxByState(rawState) : void 0;
+    if (oauthError) {
+      const msg = oauthErrorDesc || oauthError || "Autoriza\xE7\xE3o recusada no GitHub.";
+      if (tx) {
+        tx.status = "ERROR";
+        tx.errorMessage = msg;
+      }
+      const scriptPayload = JSON.stringify({
+        type: "winhood-github-oauth-result",
+        ok: false,
+        error: msg
+      }).replace(/</g, "\\u003c");
+      const targetOrigin = JSON.stringify(tx?.originHint || "*");
+      const script = tx?.mode === "popup" ? `if(window.opener){window.opener.postMessage(${scriptPayload},${targetOrigin});}window.close();` : void 0;
+      return renderOAuthCallbackHtml(
+        res,
+        400,
+        "Autoriza\xE7\xE3o GitHub n\xE3o conclu\xEDda",
+        msg,
+        script
+      );
+    }
+    if (!rawCode || !rawState || !tx || Date.now() > tx.expiresAtMs) {
+      if (tx) pendingGitHubOAuthTxs.delete(tx.state);
+      return renderOAuthCallbackHtml(
+        res,
+        400,
+        "Estado OAuth inv\xE1lido ou expirado",
+        "A solicita\xE7\xE3o de autentica\xE7\xE3o GitHub expirou ou o par\xE2metro state n\xE3o corresponde. Feche esta janela e tente novamente."
+      );
+    }
+    const { clientId, clientSecret } = resolveEffectiveGitHubOAuthCredentials();
+    try {
+      const tokenRes = await exchangeGitHubOAuthCode({
+        clientId,
+        clientSecret,
+        code: rawCode,
+        redirectUri: tx.redirectUri,
+        codeVerifier: tx.codeVerifier
+      });
+      const profile = await fetchGitHubAuthenticatedProfile(tokenRes.accessToken);
+      const outcome = authService.issueGitHubOAuthSession({
+        githubId: profile.id,
+        githubLogin: profile.login,
+        name: profile.name,
+        email: profile.email,
+        avatarUrl: profile.avatarUrl,
+        ipAddress: req.ip || "127.0.0.1",
+        userAgent: String(req.headers["user-agent"] || "WinHood-GitHub-OAuth-PKCE")
+      });
+      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
+        trustDevice: outcome.trustDevice
+      });
+      appendAuditLog(
+        db,
+        outcome.isNewAccount ? "AUTH_GITHUB_OAUTH_REGISTERED" : "AUTH_GITHUB_OAUTH_LOGIN",
+        "AUTH",
+        outcome.user.id,
+        `Autentica\xE7\xE3o GitHub OAuth PKCE conclu\xEDda para @${profile.login} (${outcome.isNewAccount ? "nova conta" : "conta existente"}).`,
+        outcome.user
+      );
+      saveDatabase(db);
+      if (tx.mode === "redirect") {
+        pendingGitHubOAuthTxs.delete(tx.state);
+        return res.redirect(302, "/");
+      }
+      tx.status = "AUTHORIZED";
+      tx.sessionId = outcome.sessionId;
+      tx.csrfToken = outcome.csrfToken;
+      tx.user = outcome.user;
+      tx.isNewAccount = outcome.isNewAccount;
+      tx.expiresAtMs = Date.now() + 2 * 60 * 1e3;
+      if (tx.mode === "desktop") {
+        return renderOAuthCallbackHtml(
+          res,
+          200,
+          "WinHood Desktop autenticado com GitHub",
+          `Conta @${profile.login} autenticada com sucesso. Voc\xEA pode fechar esta aba do navegador e retornar ao aplicativo WinHood.`
+        );
+      }
+      const scriptPayload = JSON.stringify({
+        type: "winhood-github-oauth-result",
+        ok: true,
+        state: tx.state,
+        isNewAccount: outcome.isNewAccount,
+        user: outcome.user,
+        csrfToken: outcome.csrfToken
+      }).replace(/</g, "\\u003c");
+      const targetOrigin = JSON.stringify(tx.originHint || "*");
+      const script = `if(window.opener){window.opener.postMessage(${scriptPayload},${targetOrigin});setTimeout(function(){window.close();},150);}`;
+      return renderOAuthCallbackHtml(
+        res,
+        200,
+        "Conta GitHub conectada ao WinHood",
+        `Autentica\xE7\xE3o conclu\xEDda para @${profile.login}. Esta janela fechar\xE1 automaticamente.`,
+        script
+      );
+    } catch (err) {
+      const msg = err?.message || "Falha ao concluir autentica\xE7\xE3o GitHub OAuth.";
+      tx.status = "ERROR";
+      tx.errorMessage = msg;
+      return renderOAuthCallbackHtml(
+        res,
+        502,
+        "Falha na autentica\xE7\xE3o GitHub",
+        msg
+      );
+    }
+  });
+  app.get("/api/auth/github/oauth/status", (req, res) => {
+    prunePendingGitHubOAuthTxs();
+    const rawState = typeof req.query.state === "string" ? req.query.state : "";
+    if (!rawState) {
+      return res.status(400).json({ error: "Par\xE2metro state obrigat\xF3rio.", code: "STATE_REQUIRED" });
+    }
+    const tx = findGitHubOAuthTxByState(rawState);
+    if (!tx) {
+      return res.status(404).json({
+        status: "EXPIRED",
+        error: "Transa\xE7\xE3o OAuth n\xE3o encontrada ou expirada.",
+        code: "GITHUB_OAUTH_TX_NOT_FOUND"
+      });
+    }
+    if (tx.status === "PENDING") {
+      return res.json({ status: "PENDING", authorized: false });
+    }
+    if (tx.status === "ERROR") {
+      pendingGitHubOAuthTxs.delete(tx.state);
+      return res.status(400).json({
+        status: "ERROR",
+        authorized: false,
+        error: tx.errorMessage || "Autoriza\xE7\xE3o GitHub recusada."
+      });
+    }
+    const sessionId = tx.sessionId;
+    const csrfToken = tx.csrfToken;
+    const user = tx.user;
+    const isNewAccount = Boolean(tx.isNewAccount);
+    pendingGitHubOAuthTxs.delete(tx.state);
+    const { isCrossSiteIframe } = resolveCookieSecurityContext(res);
+    setSessionCookies(res, sessionId, csrfToken, { trustDevice: true });
+    return res.json({
+      status: "AUTHORIZED",
+      authorized: true,
+      authenticated: true,
+      isNewAccount,
+      user,
+      csrfToken,
+      ...isCrossSiteIframe ? { sessionId } : {}
+    });
+  });
+  app.post("/api/auth/github/device/start", async (req, res) => {
+    const bodyClientId = typeof req.body?.clientId === "string" ? req.body.clientId.trim() : "";
+    const { clientId: configuredClientId } = resolveEffectiveGitHubOAuthCredentials();
+    const clientId = (configuredClientId || bodyClientId).trim();
+    if (clientId.length < 8) {
+      return res.status(400).json({
+        error: "Informe seu GitHub OAuth Client ID ou utilize um Personal Access Token (PAT) do GitHub para entrar imediatamente.",
+        code: "GITHUB_CLIENT_ID_MISSING",
+        patLoginEndpoint: "/api/auth/github/token"
+      });
+    }
+    try {
+      const deviceResp = await startGitHubDeviceAuth(clientId);
+      return res.json(deviceResp);
+    } catch (err) {
+      return res.status(502).json({
+        error: err?.message || "Falha ao iniciar GitHub OAuth Device Flow.",
+        code: "GITHUB_DEVICE_FLOW_FAILED"
+      });
+    }
+  });
+  app.post("/api/auth/github/device/poll", async (req, res) => {
+    const { deviceCode, clientId: bodyClientId } = req.body || {};
+    const { clientId: configuredClientId } = resolveEffectiveGitHubOAuthCredentials();
+    const clientId = (configuredClientId || (typeof bodyClientId === "string" ? bodyClientId.trim() : "")).trim();
+    if (clientId.length < 8) {
+      return res.status(400).json({
+        error: "GITHUB_CLIENT_ID_MISSING: Informe um GitHub OAuth Client ID v\xE1lido.",
+        code: "GITHUB_CLIENT_ID_MISSING"
+      });
+    }
+    if (!deviceCode || typeof deviceCode !== "string") {
+      return res.status(400).json({ error: "deviceCode obrigat\xF3rio.", code: "INVALID_REQUEST" });
+    }
+    try {
+      const pollResult = await pollGitHubDeviceToken(clientId, deviceCode);
+      if (pollResult.status !== "AUTHORIZED" || !pollResult.accessToken) {
+        return res.json({
+          authorized: false,
+          status: pollResult.status,
+          errorDescription: pollResult.errorDescription
+        });
+      }
+      const profile = await fetchGitHubAuthenticatedProfile(pollResult.accessToken);
+      const outcome = authService.issueGitHubOAuthSession({
+        githubId: profile.id,
+        githubLogin: profile.login,
+        name: profile.name,
+        email: profile.email,
+        avatarUrl: profile.avatarUrl,
+        ipAddress: req.ip || "127.0.0.1",
+        userAgent: String(req.headers["user-agent"] || "WinHood-GitHub-OAuth")
+      });
+      const { isCrossSiteIframe } = resolveCookieSecurityContext(res);
+      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
+        trustDevice: outcome.trustDevice
+      });
+      appendAuditLog(
+        db,
+        "AUTH_GITHUB_DEVICE_FLOW_SUCCESS",
+        "AUTH",
+        outcome.user.id,
+        `Login via GitHub OAuth Device Flow conclu\xEDdo para @${profile.login} (${outcome.user.email}).`,
+        outcome.user
+      );
+      saveDatabase(db);
+      return res.json({
+        authorized: true,
+        status: "AUTHORIZED",
+        authenticated: true,
+        isNewAccount: outcome.isNewAccount,
+        user: outcome.user,
+        csrfToken: outcome.csrfToken,
+        ...isCrossSiteIframe ? { sessionId: outcome.sessionId } : {}
+      });
+    } catch (err) {
+      const msg = err?.message || "Erro ao consultar autoriza\xE7\xE3o do GitHub Device Flow.";
+      const status = msg.startsWith("GITHUB_TOKEN_UNAUTHORIZED") ? 401 : 502;
+      return res.status(status).json({
+        error: msg,
+        code: "GITHUB_DEVICE_POLL_FAILED"
+      });
+    }
+  });
+  app.post("/api/auth/github/token", async (req, res) => {
+    const { token, trustDevice } = req.body || {};
+    const cleanToken = typeof token === "string" ? token.trim() : "";
+    if (cleanToken.length < 10) {
+      return res.status(400).json({
+        error: "Informe um GitHub Personal Access Token (PAT) v\xE1lido (ghp_... ou github_pat_...).",
+        code: "GITHUB_TOKEN_INVALID"
+      });
+    }
+    try {
+      const profile = await fetchGitHubAuthenticatedProfile(cleanToken);
+      const outcome = authService.issueGitHubOAuthSession({
+        githubId: profile.id,
+        githubLogin: profile.login,
+        name: profile.name,
+        email: profile.email,
+        avatarUrl: profile.avatarUrl,
+        ipAddress: req.ip || "127.0.0.1",
+        userAgent: String(req.headers["user-agent"] || "WinHood-GitHub-PAT")
+      });
+      const { isCrossSiteIframe } = resolveCookieSecurityContext(res);
+      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
+        trustDevice: trustDevice !== false
+      });
+      appendAuditLog(
+        db,
+        "AUTH_GITHUB_PAT_LOGIN_SUCCESS",
+        "AUTH",
+        outcome.user.id,
+        `Login via GitHub Personal Access Token validado na API oficial para @${profile.login}.`,
+        outcome.user
+      );
+      saveDatabase(db);
+      return res.json({
+        authenticated: true,
+        provider: "github-pat",
+        isNewAccount: outcome.isNewAccount,
+        user: outcome.user,
+        csrfToken: outcome.csrfToken,
+        ...isCrossSiteIframe ? { sessionId: outcome.sessionId } : {}
+      });
+    } catch (err) {
+      const msg = err?.message || "Erro de rede ao validar token na API oficial do GitHub.";
+      if (msg.startsWith("GITHUB_TOKEN_UNAUTHORIZED")) {
+        return res.status(401).json({
+          error: "Token GitHub rejeitado pela API oficial (HTTP 401/403). Verifique se o PAT est\xE1 ativo e possui escopo read:user.",
+          code: "GITHUB_TOKEN_UNAUTHORIZED"
+        });
+      }
+      const code = msg.includes(":") ? msg.split(":")[0].trim() : "GITHUB_TOKEN_NETWORK_ERROR";
+      return res.status(502).json({
+        error: msg,
+        code
+      });
+    }
   });
   app.post("/api/auth/bootstrap-admin", (req, res) => {
     try {
@@ -32625,6 +33940,79 @@ async function createWinHoodApp(options) {
       return res.status(status).json({ error: msg, code, platform: process.platform });
     }
   });
+  app.get("/api/auth/windows-hello/status", (_req, res) => {
+    res.json({
+      platform: process.platform,
+      nativeSupported: process.platform === "win32",
+      webauthnSupported: true,
+      hasRegisteredCredentials: authService.hasAnyWebAuthnCredentials()
+    });
+  });
+  app.post("/api/auth/webauthn/link-credential/options", (req, res) => {
+    const actor = getRequestActor(req, res);
+    if (actor.id === "usr-anonymous") {
+      return res.status(401).json({ error: "AUTH_REQUIRED" });
+    }
+    try {
+      const options2 = authService.createWebAuthnLinkOptions({
+        userId: actor.id,
+        rpId: resolveWebAuthnRpId(req),
+        ipAddress: req.ip || "127.0.0.1"
+      });
+      return res.json({ ...options2, publicKey: options2 });
+    } catch (err) {
+      return res.status(400).json({ error: err?.message || "Falha ao gerar desafio para vincular Passkey." });
+    }
+  });
+  app.post("/api/auth/webauthn/link-credential/verify", (req, res) => {
+    const actor = getRequestActor(req, res);
+    if (actor.id === "usr-anonymous") {
+      return res.status(401).json({ error: "AUTH_REQUIRED" });
+    }
+    try {
+      const {
+        challengeId,
+        credentialId,
+        clientDataJSON,
+        attestationObject,
+        authenticatorData,
+        publicKeySpkiBase64,
+        coseAlgorithm,
+        transports,
+        label,
+        credential
+      } = req.body || {};
+      const result = authService.verifyWebAuthnLinkCredential({
+        userId: actor.id,
+        challengeId,
+        credentialId: credentialId || credential?.id || credential?.rawId || "",
+        clientDataJSON: clientDataJSON || credential?.response?.clientDataJSON || "",
+        attestationObject: attestationObject || credential?.response?.attestationObject,
+        authenticatorData: authenticatorData || credential?.response?.authenticatorData,
+        publicKeySpkiBase64: publicKeySpkiBase64 || credential?.response?.publicKey,
+        coseAlgorithm: coseAlgorithm ?? credential?.response?.publicKeyAlgorithm,
+        transports: transports || credential?.response?.transports,
+        label,
+        ipAddress: req.ip || "127.0.0.1"
+      });
+      appendAuditLog(
+        db,
+        "USER_WEBAUTHN_CREDENTIAL_LINKED",
+        "AUTH",
+        result.user.id,
+        `Nova Passkey / Windows Hello vinculada \xE0 conta ${result.user.email}.`,
+        result.user
+      );
+      saveDatabase(db);
+      return res.json({
+        ok: true,
+        user: result.user,
+        credentialId: result.credentialId
+      });
+    } catch (err) {
+      return res.status(400).json({ error: err?.message || "Falha ao vincular Passkey \xE0 conta." });
+    }
+  });
   app.post("/api/auth/logout", (req, res) => {
     const actor = req.authUser;
     const sessionToken = extractSessionTokenFromRequest(req).token;
@@ -32691,7 +34079,7 @@ async function createWinHoodApp(options) {
     const providedCsrf = String(req.headers["x-csrf-token"] || req.headers["x-winhood-csrf"] || "").trim();
     const expBuf = Buffer.from(expectedCsrf, "utf8");
     const provBuf = Buffer.from(providedCsrf, "utf8");
-    if (!expectedCsrf || expBuf.length !== provBuf.length || !crypto30.timingSafeEqual(expBuf, provBuf)) {
+    if (!expectedCsrf || expBuf.length !== provBuf.length || !crypto31.timingSafeEqual(expBuf, provBuf)) {
       return res.status(403).json({
         error: "CSRF_INVALID",
         code: "CSRF_INVALID",
@@ -33238,7 +34626,8 @@ async function createWinHoodApp(options) {
     });
     res.json(probeRes);
   });
-  app.post("/api/sonar/generate-command", (req, res) => {
+  app.post("/api/sonar/generate-command", analysisRateLimiter, (req, res) => {
+    if (!requireWritePermission(res, req, "sonar:config")) return;
     const {
       projectKey = "MEU_PROJETO",
       hostUrl = "http://localhost:9000",
@@ -33322,7 +34711,7 @@ async function createWinHoodApp(options) {
     const resolvedCategory = (category || resolvedTags[0] || "Avalia\xE7\xE3o Multi-Categoria Transversal").trim();
     const resolvedEnabledCategories = Array.isArray(enabledCategories) && enabledCategories.length > 0 ? enabledCategories : [...ALL_BENCHMARK_CATEGORIES];
     const project = {
-      id: crypto30.randomUUID(),
+      id: crypto31.randomUUID(),
       name: name.trim(),
       category: resolvedCategory,
       domainTags: resolvedTags,
@@ -33496,7 +34885,7 @@ async function createWinHoodApp(options) {
       return res.status(status).json({ error: msg });
     }
   });
-  app.post("/api/projects/extract-zip", (req, res) => {
+  app.post("/api/projects/extract-zip", heavyUploadJsonParser, (req, res) => {
     if (!requireWritePermission(res, req, "projects:write")) return;
     const { zipBase64 } = req.body || {};
     if (!zipBase64 || typeof zipBase64 !== "string") {
@@ -33520,7 +34909,7 @@ async function createWinHoodApp(options) {
       });
     }
   });
-  app.post("/api/projects/upload", ingestionRateLimiter, (req, res) => {
+  app.post("/api/projects/upload", ingestionRateLimiter, heavyUploadJsonParser, (req, res) => {
     if (!requireWritePermission(res, req, "projects:write")) return;
     const {
       name,
@@ -33575,7 +34964,7 @@ async function createWinHoodApp(options) {
       });
     }
     const nowIso = (/* @__PURE__ */ new Date()).toISOString();
-    const projectId = crypto30.randomUUID();
+    const projectId = crypto31.randomUUID();
     const resolvedTags = Array.isArray(domainTags) && domainTags.length > 0 ? domainTags.map((t) => String(t).trim()).filter(Boolean) : category ? [category.trim(), "multi-category", "mqr-strict"] : ["multi-category", "devsecops", "mqr-strict"];
     const resolvedCategory = (category || resolvedTags[0] || "Avalia\xE7\xE3o Multi-Categoria Transversal").trim();
     const resolvedEnabledCategories = Array.isArray(enabledCategories) && enabledCategories.length > 0 ? enabledCategories : [...ALL_BENCHMARK_CATEGORIES];
@@ -33625,7 +35014,7 @@ async function createWinHoodApp(options) {
     const isolatedPath = writeIsolatedArtifactsToDisk(slug, filesMap, isolatedArtifactsDir);
     const inv = buildTechnicalInventory(filesMap, isolatedPath);
     const createdSoftware = {
-      id: `sw-${crypto30.randomUUID().slice(0, 8)}`,
+      id: `sw-${crypto31.randomUUID().slice(0, 8)}`,
       projectId: project.id,
       name: swName,
       vendor: swVendor,
@@ -34087,7 +35476,7 @@ async function createWinHoodApp(options) {
     }
     let targetProject = existingProject;
     if (!targetProject) {
-      const projId = crypto30.randomUUID();
+      const projId = crypto31.randomUUID();
       targetProject = {
         id: projId,
         name: (newProjectName || `Benchmark ${repoName}`).trim(),
@@ -34127,7 +35516,7 @@ async function createWinHoodApp(options) {
     const isolatedPath = writeIsolatedArtifactsToDisk(slug, filesMap, isolatedArtifactsDir);
     const inv = buildTechnicalInventory(filesMap, isolatedPath);
     const newSoftware = {
-      id: `sw-${crypto30.randomUUID().slice(0, 8)}`,
+      id: `sw-${crypto31.randomUUID().slice(0, 8)}`,
       projectId: targetProject.id,
       name: repoName,
       vendor: owner || "Comunidade GitHub",
@@ -34309,7 +35698,7 @@ async function createWinHoodApp(options) {
       isolatedPath = writeIsolatedArtifactsToDisk(slug, filesMap, isolatedArtifactsDir);
       inv = buildTechnicalInventory(filesMap, isolatedPath);
     }
-    const swId = `sw-${crypto30.randomUUID().slice(0, 8)}`;
+    const swId = `sw-${crypto31.randomUUID().slice(0, 8)}`;
     const commit = hasSource ? body.commitHash && body.commitHash.trim().length > 0 ? body.commitHash.trim() : `PKG_${inv.packageSha256.slice(0, 16)}` : body.commitHash && body.commitHash.trim().length > 0 ? body.commitHash.trim() : "NOT_DECLARED";
     const resolvedDomainTags = Array.isArray(body.domainTags) && body.domainTags.length > 0 ? body.domainTags.map((t) => String(t).trim()).filter(Boolean) : body.category ? [body.category.trim(), ...Object.keys(inv.languageBreakdown).map((l) => l.toLowerCase())] : ["multi-category", ...Object.keys(inv.languageBreakdown).map((l) => l.toLowerCase())];
     const newSw = {
@@ -34519,7 +35908,8 @@ async function createWinHoodApp(options) {
       defaultProfiles: db.profiles
     });
   });
-  app.post("/api/benchmarks/pre-analysis", (req, res) => {
+  app.post("/api/benchmarks/pre-analysis", analysisRateLimiter, (req, res) => {
+    if (!requireWritePermission(res, req, "runs:execute")) return;
     const {
       softwareIds,
       profileId,
@@ -34596,7 +35986,7 @@ async function createWinHoodApp(options) {
     if (!targetProject) {
       const nowIso = (/* @__PURE__ */ new Date()).toISOString();
       targetProject = {
-        id: `proj-${crypto30.randomUUID().slice(0, 8)}`,
+        id: `proj-${crypto31.randomUUID().slice(0, 8)}`,
         name: "Projeto Principal (Zero-Configura\xE7\xE3o)",
         category: "Aplica\xE7\xF5es Web & Microsservi\xE7os",
         objective: "Auditoria Autom\xE1tica de Qualidade e Seguran\xE7a",
@@ -34636,7 +36026,7 @@ async function createWinHoodApp(options) {
         message: `O software "${missingSources[0].name}" n\xE3o possui c\xF3digo-fonte importado. Ingest\xE3o de fontes reais obrigat\xF3ria antes da an\xE1lise.`
       });
     }
-    const runId = `run-${crypto30.randomUUID().slice(0, 8)}`;
+    const runId = `run-${crypto31.randomUUID().slice(0, 8)}`;
     const activeEnabledCategories = targetProject.enabledCategories && targetProject.enabledCategories.length > 0 ? targetProject.enabledCategories : [...ALL_BENCHMARK_CATEGORIES];
     const activeWeights = normalizeEnabledCategoryWeights(DEFAULT_CATEGORY_WEIGHTS, activeEnabledCategories);
     const activeEnv = DEFAULT_BENCHMARK_PROFILES[0].equivalenceEnvironment;
@@ -34750,7 +36140,7 @@ async function createWinHoodApp(options) {
     if (!project) {
       const nowIso = (/* @__PURE__ */ new Date()).toISOString();
       project = {
-        id: `proj-${crypto30.randomUUID().slice(0, 8)}`,
+        id: `proj-${crypto31.randomUUID().slice(0, 8)}`,
         name: `Avalia\xE7\xE3o Independente (${selectedSoftwares.map((s) => s.name).join(" vs ")})`,
         category: "Avalia\xE7\xE3o Multi-Categoria Transversal",
         domainTags: ["multi-category", "standalone"],
@@ -34812,7 +36202,7 @@ async function createWinHoodApp(options) {
     }
     const activeQualityGateId = qualityGateId || project.defaultQualityGateId || "qg-sonar-way-mqr";
     const resolvedProfileName = profileName || matchedSpecializedProfile?.name || (resolvedAssessmentMode === "INDIVIDUAL" ? `Auditoria Individual - ${selectedSoftwares[0]?.name}` : "Benchmark WinHood");
-    const runId = `run-${crypto30.randomUUID().slice(0, 8)}`;
+    const runId = `run-${crypto31.randomUUID().slice(0, 8)}`;
     const runningRun = createInitialRunningBenchmark({
       runId,
       projectId: project.id,
@@ -35056,7 +36446,8 @@ async function createWinHoodApp(options) {
       message: "Dados de demonstra\xE7\xE3o carregados com sucesso no ambiente DEMO."
     });
   });
-  app.post("/api/market/discover", async (req, res) => {
+  app.post("/api/market/discover", analysisRateLimiter, async (req, res) => {
+    if (!requireWritePermission(res, req, "runs:execute")) return;
     const {
       projectId,
       softwareId,
@@ -36162,7 +37553,7 @@ async function createWinHoodApp(options) {
         sourceFilesSha256Manifest: Object.entries(sw.sourceFilesContent || {}).sort(([a], [b]) => a.localeCompare(b)).map(([filePath, content]) => ({
           filePath,
           bytes: Buffer.byteLength(content, "utf8"),
-          sha256: crypto30.createHash("sha256").update(content, "utf8").digest("hex")
+          sha256: crypto31.createHash("sha256").update(content, "utf8").digest("hex")
         }))
       })),
       section05_algebraicScoreCardsBreakdown: run.scoreCards.map((sc) => ({
@@ -36296,6 +37687,157 @@ async function createWinHoodApp(options) {
       cacheStats
     });
   });
+  app.get("/api/admin/integrations/github-oauth", (req, res) => {
+    const actor = getRequestActor(req, res);
+    if (actor.role !== "ADMIN") {
+      return res.status(403).json({
+        error: "ADMIN_REQUIRED",
+        code: "ADMIN_REQUIRED",
+        currentRole: actor.role,
+        message: "ACESSO RESTRITO: Apenas administradores (ADMIN) podem inspecionar o status de configura\xE7\xE3o do GitHub OAuth 2.0."
+      });
+    }
+    res.setHeader("Cache-Control", "no-store");
+    return res.json(
+      inspectGitHubOAuthServerStatus({
+        env: process.env,
+        callbackUrl: resolveGitHubCallbackUrl(req),
+        overrideCredentials: resolveStoredGitHubOAuthOverride()
+      })
+    );
+  });
+  app.put("/api/admin/integrations/github-oauth", analysisRateLimiter, (req, res) => {
+    const actor = getRequestActor(req, res);
+    if (actor.role !== "ADMIN") {
+      return res.status(403).json({
+        error: "ADMIN_REQUIRED",
+        code: "ADMIN_REQUIRED",
+        currentRole: actor.role,
+        message: "ACESSO RESTRITO: Apenas administradores (ADMIN) podem atualizar credenciais do GitHub OAuth 2.0."
+      });
+    }
+    const body = req.body || {};
+    const rawClientId = typeof body.clientId === "string" ? body.clientId.trim() : "";
+    const rawClientSecret = typeof body.clientSecret === "string" ? body.clientSecret.trim() : "";
+    if (!rawClientId && !rawClientSecret) {
+      return res.status(400).json({
+        error: "OAUTH_CREDENTIALS_REQUIRED",
+        code: "OAUTH_CREDENTIALS_REQUIRED",
+        message: "Informe WINHOOD_GITHUB_OAUTH_CLIENT_ID e/ou WINHOOD_GITHUB_OAUTH_CLIENT_SECRET para salvar."
+      });
+    }
+    let nextEncryptedClientId = db.githubOAuthConfig?.encryptedClientId ?? null;
+    let nextEncryptedClientSecret = db.githubOAuthConfig?.encryptedClientSecret ?? null;
+    if (rawClientId) {
+      const check = validateOAuthCredentialInput(rawClientId, "WINHOOD_GITHUB_OAUTH_CLIENT_ID");
+      if ("error" in check) {
+        return res.status(400).json({
+          error: "INVALID_CLIENT_ID",
+          code: "INVALID_CLIENT_ID",
+          message: check.error
+        });
+      }
+      nextEncryptedClientId = MqrBridgeConnection.encryptToken(check.value);
+    }
+    if (rawClientSecret) {
+      const check = validateOAuthCredentialInput(
+        rawClientSecret,
+        "WINHOOD_GITHUB_OAUTH_CLIENT_SECRET"
+      );
+      if ("error" in check) {
+        return res.status(400).json({
+          error: "INVALID_CLIENT_SECRET",
+          code: "INVALID_CLIENT_SECRET",
+          message: check.error
+        });
+      }
+      nextEncryptedClientSecret = MqrBridgeConnection.encryptToken(check.value);
+    }
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    db.githubOAuthConfig = {
+      encryptedClientId: nextEncryptedClientId,
+      encryptedClientSecret: nextEncryptedClientSecret,
+      updatedAt: now,
+      updatedByUserId: actor.id
+    };
+    appendAuditLog(
+      db,
+      "GITHUB_OAUTH_CONFIG_UPDATED",
+      "AUTH",
+      "github-oauth",
+      `Credenciais GitHub OAuth 2.0 atualizadas e cifradas em AES-256-GCM (${rawClientId ? "Client ID atualizado" : "Client ID mantido"}; ${rawClientSecret ? "Client Secret atualizado" : "Client Secret mantido"}).`,
+      actor
+    );
+    saveDatabase(db, true);
+    res.setHeader("Cache-Control", "no-store");
+    return res.json(
+      inspectGitHubOAuthServerStatus({
+        env: process.env,
+        callbackUrl: resolveGitHubCallbackUrl(req),
+        overrideCredentials: resolveStoredGitHubOAuthOverride()
+      })
+    );
+  });
+  app.delete("/api/admin/integrations/github-oauth", analysisRateLimiter, (req, res) => {
+    const actor = getRequestActor(req, res);
+    if (actor.role !== "ADMIN") {
+      return res.status(403).json({
+        error: "ADMIN_REQUIRED",
+        code: "ADMIN_REQUIRED",
+        currentRole: actor.role,
+        message: "ACESSO RESTRITO: Apenas administradores (ADMIN) podem remover credenciais salvas do GitHub OAuth 2.0."
+      });
+    }
+    delete db.githubOAuthConfig;
+    appendAuditLog(
+      db,
+      "GITHUB_OAUTH_CONFIG_CLEARED",
+      "AUTH",
+      "github-oauth",
+      "Credenciais salvas de GitHub OAuth 2.0 removidas do cofre local (fallback para vari\xE1veis de ambiente, se presentes).",
+      actor
+    );
+    saveDatabase(db, true);
+    res.setHeader("Cache-Control", "no-store");
+    return res.json(
+      inspectGitHubOAuthServerStatus({
+        env: process.env,
+        callbackUrl: resolveGitHubCallbackUrl(req),
+        overrideCredentials: resolveStoredGitHubOAuthOverride()
+      })
+    );
+  });
+  app.post("/api/admin/integrations/github-oauth/verify", analysisRateLimiter, async (req, res) => {
+    const actor = getRequestActor(req, res);
+    if (actor.role !== "ADMIN") {
+      return res.status(403).json({
+        error: "ADMIN_REQUIRED",
+        code: "ADMIN_REQUIRED",
+        currentRole: actor.role,
+        message: "ACESSO RESTRITO: Apenas administradores (ADMIN) podem executar teste de conex\xE3o do GitHub OAuth 2.0."
+      });
+    }
+    const body = req.body || {};
+    const effective = resolveEffectiveGitHubOAuthCredentials();
+    const candidateClientId = typeof body.clientId === "string" && body.clientId.trim() || effective.clientId;
+    const candidateClientSecret = typeof body.clientSecret === "string" && body.clientSecret.trim() || effective.clientSecret;
+    const verification = await verifyGitHubOAuthConnection({
+      clientId: candidateClientId,
+      clientSecret: candidateClientSecret,
+      redirectUri: resolveGitHubCallbackUrl(req)
+    });
+    appendAuditLog(
+      db,
+      "GITHUB_OAUTH_CONNECTION_VERIFIED",
+      "AUTH",
+      "github-oauth",
+      `Teste de conex\xE3o GitHub OAuth 2.0 executado: status=${verification.status} (http=${verification.httpStatus ?? "N/A"}, lat\xEAncia=${verification.latencyMs}ms).`,
+      actor
+    );
+    saveDatabase(db);
+    res.setHeader("Cache-Control", "no-store");
+    return res.json(verification);
+  });
   app.get("/api/sonar/saved-projects", (_req, res) => {
     if (!Array.isArray(db.savedSonarProjects)) {
       db.savedSonarProjects = [];
@@ -36360,7 +37902,7 @@ async function createWinHoodApp(options) {
     );
     if (!existing) {
       existing = {
-        id: id || `sonar-proj-${crypto30.randomUUID().slice(0, 8)}`,
+        id: id || `sonar-proj-${crypto31.randomUUID().slice(0, 8)}`,
         name: (name || cleanProjectKey).trim(),
         platform: resolvedPlatform,
         serverUrl: safeOrigin,
@@ -37173,7 +38715,7 @@ async function createWinHoodApp(options) {
       const existingProfile = db.savedSonarProjects.find((p) => p.projectKey === effectiveKey);
       if (!existingProfile) {
         const newProfile = {
-          id: `sonar-proj-${crypto30.randomUUID().slice(0, 8)}`,
+          id: `sonar-proj-${crypto31.randomUUID().slice(0, 8)}`,
           name: effectiveKey,
           platform: "SONARCLOUD",
           serverUrl: safeOrigin,
@@ -38296,7 +39838,8 @@ async function createWinHoodApp(options) {
     saveDatabase(db);
     res.json(outcome);
   });
-  app.post("/api/intelligence/match", (req, res) => {
+  app.post("/api/intelligence/match", analysisRateLimiter, (req, res) => {
+    if (!requireWritePermission(res, req, "runs:execute")) return;
     const { softwareIds, mode = "AB_SOFTWARE" } = req.body || {};
     const selectedSoftwares = Array.isArray(softwareIds) && softwareIds.length > 0 ? db.softwares.filter((s) => softwareIds.includes(s.id)) : db.softwares.slice(0, 2);
     const latestRun = db.runs[0];
@@ -38364,7 +39907,7 @@ async function createWinHoodApp(options) {
       });
     }
     const target = {
-      id: `tgt-${crypto30.randomUUID().slice(0, 8)}`,
+      id: `tgt-${crypto31.randomUUID().slice(0, 8)}`,
       label: label.trim(),
       origin: parsedOrigin.origin,
       purpose: (purpose || "Medi\xE7\xE3o controlada de lat\xEAncia HTTP").trim(),
@@ -38410,7 +39953,7 @@ async function createWinHoodApp(options) {
     let attachedToRunId = null;
     if (targetRun) {
       const execRecord = {
-        id: `uexec-test-${crypto30.randomUUID().slice(0, 8)}`,
+        id: `uexec-test-${crypto31.randomUUID().slice(0, 8)}`,
         runId: targetRun.id,
         softwareId: sw.id,
         kind: "TEST_EXECUTION",
@@ -38469,7 +40012,7 @@ async function createWinHoodApp(options) {
           sc.metricsSummary.testCoveragePercent = parsed.lineCoveragePercent;
           targetRun.executionRecords = [
             {
-              id: `uexec-cov-${crypto30.randomUUID().slice(0, 8)}`,
+              id: `uexec-cov-${crypto31.randomUUID().slice(0, 8)}`,
               runId: targetRun.id,
               softwareId,
               kind: "COVERAGE_IMPORT",
@@ -38572,7 +40115,7 @@ async function createWinHoodApp(options) {
           sc.metricsSummary.throughputRps = result.throughputRps ?? 0;
           targetRun.executionRecords = [
             {
-              id: `uexec-perf-${crypto30.randomUUID().slice(0, 8)}`,
+              id: `uexec-perf-${crypto31.randomUUID().slice(0, 8)}`,
               runId: targetRun.id,
               softwareId,
               kind: "HTTP_PERF_PROBE",
@@ -38684,6 +40227,28 @@ async function createWinHoodApp(options) {
       if (gitarAdapter.getConnection().reencryptStoredToken(ctx)) {
         reencryptedCount += 1;
       }
+      if (db.githubOAuthConfig) {
+        if (db.githubOAuthConfig.encryptedClientId) {
+          const reencId = MqrBridgeConnection.reencryptToken(
+            db.githubOAuthConfig.encryptedClientId,
+            ctx
+          );
+          if (reencId) {
+            db.githubOAuthConfig.encryptedClientId = reencId;
+            reencryptedCount += 1;
+          }
+        }
+        if (db.githubOAuthConfig.encryptedClientSecret) {
+          const reencSecret = MqrBridgeConnection.reencryptToken(
+            db.githubOAuthConfig.encryptedClientSecret,
+            ctx
+          );
+          if (reencSecret) {
+            db.githubOAuthConfig.encryptedClientSecret = reencSecret;
+            reencryptedCount += 1;
+          }
+        }
+      }
       reencryptedCount += authService.reencryptTotpSecrets(ctx);
     });
     appendAuditLog(
@@ -38739,19 +40304,20 @@ async function createWinHoodApp(options) {
       scaCorrelations: correlations || []
     });
   });
-  app.post("/api/security/keys/verify", (req, res) => {
+  app.post("/api/security/keys/verify", analysisRateLimiter, (req, res) => {
+    if (!requireWritePermission(res, req, "security:ops")) return;
     const actor = getRequestActor(req, res);
     const probePayload = `winhood-keystore-self-test:${Date.now()}:${actor.email}`;
     const testPayloadSha256 = computeSha256(probePayload);
     const hmacKey = KeyManagementService.getActiveEvidenceHmacKey();
-    const hmacDigest = crypto30.createHmac("sha256", hmacKey.secret).update(probePayload, "utf8").digest("hex");
+    const hmacDigest = crypto31.createHmac("sha256", hmacKey.secret).update(probePayload, "utf8").digest("hex");
     const resolvedHmacSecret = KeyManagementService.getEvidenceSecretByKeyId(hmacKey.keyId);
-    const hmacExpected = resolvedHmacSecret ? crypto30.createHmac("sha256", resolvedHmacSecret).update(probePayload, "utf8").digest("hex") : "";
+    const hmacExpected = resolvedHmacSecret ? crypto31.createHmac("sha256", resolvedHmacSecret).update(probePayload, "utf8").digest("hex") : "";
     const hmacValid = Boolean(hmacDigest && hmacDigest === hmacExpected);
     const edKey = KeyManagementService.getActiveEvidenceEd25519Key();
-    const edSignature = crypto30.sign(null, Buffer.from(probePayload, "utf8"), edKey.privateKeyPem);
+    const edSignature = crypto31.sign(null, Buffer.from(probePayload, "utf8"), edKey.privateKeyPem);
     const resolvedPub = KeyManagementService.getEd25519PublicKeyByKeyId(edKey.keyId) || edKey.publicKeyPem;
-    const ed25519Valid = crypto30.verify(null, Buffer.from(probePayload, "utf8"), resolvedPub, edSignature);
+    const ed25519Valid = crypto31.verify(null, Buffer.from(probePayload, "utf8"), resolvedPub, edSignature);
     const encryptedProbe = MqrBridgeConnection.encryptToken(probePayload);
     const decryptedProbe = MqrBridgeConnection.decryptToken(encryptedProbe);
     const aesGcmValid = decryptedProbe === probePayload;
@@ -38830,7 +40396,8 @@ async function createWinHoodApp(options) {
       gateHash: QualityGateEngine.computeGateHash(created)
     });
   });
-  app.post("/api/quality-gates/evaluate", (req, res) => {
+  app.post("/api/quality-gates/evaluate", analysisRateLimiter, (req, res) => {
+    if (!requireWritePermission(res, req, "runs:execute")) return;
     const body = req.body || {};
     const run = body.runId ? db.runs.find((r) => r.id === body.runId) : db.runs[0];
     if (body.findings && Array.isArray(body.findings)) {
@@ -38909,7 +40476,8 @@ async function createWinHoodApp(options) {
     });
     return res.json({ summary });
   });
-  app.post("/api/integrations/pr-decoration", (req, res) => {
+  app.post("/api/integrations/pr-decoration", analysisRateLimiter, (req, res) => {
+    if (!requireWritePermission(res, req, "runs:execute")) return;
     const body = req.body || {};
     const run = (body.runId ? db.runs.find((r) => r.id === body.runId) : db.runs[0]) || null;
     if (!run) {
@@ -38926,7 +40494,8 @@ async function createWinHoodApp(options) {
     });
     return res.json({ decoration });
   });
-  app.post("/api/analyze/sarif", (req, res) => {
+  app.post("/api/analyze/sarif", analysisRateLimiter, heavyUploadJsonParser, (req, res) => {
+    if (!requireWritePermission(res, req, "runs:execute")) return;
     const body = req.body || {};
     if (body.sarifInput) {
       const imported = SarifCodec.importSarif210(body.sarifInput, {
@@ -39204,6 +40773,16 @@ function isAuthorizedLoopbackSender(senderUrl, expectedOrigin) {
     return false;
   }
 }
+function isAllowedExternalAuthUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== "https:") return false;
+    const host = parsed.hostname.toLowerCase();
+    return host === "github.com" || host === "www.github.com";
+  } catch {
+    return false;
+  }
+}
 function loadElectronRuntime() {
   try {
     const req = createRequire(import.meta.url);
@@ -39345,6 +40924,20 @@ async function bootstrapWindowsDesktop(options) {
       }
       return { opened: true, logsDir: layout.logsDir };
     });
+    ipcMain.handle("winhood:open-external-url", async (event, payload) => {
+      const senderUrl = event?.senderFrame?.url;
+      if (!isAuthorizedLoopbackSender(senderUrl, startedBackend.url)) {
+        throw new Error("UNAUTHORIZED_IPC_SENDER");
+      }
+      const targetUrl = typeof payload?.url === "string" ? payload.url.trim() : "";
+      if (!isAllowedExternalAuthUrl(targetUrl)) {
+        throw new Error("EXTERNAL_URL_FORBIDDEN: Apenas URLs HTTPS oficiais do GitHub s\xE3o permitidas.");
+      }
+      if (shell?.openExternal) {
+        await shell.openExternal(targetUrl);
+      }
+      return { opened: true };
+    });
   }
   const mainWindow = new BrowserWindow({
     width: 1440,
@@ -39359,7 +40952,12 @@ async function bootstrapWindowsDesktop(options) {
       preload: resolvedPreloadPath
     }
   });
-  mainWindow.webContents.setWindowOpenHandler?.(() => ({ action: "deny" }));
+  mainWindow.webContents.setWindowOpenHandler?.(({ url }) => {
+    if (isAllowedExternalAuthUrl(url) && shell?.openExternal) {
+      void shell.openExternal(url);
+    }
+    return { action: "deny" };
+  });
   mainWindow.webContents.on?.("will-navigate", (event, navigationUrl) => {
     if (!isAuthorizedLoopbackSender(navigationUrl, startedBackend.url)) {
       event.preventDefault();
@@ -39402,6 +41000,7 @@ if (isDirectEntry || process.env.WINHOOD_DESKTOP_RUN === "true") {
 export {
   ELECTRON_SECURITY_WEB_PREFERENCES,
   bootstrapWindowsDesktop,
+  isAllowedExternalAuthUrl,
   isAuthorizedLoopbackSender,
   stripTrailingSlashes4 as stripTrailingSlashes,
   waitForBackendHealth

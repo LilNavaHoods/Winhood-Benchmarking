@@ -137,6 +137,17 @@ export function isAuthorizedLoopbackSender(
   }
 }
 
+export function isAllowedExternalAuthUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== 'https:') return false;
+    const host = parsed.hostname.toLowerCase();
+    return host === 'github.com' || host === 'www.github.com';
+  } catch {
+    return false;
+  }
+}
+
 function loadElectronRuntime(): any | null {
   try {
     const req = createRequire(import.meta.url);
@@ -310,6 +321,21 @@ export async function bootstrapWindowsDesktop(options?: {
       }
       return { opened: true, logsDir: layout.logsDir };
     });
+
+    ipcMain.handle('winhood:open-external-url', async (event: any, payload?: { url?: string }) => {
+      const senderUrl = event?.senderFrame?.url;
+      if (!isAuthorizedLoopbackSender(senderUrl, startedBackend.url)) {
+        throw new Error('UNAUTHORIZED_IPC_SENDER');
+      }
+      const targetUrl = typeof payload?.url === 'string' ? payload.url.trim() : '';
+      if (!isAllowedExternalAuthUrl(targetUrl)) {
+        throw new Error('EXTERNAL_URL_FORBIDDEN: Apenas URLs HTTPS oficiais do GitHub são permitidas.');
+      }
+      if (shell?.openExternal) {
+        await shell.openExternal(targetUrl);
+      }
+      return { opened: true };
+    });
   }
 
   // 6. Create hardened BrowserWindow
@@ -328,7 +354,12 @@ export async function bootstrapWindowsDesktop(options?: {
   });
 
   // 7. Navigation and popup hardening
-  mainWindow.webContents.setWindowOpenHandler?.(() => ({ action: 'deny' }));
+  mainWindow.webContents.setWindowOpenHandler?.(({ url }: { url: string }) => {
+    if (isAllowedExternalAuthUrl(url) && shell?.openExternal) {
+      void shell.openExternal(url);
+    }
+    return { action: 'deny' };
+  });
   mainWindow.webContents.on?.('will-navigate', (event: any, navigationUrl: string) => {
     if (!isAuthorizedLoopbackSender(navigationUrl, startedBackend.url)) {
       event.preventDefault();

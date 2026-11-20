@@ -1240,6 +1240,7 @@ export default function App() {
             {activeNav === 'tools_integrations' && (
               <ToolsAndIntegrationsModule
                 softwares={softwares}
+                currentUserRole={currentUser?.role}
                 onNotify={notify}
               />
             )}
