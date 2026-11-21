@@ -17,7 +17,7 @@ A equipe **WinHood Engineering & AppSec** fornece correções de segurança e at
 O WinHood implementa controles de defesa em profundidade verificados por suíte automatizada (`npm run test:security` e `npm run test:desktop`):
 
 - **Criptografia em Repouso (`whdb:enc:v2`):** AES-256-GCM autenticado com rotação de chaves via `KeyManagementService` e verificação de integridade lateral SHA-256.
-- **Autenticação Forte:** Senha/PIN com `scrypt` (`N=16384, r=8, p=1`), MFA TOTP RFC 6238 criptografado em repouso e suporte nativo a **Windows Hello (WebAuthn / FIDO2)** com validação criptográfica `ES256`/`RS256` e contador anti-replay (`signCount`).
+- **Autenticação Forte:** Senha/PIN com `scrypt` (`N=16384, r=8, p=1`), MFA TOTP RFC 6238 criptografado em repouso, **Login Social GitHub OAuth 2.0 + PKCE S256** (com `state` criptográfico vinculado a cookie `HttpOnly` em fluxo redirect, anti-replay single-use de `state` e `code`, proteção contra *session fixation*, `Client Secret` estritamente no backend e controle `WINHOOD_GITHUB_ALLOW_SIGNUP`) e suporte nativo a **Windows Hello (WebAuthn / FIDO2)** com validação criptográfica `ES256`/`RS256` e contador anti-replay (`signCount`).
 - **Isolamento Electron:** `nodeIntegration: false`, `contextIsolation: true`, `sandbox: true`, `webSecurity: true`, validação de origem loopback no IPC e bloqueio de navegação externa.
 - **Proteção de Rede e Arquivos:** `SsrfGuard` contra acesso a IPs privados/loopback/metadata, proteção CSRF (`Double-Submit`), headers HTTP restritivos (`X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`, `Referrer-Policy: no-referrer`, `Permissions-Policy`) e prevenção de Path Traversal / Zip Slip.
 

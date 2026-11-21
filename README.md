@@ -62,6 +62,9 @@ WinHood operates strictly as an **independent audit, evidence, and comparative b
 # Install dependencies
 npm install
 
+# Verify browser-safe frontend dependency graph (zero Node.js imports)
+npm run check:browser-imports
+
 # TypeScript check
 npm run lint
 
@@ -80,3 +83,21 @@ npx tsx cli/winhood-cli.ts report --format=json --path ./src/gate --out report.j
 # Start fullstack server (Express API + Vite frontend on port 3000)
 npm run dev
 ```
+
+---
+
+## 4. One-Time Admin Setup — GitHub Social Login (OAuth 2.0 + PKCE S256)
+
+End users authenticate directly via GitHub in the browser by clicking **Entrar ou cadastrar com GitHub**, without entering a PAT, Client ID, Client Secret, or GitHub password.
+
+1. Go to **GitHub Developer Settings** (`https://github.com/settings/developers` → **OAuth Apps** → **New OAuth App**).
+2. Configure the URLs for your environment:
+   - **Development (local):**
+     - Homepage URL: `http://localhost:3000`
+     - Authorization callback URL: `http://localhost:3000/api/auth/github/oauth/callback`
+   - **Production / Cloud:**
+     - Homepage URL: `https://<your-domain>`
+     - Authorization callback URL: `https://<your-domain>/api/auth/github/oauth/callback`
+3. Set `WINHOOD_GITHUB_OAUTH_CLIENT_ID` and `WINHOOD_GITHUB_OAUTH_CLIENT_SECRET` in `.env` (or configure them once via **Ferramentas & Integrações → GitHub OAuth Admin**, stored AES-256-GCM encrypted in the server vault).
+4. Optional policy: set `WINHOOD_GITHUB_ALLOW_SIGNUP=false` to restrict GitHub login to existing linked accounts.
+

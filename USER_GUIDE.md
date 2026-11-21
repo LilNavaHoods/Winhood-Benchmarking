@@ -27,12 +27,13 @@ Você tem 3 maneiras de carregar softwares para comparação:
 - **Opção 2 — Upload de Código Local**: Clique no botão **Upload** na barra superior para enviar pastas ou arquivos (`.ts`, `.tsx`, `.js`, `.py`, `.sql`, `.json`, `.md`) do seu computador.
 - **Opção 3 — Importação de Repositório Git**: Clique no botão de importação na barra superior para pesquisar e importar repositórios públicos diretamente.
 
-### Passo 2: Configurar Pesos Matemáticos e Executar o Benchmark (`Wizard de Benchmark`)
-1. Selecione o **Projeto** e marque os softwares concorrentes.
-2. Selecione o **Modo MQR (Modern Quality Regime)** ou **Perfil de Qualidade Estrita**.
-3. Ajuste os pesos das **12 Categorias de Avaliação** (*Segurança*, *Qualidade de Código*, *Funcionalidades*, *Arquitetura*, *Desempenho*, *Banco de Dados*, *Confiabilidade*, *Compatibilidade*, *Usabilidade*, *Instalação T0/T1/T2*, *Privacidade* e *Documentação*).
-4. Certifique-se de que a **soma matemática seja exatamente `100%`**.
-5. Clique em **Executar Benchmark Determinístico Real**.
+### Passo 2: Configurar Pesos Matemáticos, Equivalência e Executar o Benchmark (`Nova Avaliação — Wizard`)
+1. Escolha a modalidade: **Avaliação Individual (A)**, **Comparação A/B (B)** ou **Concorrente de Mercado (C)**.
+2. Selecione o **Projeto** (opcional) e o **Software Principal** (e concorrentes na Etapa 3 para Comparação A/B).
+3. Ajuste o **Perfil de Qualidade Estrita / Modo MQR** e os pesos das **12 Categorias de Avaliação** (*Segurança*, *Qualidade de Código*, *Funcionalidades*, *Arquitetura*, *Desempenho*, *Banco de Dados*, *Confiabilidade*, *Compatibilidade*, *Usabilidade*, *Instalação T0/T1/T2*, *Privacidade* e *Documentação*), garantindo soma exata de **`100%`** (use o botão de normalização automática quando ativar/desativar categorias).
+4. Na Etapa 5, revise a pré-análise, configure as **Condições Experimentais & Equivalência do Worker** (vCPUs, RAM, Concorrência VUs, SO Alvo e autorização formal DAST) e clique em **Iniciar Benchmark**.
+
+> **Autenticação Social GitHub:** Quando configurada pelo administrador da instalação, clique diretamente em **Entrar ou cadastrar com GitHub** para autenticar-se pelo navegador via OAuth 2.0 + PKCE (sem necessidade de inserir PAT, senha ou Client ID manualmente). Caso o administrador ainda não tenha habilitado a integração, utilize **Workspace Local (1 clique)**, **Windows Hello / Passkey** ou **Acesso avançado**.
 
 ### Passo 3: Qualidade Contínua no Modo MQR, Interoperabilidade SARIF e Remediação Supervisionada (`Ferramentas e Integrações`)
 - **Modos de Operação e Interoperabilidade Aberta**:

@@ -35,16 +35,18 @@ import { HairlineAnimatedFigure } from './HairlineAnimatedFigure';
 import {
   ALL_BENCHMARK_CATEGORIES,
   DEFAULT_CATEGORY_WEIGHTS,
+  MARKET_CATEGORIES,
+} from '../shared/benchmarkCategories';
+import {
   normalizeEnabledCategoryWeights,
   validateCategoryWeights,
   validateEquivalenceConditions,
-} from '../engine/scoringEngine';
+} from '../shared/benchmarkWeights';
 import {
   DOMAIN_SPECIALIZED_PROFILES,
   buildPreAnalysisSummary,
   evaluateSoftwareComparability,
 } from '../engine/methodologyCatalogEngine';
-import { MARKET_CATEGORIES } from '../engine/marketCompetitorDiscoveryEngine';
 
 interface BenchmarkWizardModuleProps {
   projects: Project[];
@@ -1386,6 +1388,137 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                 </div>
               )}
 
+              {/* Experimental Equivalence Conditions Editor (Seção 22) */}
+              <div className="p-4 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-[#080b10] space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-xs font-bold text-slate-900 dark:text-slate-100">
+                    <Cpu className="w-4 h-4 text-[#31d6c4]" />
+                    <span>Condições Experimentais &amp; Equivalência do Worker (Seção 22)</span>
+                  </div>
+                  <span
+                    className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded ${
+                      eqValidation.equivalent
+                        ? 'bg-emerald-500/15 text-emerald-500'
+                        : 'bg-rose-500/15 text-rose-400'
+                    }`}
+                  >
+                    {eqValidation.equivalent ? 'EQUIVALÊNCIA VALIDADA' : 'PARÂMETROS FORA DO LIMITE'}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+                  <div>
+                    <label
+                      htmlFor="wizard-eq-cpu"
+                      className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1"
+                    >
+                      Limite CPU (1–64 vCPUs)
+                    </label>
+                    <input
+                      id="wizard-eq-cpu"
+                      type="number"
+                      min={1}
+                      max={64}
+                      value={cpuCoresLimit}
+                      onChange={(e) => setCpuCoresLimit(Number(e.target.value))}
+                      className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0f141c] px-2.5 py-1.5 text-xs font-mono text-slate-900 dark:text-slate-100"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="wizard-eq-ram"
+                      className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1"
+                    >
+                      Memória RAM (128–65536 MB)
+                    </label>
+                    <input
+                      id="wizard-eq-ram"
+                      type="number"
+                      min={128}
+                      max={65536}
+                      step={128}
+                      value={memoryMbLimit}
+                      onChange={(e) => setMemoryMbLimit(Number(e.target.value))}
+                      className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0f141c] px-2.5 py-1.5 text-xs font-mono text-slate-900 dark:text-slate-100"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="wizard-eq-concurrency"
+                      className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1"
+                    >
+                      Concorrência (1–5000 VUs)
+                    </label>
+                    <input
+                      id="wizard-eq-concurrency"
+                      type="number"
+                      min={1}
+                      max={5000}
+                      value={workloadConcurrency}
+                      onChange={(e) => setWorkloadConcurrency(Number(e.target.value))}
+                      className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0f141c] px-2.5 py-1.5 text-xs font-mono text-slate-900 dark:text-slate-100"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="wizard-eq-os"
+                      className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1"
+                    >
+                      SO Alvo do Worker
+                    </label>
+                    <input
+                      id="wizard-eq-os"
+                      type="text"
+                      value={osTarget}
+                      onChange={(e) => setOsTarget(e.target.value)}
+                      className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0f141c] px-2.5 py-1.5 text-xs text-slate-900 dark:text-slate-100"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1 text-xs">
+                  <label className="flex items-center gap-2 text-slate-700 dark:text-slate-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={dastFormalAuth}
+                      onChange={(e) => setDastFormalAuth(e.target.checked)}
+                      className="rounded accent-[#31d6c4]"
+                    />
+                    <span>Autorização formal ativa para testes dinâmicos / DAST controlados</span>
+                  </label>
+                  <div>
+                    <label htmlFor="wizard-eq-owner" className="sr-only">
+                      Responsável pela autorização
+                    </label>
+                    <input
+                      id="wizard-eq-owner"
+                      type="text"
+                      value={authorizedByOwner}
+                      onChange={(e) => setAuthorizedByOwner(e.target.value)}
+                      placeholder="Responsável / Autorização formal"
+                      className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0f141c] px-2.5 py-1.5 text-xs text-slate-900 dark:text-slate-100"
+                    />
+                  </div>
+                </div>
+
+                {!eqValidation.equivalent && (
+                  <div className="p-2.5 rounded-lg border border-rose-500/30 bg-rose-500/10 text-xs text-rose-400 space-y-1">
+                    {eqValidation.reasons.map((reason, idx) => (
+                      <div key={`eq-err-${idx}`}>• {reason}</div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {assessmentMode === 'AB_COMPARE' && comparisonSoftwareIds.length === 0 && (
+                <div className="p-3 rounded-lg border border-rose-500/30 bg-rose-500/10 text-xs text-rose-400 flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>
+                    Selecione ao menos um software concorrente na Etapa 3 para executar o Benchmark A/B.
+                  </span>
+                </div>
+              )}
+
               <div className="pt-2">
                 <button
                   type="button"
@@ -1394,6 +1527,7 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                     !activePrimarySoftware ||
                     !weightValidation.valid ||
                     !eqValidation.equivalent ||
+                    (assessmentMode === 'AB_COMPARE' && comparisonSoftwareIds.length === 0) ||
                     (assessmentMode === 'MARKET_COMPETITOR' && !candidateApproved)
                   }
                   onClick={handleExecute}

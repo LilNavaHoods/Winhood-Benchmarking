@@ -307,6 +307,16 @@ export const GitHubOAuthAdminPanel: React.FC<GitHubOAuthAdminPanelProps> = ({
             <p className="text-[11px] font-mono text-slate-700 dark:text-slate-300 break-all">
               {status.callbackUrlEffective}
             </p>
+            <p className="text-[10px] font-mono text-slate-500 dark:text-slate-400 break-all">
+              Homepage URL:{' '}
+              {(() => {
+                try {
+                  return new URL(status.callbackUrlEffective).origin;
+                } catch {
+                  return typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
+                }
+              })()}
+            </p>
           </div>
         </div>
       )}
@@ -521,7 +531,7 @@ export const GitHubOAuthAdminPanel: React.FC<GitHubOAuthAdminPanelProps> = ({
 
       <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
         <p className="text-xs text-slate-600 dark:text-slate-400">
-          Escopos solicitados: <code className="font-mono">read:user user:email</code> · Sem OAuth App configurado, usuários ainda podem entrar com Personal Access Token (PAT) ou Device Flow.
+          Escopos solicitados: <code className="font-mono">read:user user:email</code> · Configuração única pelo administrador: usuários finais entram clicando diretamente em &quot;Entrar ou cadastrar com GitHub&quot;, sem PAT ou Client ID manual.
         </p>
 
         <div className="flex flex-wrap items-center gap-2">

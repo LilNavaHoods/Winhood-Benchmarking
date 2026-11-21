@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
+import type { WinHoodAccessMode } from '../shared/authTypes';
 
-export type WinHoodAccessMode = 'SOLO_LOCAL_DESKTOP' | 'LOCKED_VAULT' | 'TEAM_SERVER';
+export type { WinHoodAccessMode };
 
 export interface SoloLocalPolicyCheck {
   allowed: boolean;

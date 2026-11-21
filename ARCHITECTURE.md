@@ -24,4 +24,15 @@ O sistema separa estritamente o domínio analítico (`src/engine/`) dos adaptado
 - `GET /api/findings` & `POST /api/findings/:id/validate` — Consulta filtrada e triagem DevSecOps em tempo real nos 9 estados de validação com re-assinatura HMAC-SHA256.
 - `GET /api/evidence` & `POST /api/evidence/:runId/verify` — Cadeia append-only de evidências, manifesto HMAC-SHA256 e verificação criptográfica de integridade.
 - `GET /api/reports/:runId/export?format=json|csv|md|sarif|html&type=...` — Exportação oficial de relatórios de 23 seções.
+- `GET /api/auth/github/oauth/start`, `GET /api/auth/github/oauth/callback`, `GET /api/auth/github/oauth/status` — Fluxo OAuth 2.0 Authorization Code + PKCE S256 (redirecionamento direto no navegador, popup para iframe de preview e navegador externo no Electron Desktop).
+
+## 3. Separação Browser-Safe (`src/shared/`) vs. Módulos Exclusivos de Backend
+
+Para impedir que dependências nativas do Node.js (`node:child_process`, `node:fs`, `node:crypto`, `node:net`, `node:dns`, `KeyManagementService`, `QualityGateEngine`) cheguem ao bundle Vite do navegador:
+
+- **`src/shared/benchmarkCategories.ts`**: Definições canônicas de `ALL_BENCHMARK_CATEGORIES`, `DEFAULT_CATEGORY_WEIGHTS` e `MARKET_CATEGORIES`.
+- **`src/shared/benchmarkWeights.ts`**: Funções puras e determinísticas `normalizeEnabledCategoryWeights`, `validateCategoryWeights`, `validateEquivalenceConditions` e `classifyScoreScale`, consumidas tanto pelo Wizard React quanto pelo `scoringEngine.ts` no backend (fonte única de verdade).
+- **`src/shared/authTypes.ts`**: Tipos compartilhados de modo de acesso e mapeamento sanitizado de códigos de erro OAuth.
+- **Guardrail Automatizado (`scripts/check-browser-imports.mjs`)**: Executado via `npm run check:browser-imports`, obrigatoriamente antes de `npm run build`, `npm run build:desktop` e nos jobs Linux/Windows de CI. Percorre o grafo transitivo de imports, re-exports, barrels e `import()` dinâmicos a partir do frontend e falha o build caso qualquer módulo Node.js ou exclusivo de servidor seja alcançável.
+
 

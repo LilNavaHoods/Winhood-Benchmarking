@@ -3315,6 +3315,7 @@ export class AuthService {
     avatarUrl?: string | null;
     ipAddress?: string;
     userAgent?: string;
+    allowSignup?: boolean;
   }): {
     user: PublicUserView;
     sessionId: string;
@@ -3345,6 +3346,11 @@ export class AuthService {
 
     let isNewAccount = false;
     if (!user) {
+      if (params.allowSignup === false) {
+        throw new Error(
+          'AUTH_SIGNUP_DISABLED: O cadastro automático de novos usuários via GitHub está desabilitado pelo administrador.'
+        );
+      }
       isNewAccount = true;
       const isFirstUser = this.db.users.length === 0;
       user = {

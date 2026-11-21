@@ -11,6 +11,9 @@
 
 import type { MarketCompetitorCandidate } from '../types/benchmark';
 import { computeSha256 } from './scoringEngine';
+import { MARKET_CATEGORIES } from '../shared/benchmarkCategories';
+
+export { MARKET_CATEGORIES };
 
 export interface MarketDiscoveryWeights {
   purpose: number;       // 30%
@@ -29,25 +32,6 @@ export const DEFAULT_MARKET_DISCOVERY_WEIGHTS: MarketDiscoveryWeights = {
   distribution: 10,
   integrations: 10,
 };
-
-export const MARKET_CATEGORIES = [
-  'Gerenciadores de Senhas & Criptografia',
-  'VPN & Segurança de Rede',
-  'Endpoint Security & EDR',
-  'ITSM & Service Desk',
-  'Monitoramento & Observabilidade',
-  'Software Quality & Análise de Código',
-  'DevSecOps & SAST/DAST/SCA',
-  'Segurança de APIs & Web Application Firewall',
-  'Gerenciamento de Bancos de Dados',
-  'Documentação & Knowledge Base',
-  'Gerenciamento de Projetos & Tarefas',
-  'Backup & Disaster Recovery',
-  'Infraestrutura & Gestão de Cloud',
-  'Aplicações Desktop Windows',
-  'Aplicações Web Corporativas',
-  'Aplicações Mobile',
-] as const;
 
 export const IDEA_SEMANTIC_CLUSTERS: Record<string, string[]> = {
   ITSM_HELPDESK: [

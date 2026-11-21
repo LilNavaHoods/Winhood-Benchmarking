@@ -28,7 +28,7 @@ import type {
   VisualReportCategoryKey,
 } from '../types/benchmark';
 import { CATEGORY_LABELS, TwelvePillarRadarSvg } from './DashboardModule';
-import { ALL_BENCHMARK_CATEGORIES } from '../engine/scoringEngine';
+import { ALL_BENCHMARK_CATEGORIES } from '../shared/benchmarkCategories';
 import { HairlineAnimatedFigure, type HairlineFigureType } from './HairlineAnimatedFigure';
 
 const VISUAL_CATEGORIES_CONFIG: Array<{

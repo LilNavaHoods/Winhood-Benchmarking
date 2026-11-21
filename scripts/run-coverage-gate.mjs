@@ -66,6 +66,7 @@ const c8Exclude = Array.from(
 );
 
 const testFiles = [
+  'src/shared/wizardAndBrowserSafety.test.ts',
   'src/engine/analyzer.test.ts',
   'src/analyzers/analyzers.test.ts',
   'src/analyzers/pluginsAndIac.test.ts',

@@ -3596,6 +3596,358 @@ test('PUT/POST verify/DELETE /api/admin/integrations/github-oauth enforce RBAC, 
   });
 });
 
+test('GitHub Social OAuth Direct Redirect + PKCE S256 Callback: new signup, existing login, replay block, signup policy, fixation protection, and zero secret leak', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'winhood-gh-social-e2e-'));
+    const prevId = process.env.WINHOOD_GITHUB_OAUTH_CLIENT_ID;
+    const prevSec = process.env.WINHOOD_GITHUB_OAUTH_CLIENT_SECRET;
+    const prevCb = process.env.WINHOOD_GITHUB_OAUTH_CALLBACK_URL;
+    const prevAllowSignup = process.env.WINHOOD_GITHUB_ALLOW_SIGNUP;
+
+    const testClientId = 'Ov23liSocialLoginTest9988';
+    const testClientSecret = 'gh_secret_super_confidential_99887766';
+    const testAccessToken = 'gho_sensitive_github_access_token_xyz987';
+
+    let exchangeCalls = 0;
+    let shouldFailExchange = false;
+    let shouldFailProfile = false;
+    let activeMockUser = {
+      id: 424242,
+      login: 'octocat-winhood',
+      name: 'Octocat Engineer',
+      email: 'octocat@winhood.dev',
+      avatarUrl: 'https://avatars.githubusercontent.com/u/424242',
+    };
+
+    const { app, authService } = await createWinHoodApp({
+      dataDir: tmpDir,
+      enforceProductionAuth: true,
+      githubOAuthHooks: {
+        exchangeCode: async (params) => {
+          exchangeCalls += 1;
+          assert.equal(params.clientId, testClientId);
+          assert.equal(params.clientSecret, testClientSecret);
+          assert.ok(params.codeVerifier.length >= 43, 'PKCE code_verifier must be present');
+          if (shouldFailExchange) {
+            throw new Error(`GITHUB_OAUTH_EXCHANGE_ERROR: bad_verification_code (${testClientSecret})`);
+          }
+          return { accessToken: testAccessToken, tokenType: 'bearer', scope: 'read:user user:email' };
+        },
+        fetchProfile: async (token) => {
+          assert.equal(token, testAccessToken);
+          if (shouldFailProfile) {
+            throw new Error(`GITHUB_TOKEN_UNAUTHORIZED: invalid token ${testAccessToken}`);
+          }
+          return { ...activeMockUser };
+        },
+      },
+    });
+
+    const server = await new Promise<http.Server>((resolve) => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    const port = (server.address() as AddressInfo).port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    const parseSetCookies = (res: Response): string[] => {
+      const anyH = res.headers as unknown as { getSetCookie?: () => string[] };
+      if (typeof anyH.getSetCookie === 'function') return anyH.getSetCookie();
+      const single = res.headers.get('set-cookie');
+      return single ? [single] : [];
+    };
+
+    const extractCookiePair = (setCookies: string[], name: string): string => {
+      const found = setCookies.find((c) => c.startsWith(`${name}=`));
+      return found ? found.split(';')[0]! : '';
+    };
+
+    try {
+      // 1. Unconfigured browser redirect redirects cleanly to /?github_oauth_error=not_configured
+      delete process.env.WINHOOD_GITHUB_OAUTH_CLIENT_ID;
+      delete process.env.WINHOOD_GITHUB_OAUTH_CLIENT_SECRET;
+      delete process.env.WINHOOD_GITHUB_OAUTH_CALLBACK_URL;
+      delete process.env.WINHOOD_GITHUB_ALLOW_SIGNUP;
+
+      const unconfRedirect = await fetch(`${baseUrl}/api/auth/github/oauth/start?mode=redirect`, {
+        redirect: 'manual',
+        headers: { Host: `127.0.0.1:${port}` },
+      });
+      assert.equal(unconfRedirect.status, 302);
+      assert.equal(unconfRedirect.headers.get('location'), '/?github_oauth_error=not_configured');
+
+      // 2. Configure GitHub OAuth credentials on backend
+      process.env.WINHOOD_GITHUB_OAUTH_CLIENT_ID = testClientId;
+      process.env.WINHOOD_GITHUB_OAUTH_CLIENT_SECRET = testClientSecret;
+
+      // Invalid/open-redirect WINHOOD_GITHUB_OAUTH_CALLBACK_URL must be ignored in favor of safe host callback
+      process.env.WINHOOD_GITHUB_OAUTH_CALLBACK_URL = 'https://evil.example.com/steal-code';
+      const safeStartRes = await fetch(`${baseUrl}/api/auth/github/oauth/start?mode=redirect`, {
+        redirect: 'manual',
+        headers: { Host: `127.0.0.1:${port}` },
+      });
+      assert.equal(safeStartRes.status, 302);
+      const loc1 = new URL(safeStartRes.headers.get('location') || '');
+      assert.equal(loc1.origin, 'https://github.com');
+      assert.equal(loc1.pathname, '/login/oauth/authorize');
+      assert.equal(loc1.searchParams.get('client_id'), testClientId);
+      assert.equal(loc1.searchParams.get('code_challenge_method'), 'S256');
+      assert.ok((loc1.searchParams.get('code_challenge') || '').length >= 40);
+      assert.equal(
+        loc1.searchParams.get('redirect_uri'),
+        `http://127.0.0.1:${port}/api/auth/github/oauth/callback`
+      );
+      assert.equal(loc1.toString().includes(testClientSecret), false);
+      delete process.env.WINHOOD_GITHUB_OAUTH_CALLBACK_URL;
+
+      const state1 = loc1.searchParams.get('state')!;
+      const startSetCookies1 = parseSetCookies(safeStartRes);
+      const stateCookie1 = extractCookiePair(startSetCookies1, 'winhood_oauth_state');
+      assert.ok(stateCookie1.startsWith('winhood_oauth_state='), 'State cookie must be issued');
+      assert.ok(
+        startSetCookies1.some((c) => c.includes('HttpOnly') && c.includes('SameSite=Lax')),
+        'OAuth state cookie must be HttpOnly and SameSite=Lax on loopback'
+      );
+
+      // 3. Callback with mismatched state cookie is rejected without invoking GitHub token exchange
+      const mismatchCb = await fetch(
+        `${baseUrl}/api/auth/github/oauth/callback?code=fake_code_1&state=${encodeURIComponent(state1)}`,
+        {
+          redirect: 'manual',
+          headers: {
+            Host: `127.0.0.1:${port}`,
+            Cookie: 'winhood_oauth_state=forged_state_value',
+          },
+        }
+      );
+      assert.equal(mismatchCb.status, 302);
+      assert.equal(mismatchCb.headers.get('location'), '/?github_oauth_error=invalid_state');
+      assert.equal(exchangeCalls, 0);
+
+      // 4. Full valid redirect flow (also testing Accept: text/html without explicit mode) + session fixation protection
+      const preExisting = authService.issueSoloLocalDesktopSession({
+        ipAddress: '127.0.0.1',
+        userAgent: 'pre-fixation-session',
+      });
+      const startHtmlRes = await fetch(`${baseUrl}/api/auth/github/oauth/start`, {
+        redirect: 'manual',
+        headers: {
+          Host: `127.0.0.1:${port}`,
+          Accept: 'text/html,application/xhtml+xml',
+        },
+      });
+      assert.equal(startHtmlRes.status, 302);
+      const loc2 = new URL(startHtmlRes.headers.get('location') || '');
+      const state2 = loc2.searchParams.get('state')!;
+      const stateCookie2 = extractCookiePair(parseSetCookies(startHtmlRes), 'winhood_oauth_state');
+
+      // Use trailing slash /callback/ to confirm compatibility
+      const validCb = await fetch(
+        `${baseUrl}/api/auth/github/oauth/callback/?code=valid_code_once&state=${encodeURIComponent(state2)}`,
+        {
+          redirect: 'manual',
+          headers: {
+            Host: `127.0.0.1:${port}`,
+            Cookie: `${stateCookie2}; winhood_session=${encodeURIComponent(preExisting.sessionId)}`,
+          },
+        }
+      );
+      assert.equal(validCb.status, 302);
+      assert.equal(validCb.headers.get('location'), '/');
+      assert.equal(exchangeCalls, 1);
+
+      // Old session must have been revoked (session fixation prevention)
+      const oldSessionCheck = await fetch(`${baseUrl}/api/auth/me`, {
+        headers: {
+          Host: `127.0.0.1:${port}`,
+          Cookie: `winhood_session=${encodeURIComponent(preExisting.sessionId)}`,
+        },
+      });
+      const oldSessionJson = (await oldSessionCheck.json()) as { authenticated: boolean };
+      assert.equal(oldSessionJson.authenticated, false, 'Pre-existing session must be revoked on OAuth login');
+
+      // New session cookie must be HttpOnly, authenticate /api/auth/me, and never expose GitHub secrets/tokens
+      const cbSetCookies = parseSetCookies(validCb);
+      const newSessionPair = extractCookiePair(cbSetCookies, 'winhood_session');
+      const newCsrfPair = extractCookiePair(cbSetCookies, 'winhood_csrf');
+      assert.ok(newSessionPair.startsWith('winhood_session='));
+      assert.ok(cbSetCookies.some((c) => c.startsWith('winhood_session=') && c.includes('HttpOnly')));
+      assert.ok(cbSetCookies.some((c) => c.startsWith('winhood_oauth_state=') && c.includes('Max-Age=0')));
+
+      const meRes = await fetch(`${baseUrl}/api/auth/me`, {
+        headers: { Host: `127.0.0.1:${port}`, Cookie: `${newSessionPair}; ${newCsrfPair}` },
+      });
+      assert.equal(meRes.status, 200);
+      const meText = await meRes.text();
+      assert.equal(meText.includes(testClientSecret), false);
+      assert.equal(meText.includes(testAccessToken), false);
+      const meJson = JSON.parse(meText) as {
+        authenticated: boolean;
+        user: { githubLogin: string; email: string; githubLinked: boolean };
+      };
+      assert.equal(meJson.authenticated, true);
+      assert.equal(meJson.user.githubLogin, 'octocat-winhood');
+      assert.equal(meJson.user.email, 'octocat@winhood.dev');
+      assert.equal(meJson.user.githubLinked, true);
+
+      // 5. Replayed state or replayed code must be blocked without re-calling GitHub
+      const replayStateRes = await fetch(
+        `${baseUrl}/api/auth/github/oauth/callback?code=valid_code_once&state=${encodeURIComponent(state2)}`,
+        {
+          redirect: 'manual',
+          headers: { Host: `127.0.0.1:${port}`, Cookie: stateCookie2 },
+        }
+      );
+      assert.equal(replayStateRes.status, 302);
+      assert.equal(replayStateRes.headers.get('location'), '/?github_oauth_error=invalid_state');
+
+      // New transaction attempting to replay an already consumed authorization code
+      const startForCodeReplay = await fetch(`${baseUrl}/api/auth/github/oauth/start?mode=redirect`, {
+        redirect: 'manual',
+        headers: { Host: `127.0.0.1:${port}` },
+      });
+      const stateReplay = new URL(startForCodeReplay.headers.get('location')!).searchParams.get('state')!;
+      const cookieReplay = extractCookiePair(parseSetCookies(startForCodeReplay), 'winhood_oauth_state');
+      const replayCodeRes = await fetch(
+        `${baseUrl}/api/auth/github/oauth/callback?code=valid_code_once&state=${encodeURIComponent(stateReplay)}`,
+        {
+          redirect: 'manual',
+          headers: { Host: `127.0.0.1:${port}`, Cookie: cookieReplay },
+        }
+      );
+      assert.equal(replayCodeRes.status, 302);
+      assert.equal(replayCodeRes.headers.get('location'), '/?github_oauth_error=replayed_code');
+      assert.equal(exchangeCalls, 1, 'Replayed authorization code must never hit token exchange');
+
+      // 6. GitHub access_denied callback error redirects cleanly
+      const startDenied = await fetch(`${baseUrl}/api/auth/github/oauth/start?mode=redirect`, {
+        redirect: 'manual',
+        headers: { Host: `127.0.0.1:${port}` },
+      });
+      const stateDenied = new URL(startDenied.headers.get('location')!).searchParams.get('state')!;
+      const cookieDenied = extractCookiePair(parseSetCookies(startDenied), 'winhood_oauth_state');
+      const deniedCb = await fetch(
+        `${baseUrl}/api/auth/github/oauth/callback?error=access_denied&state=${encodeURIComponent(stateDenied)}`,
+        {
+          redirect: 'manual',
+          headers: { Host: `127.0.0.1:${port}`, Cookie: cookieDenied },
+        }
+      );
+      assert.equal(deniedCb.status, 302);
+      assert.equal(deniedCb.headers.get('location'), '/?github_oauth_error=access_denied');
+
+      // 7. WINHOOD_GITHUB_ALLOW_SIGNUP=false blocks brand-new GitHub users but still allows existing linked user
+      process.env.WINHOOD_GITHUB_ALLOW_SIGNUP = 'false';
+      activeMockUser = {
+        id: 999001,
+        login: 'blocked-new-user',
+        name: 'New User Blocked',
+        email: 'blocked@winhood.dev',
+        avatarUrl: 'https://avatars.githubusercontent.com/u/999001',
+      };
+      const startBlockedSignup = await fetch(`${baseUrl}/api/auth/github/oauth/start?mode=redirect`, {
+        redirect: 'manual',
+        headers: { Host: `127.0.0.1:${port}` },
+      });
+      const stateBlocked = new URL(startBlockedSignup.headers.get('location')!).searchParams.get('state')!;
+      const cookieBlocked = extractCookiePair(parseSetCookies(startBlockedSignup), 'winhood_oauth_state');
+      const blockedSignupCb = await fetch(
+        `${baseUrl}/api/auth/github/oauth/callback?code=new_user_code_1&state=${encodeURIComponent(stateBlocked)}`,
+        {
+          redirect: 'manual',
+          headers: { Host: `127.0.0.1:${port}`, Cookie: cookieBlocked },
+        }
+      );
+      assert.equal(blockedSignupCb.status, 302);
+      assert.equal(blockedSignupCb.headers.get('location'), '/?github_oauth_error=signup_disabled');
+
+      // Existing user logs in successfully even when WINHOOD_GITHUB_ALLOW_SIGNUP=false
+      activeMockUser = {
+        id: 424242,
+        login: 'octocat-winhood',
+        name: 'Octocat Engineer',
+        email: 'octocat@winhood.dev',
+        avatarUrl: 'https://avatars.githubusercontent.com/u/424242',
+      };
+      const startExisting = await fetch(`${baseUrl}/api/auth/github/oauth/start?mode=redirect`, {
+        redirect: 'manual',
+        headers: { Host: `127.0.0.1:${port}` },
+      });
+      const stateExisting = new URL(startExisting.headers.get('location')!).searchParams.get('state')!;
+      const cookieExisting = extractCookiePair(parseSetCookies(startExisting), 'winhood_oauth_state');
+      const existingCb = await fetch(
+        `${baseUrl}/api/auth/github/oauth/callback?code=existing_user_code_2&state=${encodeURIComponent(stateExisting)}`,
+        {
+          redirect: 'manual',
+          headers: { Host: `127.0.0.1:${port}`, Cookie: cookieExisting },
+        }
+      );
+      assert.equal(existingCb.status, 302);
+      assert.equal(existingCb.headers.get('location'), '/');
+
+      // 8. Token exchange failure and profile failure sanitize errors & never leak secrets
+      shouldFailExchange = true;
+      const startFailEx = await fetch(`${baseUrl}/api/auth/github/oauth/start?mode=redirect`, {
+        redirect: 'manual',
+        headers: { Host: `127.0.0.1:${port}` },
+      });
+      const stateFailEx = new URL(startFailEx.headers.get('location')!).searchParams.get('state')!;
+      const cookieFailEx = extractCookiePair(parseSetCookies(startFailEx), 'winhood_oauth_state');
+      const failExCb = await fetch(
+        `${baseUrl}/api/auth/github/oauth/callback?code=fail_ex_code&state=${encodeURIComponent(stateFailEx)}`,
+        {
+          redirect: 'manual',
+          headers: { Host: `127.0.0.1:${port}`, Cookie: cookieFailEx },
+        }
+      );
+      assert.equal(failExCb.status, 302);
+      assert.equal(failExCb.headers.get('location'), '/?github_oauth_error=exchange_failed');
+      assert.equal((await failExCb.text()).includes(testClientSecret), false);
+      shouldFailExchange = false;
+
+      shouldFailProfile = true;
+      const startFailProf = await fetch(`${baseUrl}/api/auth/github/oauth/start?mode=popup`, {
+        headers: { Host: `127.0.0.1:${port}` },
+      });
+      const { state: stateFailProf } = (await startFailProf.json()) as { state: string };
+      const failProfCb = await fetch(
+        `${baseUrl}/api/auth/github/oauth/callback?code=fail_prof_code&state=${encodeURIComponent(stateFailProf)}`,
+        { headers: { Host: `127.0.0.1:${port}` } }
+      );
+      assert.equal(failProfCb.status, 502);
+      const failProfHtml = await failProfCb.text();
+      assert.equal(failProfHtml.includes(testAccessToken), false, 'Access token must never leak in error HTML');
+      assert.equal(failProfHtml.includes(testClientSecret), false, 'Client secret must never leak in error HTML');
+      shouldFailProfile = false;
+
+      // 9. Logout revokes GitHub OAuth session cleanly
+      const csrfValue = decodeURIComponent(newCsrfPair.split('=')[1] || '');
+      const logoutRes = await fetch(`${baseUrl}/api/auth/logout`, {
+        method: 'POST',
+        headers: {
+          Host: `127.0.0.1:${port}`,
+          Cookie: `${newSessionPair}; ${newCsrfPair}`,
+          'x-csrf-token': csrfValue,
+        },
+      });
+      assert.equal(logoutRes.status, 200);
+      const postLogoutMe = await fetch(`${baseUrl}/api/auth/me`, {
+        headers: { Host: `127.0.0.1:${port}`, Cookie: `${newSessionPair}; ${newCsrfPair}` },
+      });
+      const postLogoutJson = (await postLogoutMe.json()) as { authenticated: boolean };
+      assert.equal(postLogoutJson.authenticated, false);
+    } finally {
+      if (prevId === undefined) delete process.env.WINHOOD_GITHUB_OAUTH_CLIENT_ID;
+      else process.env.WINHOOD_GITHUB_OAUTH_CLIENT_ID = prevId;
+      if (prevSec === undefined) delete process.env.WINHOOD_GITHUB_OAUTH_CLIENT_SECRET;
+      else process.env.WINHOOD_GITHUB_OAUTH_CLIENT_SECRET = prevSec;
+      if (prevCb === undefined) delete process.env.WINHOOD_GITHUB_OAUTH_CALLBACK_URL;
+      else process.env.WINHOOD_GITHUB_OAUTH_CALLBACK_URL = prevCb;
+      if (prevAllowSignup === undefined) delete process.env.WINHOOD_GITHUB_ALLOW_SIGNUP;
+      else process.env.WINHOOD_GITHUB_ALLOW_SIGNUP = prevAllowSignup;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
 
 
 

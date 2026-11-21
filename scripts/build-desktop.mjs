@@ -14,6 +14,12 @@ function computeFileSha256(filePath) {
 }
 
 async function runDesktopBuild() {
+  console.log('[WinHood Desktop Build] 0/4 Verifying browser-safe frontend dependency graph...');
+  execFileSync(process.execPath, [path.join(rootDir, 'scripts', 'check-browser-imports.mjs')], {
+    cwd: rootDir,
+    stdio: 'inherit',
+  });
+
   console.log('[WinHood Desktop Build] 1/4 Building frontend bundle via Vite...');
   const npxBin = process.platform === 'win32' ? 'npx.cmd' : 'npx';
   execFileSync(npxBin, ['vite', 'build'], {

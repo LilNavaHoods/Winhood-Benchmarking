@@ -24,7 +24,10 @@ import {
   setGlobalCsrfToken,
   setGlobalSessionToken,
 } from '../utils/csrfFetch';
-import type { WinHoodAccessMode } from '../security/ZeroFrictionAuthConfig';
+import {
+  resolveGitHubOAuthErrorMessage,
+  type WinHoodAccessMode,
+} from '../shared/authTypes';
 
 export interface AuthUserView {
   id: string;
@@ -63,6 +66,7 @@ interface AccessModeStatus {
   teamServerMode: boolean;
   githubDeviceFlowConfigured: boolean;
   githubOAuthDirectConfigured?: boolean;
+  githubSignupAllowed?: boolean;
   githubPatSupported?: boolean;
   windowsHelloNativeSupported?: boolean;
   hasRegisteredWebAuthnCredentials?: boolean;
@@ -126,10 +130,11 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
   const [infoMsg, setInfoMsg] = useState<string | null>(null);
   const [isPrivacyModalOpen, setIsPrivacyModalOpen] = useState(false);
 
-  // GitHub OAuth 2.0 PKCE, Device Flow (RFC 8628) & GitHub PAT Login
+  // GitHub Social Login (OAuth 2.0 PKCE) + Legacy Admin Compatibility (PAT / Device Flow)
   const [ghDevice, setGhDevice] = useState<GitHubDeviceSessionState | null>(null);
   const [copiedDeviceCode, setCopiedDeviceCode] = useState(false);
-  const [showGitHubConnectBox, setShowGitHubConnectBox] = useState(false);
+  const [showGitHubUnavailableNotice, setShowGitHubUnavailableNotice] = useState(false);
+  const [redirectingToGitHub, setRedirectingToGitHub] = useState(false);
   const [githubPatInput, setGithubPatInput] = useState('');
   const [githubClientIdInput, setGithubClientIdInput] = useState('');
   const [oauthPendingState, setOauthPendingState] = useState<{
@@ -139,6 +144,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
   const pollTimerRef = useRef<number | null>(null);
   const oauthPollTimerRef = useRef<number | null>(null);
   const oauthMsgListenerRef = useRef<((ev: MessageEvent) => void) | null>(null);
+  const oauthInFlightRef = useRef(false);
 
   // Windows Hello / Passkey tabbed panel (Login vs Register)
   const [showWindowsHelloPanel, setShowWindowsHelloPanel] = useState(false);
@@ -171,6 +177,24 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
   }, [mfaRequired]);
 
   useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const oauthErrCode = params.get('github_oauth_error');
+      if (oauthErrCode) {
+        const friendlyMessage = resolveGitHubOAuthErrorMessage(oauthErrCode);
+        if (friendlyMessage) {
+          setErrorMsg(friendlyMessage);
+        }
+        if (oauthErrCode === 'not_configured') {
+          setShowGitHubUnavailableNotice(true);
+        }
+        params.delete('github_oauth_error');
+        const nextSearch = params.toString();
+        const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`;
+        window.history.replaceState({}, document.title, nextUrl);
+      }
+    }
+
     let active = true;
     fetch('/api/auth/access-mode')
       .then((res) => (res.ok ? res.json() : null))
@@ -281,7 +305,6 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
         }
         if (data.authorized) {
           stopGitHubPolling();
-          setShowGitHubConnectBox(false);
           setInfoMsg('Autorização GitHub confirmada. Abrindo workspace...');
           await persistTokensAndComplete(data);
           return;
@@ -307,10 +330,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
 
     const candidateClientId = (explicitClientId ?? githubClientIdInput).trim();
     if (!accessPolicy?.githubDeviceFlowConfigured && candidateClientId.length < 8) {
-      setShowGitHubConnectBox(true);
-      setInfoMsg(
-        'Cole um Personal Access Token (PAT) do GitHub para entrar imediatamente, ou informe um Client ID de OAuth App para Device Flow.'
-      );
+      setErrorMsg('Informe um Client ID de OAuth App válido para usar o Device Flow.');
       return;
     }
 
@@ -323,10 +343,9 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
       });
       const data = await res.json();
       if (!res.ok) {
-        setShowGitHubConnectBox(true);
         setErrorMsg(
           data?.error ||
-            'Não foi possível iniciar o GitHub Device Flow. Use um Personal Access Token (PAT) ou informe um Client ID válido.'
+            'Não foi possível iniciar o GitHub Device Flow. Verifique o Client ID informado.'
         );
         return;
       }
@@ -337,12 +356,10 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
         expiresAtMs: Date.now() + Number(data.expires_in || 900) * 1000,
         intervalSec: Number(data.interval || 5),
       };
-      setShowGitHubConnectBox(false);
       setGhDevice(nextSession);
       setInfoMsg('Insira o código abaixo na página oficial do GitHub para concluir o acesso.');
       scheduleGitHubPoll(nextSession, candidateClientId || undefined);
     } catch {
-      setShowGitHubConnectBox(true);
       setErrorMsg('Não foi possível conectar ao endpoint de GitHub OAuth Device Flow.');
     } finally {
       setSubmitting(false);
@@ -375,7 +392,6 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
         return;
       }
       setGithubPatInput('');
-      setShowGitHubConnectBox(false);
       setInfoMsg('Conta GitHub validada na API oficial. Abrindo workspace...');
       await persistTokensAndComplete(data);
     } catch {
@@ -411,7 +427,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
         const data = await res.json();
         if (res.ok && data.authorized) {
           stopGitHubOAuthPolling();
-          setShowGitHubConnectBox(false);
+          setShowGitHubUnavailableNotice(false);
           setInfoMsg(
             data.isNewAccount
               ? 'Conta criada e autenticada via GitHub. Abrindo workspace...'
@@ -433,132 +449,138 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
   };
 
   const handleGitHubDirectAuth = async () => {
+    if (oauthInFlightRef.current || submitting) return;
     setErrorMsg(null);
     setInfoMsg(null);
     setShowWindowsHelloPanel(false);
     stopGitHubPolling();
     stopGitHubOAuthPolling();
 
-    if (accessPolicy?.githubOAuthDirectConfigured) {
-      const desktopBridge = (window as unknown as { winhoodDesktop?: WinHoodDesktopBridge })
-        .winhoodDesktop;
-      const isElectron = Boolean(
-        desktopBridge?.isElectronDesktop && typeof desktopBridge.openExternalUrl === 'function'
-      );
+    // Se o administrador ainda não configurou o OAuth App no servidor, nunca pedir PAT/Client ID ao usuário final.
+    if (!accessPolicy?.githubOAuthDirectConfigured) {
+      setShowGitHubUnavailableNotice(true);
+      return;
+    }
+
+    setShowGitHubUnavailableNotice(false);
+    oauthInFlightRef.current = true;
+
+    const desktopBridge = (window as unknown as { winhoodDesktop?: WinHoodDesktopBridge })
+      .winhoodDesktop;
+    const isElectron = Boolean(
+      desktopBridge?.isElectronDesktop && typeof desktopBridge.openExternalUrl === 'function'
+    );
+    const inIframe = isRunningInIframe();
+
+    // Em navegador padrão (aba top-level fora de iframe/Electron): redirecionamento direto OAuth 2.0 PKCE.
+    if (!isElectron && !inIframe) {
+      setRedirectingToGitHub(true);
       setSubmitting(true);
-      try {
-        const mode = isElectron ? 'desktop' : 'popup';
-        const res = await fetch(`/api/auth/github/oauth/start?mode=${mode}`);
-        const data = (await res.json()) as {
-          authorizeUrl?: string;
-          state?: string;
-          error?: string;
-        };
-        if (!res.ok || !data.authorizeUrl || !data.state) {
-          setShowGitHubConnectBox(true);
+      setInfoMsg('Redirecionando com segurança para autenticação no GitHub...');
+      window.location.assign('/api/auth/github/oauth/start?mode=redirect');
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const mode = isElectron ? 'desktop' : 'popup';
+      const res = await fetch(`/api/auth/github/oauth/start?mode=${mode}`);
+      const data = (await res.json()) as {
+        authorizeUrl?: string;
+        state?: string;
+        error?: string;
+        code?: string;
+      };
+      if (!res.ok || !data.authorizeUrl || !data.state) {
+        if (data?.code === 'GITHUB_OAUTH_NOT_CONFIGURED') {
+          setShowGitHubUnavailableNotice(true);
+        } else {
           setErrorMsg(
             data?.error ||
-              'Não foi possível iniciar o GitHub OAuth 2.0. Utilize Personal Access Token (PAT).'
+              'Não foi possível iniciar o login com o GitHub no momento. Tente novamente.'
           );
-          return;
         }
-
-        const oauthState = data.state;
-        const authorizeUrl = data.authorizeUrl;
-        setOauthPendingState({ state: oauthState, authorizeUrl });
-
-        if (isElectron && desktopBridge?.openExternalUrl) {
-          await desktopBridge.openExternalUrl(authorizeUrl);
-          setInfoMsg(
-            'Conclua o login no GitHub pelo navegador externo aberto. O WinHood continuará automaticamente.'
-          );
-          scheduleGitHubOAuthStatusPoll(oauthState);
-          return;
-        }
-
-        const onMessage = async (event: MessageEvent) => {
-          if (event.origin !== window.location.origin) return;
-          const payload = event.data as {
-            type?: string;
-            ok?: boolean;
-            state?: string;
-            error?: string;
-            user?: AuthUserView;
-            csrfToken?: string;
-            isNewAccount?: boolean;
-          } | null;
-          if (!payload || payload.type !== 'winhood-github-oauth-result') return;
-
-          if (!payload.ok) {
-            stopGitHubOAuthPolling();
-            setErrorMsg(payload.error || 'Autorização GitHub cancelada ou recusada.');
-            return;
-          }
-
-          try {
-            const statusRes = await fetch(
-              `/api/auth/github/oauth/status?state=${encodeURIComponent(payload.state || oauthState)}`
-            );
-            const statusData = await statusRes.json();
-            stopGitHubOAuthPolling();
-            setShowGitHubConnectBox(false);
-            if (statusRes.ok && statusData.authorized) {
-              setInfoMsg(
-                statusData.isNewAccount
-                  ? 'Conta criada e conectada com GitHub. Abrindo workspace...'
-                  : 'Conta GitHub autenticada. Abrindo workspace...'
-              );
-              await persistTokensAndComplete(statusData);
-            } else {
-              await persistTokensAndComplete({
-                user: payload.user,
-                csrfToken: payload.csrfToken,
-              });
-            }
-          } catch {
-            stopGitHubOAuthPolling();
-            await onRefreshSession();
-          }
-        };
-
-        oauthMsgListenerRef.current = onMessage;
-        window.addEventListener('message', onMessage);
-
-        const popup =
-          typeof window.open === 'function'
-            ? window.open(authorizeUrl, 'winhood_github_oauth', 'width=560,height=720')
-            : null;
-        if (!popup) {
-          setInfoMsg(
-            'Clique no botão "Continuar autorização no GitHub" abaixo caso o navegador tenha bloqueado a janela automática.'
-          );
-        } else {
-          setInfoMsg('Autorize o WinHood na janela oficial do GitHub para entrar ou criar sua conta.');
-        }
-        scheduleGitHubOAuthStatusPoll(oauthState);
-      } catch {
-        setShowGitHubConnectBox(true);
-        setErrorMsg('Erro de comunicação ao iniciar fluxo OAuth do GitHub.');
-      } finally {
-        setSubmitting(false);
+        return;
       }
-      return;
-    }
 
-    if (accessPolicy?.githubDeviceFlowConfigured) {
-      await handleStartGitHubDeviceFlow();
-      return;
-    }
+      const oauthState = data.state;
+      const authorizeUrl = data.authorizeUrl;
+      setOauthPendingState({ state: oauthState, authorizeUrl });
 
-    setShowGitHubConnectBox((prev) => {
-      const next = !prev;
-      if (next) {
+      if (isElectron && desktopBridge?.openExternalUrl) {
+        await desktopBridge.openExternalUrl(authorizeUrl);
         setInfoMsg(
-          'Entre ou cadastre-se instantaneamente com um Personal Access Token (PAT) do GitHub, ou informe um OAuth App Client ID para Device Flow.'
+          'Conclua o login no GitHub pelo navegador externo aberto. O WinHood continuará automaticamente.'
         );
+        scheduleGitHubOAuthStatusPoll(oauthState);
+        return;
       }
-      return next;
-    });
+
+      const onMessage = async (event: MessageEvent) => {
+        if (event.origin !== window.location.origin) return;
+        const payload = event.data as {
+          type?: string;
+          ok?: boolean;
+          state?: string;
+          error?: string;
+          user?: AuthUserView;
+          csrfToken?: string;
+          isNewAccount?: boolean;
+        } | null;
+        if (!payload || payload.type !== 'winhood-github-oauth-result') return;
+
+        if (!payload.ok) {
+          stopGitHubOAuthPolling();
+          setErrorMsg(payload.error || 'Autorização GitHub cancelada ou recusada.');
+          return;
+        }
+
+        try {
+          const statusRes = await fetch(
+            `/api/auth/github/oauth/status?state=${encodeURIComponent(payload.state || oauthState)}`
+          );
+          const statusData = await statusRes.json();
+          stopGitHubOAuthPolling();
+          if (statusRes.ok && statusData.authorized) {
+            setInfoMsg(
+              statusData.isNewAccount
+                ? 'Conta criada e conectada com GitHub. Abrindo workspace...'
+                : 'Conta GitHub autenticada. Abrindo workspace...'
+            );
+            await persistTokensAndComplete(statusData);
+          } else {
+            await persistTokensAndComplete({
+              user: payload.user,
+              csrfToken: payload.csrfToken,
+            });
+          }
+        } catch {
+          stopGitHubOAuthPolling();
+          await onRefreshSession();
+        }
+      };
+
+      oauthMsgListenerRef.current = onMessage;
+      window.addEventListener('message', onMessage);
+
+      const popup =
+        typeof window.open === 'function'
+          ? window.open(authorizeUrl, 'winhood_github_oauth', 'width=560,height=720')
+          : null;
+      if (!popup) {
+        setInfoMsg(
+          'Clique no botão "Continuar autorização no GitHub" abaixo caso o navegador tenha bloqueado a janela automática.'
+        );
+      } else {
+        setInfoMsg('Autorize o WinHood na janela oficial do GitHub para entrar ou criar sua conta.');
+      }
+      scheduleGitHubOAuthStatusPoll(oauthState);
+    } catch {
+      setErrorMsg('Erro de comunicação ao iniciar o login com o GitHub.');
+    } finally {
+      oauthInFlightRef.current = false;
+      setSubmitting(false);
+    }
   };
 
   const handleCopyDeviceCode = async () => {
@@ -1216,7 +1238,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                       setShowWindowsHelloPanel((prev) => {
                         const next = !prev;
                         if (next) {
-                          setShowGitHubConnectBox(false);
+                          setShowGitHubUnavailableNotice(false);
                           setGhDevice(null);
                           setOauthPendingState(null);
                           setInfoMsg(null);
@@ -1237,14 +1259,18 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                     type="button"
                     disabled={submitting}
                     onClick={handleGitHubDirectAuth}
-                    aria-label="Entrar ou cadastrar conta com GitHub"
+                    aria-label="Entrar ou cadastrar com GitHub"
                     aria-expanded={
-                      showGitHubConnectBox || Boolean(ghDevice) || Boolean(oauthPendingState)
+                      showGitHubUnavailableNotice || Boolean(oauthPendingState)
                     }
                     className={`w-full min-h-[44px] px-4 py-2.5 rounded-lg text-sm font-bold bg-[#14b8a6] hover:bg-[#0d9488] dark:bg-[#31d6c4] dark:hover:bg-[#22c4b2] text-slate-950 flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:opacity-50 ${FOCUS_RING}`}
                   >
                     <Github className="w-4 h-4 shrink-0" aria-hidden="true" />
-                    <span>Entrar ou Cadastrar com GitHub</span>
+                    <span>
+                      {redirectingToGitHub
+                        ? 'Redirecionando ao GitHub...'
+                        : 'Entrar ou cadastrar com GitHub'}
+                    </span>
                   </button>
                 )}
 
@@ -1253,14 +1279,18 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                     type="button"
                     disabled={submitting}
                     onClick={handleGitHubDirectAuth}
-                    aria-label="Entrar ou cadastrar conta com GitHub"
+                    aria-label="Entrar ou cadastrar com GitHub"
                     aria-expanded={
-                      showGitHubConnectBox || Boolean(ghDevice) || Boolean(oauthPendingState)
+                      showGitHubUnavailableNotice || Boolean(oauthPendingState)
                     }
                     className={`w-full min-h-[44px] px-4 py-2.5 rounded-lg text-sm font-semibold border border-slate-300 dark:border-slate-700 bg-slate-50 hover:bg-slate-100 dark:bg-[#111827] dark:hover:bg-[#1a2234] text-slate-950 dark:text-slate-50 flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:opacity-50 ${FOCUS_RING}`}
                   >
                     <Github className="w-4 h-4 shrink-0" aria-hidden="true" />
-                    <span>Entrar ou Cadastrar com GitHub</span>
+                    <span>
+                      {redirectingToGitHub
+                        ? 'Redirecionando ao GitHub...'
+                        : 'Entrar ou cadastrar com GitHub'}
+                    </span>
                   </button>
                 )}
 
@@ -1294,98 +1324,31 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                   </section>
                 )}
 
-                {/* Inline GitHub PAT & Optional OAuth Device Flow Client ID Panel */}
-                {showGitHubConnectBox && !ghDevice && (
+                {/* Friendly Notice when Admin has not configured GitHub OAuth (No PAT/Client ID fields for end users) */}
+                {showGitHubUnavailableNotice && (
                   <section
-                    aria-label="Conectar conta GitHub via Personal Access Token ou OAuth Client ID"
-                    className="p-3.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] space-y-3"
+                    role="status"
+                    aria-label="Login com GitHub indisponível"
+                    className="p-3.5 rounded-lg border border-amber-500/40 bg-amber-50 dark:bg-amber-950/30 space-y-2"
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs font-bold text-slate-950 dark:text-slate-50">
-                        Autenticação Real GitHub (Login ou Cadastro)
-                      </span>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-start gap-2 text-xs text-amber-950 dark:text-amber-100">
+                        <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+                        <div className="space-y-1">
+                          <div className="font-bold">Login com GitHub indisponível</div>
+                          <p className="leading-relaxed text-amber-900/90 dark:text-amber-200/90">
+                            O administrador ainda não configurou a autenticação GitHub para esta
+                            instalação. Tente novamente mais tarde ou utilize outro método de
+                            autenticação disponível.
+                          </p>
+                        </div>
+                      </div>
                       <button
                         type="button"
-                        onClick={() => {
-                          setShowGitHubConnectBox(false);
-                          setErrorMsg(null);
-                          setInfoMsg(null);
-                        }}
-                        className={`text-xs font-medium text-slate-700 dark:text-slate-300 hover:underline cursor-pointer rounded ${FOCUS_RING}`}
+                        onClick={() => setShowGitHubUnavailableNotice(false)}
+                        className={`text-xs font-medium text-amber-900 dark:text-amber-200 hover:underline cursor-pointer rounded shrink-0 ${FOCUS_RING}`}
                       >
                         Fechar
-                      </button>
-                    </div>
-
-                    <form onSubmit={handleGitHubPatLogin} className="space-y-2.5">
-                      <div className="space-y-1">
-                        <label
-                          htmlFor="winhood-github-pat"
-                          className="block text-xs font-semibold text-slate-900 dark:text-slate-100"
-                        >
-                          GitHub Personal Access Token (PAT)
-                        </label>
-                        <input
-                          id="winhood-github-pat"
-                          type="password"
-                          autoComplete="off"
-                          value={githubPatInput}
-                          onChange={(e) => setGithubPatInput(e.target.value)}
-                          placeholder="ghp_... ou github_pat_..."
-                          className={`w-full min-h-[42px] px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0c1017] text-sm font-mono text-slate-950 dark:text-slate-50 placeholder:text-slate-500 dark:placeholder:text-slate-400 ${FOCUS_RING}`}
-                          required
-                        />
-                        <p className="text-[11px] text-slate-700 dark:text-slate-300 leading-relaxed">
-                          Validado diretamente em{' '}
-                          <code className="font-mono font-semibold text-slate-900 dark:text-slate-100">
-                            https://api.github.com/user
-                          </code>{' '}
-                          (escopo mínimo: <code className="font-mono">read:user</code>). Se ainda não
-                          tiver conta no WinHood, ela será criada automaticamente.
-                        </p>
-                      </div>
-                      <button
-                        type="submit"
-                        disabled={submitting}
-                        className={`w-full min-h-[44px] px-4 py-2 rounded-lg text-xs font-bold bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-white text-white dark:text-slate-950 transition-colors cursor-pointer disabled:opacity-50 ${FOCUS_RING}`}
-                      >
-                        {submitting ? 'Validando no GitHub...' : 'Validar e Entrar com GitHub'}
-                      </button>
-                    </form>
-
-                    <div className="relative flex items-center py-0.5">
-                      <div className="flex-grow border-t border-slate-300 dark:border-slate-700" />
-                      <span className="shrink-0 px-2.5 text-[11px] font-medium text-slate-700 dark:text-slate-300">
-                        ou usar OAuth App Client ID
-                      </span>
-                      <div className="flex-grow border-t border-slate-300 dark:border-slate-700" />
-                    </div>
-
-                    <div className="space-y-2.5">
-                      <div className="space-y-1">
-                        <label
-                          htmlFor="winhood-github-client-id"
-                          className="block text-xs font-semibold text-slate-900 dark:text-slate-100"
-                        >
-                          GitHub OAuth App Client ID (opcional)
-                        </label>
-                        <input
-                          id="winhood-github-client-id"
-                          type="text"
-                          autoComplete="off"
-                          value={githubClientIdInput}
-                          onChange={(e) => setGithubClientIdInput(e.target.value)}
-                          placeholder="Ov23li..."
-                          className={`w-full min-h-[42px] px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0c1017] text-sm font-mono text-slate-950 dark:text-slate-50 placeholder:text-slate-500 dark:placeholder:text-slate-400 ${FOCUS_RING}`}
-                        />
-                      </div>
-                      <button
-                        type="button"
-                        disabled={submitting || githubClientIdInput.trim().length < 8}
-                        onClick={() => handleStartGitHubDeviceFlow(githubClientIdInput.trim())}
-                        className={`w-full min-h-[40px] px-3 py-2 rounded-lg text-xs font-semibold border border-slate-300 dark:border-slate-700 bg-white hover:bg-slate-100 dark:bg-[#111827] dark:hover:bg-[#1a2234] text-slate-950 dark:text-slate-50 transition-colors cursor-pointer disabled:opacity-50 ${FOCUS_RING}`}
-                      >
-                        Iniciar Device Flow (RFC 8628)
                       </button>
                     </div>
                   </section>
@@ -1399,7 +1362,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                       setShowWindowsHelloPanel((prev) => {
                         const next = !prev;
                         if (next) {
-                          setShowGitHubConnectBox(false);
+                          setShowGitHubUnavailableNotice(false);
                           setGhDevice(null);
                           setOauthPendingState(null);
                           setInfoMsg(null);
@@ -1861,6 +1824,79 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                     </strong>{' '}
                     após o acesso.
                   </p>
+
+                  {/* Legacy / Technical Integration Compatibility (PAT / Device Flow) tucked inside Advanced */}
+                  <details className="border-t border-slate-200 dark:border-slate-800 pt-3">
+                    <summary
+                      className={`flex items-center justify-between cursor-pointer select-none text-[11px] font-semibold text-slate-600 dark:text-slate-400 py-1 rounded list-none ${FOCUS_RING}`}
+                    >
+                      <span className="inline-flex items-center gap-1.5">
+                        <Github className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                        <span>Compatibilidade técnica / CI (GitHub PAT ou Device Flow)</span>
+                      </span>
+                      <ChevronRight className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                    </summary>
+
+                    <div className="pt-3 space-y-3">
+                      <form onSubmit={handleGitHubPatLogin} className="space-y-2">
+                        <label
+                          htmlFor="winhood-github-pat"
+                          className="block text-[11px] font-semibold text-slate-800 dark:text-slate-200"
+                        >
+                          GitHub Personal Access Token (apenas integração técnica)
+                        </label>
+                        <input
+                          id="winhood-github-pat"
+                          type="password"
+                          autoComplete="off"
+                          value={githubPatInput}
+                          onChange={(e) => setGithubPatInput(e.target.value)}
+                          placeholder="ghp_... ou github_pat_..."
+                          className={`w-full min-h-[38px] px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0c1017] text-xs font-mono text-slate-950 dark:text-slate-50 ${FOCUS_RING}`}
+                          required
+                        />
+                        <button
+                          type="submit"
+                          disabled={submitting}
+                          className={`w-full min-h-[38px] px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-white text-white dark:text-slate-950 transition-colors cursor-pointer disabled:opacity-50 ${FOCUS_RING}`}
+                        >
+                          {submitting ? 'Validando...' : 'Autenticar com PAT'}
+                        </button>
+                      </form>
+
+                      <div className="space-y-2 pt-2 border-t border-slate-200 dark:border-slate-800">
+                        <label
+                          htmlFor="winhood-github-client-id"
+                          className="block text-[11px] font-semibold text-slate-800 dark:text-slate-200"
+                        >
+                          GitHub Device Flow (RFC 8628 — Client ID opcional)
+                        </label>
+                        <input
+                          id="winhood-github-client-id"
+                          type="text"
+                          autoComplete="off"
+                          value={githubClientIdInput}
+                          onChange={(e) => setGithubClientIdInput(e.target.value)}
+                          placeholder="Ov23li..."
+                          className={`w-full min-h-[38px] px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0c1017] text-xs font-mono text-slate-950 dark:text-slate-50 ${FOCUS_RING}`}
+                        />
+                        <button
+                          type="button"
+                          disabled={
+                            submitting ||
+                            (!accessPolicy?.githubDeviceFlowConfigured &&
+                              githubClientIdInput.trim().length < 8)
+                          }
+                          onClick={() =>
+                            handleStartGitHubDeviceFlow(githubClientIdInput.trim() || undefined)
+                          }
+                          className={`w-full min-h-[38px] px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-300 dark:border-slate-700 bg-white hover:bg-slate-100 dark:bg-[#111827] dark:hover:bg-[#1a2234] text-slate-900 dark:text-slate-100 transition-colors cursor-pointer disabled:opacity-50 ${FOCUS_RING}`}
+                        >
+                          Iniciar Device Flow (RFC 8628)
+                        </button>
+                      </div>
+                    </div>
+                  </details>
                 </div>
               </details>
             </>

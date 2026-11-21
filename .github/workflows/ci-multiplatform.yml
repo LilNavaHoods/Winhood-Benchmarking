@@ -70,6 +70,10 @@ jobs:
         id: lint
         run: npm run lint
 
+      - name: Verify browser-safe frontend dependency graph (zero Node.js imports)
+        id: browser_imports
+        run: npm run check:browser-imports
+
       - name: Run Security & Cryptographic Hardening Suite
         id: security_tests
         run: npm run test:security
@@ -194,6 +198,10 @@ jobs:
       - name: Typecheck on Windows (tsc --noEmit)
         id: lint
         run: npm run lint
+
+      - name: Verify browser-safe frontend dependency graph on Windows
+        id: browser_imports
+        run: npm run check:browser-imports
 
       - name: Run Windows path, scanner .bat/.cmd, security, and desktop lifecycle tests
         id: unit_tests
