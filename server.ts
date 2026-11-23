@@ -115,6 +115,7 @@ import {
   validateOAuthCredentialInput,
   verifyGitHubOAuthConnection,
 } from './src/security/ZeroFrictionAuthConfig';
+import { GitHubOAuthTransactionStore } from './src/security/GitHubOAuthTransactionStore';
 import { PersistentDatabaseManager } from './src/storage/PersistentDatabaseManager';
 import { ProjectBackupService } from './src/services/backup/ProjectBackupService';
 import { SsrfGuard, type AuthorizedPerfTarget } from './src/execution/SsrfGuard';
@@ -1263,6 +1264,7 @@ export async function createWinHoodApp(options?: {
     ingestionMax?: number;
     analysisMax?: number;
     backupMax?: number;
+    oauthMax?: number;
     windowMs?: number;
   };
   githubOAuthHooks?: {
@@ -1295,6 +1297,11 @@ export async function createWinHoodApp(options?: {
     bucketName: 'backup',
     windowMs: rateLimitWindowMs,
     maxRequests: options?.rateLimits?.backupMax ?? 30,
+  });
+  const oauthRateLimiter = createInMemoryRateLimiter({
+    bucketName: 'oauth',
+    windowMs: rateLimitWindowMs,
+    maxRequests: options?.rateLimits?.oauthMax ?? 60,
   });
   app.disable('x-powered-by');
   // Limite global conservador (2MB) contra DoS; rotas autenticadas de upload usam heavyUploadJsonParser (50MB).
@@ -1482,7 +1489,10 @@ export async function createWinHoodApp(options?: {
     );
   };
 
-  const resolveCookieSecurityContext = (res: express.Response) => {
+  const resolveCookieSecurityContext = (
+    res: express.Response,
+    opts?: { forOAuthRedirect?: boolean }
+  ) => {
     const reqObj = (res as any).req as express.Request | undefined;
     const hostHeader = String(reqObj?.headers?.host || '');
     const isHostedPreview = isHostedPreviewRequest(reqObj);
@@ -1491,26 +1501,31 @@ export async function createWinHoodApp(options?: {
       !reqObj?.secure &&
       reqObj?.headers['x-forwarded-proto'] !== 'https' &&
       !isHostedPreview;
+    const isProductionNonLoopback = process.env.NODE_ENV === 'production' && !isLoopbackHttp;
     const isHttps =
       !isLoopbackHttp &&
-      (Boolean(reqObj?.secure) ||
+      (isProductionNonLoopback ||
+        Boolean(reqObj?.secure) ||
         reqObj?.headers['x-forwarded-proto'] === 'https' ||
         Boolean(reqObj?.headers?.referer?.startsWith('https://')) ||
         isHostedPreview);
     const isCrossSiteIframe = isHttps && isHostedPreview;
+    const sameSitePolicy = opts?.forOAuthRedirect ? 'Lax' : 'Strict';
     const sameSiteAttr = isCrossSiteIframe
       ? 'SameSite=None; Secure; Partitioned'
-      : `SameSite=Strict${isHttps ? '; Secure' : ''}`;
-    return { sameSiteAttr, isCrossSiteIframe };
+      : `SameSite=${sameSitePolicy}${isHttps ? '; Secure' : ''}`;
+    return { sameSiteAttr, isCrossSiteIframe, isHttps };
   };
 
   const setSessionCookies = (
     res: express.Response,
     sessionId: string,
     csrfToken: string,
-    opts?: { trustDevice?: boolean }
+    opts?: { trustDevice?: boolean; forOAuthRedirect?: boolean }
   ) => {
-    const { sameSiteAttr, isCrossSiteIframe } = resolveCookieSecurityContext(res);
+    const { sameSiteAttr, isCrossSiteIframe } = resolveCookieSecurityContext(res, {
+      forOAuthRedirect: opts?.forOAuthRedirect,
+    });
     const maxAgeSec = opts?.trustDevice
       ? Math.floor(AuthService.SESSION_TRUSTED_DEVICE_MS / 1000)
       : Math.floor(AuthService.SESSION_ABSOLUTE_MS / 1000);
@@ -1525,10 +1540,14 @@ export async function createWinHoodApp(options?: {
   };
 
   const clearSessionCookies = (res: express.Response) => {
-    const { sameSiteAttr } = resolveCookieSecurityContext(res);
+    const { sameSiteAttr, isCrossSiteIframe, isHttps } = resolveCookieSecurityContext(res);
+    const oauthStateAttr = isCrossSiteIframe
+      ? 'SameSite=None; Secure; Partitioned'
+      : `SameSite=Lax${isHttps ? '; Secure' : ''}`;
     res.setHeader('Set-Cookie', [
       `winhood_session=; Path=/; HttpOnly; ${sameSiteAttr}; Max-Age=0`,
       `winhood_csrf=; Path=/; ${sameSiteAttr}; Max-Age=0`,
+      `winhood_oauth_state=; Path=/api/auth/github/oauth; HttpOnly; ${oauthStateAttr}; Max-Age=0`,
     ]);
   };
 
@@ -1863,6 +1882,9 @@ export async function createWinHoodApp(options?: {
     });
     const { clientId: githubClientId, clientSecret: githubClientSecret } =
       resolveEffectiveGitHubOAuthCredentials();
+    const githubOAuthDirectConfigured =
+      githubClientId.length >= 8 && githubClientSecret.length >= 8;
+    res.setHeader('Cache-Control', 'no-store');
     res.json({
       mode: policy.mode,
       soloLocalAllowed: policy.allowed,
@@ -1870,7 +1892,8 @@ export async function createWinHoodApp(options?: {
       vaultLockEnabled: process.env.WINHOOD_VAULT_LOCK === 'true',
       teamServerMode: process.env.WINHOOD_TEAM_SERVER === 'true',
       githubDeviceFlowConfigured: githubClientId.length >= 8,
-      githubOAuthDirectConfigured: githubClientId.length >= 8 && githubClientSecret.length >= 8,
+      githubOAuthDirectConfigured,
+      githubOAuthStatus: githubOAuthDirectConfigured ? 'CONFIGURED' : 'NOT_CONFIGURED',
       githubSignupAllowed: process.env.WINHOOD_GITHUB_ALLOW_SIGNUP !== 'false',
       githubPatSupported: true,
       windowsHelloNativeSupported: process.platform === 'win32',
@@ -1929,60 +1952,16 @@ export async function createWinHoodApp(options?: {
     }
   });
 
-  interface PendingGitHubOAuthTx {
-    state: string;
-    codeVerifier: string;
-    redirectUri: string;
-    mode: 'popup' | 'redirect' | 'desktop';
-    originHint: string;
-    expiresAtMs: number;
-    status: 'PENDING' | 'AUTHORIZED' | 'ERROR';
-    consumed: boolean;
-    stateCookieRequired: boolean;
-    errorMessage?: string;
-    sessionId?: string;
-    csrfToken?: string;
-    user?: PublicUserView;
-    isNewAccount?: boolean;
-  }
-
-  const pendingGitHubOAuthTxs = new Map<string, PendingGitHubOAuthTx>();
-  const consumedGitHubOAuthCodeHashes = new Map<string, number>();
-
-  const prunePendingGitHubOAuthTxs = () => {
-    const now = Date.now();
-    for (const [key, tx] of pendingGitHubOAuthTxs.entries()) {
-      if (now > tx.expiresAtMs) {
-        pendingGitHubOAuthTxs.delete(key);
-      }
-    }
-    for (const [codeHash, expMs] of consumedGitHubOAuthCodeHashes.entries()) {
-      if (now > expMs) {
-        consumedGitHubOAuthCodeHashes.delete(codeHash);
-      }
-    }
-  };
-
-  const findGitHubOAuthTxByState = (rawState: string): PendingGitHubOAuthTx | undefined => {
-    const providedBuf = Buffer.from(rawState, 'utf8');
-    if (providedBuf.length === 0) return undefined;
-    for (const tx of pendingGitHubOAuthTxs.values()) {
-      const expectedBuf = Buffer.from(tx.state, 'utf8');
-      if (
-        expectedBuf.length === providedBuf.length &&
-        crypto.timingSafeEqual(expectedBuf, providedBuf)
-      ) {
-        return tx;
-      }
-    }
-    return undefined;
-  };
+  const oauthTxStore = new GitHubOAuthTransactionStore(dataDir);
 
   const isValidGitHubCallbackRedirectUri = (candidate: string): boolean => {
     if (!candidate) return false;
     try {
       const parsed = new URL(candidate);
       if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        return false;
+      }
+      if (parsed.username || parsed.password || parsed.search || parsed.hash) {
         return false;
       }
       const normalizedPath = parsed.pathname.replace(/\/+$/, '');
@@ -1992,28 +1971,48 @@ export async function createWinHoodApp(options?: {
     }
   };
 
+  const isLoopbackRequestHost = (req: express.Request): boolean => {
+    const remoteIp = (req.socket.remoteAddress || req.ip || '').replace(/^::ffff:/, '').toLowerCase();
+    const rawHost = String(req.headers.host || '').split(':')[0]!.trim().toLowerCase();
+    return (
+      (remoteIp === '127.0.0.1' || remoteIp === '::1' || remoteIp === 'localhost') &&
+      (rawHost === '127.0.0.1' || rawHost === 'localhost' || rawHost === '::1' || rawHost === '')
+    );
+  };
+
   const resolveGitHubCallbackUrl = (req: express.Request): string => {
-    const explicit = (process.env.WINHOOD_GITHUB_OAUTH_CALLBACK_URL || '').trim();
-    if (explicit && isValidGitHubCallbackRedirectUri(explicit)) {
-      return explicit;
+    const explicitCallback = (
+      process.env.WINHOOD_GITHUB_OAUTH_CALLBACK_URL ||
+      process.env.WINHOOD_GITHUB_OAUTH_REDIRECT_URI ||
+      ''
+    ).trim();
+    if (explicitCallback && isValidGitHubCallbackRedirectUri(explicitCallback)) {
+      return explicitCallback;
     }
     const appUrlEnv = (process.env.APP_URL || '').trim();
-    if (appUrlEnv && isHostedPreviewRequest(req)) {
+    if (appUrlEnv && (isHostedPreviewRequest(req) || !isLoopbackRequestHost(req))) {
       try {
         const parsedAppUrl = new URL(appUrlEnv);
         if (parsedAppUrl.protocol === 'http:' || parsedAppUrl.protocol === 'https:') {
           return `${parsedAppUrl.origin}/api/auth/github/oauth/callback`;
         }
       } catch {
-        // Fallback to request headers
+        // Fallback below
       }
     }
-    const rawProto = String(req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http'))
-      .split(',')[0]!
-      .trim()
-      .toLowerCase();
-    const proto = rawProto === 'https' ? 'https' : 'http';
-    const rawHost = String(req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000')
+    const trustProxyHeaders =
+      process.env.WINHOOD_TRUST_PROXY === 'true' || isHostedPreviewRequest(req);
+    const rawProto = trustProxyHeaders
+      ? String(req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http'))
+      : req.secure
+        ? 'https'
+        : 'http';
+    const proto = rawProto.split(',')[0]!.trim().toLowerCase() === 'https' ? 'https' : 'http';
+    const rawHost = (
+      trustProxyHeaders
+        ? String(req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000')
+        : String(req.headers.host || 'localhost:3000')
+    )
       .split(',')[0]!
       .replace(/[\r\n\s]/g, '')
       .trim();
@@ -2022,13 +2021,19 @@ export async function createWinHoodApp(options?: {
   };
 
   const buildOAuthStateCookieAttr = (res: express.Response): string => {
-    const { isCrossSiteIframe } = resolveCookieSecurityContext(res);
+    const { isCrossSiteIframe, isHttps: contextIsHttps } = resolveCookieSecurityContext(res, {
+      forOAuthRedirect: true,
+    });
     if (isCrossSiteIframe) {
       return 'SameSite=None; Secure; Partitioned';
     }
     const reqObj = (res as any).req as express.Request | undefined;
     const isHttps =
-      Boolean(reqObj?.secure) || reqObj?.headers['x-forwarded-proto'] === 'https';
+      contextIsHttps ||
+      Boolean(reqObj?.secure) ||
+      ((process.env.WINHOOD_TRUST_PROXY === 'true' ||
+        (reqObj ? isHostedPreviewRequest(reqObj) : false)) &&
+        reqObj?.headers['x-forwarded-proto'] === 'https');
     return `SameSite=Lax${isHttps ? '; Secure' : ''}`;
   };
 
@@ -2088,8 +2093,9 @@ export async function createWinHoodApp(options?: {
     return res.status(statusCode).type('html').send(html);
   };
 
-  app.get('/api/auth/github/oauth/start', (req, res) => {
-    prunePendingGitHubOAuthTxs();
+  app.get('/api/auth/github/oauth/start', oauthRateLimiter, (req, res) => {
+    oauthTxStore.pruneExpired();
+    res.setHeader('Cache-Control', 'no-store');
     const rawMode = typeof req.query.mode === 'string' ? req.query.mode.trim().toLowerCase() : '';
     const acceptHeader = String(req.headers.accept || '').toLowerCase();
     const wantsBrowserRedirect =
@@ -2098,7 +2104,6 @@ export async function createWinHoodApp(options?: {
     const { clientId, clientSecret } = resolveEffectiveGitHubOAuthCredentials();
     if (clientId.length < 8 || clientSecret.length < 8) {
       if (wantsBrowserRedirect) {
-        res.setHeader('Cache-Control', 'no-store');
         return res.redirect(302, '/?github_oauth_error=not_configured');
       }
       return res.status(400).json({
@@ -2115,7 +2120,6 @@ export async function createWinHoodApp(options?: {
     const redirectUri = resolveGitHubCallbackUrl(req);
     if (!isValidGitHubCallbackRedirectUri(redirectUri)) {
       if (wantsBrowserRedirect) {
-        res.setHeader('Cache-Control', 'no-store');
         return res.redirect(302, '/?github_oauth_error=invalid_redirect');
       }
       return res.status(400).json({
@@ -2126,19 +2130,27 @@ export async function createWinHoodApp(options?: {
     const pkce = generateGitHubOAuthPkce();
 
     let originHint = '';
+    try {
+      originHint = new URL(redirectUri).origin;
+    } catch {
+      originHint = '';
+    }
     const rawOrigin = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
     if (rawOrigin) {
       try {
         const parsedOrigin = new URL(rawOrigin);
-        if (parsedOrigin.protocol === 'http:' || parsedOrigin.protocol === 'https:') {
+        if (
+          (parsedOrigin.protocol === 'http:' || parsedOrigin.protocol === 'https:') &&
+          (!originHint || parsedOrigin.origin === originHint)
+        ) {
           originHint = parsedOrigin.origin;
         }
       } catch {
-        originHint = '';
+        // Keep canonical originHint
       }
     }
 
-    pendingGitHubOAuthTxs.set(pkce.state, {
+    oauthTxStore.saveTransaction({
       state: pkce.state,
       codeVerifier: pkce.codeVerifier,
       redirectUri,
@@ -2155,9 +2167,9 @@ export async function createWinHoodApp(options?: {
       redirectUri,
       state: pkce.state,
       codeChallenge: pkce.codeChallenge,
+      allowSignup: process.env.WINHOOD_GITHUB_ALLOW_SIGNUP !== 'false',
     });
 
-    res.setHeader('Cache-Control', 'no-store');
     if (mode === 'redirect') {
       setOAuthStateCookie(res, pkce.state);
       return res.redirect(302, authorizeUrl);
@@ -2173,7 +2185,7 @@ export async function createWinHoodApp(options?: {
   });
 
   const handleGitHubOAuthCallback: express.RequestHandler = async (req, res) => {
-    prunePendingGitHubOAuthTxs();
+    oauthTxStore.pruneExpired();
     const rawState = typeof req.query.state === 'string' ? req.query.state : '';
     const rawCode = typeof req.query.code === 'string' ? req.query.code : '';
     const oauthError = typeof req.query.error === 'string' ? req.query.error : '';
@@ -2182,7 +2194,7 @@ export async function createWinHoodApp(options?: {
     const cookies = parseCookies(req.headers.cookie);
     const hasStateCookie = Boolean(cookies.winhood_oauth_state);
 
-    const tx = rawState ? findGitHubOAuthTxByState(rawState) : undefined;
+    const tx = rawState ? oauthTxStore.getTransactionByState(rawState) : undefined;
     const isRedirectFlow = tx ? tx.mode === 'redirect' : hasStateCookie;
 
     const respondWithOAuthError = (
@@ -2202,7 +2214,7 @@ export async function createWinHoodApp(options?: {
         errorCode,
         error: message,
       }).replace(/</g, '\\u003c');
-      const targetOrigin = JSON.stringify(tx?.originHint || '*');
+      const targetOrigin = JSON.stringify(tx?.originHint || new URL(resolveGitHubCallbackUrl(req)).origin);
       const script =
         tx?.mode === 'popup'
           ? `if(window.opener){window.opener.postMessage(${scriptPayload},${targetOrigin});}window.close();`
@@ -2220,34 +2232,26 @@ export async function createWinHoodApp(options?: {
             ? oauthErrorDesc.slice(0, 180)
             : 'Autorização recusada no GitHub.';
       if (tx) {
-        tx.consumed = true;
-        tx.status = 'ERROR';
-        tx.errorMessage = safeMsg;
         if (tx.mode === 'redirect') {
-          pendingGitHubOAuthTxs.delete(tx.state);
+          oauthTxStore.deleteTransaction(tx.state);
+        } else {
+          oauthTxStore.updateTransaction(tx.state, {
+            consumed: true,
+            status: 'ERROR',
+            errorMessage: safeMsg,
+          });
         }
       }
       return respondWithOAuthError(400, safeErrorCode, 'Autorização GitHub não concluída', safeMsg);
     }
 
     if (!rawCode || !rawState || !tx || Date.now() > tx.expiresAtMs) {
-      if (tx) pendingGitHubOAuthTxs.delete(tx.state);
+      if (tx) oauthTxStore.deleteTransaction(tx.state);
       return respondWithOAuthError(
         400,
         'invalid_state',
         'Estado OAuth inválido ou expirado',
         'A solicitação de autenticação GitHub expirou ou o parâmetro state não corresponde. Tente iniciar o login novamente.'
-      );
-    }
-
-    const codeHash = computeSha256(rawCode);
-    if (tx.consumed || consumedGitHubOAuthCodeHashes.has(codeHash)) {
-      pendingGitHubOAuthTxs.delete(tx.state);
-      return respondWithOAuthError(
-        400,
-        'replayed_code',
-        'Código de autorização já utilizado',
-        'Este código de autorização do GitHub já foi utilizado. Inicie um novo login.'
       );
     }
 
@@ -2260,7 +2264,7 @@ export async function createWinHoodApp(options?: {
         cookieBuf.length !== expectedBuf.length ||
         !crypto.timingSafeEqual(cookieBuf, expectedBuf)
       ) {
-        pendingGitHubOAuthTxs.delete(tx.state);
+        oauthTxStore.deleteTransaction(tx.state);
         return respondWithOAuthError(
           400,
           'invalid_state',
@@ -2271,7 +2275,7 @@ export async function createWinHoodApp(options?: {
     }
 
     if (!isValidGitHubCallbackRedirectUri(tx.redirectUri)) {
-      pendingGitHubOAuthTxs.delete(tx.state);
+      oauthTxStore.deleteTransaction(tx.state);
       return respondWithOAuthError(
         400,
         'invalid_redirect',
@@ -2280,13 +2284,28 @@ export async function createWinHoodApp(options?: {
       );
     }
 
-    // Mark single-use synchronously before any async I/O to eliminate race-condition replays
-    tx.consumed = true;
-    consumedGitHubOAuthCodeHashes.set(codeHash, Date.now() + 15 * 60 * 1000);
+    // Consume atomically in persistent store BEFORE any external network I/O to eliminate replay races
+    const consumedOutcome = oauthTxStore.consumeTransactionAtomically(rawState, rawCode);
+    if (!consumedOutcome.ok) {
+      if ('reason' in consumedOutcome && consumedOutcome.reason === 'REPLAYED_CODE') {
+        return respondWithOAuthError(
+          400,
+          'replayed_code',
+          'Código de autorização já utilizado',
+          'Este código de autorização do GitHub já foi utilizado. Inicie um novo login.'
+        );
+      }
+      return respondWithOAuthError(
+        400,
+        'invalid_state',
+        'Estado OAuth inválido ou expirado',
+        'A solicitação de autenticação GitHub expirou ou o parâmetro state não corresponde. Tente iniciar o login novamente.'
+      );
+    }
 
     const { clientId, clientSecret } = resolveEffectiveGitHubOAuthCredentials();
     if (clientId.length < 8 || clientSecret.length < 8) {
-      pendingGitHubOAuthTxs.delete(tx.state);
+      oauthTxStore.deleteTransaction(tx.state);
       return respondWithOAuthError(
         400,
         'not_configured',
@@ -2316,15 +2335,22 @@ export async function createWinHoodApp(options?: {
       }
 
       const allowSignup = process.env.WINHOOD_GITHUB_ALLOW_SIGNUP !== 'false';
+      const isInternetExposed =
+        !isLoopbackRequestHost(req) ||
+        isHostedPreviewRequest(req) ||
+        process.env.WINHOOD_TEAM_SERVER === 'true';
       const outcome = authService.issueGitHubOAuthSession({
         githubId: profile.id,
         githubLogin: profile.login,
         name: profile.name,
         email: profile.email,
+        emailVerified: profile.emailVerified !== false,
         avatarUrl: profile.avatarUrl,
         ipAddress: req.ip || '127.0.0.1',
         userAgent: String(req.headers['user-agent'] || 'WinHood-GitHub-OAuth-PKCE'),
         allowSignup,
+        isInternetExposed,
+        allowFirstUserAdmin: false,
       });
 
       appendAuditLog(
@@ -2338,8 +2364,10 @@ export async function createWinHoodApp(options?: {
       saveDatabase(db);
 
       if (tx.mode === 'redirect') {
-        pendingGitHubOAuthTxs.delete(tx.state);
-        const { sameSiteAttr, isCrossSiteIframe } = resolveCookieSecurityContext(res);
+        oauthTxStore.deleteTransaction(tx.state);
+        const { sameSiteAttr, isCrossSiteIframe } = resolveCookieSecurityContext(res, {
+          forOAuthRedirect: true,
+        });
         const maxAgeSec = outcome.trustDevice
           ? Math.floor(AuthService.SESSION_TRUSTED_DEVICE_MS / 1000)
           : Math.floor(AuthService.SESSION_ABSOLUTE_MS / 1000);
@@ -2360,12 +2388,14 @@ export async function createWinHoodApp(options?: {
         trustDevice: outcome.trustDevice,
       });
 
-      tx.status = 'AUTHORIZED';
-      tx.sessionId = outcome.sessionId;
-      tx.csrfToken = outcome.csrfToken;
-      tx.user = outcome.user;
-      tx.isNewAccount = outcome.isNewAccount;
-      tx.expiresAtMs = Date.now() + 2 * 60 * 1000;
+      oauthTxStore.updateTransaction(tx.state, {
+        status: 'AUTHORIZED',
+        sessionId: outcome.sessionId,
+        csrfToken: outcome.csrfToken,
+        user: outcome.user,
+        isNewAccount: outcome.isNewAccount,
+        expiresAtMs: Date.now() + 2 * 60 * 1000,
+      });
 
       if (tx.mode === 'desktop') {
         return renderOAuthCallbackHtml(
@@ -2384,7 +2414,7 @@ export async function createWinHoodApp(options?: {
         user: outcome.user,
         csrfToken: outcome.csrfToken,
       }).replace(/</g, '\\u003c');
-      const targetOrigin = JSON.stringify(tx.originHint || '*');
+      const targetOrigin = JSON.stringify(tx.originHint || new URL(tx.redirectUri).origin);
       const script = `if(window.opener){window.opener.postMessage(${scriptPayload},${targetOrigin});setTimeout(function(){window.close();},150);}`;
       return renderOAuthCallbackHtml(
         res,
@@ -2407,29 +2437,46 @@ export async function createWinHoodApp(options?: {
         errorCode = 'account_disabled';
         safeMsg = 'Esta conta foi desabilitada pelo administrador.';
         statusCode = 403;
+      } else if (rawMsg.startsWith('AUTH_EMAIL_VERIFICATION_REQUIRED')) {
+        errorCode = 'email_unverified';
+        safeMsg =
+          'Não foi possível vincular automaticamente sua conta GitHub porque o endereço de e-mail não está verificado no GitHub.';
+        statusCode = 403;
+      } else if (rawMsg.startsWith('GITHUB_ALREADY_LINKED')) {
+        errorCode = 'github_already_linked';
+        safeMsg = 'Esta conta GitHub já está associada a outro usuário nesta instalação.';
+        statusCode = 409;
       } else if (rawMsg.startsWith('GITHUB_PROFILE') || rawMsg.startsWith('GITHUB_TOKEN_UNAUTHORIZED')) {
         errorCode = 'profile_failed';
         safeMsg = 'Não foi possível consultar o perfil autenticado na API do GitHub.';
         statusCode = 502;
       }
-      tx.status = 'ERROR';
-      tx.errorMessage = safeMsg;
       if (tx.mode === 'redirect') {
-        pendingGitHubOAuthTxs.delete(tx.state);
+        oauthTxStore.deleteTransaction(tx.state);
+      } else {
+        oauthTxStore.updateTransaction(tx.state, {
+          status: 'ERROR',
+          errorMessage: safeMsg,
+        });
       }
       return respondWithOAuthError(statusCode, errorCode, 'Falha na autenticação GitHub', safeMsg);
     }
   };
 
-  app.get(['/api/auth/github/oauth/callback', '/api/auth/github/oauth/callback/'], handleGitHubOAuthCallback);
+  app.get(
+    ['/api/auth/github/oauth/callback', '/api/auth/github/oauth/callback/'],
+    oauthRateLimiter,
+    handleGitHubOAuthCallback
+  );
 
-  app.get('/api/auth/github/oauth/status', (req, res) => {
-    prunePendingGitHubOAuthTxs();
+  app.get('/api/auth/github/oauth/status', oauthRateLimiter, (req, res) => {
+    oauthTxStore.pruneExpired();
+    res.setHeader('Cache-Control', 'no-store');
     const rawState = typeof req.query.state === 'string' ? req.query.state : '';
     if (!rawState) {
       return res.status(400).json({ error: 'Parâmetro state obrigatório.', code: 'STATE_REQUIRED' });
     }
-    const tx = findGitHubOAuthTxByState(rawState);
+    const tx = oauthTxStore.getTransactionByState(rawState);
     if (!tx) {
       return res.status(404).json({
         status: 'EXPIRED',
@@ -2441,7 +2488,7 @@ export async function createWinHoodApp(options?: {
       return res.json({ status: 'PENDING', authorized: false });
     }
     if (tx.status === 'ERROR') {
-      pendingGitHubOAuthTxs.delete(tx.state);
+      oauthTxStore.deleteTransaction(tx.state);
       return res.status(400).json({
         status: 'ERROR',
         authorized: false,
@@ -2452,7 +2499,7 @@ export async function createWinHoodApp(options?: {
     const csrfToken = tx.csrfToken!;
     const user = tx.user!;
     const isNewAccount = Boolean(tx.isNewAccount);
-    pendingGitHubOAuthTxs.delete(tx.state);
+    oauthTxStore.deleteTransaction(tx.state);
 
     const { isCrossSiteIframe } = resolveCookieSecurityContext(res);
     setSessionCookies(res, sessionId, csrfToken, { trustDevice: true });
@@ -2467,7 +2514,36 @@ export async function createWinHoodApp(options?: {
     });
   });
 
-  app.post('/api/auth/github/device/start', async (req, res) => {
+  app.post('/api/auth/bootstrap-admin/claim', (req, res) => {
+    const authCtx = res.locals.authContext as { user: PublicUserView } | undefined;
+    if (!authCtx?.user) {
+      return res.status(401).json({ error: 'Autenticação necessária para reivindicar bootstrap administrativo.' });
+    }
+    const { bootstrapToken } = (req.body || {}) as { bootstrapToken?: string };
+    if (!bootstrapToken || typeof bootstrapToken !== 'string') {
+      return res.status(400).json({ error: 'Informe o token único de bootstrap administrativo.' });
+    }
+    try {
+      const promoted = authService.claimAdminWithBootstrapToken(authCtx.user.id, bootstrapToken);
+      appendAuditLog(
+        db,
+        'AUTH_ADMIN_BOOTSTRAP_CLAIMED',
+        'AUTH',
+        promoted.id,
+        `Usuário ${promoted.email} assumiu papel ADMIN mediante token único de bootstrap.`,
+        promoted
+      );
+      saveDatabase(db);
+      return res.json({ ok: true, user: promoted });
+    } catch (err: any) {
+      const msg = String(err?.message || 'Falha ao validar token de bootstrap.');
+      const status = msg.startsWith('BOOTSTRAP_ALREADY_COMPLETED') ? 409 : 403;
+      return res.status(status).json({ error: msg });
+    }
+  });
+
+  app.post('/api/auth/github/device/start', oauthRateLimiter, async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
     const bodyClientId = typeof req.body?.clientId === 'string' ? req.body.clientId.trim() : '';
     const { clientId: configuredClientId } = resolveEffectiveGitHubOAuthCredentials();
     const clientId = (configuredClientId || bodyClientId).trim();
@@ -2490,7 +2566,8 @@ export async function createWinHoodApp(options?: {
     }
   });
 
-  app.post('/api/auth/github/device/poll', async (req, res) => {
+  app.post('/api/auth/github/device/poll', oauthRateLimiter, async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
     const { deviceCode, clientId: bodyClientId } = (req.body || {}) as {
       deviceCode?: string;
       clientId?: string;
@@ -2520,14 +2597,27 @@ export async function createWinHoodApp(options?: {
       }
 
       const profile = await fetchGitHubAuthenticatedProfile(pollResult.accessToken);
+      const existingSession = extractSessionTokenFromRequest(req);
+      if (existingSession.token) {
+        authService.revokeSession(existingSession.token);
+      }
+      const allowSignup = process.env.WINHOOD_GITHUB_ALLOW_SIGNUP !== 'false';
+      const isInternetExposed =
+        !isLoopbackRequestHost(req) ||
+        isHostedPreviewRequest(req) ||
+        process.env.WINHOOD_TEAM_SERVER === 'true';
       const outcome = authService.issueGitHubOAuthSession({
         githubId: profile.id,
         githubLogin: profile.login,
         name: profile.name,
         email: profile.email,
+        emailVerified: profile.emailVerified !== false,
         avatarUrl: profile.avatarUrl,
         ipAddress: req.ip || '127.0.0.1',
         userAgent: String(req.headers['user-agent'] || 'WinHood-GitHub-OAuth'),
+        allowSignup,
+        isInternetExposed,
+        allowFirstUserAdmin: false,
       });
       const { isCrossSiteIframe } = resolveCookieSecurityContext(res);
       setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
@@ -2552,7 +2642,17 @@ export async function createWinHoodApp(options?: {
         ...(isCrossSiteIframe ? { sessionId: outcome.sessionId } : {}),
       });
     } catch (err: any) {
-      const msg = err?.message || 'Erro ao consultar autorização do GitHub Device Flow.';
+      const msg = String(err?.message || 'Erro ao consultar autorização do GitHub Device Flow.');
+      if (
+        msg.startsWith('AUTH_SIGNUP_DISABLED') ||
+        msg.startsWith('AUTH_ACCOUNT_DISABLED') ||
+        msg.startsWith('AUTH_EMAIL_VERIFICATION_REQUIRED')
+      ) {
+        return res.status(403).json({ error: msg, code: msg.split(':')[0]!.trim() });
+      }
+      if (msg.startsWith('GITHUB_ALREADY_LINKED')) {
+        return res.status(409).json({ error: msg, code: 'GITHUB_ALREADY_LINKED' });
+      }
       const status = msg.startsWith('GITHUB_TOKEN_UNAUTHORIZED') ? 401 : 502;
       return res.status(status).json({
         error: msg,
@@ -2561,7 +2661,8 @@ export async function createWinHoodApp(options?: {
     }
   });
 
-  app.post('/api/auth/github/token', async (req, res) => {
+  app.post('/api/auth/github/token', oauthRateLimiter, async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
     const { token, trustDevice } = (req.body || {}) as {
       token?: string;
       trustDevice?: boolean;
@@ -2575,14 +2676,27 @@ export async function createWinHoodApp(options?: {
     }
     try {
       const profile = await fetchGitHubAuthenticatedProfile(cleanToken);
+      const existingSession = extractSessionTokenFromRequest(req);
+      if (existingSession.token) {
+        authService.revokeSession(existingSession.token);
+      }
+      const allowSignup = process.env.WINHOOD_GITHUB_ALLOW_SIGNUP !== 'false';
+      const isInternetExposed =
+        !isLoopbackRequestHost(req) ||
+        isHostedPreviewRequest(req) ||
+        process.env.WINHOOD_TEAM_SERVER === 'true';
       const outcome = authService.issueGitHubOAuthSession({
         githubId: profile.id,
         githubLogin: profile.login,
         name: profile.name,
         email: profile.email,
+        emailVerified: profile.emailVerified !== false,
         avatarUrl: profile.avatarUrl,
         ipAddress: req.ip || '127.0.0.1',
         userAgent: String(req.headers['user-agent'] || 'WinHood-GitHub-PAT'),
+        allowSignup,
+        isInternetExposed,
+        allowFirstUserAdmin: false,
       });
       const { isCrossSiteIframe } = resolveCookieSecurityContext(res);
       setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
@@ -2606,13 +2720,23 @@ export async function createWinHoodApp(options?: {
         ...(isCrossSiteIframe ? { sessionId: outcome.sessionId } : {}),
       });
     } catch (err: any) {
-      const msg = err?.message || 'Erro de rede ao validar token na API oficial do GitHub.';
+      const msg = String(err?.message || 'Erro de rede ao validar token na API oficial do GitHub.');
       if (msg.startsWith('GITHUB_TOKEN_UNAUTHORIZED')) {
         return res.status(401).json({
           error:
             'Token GitHub rejeitado pela API oficial (HTTP 401/403). Verifique se o PAT está ativo e possui escopo read:user.',
           code: 'GITHUB_TOKEN_UNAUTHORIZED',
         });
+      }
+      if (
+        msg.startsWith('AUTH_SIGNUP_DISABLED') ||
+        msg.startsWith('AUTH_ACCOUNT_DISABLED') ||
+        msg.startsWith('AUTH_EMAIL_VERIFICATION_REQUIRED')
+      ) {
+        return res.status(403).json({ error: msg, code: msg.split(':')[0]!.trim() });
+      }
+      if (msg.startsWith('GITHUB_ALREADY_LINKED')) {
+        return res.status(409).json({ error: msg, code: 'GITHUB_ALREADY_LINKED' });
       }
       const code = msg.includes(':') ? msg.split(':')[0]!.trim() : 'GITHUB_TOKEN_NETWORK_ERROR';
       return res.status(502).json({
@@ -3332,6 +3456,7 @@ export async function createWinHoodApp(options?: {
   });
 
   app.post('/api/auth/logout', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
     const actor = (req as any).authUser as PublicUserView | undefined;
     const sessionToken = extractSessionTokenFromRequest(req).token;
     if (sessionToken) {
@@ -3353,6 +3478,7 @@ export async function createWinHoodApp(options?: {
   });
 
   app.get('/api/auth/me', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
     const sessionToken = extractSessionTokenFromRequest(req).token;
     const validated = sessionToken ? authService.validateSession(sessionToken) : null;
     const user = validated?.user || ((req as any).authUser as PublicUserView | undefined);
@@ -5650,6 +5776,9 @@ export async function createWinHoodApp(options?: {
     });
   });
 
+  const pendingRunTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const cancelledRunIds = new Set<string>();
+
   app.get('/api/benchmark-runs', (req, res) => {
     const projectId = req.query.projectId as string | undefined;
     const runs = projectId
@@ -5808,6 +5937,14 @@ export async function createWinHoodApp(options?: {
 
         const targetIdx = db.runs.findIndex((r) => r.id === runId);
         if (targetIdx !== -1) {
+          const prevRecords = db.runs[targetIdx]?.executionRecords || [];
+          if (prevRecords.length > 0) {
+            const seenIds = new Set((completedRun.executionRecords || []).map((rec) => rec.id));
+            completedRun.executionRecords = [
+              ...prevRecords.filter((rec) => !seenIds.has(rec.id)),
+              ...(completedRun.executionRecords || []),
+            ];
+          }
           db.runs[targetIdx] = completedRun;
           db.telemetry.workerExecutionsCount += completedRun.toolExecutions.length;
           appendAuditLog(
@@ -5975,7 +6112,7 @@ export async function createWinHoodApp(options?: {
 
     const baseWeights = weights || matchedSpecializedProfile?.weights || DEFAULT_CATEGORY_WEIGHTS;
     const activeWeights =
-      activeEnabledCategories.length < 12
+      !weights && activeEnabledCategories.length < 12
         ? normalizeEnabledCategoryWeights(baseWeights, activeEnabledCategories)
         : baseWeights;
     const weightCheck = validateCategoryWeights(activeWeights, activeEnabledCategories);
@@ -6029,7 +6166,11 @@ export async function createWinHoodApp(options?: {
     saveDatabase(db, true);
 
     // Execução assíncrona com atualização contínua de telemetria de progresso e ETA
-    setTimeout(() => {
+    const runTimer = setTimeout(() => {
+      pendingRunTimers.delete(runId);
+      if (cancelledRunIds.has(runId)) {
+        return;
+      }
       try {
         const completedRun = executeBenchmarkRunOrchestration({
           runId,
@@ -6051,6 +6192,7 @@ export async function createWinHoodApp(options?: {
           environmentMode: db.environmentMode,
           dataOrigin: selectedSoftwares[0]?.dataOrigin || 'USER_SOURCE',
           onProgress: (prog) => {
+            if (cancelledRunIds.has(runId)) return;
             const current = db.runs.find((r) => r.id === runId);
             if (current && current.status === 'RUNNING') {
               current.progress = prog;
@@ -6058,8 +6200,20 @@ export async function createWinHoodApp(options?: {
           },
         });
 
+        if (cancelledRunIds.has(runId)) {
+          return;
+        }
+
         const targetIdx = db.runs.findIndex((r) => r.id === runId);
         if (targetIdx !== -1) {
+          const prevRecords = db.runs[targetIdx]?.executionRecords || [];
+          if (prevRecords.length > 0) {
+            const seenIds = new Set((completedRun.executionRecords || []).map((rec) => rec.id));
+            completedRun.executionRecords = [
+              ...prevRecords.filter((rec) => !seenIds.has(rec.id)),
+              ...(completedRun.executionRecords || []),
+            ];
+          }
           db.runs[targetIdx] = completedRun;
           db.telemetry.workerExecutionsCount += completedRun.toolExecutions.length;
           appendAuditLog(
@@ -6074,6 +6228,7 @@ export async function createWinHoodApp(options?: {
           saveDatabase(db, true);
         }
       } catch (err: any) {
+        if (cancelledRunIds.has(runId)) return;
         const target = db.runs.find((r) => r.id === runId);
         if (target) {
           target.status = 'FAILED';
@@ -6089,6 +6244,7 @@ export async function createWinHoodApp(options?: {
         }
       }
     }, 150);
+    pendingRunTimers.set(runId, runTimer);
 
     return res.status(201).json({ run: runningRun });
   });
@@ -6864,12 +7020,29 @@ export async function createWinHoodApp(options?: {
   app.post('/api/benchmark-runs/:id/emergency-stop', (req, res) => {
     if (!requireWritePermission(res, req, 'runs:execute')) return;
     const actor = getRequestActor(req, res);
-    const run = db.runs.find((r) => r.id === req.params.id) || db.runs[0];
+    const run = db.runs.find((r) => r.id === req.params.id);
     if (!run) {
       return res.status(404).json({ error: 'Execução não encontrada.' });
     }
 
+    const pendingTimer = pendingRunTimers.get(run.id);
+    if (pendingTimer) {
+      clearTimeout(pendingTimer);
+      pendingRunTimers.delete(run.id);
+    }
+    cancelledRunIds.add(run.id);
+
     run.status = 'COMPLETED_WITH_WARNINGS';
+    run.completedAt = run.completedAt || new Date().toISOString();
+    run.executiveSummary =
+      'Execução interrompida via Cancelamento Emergencial pelo operador. Snapshot baseline T0 restaurado.';
+    run.progress = {
+      percent: 100,
+      stageLabel: 'Cancelado pelo operador (Emergency Stop)',
+      estimatedRemainingSeconds: 0,
+      processedFiles: run.progress?.processedFiles || 0,
+      totalFiles: run.progress?.totalFiles || 0,
+    };
     appendAuditLog(
       db,
       'EMERGENCY_STOP_TRIGGERED',
@@ -6878,11 +7051,12 @@ export async function createWinHoodApp(options?: {
       `Cancelamento emergencial acionado por ${actor.name}. Workers isolados encerrados e snapshot baseline T0 restaurado.`,
       actor
     );
-    saveDatabase(db);
+    saveDatabase(db, true);
 
     return res.json({
       ok: true,
       runId: run.id,
+      status: run.status,
       message:
         'Cancelamento emergencial executado: workers descartáveis destruídos e snapshot T0 restaurado com sucesso.',
     });

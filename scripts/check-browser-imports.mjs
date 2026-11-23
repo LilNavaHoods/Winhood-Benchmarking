@@ -3,14 +3,16 @@
  *
  * Parses TypeScript/JavaScript ASTs (via the official TypeScript compiler API)
  * starting from frontend entry points (index.html / src/main.tsx + all client
- * UI components) and traverses static imports, re-exports, barrel files,
- * dynamic `import(...)`, and `require(...)` across `.ts`, `.tsx`, `.js`, `.jsx`,
- * `.mjs`, and `.cjs` files — resolving tsconfig/Vite path aliases.
+ * UI, shared, and utility modules) and traverses static imports, re-exports,
+ * barrel files, dynamic `import(...)`, and `require(...)` across `.ts`, `.tsx`,
+ * `.js`, `.jsx`, `.mjs`, and `.cjs` files — resolving both tsconfig.json and
+ * vite.config.* path aliases as well as TypeScript ESM `.js -> .ts` imports.
  *
  * Fails with exit code 1 if any Node.js built-in module (e.g., `node:child_process`,
  * `child_process`, `node:fs`, `fs`, `node:net`, `node:dns`, `node:os`, `node:crypto`,
- * `node:worker_threads`, etc.) or forbidden server-only package (`express`, `electron`)
- * is reachable in runtime client code.
+ * `node:worker_threads`, etc.) or forbidden server-only package (`express`, `electron`,
+ * `esbuild`, `tsx`, `dotenv`, `sqlite3`, `better-sqlite3`, `keytar`) is reachable in
+ * runtime client code.
  */
 
 import fs from 'node:fs';
@@ -20,6 +22,12 @@ import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 
 const RESOLVABLE_EXTENSIONS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
+const ESM_JS_TO_TS_FALLBACKS = {
+  '.js': ['.ts', '.tsx', '.js', '.jsx'],
+  '.jsx': ['.tsx', '.jsx'],
+  '.mjs': ['.mts', '.ts', '.mjs'],
+  '.cjs': ['.cts', '.ts', '.cjs'],
+};
 
 export const NODE_BUILTIN_SET = new Set([
   ...builtinModules,
@@ -32,6 +40,10 @@ export const FORBIDDEN_SERVER_PACKAGES = new Set([
   'electron',
   'esbuild',
   'tsx',
+  'dotenv',
+  'sqlite3',
+  'better-sqlite3',
+  'keytar',
 ]);
 
 export function isForbiddenBrowserSpecifier(specifier) {
@@ -99,7 +111,7 @@ export function extractRuntimeSpecifiersFromSource(filePath, sourceText) {
       }
     }
 
-    // 2. Re-exports: export * from '...' / export { a } from '...'
+    // 2. Re-exports: export * from '...' / export * as ns from '...' / export { a } from '...'
     if (
       ts.isExportDeclaration(node) &&
       node.moduleSpecifier &&
@@ -149,7 +161,7 @@ export function extractRuntimeSpecifiersFromSource(filePath, sourceText) {
   return specifiers;
 }
 
-function loadTsconfigPathAliases(rootDir) {
+export function loadTsconfigPathAliases(rootDir) {
   const tsconfigPath = path.join(rootDir, 'tsconfig.json');
   if (!fs.existsSync(tsconfigPath)) return [];
   try {
@@ -178,22 +190,164 @@ function loadTsconfigPathAliases(rootDir) {
   }
 }
 
+function evalSimplePathExpression(node, rootDir) {
+  if (!node) return null;
+  if (ts.isStringLiteralLike(node)) {
+    return path.resolve(rootDir, node.text);
+  }
+  // Support path.resolve(__dirname / import.meta.dirname, 'src', ...) or path.join(...)
+  if (ts.isCallExpression(node) && node.arguments.length >= 1) {
+    const exprText = node.expression.getText();
+    if (exprText.endsWith('resolve') || exprText.endsWith('join')) {
+      const segments = [];
+      for (const arg of node.arguments) {
+        if (ts.isStringLiteralLike(arg)) {
+          segments.push(arg.text);
+        } else {
+          const raw = arg.getText();
+          if (raw === '__dirname' || raw === 'import.meta.dirname' || raw === 'process.cwd()') {
+            segments.push(rootDir);
+          }
+        }
+      }
+      if (segments.length > 0) {
+        return path.resolve(rootDir, ...segments);
+      }
+    }
+  }
+  return null;
+}
+
+function pushViteAliasEntry(aliases, findKey, replacementPath) {
+  if (!findKey || !replacementPath) return;
+  const normalizedFind = findKey.trim();
+  if (!normalizedFind) return;
+  if (normalizedFind.endsWith('/')) {
+    aliases.push({ prefix: normalizedFind, targetDir: replacementPath });
+  } else {
+    aliases.push({ exact: normalizedFind, targetPath: replacementPath });
+    aliases.push({ prefix: `${normalizedFind}/`, targetDir: replacementPath });
+  }
+}
+
+/**
+ * Parses Vite `resolve.alias` entries (both object-map and `{ find, replacement }` array syntax)
+ * from `vite.config.{ts,mts,mjs,js}` using the TypeScript AST.
+ */
+export function loadViteAliases(rootDir) {
+  const candidates = ['vite.config.ts', 'vite.config.mts', 'vite.config.mjs', 'vite.config.js'];
+  const viteConfigPath = candidates
+    .map((f) => path.join(rootDir, f))
+    .find((p) => fs.existsSync(p) && fs.statSync(p).isFile());
+  if (!viteConfigPath) return [];
+
+  try {
+    const content = fs.readFileSync(viteConfigPath, 'utf8');
+    const sourceFile = ts.createSourceFile(
+      viteConfigPath,
+      content,
+      ts.ScriptTarget.Latest,
+      true,
+      getScriptKind(viteConfigPath)
+    );
+    const aliases = [];
+
+    const visit = (node) => {
+      if (
+        ts.isPropertyAssignment(node) &&
+        ((ts.isIdentifier(node.name) && node.name.text === 'alias') ||
+          (ts.isStringLiteral(node.name) && node.name.text === 'alias'))
+      ) {
+        const init = node.initializer;
+        if (ts.isObjectLiteralExpression(init)) {
+          for (const prop of init.properties) {
+            if (!ts.isPropertyAssignment(prop)) continue;
+            const key =
+              ts.isStringLiteralLike(prop.name) || ts.isIdentifier(prop.name)
+                ? prop.name.text
+                : null;
+            const target = evalSimplePathExpression(prop.initializer, rootDir);
+            if (key && target) {
+              pushViteAliasEntry(aliases, key, target);
+            }
+          }
+        } else if (ts.isArrayLiteralExpression(init)) {
+          for (const elem of init.elements) {
+            if (!ts.isObjectLiteralExpression(elem)) continue;
+            let findKey = null;
+            let replacement = null;
+            for (const prop of elem.properties) {
+              if (!ts.isPropertyAssignment(prop)) continue;
+              const propName =
+                ts.isIdentifier(prop.name) || ts.isStringLiteralLike(prop.name)
+                  ? prop.name.text
+                  : null;
+              if (propName === 'find' && ts.isStringLiteralLike(prop.initializer)) {
+                findKey = prop.initializer.text;
+              } else if (propName === 'replacement') {
+                replacement = evalSimplePathExpression(prop.initializer, rootDir);
+              }
+            }
+            if (findKey && replacement) {
+              pushViteAliasEntry(aliases, findKey, replacement);
+            }
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+
+    visit(sourceFile);
+    return aliases;
+  } catch {
+    return [];
+  }
+}
+
+export function loadModuleAliases(rootDir) {
+  const combined = [...loadTsconfigPathAliases(rootDir), ...loadViteAliases(rootDir)];
+  const seen = new Set();
+  return combined.filter((entry) => {
+    const sig = entry.prefix
+      ? `p:${entry.prefix}=>${entry.targetDir}`
+      : `e:${entry.exact}=>${entry.targetPath}`;
+    if (seen.has(sig)) return false;
+    seen.add(sig);
+    return true;
+  });
+}
+
 function resolveCandidateFile(baseCandidate) {
   // Exact file match
   if (fs.existsSync(baseCandidate) && fs.statSync(baseCandidate).isFile()) {
     return baseCandidate;
   }
+
+  // TypeScript ESM extension mapping (e.g. `./foo.js` -> `./foo.ts` / `./foo.tsx`)
+  const ext = path.extname(baseCandidate).toLowerCase();
+  const mappedExts = ESM_JS_TO_TS_FALLBACKS[ext];
+  if (mappedExts) {
+    const stem = baseCandidate.slice(0, -ext.length);
+    for (const candidateExt of mappedExts) {
+      const mapped = `${stem}${candidateExt}`;
+      if (fs.existsSync(mapped) && fs.statSync(mapped).isFile()) {
+        return mapped;
+      }
+    }
+  }
+
   // Try adding resolvable extensions
-  for (const ext of RESOLVABLE_EXTENSIONS) {
-    const withExt = `${baseCandidate}${ext}`;
+  for (const candidateExt of RESOLVABLE_EXTENSIONS) {
+    const withExt = `${baseCandidate}${candidateExt}`;
     if (fs.existsSync(withExt) && fs.statSync(withExt).isFile()) {
       return withExt;
     }
   }
+
   // Try directory index.* (barrel files)
   if (fs.existsSync(baseCandidate) && fs.statSync(baseCandidate).isDirectory()) {
-    for (const ext of RESOLVABLE_EXTENSIONS) {
-      const idxFile = path.join(baseCandidate, `index${ext}`);
+    for (const candidateExt of RESOLVABLE_EXTENSIONS) {
+      const idxFile = path.join(baseCandidate, `index${candidateExt}`);
       if (fs.existsSync(idxFile) && fs.statSync(idxFile).isFile()) {
         return idxFile;
       }
@@ -218,19 +372,43 @@ function resolveLocalModule(fromFile, specifier, rootDir, aliases) {
     return resolveCandidateFile(base);
   }
 
-  // Configured tsconfig/Vite aliases (e.g., @/src/...)
+  // Configured tsconfig/Vite aliases (e.g., @/src/..., @shared/...)
   for (const alias of aliases) {
     if (alias.exact && cleanSpec === alias.exact) {
-      return resolveCandidateFile(alias.targetPath);
+      const resolved = resolveCandidateFile(alias.targetPath);
+      if (resolved) return resolved;
     }
     if (alias.prefix && cleanSpec.startsWith(alias.prefix)) {
       const rest = cleanSpec.slice(alias.prefix.length);
       const base = path.resolve(alias.targetDir, rest);
-      return resolveCandidateFile(base);
+      const resolved = resolveCandidateFile(base);
+      if (resolved) return resolved;
     }
   }
 
   return null;
+}
+
+function collectSourceFilesRecursively(dirPath, out) {
+  if (!fs.existsSync(dirPath)) return;
+  for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+    const abs = path.join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name === '__tests__') {
+        continue;
+      }
+      collectSourceFilesRecursively(abs, out);
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    const name = entry.name;
+    if (name.includes('.test.') || name.includes('.spec.') || name.endsWith('.d.ts')) continue;
+    const ext = path.extname(name).toLowerCase();
+    if (!RESOLVABLE_EXTENSIONS.includes(ext)) continue;
+    if (!out.includes(abs)) {
+      out.push(abs);
+    }
+  }
 }
 
 function discoverDefaultFrontendEntries(rootDir) {
@@ -245,31 +423,21 @@ function discoverDefaultFrontendEntries(rootDir) {
       if (!src || src.startsWith('http://') || src.startsWith('https://')) continue;
       const rel = src.startsWith('/') ? src.slice(1) : src;
       const resolved = resolveCandidateFile(path.resolve(rootDir, rel));
-      if (resolved) entries.push(resolved);
+      if (resolved && !entries.includes(resolved)) entries.push(resolved);
     }
   }
 
-  const mainTsx = path.join(rootDir, 'src', 'main.tsx');
-  if (fs.existsSync(mainTsx) && !entries.includes(mainTsx)) {
-    entries.push(mainTsx);
+  for (const candidate of ['src/main.tsx', 'src/main.ts', 'src/App.tsx']) {
+    const abs = path.join(rootDir, candidate);
+    if (fs.existsSync(abs) && !entries.includes(abs)) {
+      entries.push(abs);
+    }
   }
 
-  // Also include every non-test file in src/components and src/shared so even
-  // detached/lazy UI components cannot silently re-introduce Node-only imports.
-  for (const subDir of ['src/components', 'src/shared']) {
-    const fullSubDir = path.join(rootDir, subDir);
-    if (!fs.existsSync(fullSubDir)) continue;
-    for (const entry of fs.readdirSync(fullSubDir, { withFileTypes: true })) {
-      if (!entry.isFile()) continue;
-      const name = entry.name;
-      if (name.includes('.test.') || name.includes('.spec.')) continue;
-      const ext = path.extname(name).toLowerCase();
-      if (!RESOLVABLE_EXTENSIONS.includes(ext)) continue;
-      const abs = path.join(fullSubDir, name);
-      if (!entries.includes(abs)) {
-        entries.push(abs);
-      }
-    }
+  // Recursively include every non-test file in src/components, src/shared, and src/utils
+  // so even detached/lazy UI components or shared helpers cannot silently pull Node-only modules.
+  for (const subDir of ['src/components', 'src/shared', 'src/utils']) {
+    collectSourceFilesRecursively(path.join(rootDir, subDir), entries);
   }
 
   return entries;
@@ -282,7 +450,7 @@ function discoverDefaultFrontendEntries(rootDir) {
  */
 export function analyzeBrowserDependencyGraph(options) {
   const rootDir = path.resolve(options.rootDir);
-  const aliases = loadTsconfigPathAliases(rootDir);
+  const aliases = loadModuleAliases(rootDir);
   const entryPoints =
     options.entryPoints && options.entryPoints.length > 0
       ? options.entryPoints.map((e) => path.resolve(rootDir, e))
@@ -353,7 +521,11 @@ const isDirectExecution =
   process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
 
 if (isDirectExecution) {
-  const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const rootArgIdx = process.argv.indexOf('--root');
+  const rootDir =
+    rootArgIdx !== -1 && process.argv[rootArgIdx + 1]
+      ? path.resolve(process.argv[rootArgIdx + 1])
+      : path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const result = analyzeBrowserDependencyGraph({ rootDir });
 
   if (!result.ok) {

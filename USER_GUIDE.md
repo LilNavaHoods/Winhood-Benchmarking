@@ -66,3 +66,20 @@ Você tem 3 maneiras de carregar softwares para comparação:
 | **Arquitetura & Ciclos** | Dependência circular + Violação de camada (UI acessando SQL direto) | Camadas desacopladas, `0` ciclos, trilha de auditoria íntegra | **KeeSafe Open** vence |
 | **Quality Gate (Modo MQR)** | `BLOCKED` (Reprovado — Security Rating E) | `APPROVED` (Aprovado — Ratings A em Segurança, Confiabilidade e Manutenibilidade) | **KeeSafe Open** vence |
 | **Nota Composta Final (0.00–5.00)** | **≤ 2.20 / 5.00** (Travado por Kill Switch) | **> 4.50 / 5.00** (**Vencedor Técnico Validado**) | Adoção recomendada: **KeeSafe Open** |
+
+---
+
+## 4. Solução de Problemas Comuns (Wizard, Benchmark A/B e Login GitHub)
+
+### Nova Avaliação (Wizard) e Benchmark A/B
+- **Soma de pesos diferente de `100%`:** ao habilitar ou desabilitar categorias na Etapa de Pesos, clique em **Normalizar para 100%** para redistribuir automaticamente os percentuais apenas entre as categorias ativas.
+- **Botão de execução bloqueado em Comparação A/B:** confirme que o **Software Principal (A)** e ao menos um **Software Concorrente (B)** distintos estão selecionados e possuem arquivos ingeridos em **Projetos & Softwares**.
+- **Comparabilidade marcada como assimétrica / vencedor bloqueado:** verifique na Etapa de Equivalência se ambos os softwares possuem escopo/linguagens compatíveis e condições experimentais alinhadas; quando há assimetria crítica, o motor bloqueia a declaração automática de vencedor por segurança metodológica.
+- **Cancelar uma execução em andamento:** utilize o botão de parada de emergência durante a execução para solicitar cancelamento seguro no backend (`POST /api/benchmark-runs/:id/cancel`).
+
+### Login Social GitHub (OAuth 2.0)
+- **Botão "Entrar ou cadastrar com GitHub" informa que não está configurado:** o administrador da instância ainda precisa cadastrar o **GitHub OAuth App** no servidor (consulte a Seção 4 do `README.md`). Enquanto isso, você pode usar **Workspace Local (1 clique)** ou **Windows Hello / Passkey**.
+- **Erro `redirect_uri_mismatch` na página do GitHub:** a *Authorization callback URL* cadastrada no GitHub Developer Settings diverge da URL configurada no servidor (`http://localhost:3000/api/auth/github/oauth/callback` em dev local ou `https://<dominio>/api/auth/github/oauth/callback` em produção).
+- **Erro de sessão/estado expirado ou inválido ao retornar do GitHub:** clique novamente em **Entrar ou cadastrar com GitHub** para iniciar um novo fluxo (cada `state` e `code` OAuth é de uso único por segurança contra replay). Certifique-se de que cookies estão habilitados para o domínio da aplicação.
+- **Cadastro via GitHub bloqueado (`signup_disabled`):** o administrador ativou `WINHOOD_GITHUB_ALLOW_SIGNUP=false`; solicite a vinculação prévia da sua conta ou acesse por outro método autorizado.
+

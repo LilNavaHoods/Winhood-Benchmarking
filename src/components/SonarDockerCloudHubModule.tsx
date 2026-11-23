@@ -27,7 +27,7 @@ import {
   FileCode2,
   PlusCircle,
 } from 'lucide-react';
-import type { HardwareProfile } from '../engine/workerPool';
+import type { HardwareProfile } from '../shared/benchmarkConfig';
 import type {
   SavedSonarProjectProfile,
   SonarHotspotsBreakdown,

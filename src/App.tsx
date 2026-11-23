@@ -53,6 +53,7 @@ import { ContextualScreenHelpBanner } from './components/ContextualScreenHelpBan
 import { AnalysisProgressHeaderBanner } from './components/AnalysisProgressHeaderBanner';
 import { WinHoodLogo } from './components/WinHoodLogo';
 import { AuthGateModal, type AuthUserView } from './components/AuthGateModal';
+import { extractGitHubOAuthErrorFromSearch } from './shared/authTypes';
 import { ModuleErrorBoundary } from './components/ModuleErrorBoundary';
 import {
   clearClientAuthTokens,
@@ -259,8 +260,8 @@ export default function App() {
     }
     try {
       const [sessRes, bsRes] = await Promise.all([
-        fetch('/api/auth/session'),
-        fetch('/api/auth/bootstrap-status'),
+        fetch('/api/auth/session', { cache: 'no-store' }),
+        fetch('/api/auth/bootstrap-status', { cache: 'no-store' }),
       ]);
       if (sessRes.status >= 500 || bsRes.status >= 500) {
         setAuthStatus('error');
@@ -383,6 +384,16 @@ export default function App() {
 
   useEffect(() => {
     if (authenticated && !mfaRequired) {
+      if (typeof window !== 'undefined') {
+        const parsedErr = extractGitHubOAuthErrorFromSearch(window.location.search);
+        if (parsedErr.errorCode) {
+          if (parsedErr.message) {
+            notify(parsedErr.message, 'error');
+          }
+          const nextUrl = `${window.location.pathname}${parsedErr.cleanedSearch}${window.location.hash}`;
+          window.history.replaceState({}, document.title, nextUrl);
+        }
+      }
       void fetchAllBackendState();
     } else if (!authLoading) {
       setLoading(false);

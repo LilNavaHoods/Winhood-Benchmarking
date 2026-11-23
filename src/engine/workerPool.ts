@@ -7,19 +7,9 @@
  */
 
 import os from 'os';
+import type { HardwareProfile } from '../shared/benchmarkConfig';
 
-export interface HardwareProfile {
-  cpuModel: string;
-  totalLogicalCores: number;
-  activeThreadsLimit: number;
-  totalMemoryMb: number;
-  freeMemoryMb: number;
-  memoryLimitMb: number;
-  platform: string;
-  architecture: string;
-  performanceMode: 'ECONOMICAL' | 'BALANCED' | 'TURBO_MAX';
-  multithreadCapable: boolean;
-}
+export type { HardwareProfile };
 
 export interface ProcessingBatchChunk<T> {
   chunkIndex: number;

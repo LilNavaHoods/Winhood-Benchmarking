@@ -23,12 +23,12 @@ import {
   ALL_BENCHMARK_CATEGORIES,
   DEFAULT_CATEGORY_WEIGHTS,
 } from '../shared/benchmarkCategories';
+import { normalizeEnabledCategoryWeights } from '../shared/benchmarkWeights';
 import {
   classifyScoreScale,
-  normalizeEnabledCategoryWeights,
   validateCategoryWeights,
   validateEquivalenceConditions,
-} from '../shared/benchmarkWeights';
+} from '../shared/benchmarkValidation';
 
 export {
   ALL_BENCHMARK_CATEGORIES,
@@ -285,6 +285,8 @@ export function enrichLegacyOrExternalFinding(
     toolId,
     toolName: partial.toolName || 'External Static Analyzer',
     toolVersion: partial.toolVersion || '1.0.0',
+    ...(partial.detectionMethod ? { detectionMethod: partial.detectionMethod } : {}),
+    ...(partial.originType ? { originType: partial.originType } : {}),
     category,
     originalRuleId: partial.originalRuleId,
     title: partial.title,
@@ -318,6 +320,7 @@ export function enrichLegacyOrExternalFinding(
     remediation: partial.remediation || 'Revisar e corrigir o trecho conforme o guia da regra.',
     evidenceSha256,
     validationStatus: partial.validationStatus || 'VALIDATED',
+    ...(partial.lifecycleState ? { lifecycleState: partial.lifecycleState } : {}),
     collectedAt: partial.collectedAt || new Date().toISOString(),
   };
 }

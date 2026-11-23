@@ -1,8 +1,8 @@
 // server.ts
-import crypto31 from "node:crypto";
-import fs16 from "node:fs";
-import os10 from "node:os";
-import path17 from "node:path";
+import crypto32 from "node:crypto";
+import fs18 from "node:fs";
+import os11 from "node:os";
+import path19 from "node:path";
 import { execFile as execFile2 } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { promisify as promisify2 } from "node:util";
@@ -2295,56 +2295,7 @@ var MARKET_CATEGORIES = [
   "Aplica\xE7\xF5es Mobile"
 ];
 
-// src/shared/benchmarkWeights.ts
-function normalizeEnabledCategoryWeights(weights, enabledCategories) {
-  const activeList = enabledCategories && enabledCategories.length > 0 ? enabledCategories : ALL_BENCHMARK_CATEGORIES;
-  const activeSet = new Set(activeList);
-  let rawSum = 0;
-  for (const key of ALL_BENCHMARK_CATEGORIES) {
-    if (activeSet.has(key)) {
-      const candidate = weights[key];
-      const w = typeof candidate === "number" && Number.isFinite(candidate) ? candidate : DEFAULT_CATEGORY_WEIGHTS[key] ?? 0;
-      rawSum += Math.max(0, w);
-    }
-  }
-  const normalized = { ...DEFAULT_CATEGORY_WEIGHTS };
-  if (rawSum <= 0) {
-    const equalShare = Math.floor(100 / activeList.length * 100) / 100;
-    let allocated = 0;
-    for (const key of ALL_BENCHMARK_CATEGORIES) {
-      if (activeSet.has(key)) {
-        normalized[key] = equalShare;
-        allocated = Math.round((allocated + equalShare) * 100) / 100;
-      } else {
-        normalized[key] = 0;
-      }
-    }
-    const firstKey = activeList[0];
-    if (firstKey) {
-      normalized[firstKey] = Math.round((normalized[firstKey] + (100 - allocated)) * 100) / 100;
-    }
-    return normalized;
-  }
-  let runningSum = 0;
-  for (const key of ALL_BENCHMARK_CATEGORIES) {
-    if (!activeSet.has(key)) {
-      normalized[key] = 0;
-    } else {
-      const candidate = weights[key];
-      const rawWeight = typeof candidate === "number" && Number.isFinite(candidate) ? candidate : DEFAULT_CATEGORY_WEIGHTS[key] ?? 0;
-      const w = Math.max(0, rawWeight);
-      const scaled = Math.round(w / rawSum * 100 * 100) / 100;
-      normalized[key] = scaled;
-      runningSum = Math.round((runningSum + scaled) * 100) / 100;
-    }
-  }
-  const remainder = Math.round((100 - runningSum) * 100) / 100;
-  if (Math.abs(remainder) > 0 && activeList.length > 0) {
-    const targetKey = activeList.find((k) => normalized[k] + remainder >= 0) || activeList[0];
-    normalized[targetKey] = Math.round((normalized[targetKey] + remainder) * 100) / 100;
-  }
-  return normalized;
-}
+// src/shared/benchmarkValidation.ts
 function validateCategoryWeights(weights, enabledCategories) {
   const errors = [];
   const activeSet = enabledCategories && enabledCategories.length > 0 ? new Set(enabledCategories) : null;
@@ -2402,6 +2353,57 @@ function classifyScoreScale(score) {
   if (score < 3.7) return "Adequado";
   if (score < 4.5) return "Muito bom";
   return "Excelente";
+}
+
+// src/shared/benchmarkWeights.ts
+function normalizeEnabledCategoryWeights(weights, enabledCategories) {
+  const activeList = enabledCategories && enabledCategories.length > 0 ? enabledCategories : ALL_BENCHMARK_CATEGORIES;
+  const activeSet = new Set(activeList);
+  let rawSum = 0;
+  for (const key of ALL_BENCHMARK_CATEGORIES) {
+    if (activeSet.has(key)) {
+      const candidate = weights[key];
+      const w = typeof candidate === "number" && Number.isFinite(candidate) ? candidate : DEFAULT_CATEGORY_WEIGHTS[key] ?? 0;
+      rawSum += Math.max(0, w);
+    }
+  }
+  const normalized = { ...DEFAULT_CATEGORY_WEIGHTS };
+  if (rawSum <= 0) {
+    const equalShare = Math.floor(100 / activeList.length * 100) / 100;
+    let allocated = 0;
+    for (const key of ALL_BENCHMARK_CATEGORIES) {
+      if (activeSet.has(key)) {
+        normalized[key] = equalShare;
+        allocated = Math.round((allocated + equalShare) * 100) / 100;
+      } else {
+        normalized[key] = 0;
+      }
+    }
+    const firstKey = activeList[0];
+    if (firstKey) {
+      normalized[firstKey] = Math.round((normalized[firstKey] + (100 - allocated)) * 100) / 100;
+    }
+    return normalized;
+  }
+  let runningSum = 0;
+  for (const key of ALL_BENCHMARK_CATEGORIES) {
+    if (!activeSet.has(key)) {
+      normalized[key] = 0;
+    } else {
+      const candidate = weights[key];
+      const rawWeight = typeof candidate === "number" && Number.isFinite(candidate) ? candidate : DEFAULT_CATEGORY_WEIGHTS[key] ?? 0;
+      const w = Math.max(0, rawWeight);
+      const scaled = Math.round(w / rawSum * 100 * 100) / 100;
+      normalized[key] = scaled;
+      runningSum = Math.round((runningSum + scaled) * 100) / 100;
+    }
+  }
+  const remainder = Math.round((100 - runningSum) * 100) / 100;
+  if (Math.abs(remainder) > 0 && activeList.length > 0) {
+    const targetKey = activeList.find((k) => normalized[k] + remainder >= 0) || activeList[0];
+    normalized[targetKey] = Math.round((normalized[targetKey] + remainder) * 100) / 100;
+  }
+  return normalized;
 }
 
 // src/engine/scoringEngine.ts
@@ -2583,6 +2585,8 @@ function enrichLegacyOrExternalFinding(partial) {
     toolId,
     toolName: partial.toolName || "External Static Analyzer",
     toolVersion: partial.toolVersion || "1.0.0",
+    ...partial.detectionMethod ? { detectionMethod: partial.detectionMethod } : {},
+    ...partial.originType ? { originType: partial.originType } : {},
     category,
     originalRuleId: partial.originalRuleId,
     title: partial.title,
@@ -2615,6 +2619,7 @@ function enrichLegacyOrExternalFinding(partial) {
     remediation: partial.remediation || "Revisar e corrigir o trecho conforme o guia da regra.",
     evidenceSha256,
     validationStatus: partial.validationStatus || "VALIDATED",
+    ...partial.lifecycleState ? { lifecycleState: partial.lifecycleState } : {},
     collectedAt: partial.collectedAt || (/* @__PURE__ */ new Date()).toISOString()
   };
 }
@@ -7688,7 +7693,9 @@ var SandboxExecutor = class _SandboxExecutor {
     const dockerBin = getDockerBinaryPath();
     const bwrapBin = getBwrapBinaryPath();
     const unshareBin = getUnshareBinaryPath();
-    const dockerAvailable = checkBinaryCommand(dockerBin, ["info"]);
+    const dockerDaemonAvailable = checkBinaryCommand(dockerBin, ["info"]);
+    const dockerNodeImageAvailable = dockerDaemonAvailable && checkBinaryCommand(dockerBin, ["image", "inspect", "node:22-alpine"]);
+    const dockerAvailable = dockerNodeImageAvailable;
     const bwrapAvailable = platform === "linux" && checkBinaryCommand(bwrapBin, ["--version"]);
     const unshareAvailable = platform === "linux" && checkBinaryCommand(unshareBin, ["--user", "--map-root-user", "true"]);
     const winSysRoot = process.env.SystemRoot || "C:\\Windows";
@@ -7727,8 +7734,12 @@ var SandboxExecutor = class _SandboxExecutor {
         "Nenhum runtime de sandbox isolado (Docker, bwrap, unshare, Windows Sandbox ou Node --permission) est\xE1 operacional neste host."
       );
     }
-    if (!dockerAvailable) {
+    if (!dockerDaemonAvailable) {
       limitations.push("Docker daemon n\xE3o dispon\xEDvel; execu\xE7\xE3o em container descart\xE1vel desativada.");
+    } else if (!dockerNodeImageAvailable) {
+      limitations.push(
+        "Docker daemon dispon\xEDvel, por\xE9m imagem offline node:22-alpine n\xE3o est\xE1 em cache local; usando isolamento Node Permission Model para testes JS/MJS."
+      );
     }
     if (platform !== "win32") {
       limitations.push("Windows Sandbox (T0/T1/T2 Sysinternals) indispon\xEDvel em host Linux.");
@@ -7832,8 +7843,19 @@ var SandboxExecutor = class _SandboxExecutor {
       }
       isolationState = "ISOLATION_VERIFIED";
       const childEnv = buildMinimalSandboxEnv(realTmpRoot);
+      const nodeRuntime = resolveNodeRuntimeForSubprocess();
       let res;
       if (probe.dockerAvailable) {
+        try {
+          fs4.chmodSync(realTmpRoot, 493);
+          for (const relPath of Object.keys(params.filesMap || {})) {
+            const p = path4.resolve(realTmpRoot, relPath.replace(/^\/+/, ""));
+            if (p.startsWith(realTmpRoot + path4.sep) && fs4.existsSync(p)) {
+              fs4.chmodSync(p, 420);
+            }
+          }
+        } catch {
+        }
         res = spawnSync2(
           getDockerBinaryPath(),
           [
@@ -7875,7 +7897,7 @@ var SandboxExecutor = class _SandboxExecutor {
         ].join("\n");
         fs4.writeFileSync(runnerFile, runnerScript, "utf8");
         res = spawnSync2(
-          process.execPath,
+          nodeRuntime.executablePath,
           [
             "--permission",
             `--allow-fs-read=${realTmpRoot}`,
@@ -7898,15 +7920,17 @@ var SandboxExecutor = class _SandboxExecutor {
       const durationMs = Math.max(1, Math.round(performance.now() - startMs));
       const stdout = res.stdout || "";
       const stderr = res.stderr || "";
+      const timedOut = Boolean(res.error && res.error.code === "ETIMEDOUT");
       const result = {
-        executed: res.status !== null && !res.error,
+        executed: !timedOut && res.status !== null && !res.error,
         blocked: false,
         isolationMode: probe.dockerAvailable ? "RESTRICTED_CONTAINER" : "NODE_PERMISSION_SUBPROCESS",
         isolationState,
         recoveryVerified: false,
         exitCode: res.status,
         stdout,
-        stderr,
+        stderr: timedOut ? `Timeout excedido (${timeoutMs}ms): processo encerrado.
+${stderr}` : stderr,
         stdoutSha256: crypto5.createHash("sha256").update(stdout, "utf8").digest("hex"),
         stderrSha256: crypto5.createHash("sha256").update(stderr, "utf8").digest("hex"),
         durationMs,
@@ -7995,39 +8019,52 @@ var SandboxExecutor = class _SandboxExecutor {
         }
       }
       const childEnv = buildMinimalSandboxEnv(realTmpRoot);
-      const res = probe.dockerAvailable ? spawnSync2(
-        getDockerBinaryPath(),
-        [
-          "run",
-          "--rm",
-          "--network=none",
-          "--read-only",
-          "--cap-drop=ALL",
-          "--security-opt=no-new-privileges",
-          "--pids-limit=64",
-          "--memory=512m",
-          "--cpus=1",
-          "--user=65534:65534",
-          "--tmpfs",
-          "/tmp:rw,noexec,nosuid,size=64m",
-          "-v",
-          `${realTmpRoot}:/workspace:ro`,
-          "-w",
-          "/workspace",
-          "node:22-alpine",
-          "node",
-          "--test",
-          "--test-reporter=tap",
-          ...safeTestFiles
-        ],
-        {
-          shell: false,
-          encoding: "utf8",
-          timeout: timeoutMs,
-          maxBuffer: 4 * 1024 * 1024,
-          env: childEnv
+      const nodeRuntime = resolveNodeRuntimeForSubprocess();
+      const res = probe.dockerAvailable ? (() => {
+        try {
+          fs4.chmodSync(realTmpRoot, 493);
+          for (const relPath of Object.keys(params.filesMap || {})) {
+            const p = path4.resolve(realTmpRoot, relPath.replace(/^\/+/, ""));
+            if (p.startsWith(realTmpRoot + path4.sep) && fs4.existsSync(p)) {
+              fs4.chmodSync(p, 420);
+            }
+          }
+        } catch {
         }
-      ) : (() => {
+        return spawnSync2(
+          getDockerBinaryPath(),
+          [
+            "run",
+            "--rm",
+            "--network=none",
+            "--read-only",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "--pids-limit=64",
+            "--memory=512m",
+            "--cpus=1",
+            "--user=65534:65534",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=64m",
+            "-v",
+            `${realTmpRoot}:/workspace:ro`,
+            "-w",
+            "/workspace",
+            "node:22-alpine",
+            "node",
+            "--test",
+            "--test-reporter=tap",
+            ...safeTestFiles
+          ],
+          {
+            shell: false,
+            encoding: "utf8",
+            timeout: timeoutMs,
+            maxBuffer: 4 * 1024 * 1024,
+            env: childEnv
+          }
+        );
+      })() : (() => {
         const runnerFile = path4.join(realTmpRoot, ".winhood_runner.mjs");
         const runnerScript = [
           `const files = ${JSON.stringify(safeTestFiles.map((tf) => "./" + tf.replace(/\\/g, "/")))};`,
@@ -8035,7 +8072,7 @@ var SandboxExecutor = class _SandboxExecutor {
         ].join("\n");
         fs4.writeFileSync(runnerFile, runnerScript, "utf8");
         return spawnSync2(
-          process.execPath,
+          nodeRuntime.executablePath,
           [
             "--permission",
             `--allow-fs-read=${realTmpRoot}`,
@@ -11539,22 +11576,9 @@ export function searchCredentialsController(userInput: string) {
   };
 }
 
-// src/engine/methodologyCatalogEngine.ts
+// src/shared/benchmarkConfig.ts
 var METHODOLOGY_CATALOG_VERSION = "WINHOOD-CATALOG-v4.0.0";
-var ALL_12_CATEGORIES = [
-  "functionality",
-  "code_quality",
-  "security",
-  "performance",
-  "architecture",
-  "database",
-  "reliability",
-  "compatibility",
-  "usability",
-  "installation",
-  "privacy",
-  "documentation"
-];
+var ALL_12_CATEGORIES = ALL_BENCHMARK_CATEGORIES;
 var EVALUATION_CRITERIA_CATALOG = [
   {
     id: "CRIT-FUNC-001",
@@ -26483,9 +26507,50 @@ ${token}
     const fallbackNoreply = typeof params.githubId === "number" ? `${params.githubId}+${cleanLogin}@users.noreply.github.com` : `${cleanLogin}@users.noreply.github.com`;
     const candidateEmail = (params.email || fallbackNoreply).trim().toLowerCase();
     const resolvedEmail = isValidEmailAddress(candidateEmail) ? candidateEmail : fallbackNoreply;
+    const isSyntheticNoreply = resolvedEmail === fallbackNoreply;
+    const emailVerified = typeof params.emailVerified === "boolean" ? params.emailVerified : isSyntheticNoreply;
     const cleanName = (params.name || cleanLogin).replace(/[\r\n\0]/g, " ").trim().slice(0, 80) || cleanLogin;
     const now = (/* @__PURE__ */ new Date()).toISOString();
-    let user = (typeof params.githubId === "number" ? this.db.users.find((u) => u.githubId === params.githubId) : void 0) || this.db.users.find((u) => u.githubLogin?.toLowerCase() === cleanLogin.toLowerCase()) || this.db.users.find((u) => u.email === resolvedEmail);
+    let user = typeof params.githubId === "number" ? this.db.users.find((u) => u.githubId === params.githubId) : void 0;
+    if (!user) {
+      const loginMatch = this.db.users.find(
+        (u) => u.githubLogin?.toLowerCase() === cleanLogin.toLowerCase()
+      );
+      if (loginMatch) {
+        if (typeof params.githubId === "number" && typeof loginMatch.githubId === "number" && loginMatch.githubId !== params.githubId) {
+          throw new Error(
+            "GITHUB_ALREADY_LINKED: O login GitHub informado pertence a outra identidade j\xE1 vinculada."
+          );
+        }
+        user = loginMatch;
+      }
+    }
+    if (!user) {
+      const emailMatch = this.db.users.find((u) => u.email === resolvedEmail);
+      if (emailMatch) {
+        if (typeof params.githubId === "number" && typeof emailMatch.githubId === "number" && emailMatch.githubId !== params.githubId) {
+          throw new Error(
+            "GITHUB_ALREADY_LINKED: Este endere\xE7o de e-mail j\xE1 est\xE1 vinculado a outra conta GitHub."
+          );
+        }
+        if (!emailVerified) {
+          throw new Error(
+            "AUTH_EMAIL_VERIFICATION_REQUIRED: N\xE3o \xE9 permitido vincular automaticamente uma conta existente usando e-mail GitHub n\xE3o verificado."
+          );
+        }
+        user = emailMatch;
+      }
+    }
+    if (user && typeof params.githubId === "number") {
+      const duplicateOwner = this.db.users.find(
+        (u) => u.id !== user.id && u.githubId === params.githubId
+      );
+      if (duplicateOwner) {
+        throw new Error(
+          "GITHUB_ALREADY_LINKED: Esta conta GitHub j\xE1 est\xE1 associada a outro usu\xE1rio."
+        );
+      }
+    }
     let isNewAccount = false;
     if (!user) {
       if (params.allowSignup === false) {
@@ -26494,12 +26559,25 @@ ${token}
         );
       }
       isNewAccount = true;
-      const isFirstUser = this.db.users.length === 0;
+      let grantedAdminViaBootstrap = false;
+      if (params.bootstrapAdminToken && this.db.bootstrapTokenSha256) {
+        const provided = params.bootstrapAdminToken.trim();
+        const notExpired = !this.db.bootstrapTokenExpiresAt || Date.now() <= Date.parse(this.db.bootstrapTokenExpiresAt);
+        if (provided && notExpired) {
+          const providedSha = Buffer.from(sha256(provided), "hex");
+          const storedSha = Buffer.from(this.db.bootstrapTokenSha256, "hex");
+          if (providedSha.length === storedSha.length && crypto19.timingSafeEqual(providedSha, storedSha)) {
+            grantedAdminViaBootstrap = true;
+          }
+        }
+      }
+      const canGrantFirstLocalAdmin = this.db.users.length === 0 && params.isInternetExposed !== true && params.allowFirstUserAdmin === true;
+      const assignedRole = grantedAdminViaBootstrap || canGrantFirstLocalAdmin ? "ADMIN" : "SECURITY_LEAD";
       user = {
         id: `usr-gh-${crypto19.randomUUID().slice(0, 8)}`,
         name: cleanName,
         email: resolvedEmail,
-        role: isFirstUser ? "ADMIN" : "SECURITY_LEAD",
+        role: assignedRole,
         passwordHash: hashPassword(`wh-gh-oauth-${crypto19.randomBytes(24).toString("base64url")}`),
         pinHash: null,
         pinEnabled: false,
@@ -26521,7 +26599,7 @@ ${token}
         updatedAt: now
       };
       this.db.users.push(user);
-      if (isFirstUser) {
+      if (assignedRole === "ADMIN") {
         this.completeBootstrapOnFirstAccount(now);
       }
     } else if (user.disabled) {
@@ -26539,21 +26617,59 @@ ${token}
       user.authProviders = Array.from(providers);
       user.updatedAt = now;
     }
+    const mfaVerified = !user.mfaEnabled;
     const { sessionId, session } = this.createSessionRecord(
       user,
-      true,
+      mfaVerified,
       params.ipAddress || "127.0.0.1",
       params.userAgent || "WinHood-GitHub-OAuth",
       { trustDevice: true }
     );
     this.save();
     return {
-      user: this.toPublicUserView(user, true),
+      user: this.toPublicUserView(user, mfaVerified),
       sessionId,
       csrfToken: session.csrfToken,
       trustDevice: true,
-      isNewAccount
+      isNewAccount,
+      mfaRequired: user.mfaEnabled
     };
+  }
+  /**
+   * Fluxo explícito, seguro e de uso único para promoção administrativa inicial via token de bootstrap.
+   * Impede escalonamento automático de privilégios para o primeiro usuário GitHub em instalações expostas.
+   */
+  claimAdminWithBootstrapToken(userId, bootstrapToken) {
+    const user = this.db.users.find((u) => u.id === userId && !u.disabled);
+    if (!user) {
+      throw new Error("USER_NOT_FOUND: Usu\xE1rio n\xE3o encontrado.");
+    }
+    const existingAdmin = this.db.users.find((u) => u.role === "ADMIN" && !u.disabled);
+    if (existingAdmin) {
+      throw new Error(
+        "BOOTSTRAP_ALREADY_COMPLETED: Esta instala\xE7\xE3o j\xE1 possui um administrador ativo."
+      );
+    }
+    const provided = (bootstrapToken || "").trim();
+    if (!provided || !this.db.bootstrapTokenSha256) {
+      throw new Error(
+        "BOOTSTRAP_TOKEN_INVALID: Token de bootstrap administrativo ausente ou j\xE1 consumido."
+      );
+    }
+    if (this.db.bootstrapTokenExpiresAt && Date.now() > Date.parse(this.db.bootstrapTokenExpiresAt)) {
+      throw new Error("BOOTSTRAP_TOKEN_EXPIRED: Token de bootstrap administrativo expirado.");
+    }
+    const providedSha = Buffer.from(sha256(provided), "hex");
+    const storedSha = Buffer.from(this.db.bootstrapTokenSha256, "hex");
+    if (providedSha.length !== storedSha.length || !crypto19.timingSafeEqual(providedSha, storedSha)) {
+      throw new Error("BOOTSTRAP_TOKEN_INVALID: Token de bootstrap administrativo inv\xE1lido.");
+    }
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    user.role = "ADMIN";
+    user.updatedAt = now;
+    this.completeBootstrapOnFirstAccount(now);
+    this.save();
+    return this.toPublicUserView(user, true);
   }
   linkGitHubAccountToUser(userId, params) {
     const user = this.db.users.find((u) => u.id === userId && !u.disabled);
@@ -26720,12 +26836,14 @@ function buildGitHubOAuthAuthorizeUrl(params) {
     state: params.state,
     code_challenge: params.codeChallenge,
     code_challenge_method: "S256",
-    allow_signup: "true"
+    allow_signup: params.allowSignup === false ? "false" : "true"
   });
   return `https://github.com/login/oauth/authorize?${qs.toString()}`;
 }
 async function exchangeGitHubOAuthCode(params) {
-  if (!params.clientId.trim() || !params.clientSecret.trim()) {
+  const cleanClientId = params.clientId.trim();
+  const cleanClientSecret = params.clientSecret.trim();
+  if (!cleanClientId || !cleanClientSecret) {
     throw new Error(
       "GITHUB_OAUTH_CONFIG_MISSING: Configure WINHOOD_GITHUB_OAUTH_CLIENT_ID e WINHOOD_GITHUB_OAUTH_CLIENT_SECRET."
     );
@@ -26737,8 +26855,8 @@ async function exchangeGitHubOAuthCode(params) {
       "Content-Type": "application/x-www-form-urlencoded"
     },
     body: new URLSearchParams({
-      client_id: params.clientId.trim(),
-      client_secret: params.clientSecret.trim(),
+      client_id: cleanClientId,
+      client_secret: cleanClientSecret,
       code: params.code.trim(),
       redirect_uri: params.redirectUri,
       code_verifier: params.codeVerifier
@@ -26749,9 +26867,9 @@ async function exchangeGitHubOAuthCode(params) {
   }
   const data = await res.json();
   if (!data.access_token) {
-    throw new Error(
-      `GITHUB_OAUTH_EXCHANGE_FAILED: ${data.error_description || data.error || "Token ausente."}`
-    );
+    const rawDetail = String(data.error_description || data.error || "Token ausente.");
+    const safeDetail = rawDetail.split(cleanClientSecret).join("[REDACTED]").slice(0, 200);
+    throw new Error(`GITHUB_OAUTH_EXCHANGE_FAILED: ${safeDetail}`);
   }
   return {
     accessToken: data.access_token,
@@ -26778,32 +26896,50 @@ async function fetchGitHubAuthenticatedProfile(accessToken) {
   if (!userJson.login || typeof userJson.id !== "number") {
     throw new Error("GITHUB_PROFILE_INCOMPLETE: API do GitHub n\xE3o retornou id/login.");
   }
-  let resolvedEmail = (userJson.email || "").trim().toLowerCase();
-  if (!resolvedEmail) {
-    try {
-      const emailsRes = await fetch("https://api.github.com/user/emails", { headers });
-      if (emailsRes.ok) {
-        const emails = await emailsRes.json();
-        if (Array.isArray(emails)) {
-          const primaryVerified = emails.find((e) => e.primary && e.verified && e.email);
-          const anyVerified = emails.find((e) => e.verified && e.email);
-          const primaryAny = emails.find((e) => e.primary && e.email);
-          resolvedEmail = String(
-            primaryVerified?.email || anyVerified?.email || primaryAny?.email || ""
-          ).trim().toLowerCase();
+  let resolvedEmail = "";
+  let emailVerified = false;
+  const publicEmail = (userJson.email || "").trim().toLowerCase();
+  try {
+    const emailsRes = await fetch("https://api.github.com/user/emails", { headers });
+    if (emailsRes.ok) {
+      const emails = await emailsRes.json();
+      if (Array.isArray(emails)) {
+        const primaryVerified = emails.find((e) => e.primary && e.verified && e.email);
+        const anyVerified = emails.find((e) => e.verified && e.email);
+        const primaryAny = emails.find((e) => e.primary && e.email);
+        if (primaryVerified?.email) {
+          resolvedEmail = String(primaryVerified.email).trim().toLowerCase();
+          emailVerified = true;
+        } else if (anyVerified?.email) {
+          resolvedEmail = String(anyVerified.email).trim().toLowerCase();
+          emailVerified = true;
+        } else if (publicEmail) {
+          resolvedEmail = publicEmail;
+          emailVerified = emails.some(
+            (e) => e.verified && String(e.email || "").trim().toLowerCase() === publicEmail
+          );
+        } else if (primaryAny?.email) {
+          resolvedEmail = String(primaryAny.email).trim().toLowerCase();
+          emailVerified = false;
         }
       }
-    } catch {
     }
+  } catch {
+  }
+  if (!resolvedEmail && publicEmail) {
+    resolvedEmail = publicEmail;
+    emailVerified = false;
   }
   if (!resolvedEmail) {
     resolvedEmail = `${userJson.id}+${userJson.login}@users.noreply.github.com`;
+    emailVerified = true;
   }
   return {
     id: userJson.id,
     login: userJson.login,
     name: (userJson.name || userJson.login).trim(),
     email: resolvedEmail,
+    emailVerified,
     avatarUrl: userJson.avatar_url || null
   };
 }
@@ -26985,22 +27121,243 @@ async function verifyGitHubOAuthConnection(params) {
   }
 }
 
-// src/storage/PersistentDatabaseManager.ts
+// src/security/GitHubOAuthTransactionStore.ts
 import crypto21 from "node:crypto";
 import fs14 from "node:fs";
 import path15 from "node:path";
-import zlib from "node:zlib";
+var DEFAULT_CODE_REPLAY_TTL_MS = 15 * 60 * 1e3;
 function sha256Hex2(raw) {
   return crypto21.createHash("sha256").update(raw, "utf8").digest("hex");
 }
-function fsyncAndRename(tmpPath, targetPath) {
-  const fd = fs14.openSync(tmpPath, "r+");
-  try {
-    fs14.fsyncSync(fd);
-  } finally {
-    fs14.closeSync(fd);
+var GitHubOAuthTransactionStore = class {
+  constructor(dataDir) {
+    this.storeFilePath = path15.join(dataDir, "security", "github_oauth_transactions.json");
+    this.keystorePath = path15.join(dataDir, "keys", "keystore.json");
   }
-  fs14.renameSync(tmpPath, targetPath);
+  encryptValue(plain) {
+    const { keyId, keyBuffer } = KeyManagementService.getActiveVaultAesKey(this.keystorePath);
+    const iv = crypto21.randomBytes(12);
+    const cipher = crypto21.createCipheriv("aes-256-gcm", keyBuffer, iv);
+    const encrypted = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    return `whoauth:v1:${keyId}:${iv.toString("hex")}:${tag.toString("hex")}:${encrypted.toString("hex")}`;
+  }
+  decryptValue(stored) {
+    if (!stored) return void 0;
+    if (!stored.startsWith("whoauth:v1:")) return stored;
+    const parts = stored.split(":");
+    if (parts.length !== 6) return void 0;
+    const [, , keyId, ivHex, tagHex, cipherHex] = parts;
+    const keyBuf = KeyManagementService.getVaultKeyBufferByKeyId(keyId, this.keystorePath) || KeyManagementService.getActiveVaultAesKey(this.keystorePath).keyBuffer;
+    const decipher = crypto21.createDecipheriv("aes-256-gcm", keyBuf, Buffer.from(ivHex, "hex"));
+    decipher.setAuthTag(Buffer.from(tagHex, "hex"));
+    const plain = Buffer.concat([
+      decipher.update(Buffer.from(cipherHex, "hex")),
+      decipher.final()
+    ]);
+    return plain.toString("utf8");
+  }
+  readStore() {
+    const empty = {
+      schemaVersion: 1,
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      transactions: {},
+      consumedCodeHashes: {}
+    };
+    try {
+      if (!fs14.existsSync(this.storeFilePath)) return empty;
+      const raw = fs14.readFileSync(this.storeFilePath, "utf8");
+      const parsed = JSON.parse(raw);
+      return {
+        schemaVersion: 1,
+        updatedAt: parsed.updatedAt || (/* @__PURE__ */ new Date()).toISOString(),
+        transactions: parsed.transactions && typeof parsed.transactions === "object" ? parsed.transactions : {},
+        consumedCodeHashes: parsed.consumedCodeHashes && typeof parsed.consumedCodeHashes === "object" ? parsed.consumedCodeHashes : {}
+      };
+    } catch {
+      return empty;
+    }
+  }
+  writeStoreAtomic(data) {
+    const dir = path15.dirname(this.storeFilePath);
+    if (!fs14.existsSync(dir)) {
+      fs14.mkdirSync(dir, { recursive: true });
+    }
+    data.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    const tmpPath = `${this.storeFilePath}.tmp.${process.pid}.${crypto21.randomBytes(4).toString("hex")}`;
+    fs14.writeFileSync(tmpPath, JSON.stringify(data, null, 2), { encoding: "utf8", mode: 384 });
+    fs14.renameSync(tmpPath, this.storeFilePath);
+    try {
+      fs14.chmodSync(this.storeFilePath, 384);
+    } catch {
+    }
+  }
+  pruneInPlace(store, nowMs = Date.now()) {
+    let changed = false;
+    for (const [key, tx] of Object.entries(store.transactions)) {
+      if (!tx || typeof tx.expiresAtMs !== "number" || nowMs > tx.expiresAtMs) {
+        delete store.transactions[key];
+        changed = true;
+      }
+    }
+    for (const [codeHash, expMs] of Object.entries(store.consumedCodeHashes)) {
+      if (typeof expMs !== "number" || nowMs > expMs) {
+        delete store.consumedCodeHashes[codeHash];
+        changed = true;
+      }
+    }
+    return changed;
+  }
+  toRuntimeTx(stored) {
+    try {
+      const codeVerifier = this.decryptValue(stored.codeVerifierEnc);
+      if (!codeVerifier) return void 0;
+      return {
+        state: stored.state,
+        codeVerifier,
+        redirectUri: stored.redirectUri,
+        mode: stored.mode,
+        originHint: stored.originHint,
+        expiresAtMs: stored.expiresAtMs,
+        status: stored.status,
+        consumed: stored.consumed,
+        stateCookieRequired: stored.stateCookieRequired,
+        errorMessage: stored.errorMessage,
+        sessionId: this.decryptValue(stored.sessionIdEnc),
+        csrfToken: this.decryptValue(stored.csrfTokenEnc),
+        user: stored.user,
+        isNewAccount: stored.isNewAccount
+      };
+    } catch {
+      return void 0;
+    }
+  }
+  toStoredTx(tx) {
+    return {
+      state: tx.state,
+      codeVerifierEnc: this.encryptValue(tx.codeVerifier),
+      redirectUri: tx.redirectUri,
+      mode: tx.mode,
+      originHint: tx.originHint,
+      expiresAtMs: tx.expiresAtMs,
+      status: tx.status,
+      consumed: tx.consumed,
+      stateCookieRequired: tx.stateCookieRequired,
+      errorMessage: tx.errorMessage,
+      sessionIdEnc: tx.sessionId ? this.encryptValue(tx.sessionId) : void 0,
+      csrfTokenEnc: tx.csrfToken ? this.encryptValue(tx.csrfToken) : void 0,
+      user: tx.user,
+      isNewAccount: tx.isNewAccount
+    };
+  }
+  findMatchingKeyTimingSafe(store, rawState) {
+    const providedBuf = Buffer.from(rawState, "utf8");
+    if (providedBuf.length === 0) return void 0;
+    for (const key of Object.keys(store.transactions)) {
+      const expectedBuf = Buffer.from(key, "utf8");
+      if (expectedBuf.length === providedBuf.length && crypto21.timingSafeEqual(expectedBuf, providedBuf)) {
+        return key;
+      }
+    }
+    return void 0;
+  }
+  pruneExpired() {
+    const store = this.readStore();
+    if (this.pruneInPlace(store)) {
+      this.writeStoreAtomic(store);
+    }
+  }
+  saveTransaction(tx) {
+    const store = this.readStore();
+    this.pruneInPlace(store);
+    store.transactions[tx.state] = this.toStoredTx(tx);
+    this.writeStoreAtomic(store);
+  }
+  getTransactionByState(rawState) {
+    const store = this.readStore();
+    const pruned = this.pruneInPlace(store);
+    const matchedKey = this.findMatchingKeyTimingSafe(store, rawState);
+    if (pruned) {
+      this.writeStoreAtomic(store);
+    }
+    if (!matchedKey) return void 0;
+    const stored = store.transactions[matchedKey];
+    return stored ? this.toRuntimeTx(stored) : void 0;
+  }
+  /**
+   * Consome de forma atômica e síncrona o par (state, code) antes de qualquer I/O externo.
+   * Bloqueia replay de state ou authorization code mesmo após reinicialização do processo.
+   */
+  consumeTransactionAtomically(rawState, rawCode, codeReplayTtlMs = DEFAULT_CODE_REPLAY_TTL_MS) {
+    const store = this.readStore();
+    const now = Date.now();
+    this.pruneInPlace(store, now);
+    const matchedKey = this.findMatchingKeyTimingSafe(store, rawState);
+    if (!matchedKey) {
+      this.writeStoreAtomic(store);
+      return { ok: false, reason: "INVALID_STATE" };
+    }
+    const stored = store.transactions[matchedKey];
+    if (!stored || now > stored.expiresAtMs) {
+      delete store.transactions[matchedKey];
+      this.writeStoreAtomic(store);
+      return { ok: false, reason: "INVALID_STATE" };
+    }
+    const codeHash = sha256Hex2(rawCode);
+    const runtimeTx = this.toRuntimeTx(stored);
+    if (!runtimeTx) {
+      delete store.transactions[matchedKey];
+      this.writeStoreAtomic(store);
+      return { ok: false, reason: "INVALID_STATE" };
+    }
+    if (stored.consumed || Boolean(store.consumedCodeHashes[codeHash])) {
+      delete store.transactions[matchedKey];
+      this.writeStoreAtomic(store);
+      return { ok: false, reason: "REPLAYED_CODE", tx: runtimeTx };
+    }
+    stored.consumed = true;
+    store.consumedCodeHashes[codeHash] = now + codeReplayTtlMs;
+    this.writeStoreAtomic(store);
+    runtimeTx.consumed = true;
+    return { ok: true, tx: runtimeTx };
+  }
+  updateTransaction(rawState, patch) {
+    const store = this.readStore();
+    const matchedKey = this.findMatchingKeyTimingSafe(store, rawState);
+    if (!matchedKey) return;
+    const existing = store.transactions[matchedKey];
+    if (!existing) return;
+    const runtime = this.toRuntimeTx(existing);
+    if (!runtime) return;
+    const merged = { ...runtime, ...patch };
+    store.transactions[matchedKey] = this.toStoredTx(merged);
+    this.writeStoreAtomic(store);
+  }
+  deleteTransaction(rawState) {
+    const store = this.readStore();
+    const matchedKey = this.findMatchingKeyTimingSafe(store, rawState);
+    if (!matchedKey) return;
+    delete store.transactions[matchedKey];
+    this.writeStoreAtomic(store);
+  }
+};
+
+// src/storage/PersistentDatabaseManager.ts
+import crypto22 from "node:crypto";
+import fs15 from "node:fs";
+import path16 from "node:path";
+import zlib from "node:zlib";
+function sha256Hex3(raw) {
+  return crypto22.createHash("sha256").update(raw, "utf8").digest("hex");
+}
+function fsyncAndRename(tmpPath, targetPath) {
+  const fd = fs15.openSync(tmpPath, "r+");
+  try {
+    fs15.fsyncSync(fd);
+  } finally {
+    fs15.closeSync(fd);
+  }
+  fs15.renameSync(tmpPath, targetPath);
 }
 var PersistentDatabaseManager = class _PersistentDatabaseManager {
   constructor() {
@@ -27024,8 +27381,8 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
     const rawJson = JSON.stringify(safeMap);
     const compressed = zlib.deflateSync(Buffer.from(rawJson, "utf8"));
     const { keyId, keyBuffer } = KeyManagementService.getActiveVaultAesKey();
-    const iv = crypto21.randomBytes(12);
-    const cipher = crypto21.createCipheriv("aes-256-gcm", keyBuffer, iv);
+    const iv = crypto22.randomBytes(12);
+    const cipher = crypto22.createCipheriv("aes-256-gcm", keyBuffer, iv);
     const encrypted = Buffer.concat([cipher.update(compressed), cipher.final()]);
     const authTag = cipher.getAuthTag();
     return `${_PersistentDatabaseManager.ENVELOPE_PREFIX}${keyId}:${iv.toString("hex")}:${authTag.toString("hex")}:${encrypted.toString("base64")}`;
@@ -27074,7 +27431,7 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
       }
       let compressed;
       try {
-        const decipher = crypto21.createDecipheriv("aes-256-gcm", keyBuffer, iv);
+        const decipher = crypto22.createDecipheriv("aes-256-gcm", keyBuffer, iv);
         decipher.setAuthTag(authTag);
         compressed = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
       } catch (err) {
@@ -27176,28 +27533,28 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
     return parsed;
   }
   writeAtomicChecksummed(targetPath, data) {
-    const dir = path15.dirname(targetPath);
-    if (!fs14.existsSync(dir)) {
-      fs14.mkdirSync(dir, { recursive: true });
+    const dir = path16.dirname(targetPath);
+    if (!fs15.existsSync(dir)) {
+      fs15.mkdirSync(dir, { recursive: true });
     }
     const wrapped = _PersistentDatabaseManager.preparePayloadForDisk(data);
     const serialized = JSON.stringify(wrapped, null, 2);
-    const checksum = sha256Hex2(serialized);
+    const checksum = sha256Hex3(serialized);
     const checksumPath = `${targetPath}.sha256`;
     const backupPath = `${targetPath}.bak`;
-    if (fs14.existsSync(targetPath)) {
+    if (fs15.existsSync(targetPath)) {
       try {
-        const currentRaw = fs14.readFileSync(targetPath, "utf8");
+        const currentRaw = fs15.readFileSync(targetPath, "utf8");
         JSON.parse(currentRaw);
-        fs14.copyFileSync(targetPath, backupPath);
+        fs15.copyFileSync(targetPath, backupPath);
       } catch {
       }
     }
-    const tmpFile = `${targetPath}.${process.pid}.${crypto21.randomBytes(4).toString("hex")}.tmp`;
-    fs14.writeFileSync(tmpFile, serialized, { encoding: "utf8", mode: 384 });
+    const tmpFile = `${targetPath}.${process.pid}.${crypto22.randomBytes(4).toString("hex")}.tmp`;
+    fs15.writeFileSync(tmpFile, serialized, { encoding: "utf8", mode: 384 });
     fsyncAndRename(tmpFile, targetPath);
-    const tmpSha = `${checksumPath}.${process.pid}.${crypto21.randomBytes(4).toString("hex")}.tmp`;
-    fs14.writeFileSync(tmpSha, `${checksum}
+    const tmpSha = `${checksumPath}.${process.pid}.${crypto22.randomBytes(4).toString("hex")}.tmp`;
+    fs15.writeFileSync(tmpSha, `${checksum}
 `, { encoding: "utf8", mode: 384 });
     fsyncAndRename(tmpSha, checksumPath);
     return { sha256: checksum };
@@ -27215,18 +27572,18 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
     const checksumPath = `${targetPath}.sha256`;
     const backupPath = `${targetPath}.bak`;
     const tryReadPrimary = () => {
-      if (!fs14.existsSync(targetPath)) return null;
-      const raw = fs14.readFileSync(targetPath, "utf8");
-      if (fs14.existsSync(checksumPath)) {
-        const expected = fs14.readFileSync(checksumPath, "utf8").trim();
-        const actual = sha256Hex2(raw);
+      if (!fs15.existsSync(targetPath)) return null;
+      const raw = fs15.readFileSync(targetPath, "utf8");
+      if (fs15.existsSync(checksumPath)) {
+        const expected = fs15.readFileSync(checksumPath, "utf8").trim();
+        const actual = sha256Hex3(raw);
         if (expected.length === 64 && actual !== expected) {
-          throw new Error(`Checksum SHA-256 divergente em ${path15.basename(targetPath)}`);
+          throw new Error(`Checksum SHA-256 divergente em ${path16.basename(targetPath)}`);
         }
       }
       return _PersistentDatabaseManager.hydratePayloadFromDisk(JSON.parse(raw));
     };
-    if (!fs14.existsSync(targetPath) && !fs14.existsSync(backupPath)) {
+    if (!fs15.existsSync(targetPath) && !fs15.existsSync(backupPath)) {
       return {
         data: null,
         recoveredFromBackup: false,
@@ -27245,9 +27602,9 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
         };
       }
     } catch (primaryErr) {
-      if (fs14.existsSync(backupPath)) {
+      if (fs15.existsSync(backupPath)) {
         try {
-          const bakRaw = fs14.readFileSync(backupPath, "utf8");
+          const bakRaw = fs15.readFileSync(backupPath, "utf8");
           const bakParsed = _PersistentDatabaseManager.hydratePayloadFromDisk(
             JSON.parse(bakRaw)
           );
@@ -27289,7 +27646,7 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
     const kmsStatus = KeyManagementService.getStatus();
     const storageMode = kmsStatus.dpapiSupported ? "WINDOWS_DPAPI_KEYSTORE" : kmsStatus.keyOrigin;
     const checksumPath = `${targetPath}.sha256`;
-    if (!fs14.existsSync(targetPath)) {
+    if (!fs15.existsSync(targetPath)) {
       return {
         encryptedAtRest: true,
         algorithm: "AES-256-GCM + ZLIB-DEFLATE",
@@ -27305,9 +27662,9 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
       };
     }
     try {
-      const raw = fs14.readFileSync(targetPath, "utf8");
-      const actualSha = sha256Hex2(raw);
-      const expectedSha = fs14.existsSync(checksumPath) ? fs14.readFileSync(checksumPath, "utf8").trim() : "";
+      const raw = fs15.readFileSync(targetPath, "utf8");
+      const actualSha = sha256Hex3(raw);
+      const expectedSha = fs15.existsSync(checksumPath) ? fs15.readFileSync(checksumPath, "utf8").trim() : "";
       const parsed = JSON.parse(raw);
       const softwares = Array.isArray(parsed.softwares) ? parsed.softwares : [];
       let encryptedCount = 0;
@@ -27352,21 +27709,21 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
 };
 
 // src/services/backup/ProjectBackupService.ts
-import fs15 from "node:fs";
-import path16 from "node:path";
-import crypto22 from "node:crypto";
+import fs16 from "node:fs";
+import path17 from "node:path";
+import crypto23 from "node:crypto";
 var BACKUP_ID_ALLOWLIST = /^bkp-\d+-[a-f0-9]{8}$/i;
 var MAX_BACKUP_ID_LENGTH = 128;
 var ProjectBackupService = class {
   constructor(dataDir) {
     const root = dataDir || resolveWinHoodDataRoot();
-    this.backupsRootDir = path16.resolve(root, "backups", "projects");
-    if (!fs15.existsSync(this.backupsRootDir)) {
-      fs15.mkdirSync(this.backupsRootDir, { recursive: true, mode: 448 });
+    this.backupsRootDir = path17.resolve(root, "backups", "projects");
+    if (!fs16.existsSync(this.backupsRootDir)) {
+      fs16.mkdirSync(this.backupsRootDir, { recursive: true, mode: 448 });
     }
   }
   computeSha256(buf) {
-    return crypto22.createHash("sha256").update(buf).digest("hex");
+    return crypto23.createHash("sha256").update(buf).digest("hex");
   }
   assertSafeBackupId(backupId) {
     if (typeof backupId !== "string") {
@@ -27381,10 +27738,10 @@ var ProjectBackupService = class {
         `INVALID_BACKUP_ID: Formato de backupId n\xE3o autorizado (${trimmed.slice(0, 32)}).`
       );
     }
-    const rootResolved = path16.resolve(this.backupsRootDir);
-    const resolvedTarget = path16.resolve(rootResolved, trimmed);
-    const expectedPrefix = rootResolved.endsWith(path16.sep) ? rootResolved : `${rootResolved}${path16.sep}`;
-    if (!resolvedTarget.startsWith(expectedPrefix) || path16.dirname(resolvedTarget) !== rootResolved) {
+    const rootResolved = path17.resolve(this.backupsRootDir);
+    const resolvedTarget = path17.resolve(rootResolved, trimmed);
+    const expectedPrefix = rootResolved.endsWith(path17.sep) ? rootResolved : `${rootResolved}${path17.sep}`;
+    if (!resolvedTarget.startsWith(expectedPrefix) || path17.dirname(resolvedTarget) !== rootResolved) {
       throw new Error(
         "PATH_TRAVERSAL_BLOCKED: Caminho do backup fora do diret\xF3rio isolado autorizado."
       );
@@ -27393,10 +27750,10 @@ var ProjectBackupService = class {
   }
   resolveBackupDirectory(backupId) {
     const safeId = this.assertSafeBackupId(backupId);
-    const rootResolved = path16.resolve(this.backupsRootDir);
-    const targetDir = path16.resolve(rootResolved, safeId);
-    const expectedPrefix = rootResolved.endsWith(path16.sep) ? rootResolved : `${rootResolved}${path16.sep}`;
-    if (!targetDir.startsWith(expectedPrefix) || path16.dirname(targetDir) !== rootResolved) {
+    const rootResolved = path17.resolve(this.backupsRootDir);
+    const targetDir = path17.resolve(rootResolved, safeId);
+    const expectedPrefix = rootResolved.endsWith(path17.sep) ? rootResolved : `${rootResolved}${path17.sep}`;
+    if (!targetDir.startsWith(expectedPrefix) || path17.dirname(targetDir) !== rootResolved) {
       throw new Error(
         "PATH_TRAVERSAL_BLOCKED: Resolu\xE7\xE3o de diret\xF3rio fora do boundary de backups."
       );
@@ -27414,9 +27771,9 @@ var ProjectBackupService = class {
         `PATH_TRAVERSAL_BLOCKED: Segmento de caminho proibido no pacote (${rawRelativePath}).`
       );
     }
-    const rootResolved = path16.resolve(baseDir);
-    const absPath = path16.resolve(rootResolved, ...segments);
-    const expectedPrefix = rootResolved.endsWith(path16.sep) ? rootResolved : `${rootResolved}${path16.sep}`;
+    const rootResolved = path17.resolve(baseDir);
+    const absPath = path17.resolve(rootResolved, ...segments);
+    const expectedPrefix = rootResolved.endsWith(path17.sep) ? rootResolved : `${rootResolved}${path17.sep}`;
     if (!absPath.startsWith(expectedPrefix)) {
       throw new Error(
         `PATH_TRAVERSAL_BLOCKED: Tentativa de acesso fora do diret\xF3rio isolado (${rawRelativePath}).`
@@ -27428,9 +27785,9 @@ var ProjectBackupService = class {
     };
   }
   createBackup(project, softwares, sourceFilesMap) {
-    const backupId = `bkp-${Date.now()}-${crypto22.randomBytes(4).toString("hex")}`;
+    const backupId = `bkp-${Date.now()}-${crypto23.randomBytes(4).toString("hex")}`;
     const backupDir = this.resolveBackupDirectory(backupId);
-    fs15.mkdirSync(backupDir, { recursive: true, mode: 448 });
+    fs16.mkdirSync(backupDir, { recursive: true, mode: 448 });
     const filesSha256 = {};
     let totalSizeBytes = 0;
     let filesCount = 0;
@@ -27438,18 +27795,18 @@ var ProjectBackupService = class {
     const metaBuf = Buffer.from(metaPayload, "utf8");
     const metaRelPath = "metadata.json";
     const metaAbsPath = this.resolveSafeChildPath(backupDir, metaRelPath).absPath;
-    fs15.writeFileSync(metaAbsPath, metaBuf);
+    fs16.writeFileSync(metaAbsPath, metaBuf);
     filesSha256[metaRelPath] = this.computeSha256(metaBuf);
     totalSizeBytes += metaBuf.length;
     filesCount += 1;
     if (sourceFilesMap && typeof sourceFilesMap === "object") {
       const srcDir = this.resolveSafeChildPath(backupDir, "source_files").absPath;
-      fs15.mkdirSync(srcDir, { recursive: true, mode: 448 });
+      fs16.mkdirSync(srcDir, { recursive: true, mode: 448 });
       for (const [filePath, content] of Object.entries(sourceFilesMap)) {
         const { absPath, relPathNormalized } = this.resolveSafeChildPath(srcDir, filePath);
-        fs15.mkdirSync(path16.dirname(absPath), { recursive: true, mode: 448 });
+        fs16.mkdirSync(path17.dirname(absPath), { recursive: true, mode: 448 });
         const fileBuf = Buffer.from(String(content || ""), "utf8");
-        fs15.writeFileSync(absPath, fileBuf);
+        fs16.writeFileSync(absPath, fileBuf);
         const relKey = `source_files/${relPathNormalized}`;
         filesSha256[relKey] = this.computeSha256(fileBuf);
         totalSizeBytes += fileBuf.length;
@@ -27472,12 +27829,12 @@ var ProjectBackupService = class {
     const manifestBuf = Buffer.from(JSON.stringify(manifest, null, 2), "utf8");
     manifest.manifestSha256 = this.computeSha256(manifestBuf);
     const manifestAbsPath = this.resolveSafeChildPath(backupDir, "manifest.json").absPath;
-    fs15.writeFileSync(manifestAbsPath, JSON.stringify(manifest, null, 2), "utf8");
+    fs16.writeFileSync(manifestAbsPath, JSON.stringify(manifest, null, 2), "utf8");
     return manifest;
   }
   listBackups() {
-    if (!fs15.existsSync(this.backupsRootDir)) return [];
-    const entries = fs15.readdirSync(this.backupsRootDir, { withFileTypes: true });
+    if (!fs16.existsSync(this.backupsRootDir)) return [];
+    const entries = fs16.readdirSync(this.backupsRootDir, { withFileTypes: true });
     const summaries = [];
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
@@ -27487,10 +27844,10 @@ var ProjectBackupService = class {
       } catch {
         continue;
       }
-      const manifestPath = path16.join(backupDir, "manifest.json");
-      if (!fs15.existsSync(manifestPath)) continue;
+      const manifestPath = path17.join(backupDir, "manifest.json");
+      if (!fs16.existsSync(manifestPath)) continue;
       try {
-        const raw = fs15.readFileSync(manifestPath, "utf8");
+        const raw = fs16.readFileSync(manifestPath, "utf8");
         const m = JSON.parse(raw);
         summaries.push({
           backupId: m.backupId || entry.name,
@@ -27510,9 +27867,9 @@ var ProjectBackupService = class {
   verifyBackup(backupId) {
     this.assertSafeBackupId(backupId);
     const backupDir = this.resolveBackupDirectory(backupId);
-    const manifestPath = path16.join(backupDir, "manifest.json");
+    const manifestPath = path17.join(backupDir, "manifest.json");
     const errors = [];
-    if (!fs15.existsSync(manifestPath)) {
+    if (!fs16.existsSync(manifestPath)) {
       return {
         valid: false,
         manifest: null,
@@ -27521,7 +27878,7 @@ var ProjectBackupService = class {
     }
     let manifest;
     try {
-      manifest = JSON.parse(fs15.readFileSync(manifestPath, "utf8"));
+      manifest = JSON.parse(fs16.readFileSync(manifestPath, "utf8"));
     } catch {
       return {
         valid: false,
@@ -27541,14 +27898,14 @@ var ProjectBackupService = class {
         errors.push(err?.message || `PATH_TRAVERSAL_BLOCKED: ${relPath}`);
         continue;
       }
-      if (!fs15.existsSync(targetPath)) {
+      if (!fs16.existsSync(targetPath)) {
         errors.push(
           `FILE_MISSING: Arquivo documentado no manifesto n\xE3o foi encontrado: ${relPath}`
         );
         continue;
       }
       try {
-        const fileBuf = fs15.readFileSync(targetPath);
+        const fileBuf = fs16.readFileSync(targetPath);
         const actualHash = this.computeSha256(fileBuf);
         if (actualHash !== expectedHash) {
           errors.push(
@@ -27572,13 +27929,13 @@ var ProjectBackupService = class {
     }
     const backupDir = this.resolveBackupDirectory(backupId);
     const metaPath = this.resolveSafeChildPath(backupDir, "metadata.json").absPath;
-    if (!fs15.existsSync(metaPath)) {
+    if (!fs16.existsSync(metaPath)) {
       throw new Error("METADATA_NOT_FOUND: metadata.json ausente no backup.");
     }
-    const metaRaw = JSON.parse(fs15.readFileSync(metaPath, "utf8"));
+    const metaRaw = JSON.parse(fs16.readFileSync(metaPath, "utf8"));
     const oldProj = metaRaw.project;
     const oldSoftwares = metaRaw.softwares || [];
-    const newProjId = `proj-restored-${crypto22.randomUUID().slice(0, 8)}`;
+    const newProjId = `proj-restored-${crypto23.randomUUID().slice(0, 8)}`;
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const restoredProject = {
       ...oldProj,
@@ -27589,16 +27946,16 @@ var ProjectBackupService = class {
     };
     const restoredSoftwares = oldSoftwares.map((sw) => ({
       ...sw,
-      id: `sw-restored-${crypto22.randomUUID().slice(0, 8)}`,
+      id: `sw-restored-${crypto23.randomUUID().slice(0, 8)}`,
       projectId: newProjId,
       createdAt: now,
       updatedAt: now
     }));
     const sourceFilesMap = {};
     const srcDir = this.resolveSafeChildPath(backupDir, "source_files").absPath;
-    if (fs15.existsSync(srcDir)) {
+    if (fs16.existsSync(srcDir)) {
       const walk = (dir, baseRel = "") => {
-        const items = fs15.readdirSync(dir, { withFileTypes: true });
+        const items = fs16.readdirSync(dir, { withFileTypes: true });
         for (const item of items) {
           if (item.isSymbolicLink()) continue;
           const rel = baseRel ? `${baseRel}/${item.name}` : item.name;
@@ -27607,7 +27964,7 @@ var ProjectBackupService = class {
             walk(full, rel);
           } else if (item.isFile()) {
             try {
-              sourceFilesMap[rel] = fs15.readFileSync(full, "utf8");
+              sourceFilesMap[rel] = fs16.readFileSync(full, "utf8");
             } catch {
             }
           }
@@ -27620,14 +27977,14 @@ var ProjectBackupService = class {
   deleteBackup(backupId) {
     this.assertSafeBackupId(backupId);
     const backupDir = this.resolveBackupDirectory(backupId);
-    if (!fs15.existsSync(backupDir)) return false;
-    fs15.rmSync(backupDir, { recursive: true, force: true });
+    if (!fs16.existsSync(backupDir)) return false;
+    fs16.rmSync(backupDir, { recursive: true, force: true });
     return true;
   }
 };
 
 // src/intelligence/synchronization/ReferenceSynchronizer.ts
-import crypto23 from "node:crypto";
+import crypto24 from "node:crypto";
 function stripTrailingSlashes2(rawUrl) {
   let end = rawUrl.length;
   while (end > 0 && rawUrl.charCodeAt(end - 1) === 47) {
@@ -27735,7 +28092,7 @@ var ReferenceSynchronizer = class {
               indexedKevCveIdsCount: advisoryCache.kevCveIds.length
             }
           };
-          const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "OSV_DEV") {
@@ -27813,7 +28170,7 @@ var ReferenceSynchronizer = class {
               usedProjectSbom: queryTargets.length > 0
             }
           };
-          const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "NVD_NIST") {
@@ -27862,7 +28219,7 @@ var ReferenceSynchronizer = class {
               cachedCvesCount: Object.keys(advisoryCache.nvdByCve).length
             }
           };
-          const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "FIRST_EPSS") {
@@ -27898,7 +28255,7 @@ var ReferenceSynchronizer = class {
               sampleScores: rows.slice(0, 5)
             }
           };
-          const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "MQR_BRIDGE_CLOUD") {
@@ -27922,7 +28279,7 @@ var ReferenceSynchronizer = class {
               totalTypeScriptRules: scData?.total ?? null
             }
           };
-          const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "MQR_BRIDGE_SERVER") {
@@ -27951,7 +28308,7 @@ var ReferenceSynchronizer = class {
               serverStatus: statusData?.status || "UP"
             }
           };
-          const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "INTERNAL_HISTORY") {
@@ -27963,7 +28320,7 @@ var ReferenceSynchronizer = class {
             isOfflineFallback: false,
             lastError: null
           };
-          const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "OWASP_BENCHMARK") {
@@ -27987,7 +28344,7 @@ var ReferenceSynchronizer = class {
                 publishedAt: owaspData?.published_at || nowIso
               }
             };
-            const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+            const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
             this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
             liveFetchedSources.push(sourceKey);
           } catch {
@@ -27998,7 +28355,7 @@ var ReferenceSynchronizer = class {
               isOfflineFallback: true,
               lastError: null
             };
-            const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+            const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
             this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
             cachedFallbackSources.push(sourceKey);
           }
@@ -28023,7 +28380,7 @@ var ReferenceSynchronizer = class {
                 totalWeaknesses: cweData?.total_weaknesses || existing.recordsCount
               }
             };
-            const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+            const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
             this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
             liveFetchedSources.push(sourceKey);
           } catch {
@@ -28034,7 +28391,7 @@ var ReferenceSynchronizer = class {
               isOfflineFallback: true,
               lastError: null
             };
-            const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+            const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
             this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
             cachedFallbackSources.push(sourceKey);
           }
@@ -28059,7 +28416,7 @@ var ReferenceSynchronizer = class {
                 starsCount: repoData?.stargazers_count ?? null
               }
             };
-            const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+            const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
             this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
             liveFetchedSources.push(sourceKey);
           } catch {
@@ -28070,7 +28427,7 @@ var ReferenceSynchronizer = class {
               isOfflineFallback: true,
               lastError: null
             };
-            const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+            const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
             this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
             cachedFallbackSources.push(sourceKey);
           }
@@ -28082,7 +28439,7 @@ var ReferenceSynchronizer = class {
             isOfflineFallback: true,
             lastError: null
           };
-          const sha2562 = crypto23.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
           this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
           cachedFallbackSources.push(sourceKey);
         }
@@ -28104,16 +28461,19 @@ var ReferenceSynchronizer = class {
 };
 
 // src/validation/GoldenDatasetRunner.ts
-import crypto28 from "node:crypto";
+import crypto30 from "node:crypto";
 
 // src/analyzers/AnalyzerRegistry.ts
-import crypto26 from "node:crypto";
+import crypto28 from "node:crypto";
+import fs17 from "node:fs";
+import os10 from "node:os";
+import path18 from "node:path";
 
 // src/analyzers/FindingNormalizer.ts
-import crypto24 from "node:crypto";
+import crypto25 from "node:crypto";
 var EvidenceCollector = class {
   static computeCanonicalHash(payload) {
-    return crypto24.createHash("sha256").update(JSON.stringify(payload), "utf8").digest("hex");
+    return crypto25.createHash("sha256").update(JSON.stringify(payload), "utf8").digest("hex");
   }
   static extractContextLines(fileContent, lineNumber, radius = 2) {
     const lines = fileContent.split(/\r?\n/);
@@ -28186,7 +28546,7 @@ var FindingNormalizer = class {
 };
 
 // src/analyzers/SecretsCatalog.ts
-import crypto25 from "node:crypto";
+import crypto26 from "node:crypto";
 var SECRETS_CATALOG_VERSION = "2026.11.0";
 var SECRETS_PATTERN_CATALOG = [
   {
@@ -28304,7 +28664,7 @@ function maskDetectedSecret(raw) {
 }
 var SecretScanner = class {
   static getCatalogMetadata() {
-    const checksumSha256 = crypto25.createHash("sha256").update(JSON.stringify(SECRETS_PATTERN_CATALOG)).digest("hex");
+    const checksumSha256 = crypto26.createHash("sha256").update(JSON.stringify(SECRETS_PATTERN_CATALOG)).digest("hex");
     return {
       version: SECRETS_CATALOG_VERSION,
       patternsCount: SECRETS_PATTERN_CATALOG.length,
@@ -28702,7 +29062,430 @@ var AnalyzerPluginManager = class _AnalyzerPluginManager {
   }
 };
 
+// src/analyzers/SarifCodec.ts
+import crypto27 from "node:crypto";
+function severityToSarifLevel(sev) {
+  if (sev === "BLOCKER" || sev === "CRITICAL" || sev === "HIGH") return "error";
+  if (sev === "MEDIUM") return "warning";
+  return "note";
+}
+function parseFiniteCvss(...candidates) {
+  for (const raw of candidates) {
+    if (raw === null || raw === void 0 || raw === "") continue;
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0 && n <= 10) {
+      return Number(n.toFixed(1));
+    }
+  }
+  return void 0;
+}
+function sarifLevelToSeverity(level, resultProps, ruleProps) {
+  const rank = parseFiniteCvss(
+    resultProps?.["security-severity"],
+    ruleProps?.["security-severity"],
+    resultProps?.cvss,
+    ruleProps?.cvss
+  );
+  if (rank !== void 0) {
+    if (rank >= 9) return "CRITICAL";
+    if (rank >= 7) return "HIGH";
+    if (rank >= 4) return "MEDIUM";
+    return "LOW";
+  }
+  const norm = String(level ?? "").trim().toLowerCase();
+  if (norm === "error") return "HIGH";
+  if (norm === "warning") return "MEDIUM";
+  if (norm === "note" || norm === "none") return "LOW";
+  return "MEDIUM";
+}
+function extractCweFromSarif(resultProps, ruleProps) {
+  const directLists = [resultProps?.cwe, ruleProps?.cwe];
+  for (const candidate of directLists) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      const m = candidate.match(/CWE-\d+/i);
+      return m ? m[0].toUpperCase() : candidate.trim();
+    }
+    if (Array.isArray(candidate) && candidate[0]) {
+      const m = String(candidate[0]).match(/CWE-\d+/i);
+      return m ? m[0].toUpperCase() : String(candidate[0]).trim();
+    }
+  }
+  const tags = [
+    ...Array.isArray(resultProps?.tags) ? resultProps.tags : [],
+    ...Array.isArray(ruleProps?.tags) ? ruleProps.tags : []
+  ];
+  for (const tag of tags) {
+    const m = String(tag || "").match(/cwe[-_/]?(\d+)/i);
+    if (m?.[1]) {
+      return `CWE-${m[1]}`;
+    }
+  }
+  return void 0;
+}
+function resolveConfidenceFromSarif(hasPhysicalLocation, hasRuleMeta, resultProps, ruleProps) {
+  const precision = String(
+    resultProps?.precision || ruleProps?.precision || resultProps?.confidence || ""
+  ).trim().toLowerCase();
+  if (!hasPhysicalLocation) return "LOW";
+  if (precision === "very-high" || precision === "high") return "HIGH";
+  if (precision === "low") return "LOW";
+  return hasRuleMeta ? "MEDIUM" : "LOW";
+}
+var SarifCodec = class {
+  /**
+   * Exports NormalizedFindings into canonical SARIF 2.1.0 with data-flow codeFlows,
+   * CWE/OWASP tags, and independent open-standard positioning.
+   */
+  static exportSarif210(findings, options = {}) {
+    const rulesMap = /* @__PURE__ */ new Map();
+    const results = findings.map((f) => {
+      const ruleMeta = RuleRegistry.findRule(f.originalRuleId);
+      if (!rulesMap.has(f.originalRuleId)) {
+        rulesMap.set(f.originalRuleId, {
+          id: f.originalRuleId,
+          name: f.originalRuleId.replace(/[^a-zA-Z0-9]/g, "_"),
+          shortDescription: { text: f.title },
+          fullDescription: { text: f.whyItIsAnIssue || f.description || f.title },
+          defaultConfiguration: {
+            level: severityToSarifLevel(f.severity)
+          },
+          properties: {
+            version: ruleMeta?.version || "1.0.0",
+            cwe: f.cwe ? [f.cwe] : [],
+            owaspTop10: ruleMeta?.owaspTop10 || null,
+            cvss: f.cvss ?? ruleMeta?.cvssBase ?? null,
+            "security-severity": String(f.cvss ?? ruleMeta?.cvssBase ?? (f.severity === "BLOCKER" ? 9.5 : 5)),
+            category: f.category,
+            cleanCodeAttribute: f.cleanCodeAttribute,
+            mqrImpacts: f.mqrImpacts || []
+          }
+        });
+      }
+      const codeFlows = f.executionFlows && f.executionFlows.length > 0 ? [
+        {
+          threadFlows: [
+            {
+              locations: f.executionFlows.map((step) => ({
+                location: {
+                  physicalLocation: {
+                    artifactLocation: {
+                      uri: step.filePath.replace(/\\/g, "/"),
+                      uriBaseId: "%SRCROOT%"
+                    },
+                    region: {
+                      startLine: step.lineNumber > 0 ? step.lineNumber : 1,
+                      snippet: { text: step.codeSnippet || step.snippet || "" }
+                    }
+                  },
+                  message: { text: `[${step.nodeType}] ${step.explanation}` }
+                }
+              }))
+            }
+          ]
+        }
+      ] : void 0;
+      return {
+        ruleId: f.originalRuleId,
+        level: severityToSarifLevel(f.severity),
+        message: { text: `[${f.softwareName}] ${f.title} \u2014 ${f.whyItIsAnIssue || f.description}` },
+        locations: [
+          {
+            physicalLocation: {
+              artifactLocation: {
+                uri: f.filePath.replace(/\\/g, "/"),
+                uriBaseId: "%SRCROOT%"
+              },
+              region: {
+                startLine: f.lineNumber > 0 ? f.lineNumber : 1,
+                endLine: f.endLineNumber && f.endLineNumber > 0 ? f.endLineNumber : f.lineNumber > 0 ? f.lineNumber : 1,
+                startColumn: f.columnStart ?? 1,
+                endColumn: f.columnEnd ?? 80,
+                snippet: { text: f.snippet || "" }
+              }
+            }
+          }
+        ],
+        ...codeFlows ? { codeFlows } : {},
+        properties: {
+          softwareId: f.softwareId,
+          softwareName: f.softwareName,
+          softwareVersion: f.softwareVersion,
+          cwe: f.cwe,
+          cvss: f.cvss,
+          evidenceSha256: f.evidenceSha256,
+          remediation: f.remediation,
+          remediationEffortMinutes: f.remediationEffortMinutes
+        }
+      };
+    });
+    return {
+      $schema: "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/Sarif-2.1.0/rc2/Schemas/sarif-schema-2.1.0.json",
+      version: "2.1.0",
+      runs: [
+        {
+          tool: {
+            driver: {
+              name: options.toolName || "WinHood Independent Audit & Benchmarking Engine",
+              version: options.toolVersion || RULE_ENGINE_VERSION,
+              informationUri: options.informationUri || "https://github.com/LilNavaHoods/Winhood-Benchmarking",
+              rules: Array.from(rulesMap.values())
+            }
+          },
+          artifacts: (options.softwareArtifacts || []).map((a) => ({
+            location: { uri: `package:${a.name}@${a.version}` }
+          })),
+          results
+        }
+      ]
+    };
+  }
+  /**
+   * Validates and imports external SARIF 2.1.0 documents without runtime coupling.
+   * External SARIF findings are NEVER automatically marked as independently verified by WinHood;
+   * they preserve UNVERIFIED (or ACCEPTED_RISK when explicitly suppressed in SARIF) provenance.
+   */
+  static importSarif210(rawPayload, scope, options = {}) {
+    const errors = [];
+    const warnings = [];
+    if (!rawPayload || typeof rawPayload !== "object" || Array.isArray(rawPayload)) {
+      return {
+        valid: false,
+        errors: ["SARIF payload deve ser um objeto JSON v\xE1lido."],
+        warnings,
+        importedToolNames: [],
+        findings: [],
+        deduplicatedCount: 0,
+        payloadSha256: ""
+      };
+    }
+    const doc = rawPayload;
+    if (doc.version !== "2.1.0") {
+      errors.push(`Vers\xE3o SARIF esperada "2.1.0", recebida "${String(doc.version)}".`);
+    }
+    if (!Array.isArray(doc.runs)) {
+      errors.push('Campo obrigat\xF3rio "runs" ausente ou n\xE3o \xE9 array.');
+    }
+    if (errors.length > 0) {
+      return {
+        valid: false,
+        errors,
+        warnings,
+        importedToolNames: [],
+        findings: [],
+        deduplicatedCount: 0,
+        payloadSha256: ""
+      };
+    }
+    const findings = [];
+    const importedToolNames = [];
+    const seenDedupKeys = /* @__PURE__ */ new Set();
+    let deduplicatedCount = 0;
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    const originType = options.originType || "IMPORTED_REPORT";
+    for (let rIdx = 0; rIdx < doc.runs.length; rIdx++) {
+      const run = doc.runs[rIdx];
+      if (!run || typeof run !== "object" || Array.isArray(run)) {
+        errors.push(`Entrada runs[${rIdx}] inv\xE1lida: esperado objeto SARIF run.`);
+        continue;
+      }
+      const driver = run.tool?.driver && typeof run.tool.driver === "object" ? run.tool.driver : {};
+      const toolName = String(
+        driver.name || options.fallbackToolName || `External SARIF Tool #${rIdx + 1}`
+      ).trim();
+      const toolVersion = String(driver.version || driver.semanticVersion || "unknown").trim();
+      importedToolNames.push(toolName);
+      const rulesById = /* @__PURE__ */ new Map();
+      const ruleArrays = [
+        Array.isArray(driver.rules) ? driver.rules : [],
+        ...Array.isArray(run.tool?.extensions) ? run.tool.extensions.flatMap((ext) => Array.isArray(ext?.rules) ? ext.rules : []) : []
+      ];
+      for (const rule of ruleArrays) {
+        if (rule?.id) rulesById.set(String(rule.id), rule);
+      }
+      const results = Array.isArray(run.results) ? run.results : [];
+      for (let idx = 0; idx < results.length; idx++) {
+        const res = results[idx];
+        if (!res || typeof res !== "object") {
+          warnings.push(`runs[${rIdx}].results[${idx}] ignorado por n\xE3o ser objeto.`);
+          continue;
+        }
+        const ruleId = String(
+          res.ruleId || (typeof res.ruleIndex === "number" && Array.isArray(driver.rules) ? driver.rules[res.ruleIndex]?.id : "") || "external-sarif-rule"
+        ).trim();
+        const ruleMeta = rulesById.get(ruleId);
+        const rawLoc = Array.isArray(res.locations) ? res.locations[0] : void 0;
+        const physicalLoc = rawLoc?.physicalLocation;
+        const hasPhysicalLocation = Boolean(
+          physicalLoc && typeof physicalLoc === "object" && physicalLoc.artifactLocation?.uri
+        );
+        const filePath = hasPhysicalLocation ? String(physicalLoc.artifactLocation.uri).replace(/^file:\/\//, "").replace(/\\/g, "/") : "unknown";
+        const region = physicalLoc?.region && typeof physicalLoc.region === "object" ? physicalLoc.region : {};
+        const parsedStartLine = Number(region.startLine);
+        const startLine = Number.isFinite(parsedStartLine) && parsedStartLine > 0 ? Math.floor(parsedStartLine) : 1;
+        const parsedEndLine = Number(region.endLine);
+        const endLine = Number.isFinite(parsedEndLine) && parsedEndLine >= startLine ? Math.floor(parsedEndLine) : startLine;
+        const parsedStartCol = Number(region.startColumn);
+        const columnStart = Number.isFinite(parsedStartCol) && parsedStartCol > 0 ? Math.floor(parsedStartCol) : void 0;
+        const parsedEndCol = Number(region.endColumn);
+        const columnEnd = Number.isFinite(parsedEndCol) && parsedEndCol > 0 ? Math.floor(parsedEndCol) : void 0;
+        const snippet = String(region.snippet?.text || "");
+        if (!hasPhysicalLocation) {
+          warnings.push(`SARIF result ${ruleId} em runs[${rIdx}].results[${idx}] sem physicalLocation; atribu\xEDdo filePath="unknown".`);
+        }
+        const rawLevel = res.level ?? ruleMeta?.defaultConfiguration?.level;
+        const normalizedLevel = String(rawLevel ?? "").trim().toLowerCase();
+        if (rawLevel !== void 0 && !["error", "warning", "note", "none"].includes(normalizedLevel)) {
+          warnings.push(`Severidade SARIF n\xE3o reconhecida "${String(rawLevel)}" para regra ${ruleId}; aplicada severidade conservadora.`);
+        }
+        const cwe = extractCweFromSarif(res.properties, ruleMeta?.properties);
+        const cvss = parseFiniteCvss(
+          res.properties?.cvss,
+          ruleMeta?.properties?.cvss,
+          res.properties?.["security-severity"],
+          ruleMeta?.properties?.["security-severity"]
+        );
+        const severity = sarifLevelToSeverity(rawLevel, res.properties, ruleMeta?.properties);
+        const confidence = resolveConfidenceFromSarif(
+          hasPhysicalLocation,
+          Boolean(ruleMeta),
+          res.properties,
+          ruleMeta?.properties
+        );
+        const messageText = String(
+          res.message?.text || res.message?.markdown || ruleMeta?.fullDescription?.text || ruleMeta?.shortDescription?.text || ruleId
+        ).trim();
+        const dedupKey = `${toolName.toLowerCase()}|${ruleId}|${filePath}|${startLine}|${columnStart ?? 0}|${messageText.slice(0, 120)}`;
+        if (seenDedupKeys.has(dedupKey)) {
+          deduplicatedCount += 1;
+          continue;
+        }
+        seenDedupKeys.add(dedupKey);
+        const codeFlowSteps = Array.isArray(res.codeFlows?.[0]?.threadFlows?.[0]?.locations) ? res.codeFlows[0].threadFlows[0].locations.map((tl, sIdx) => ({
+          stepOrder: sIdx + 1,
+          nodeType: sIdx === 0 ? "SOURCE" : sIdx === res.codeFlows[0].threadFlows[0].locations.length - 1 ? "SINK" : "PROPAGATOR",
+          filePath: String(tl.location?.physicalLocation?.artifactLocation?.uri || filePath).replace(/^file:\/\//, "").replace(/\\/g, "/"),
+          lineNumber: Math.max(1, Number(tl.location?.physicalLocation?.region?.startLine || startLine)),
+          symbolName: ruleId,
+          codeSnippet: String(tl.location?.physicalLocation?.region?.snippet?.text || ""),
+          snippet: String(tl.location?.physicalLocation?.region?.snippet?.text || ""),
+          explanation: String(tl.location?.message?.text || "Imported SARIF flow step")
+        })) : void 0;
+        const categoryRaw = String(res.properties?.category || ruleMeta?.properties?.category || "").toUpperCase();
+        const category = categoryRaw === "SECRETS" || categoryRaw === "SCA" || categoryRaw === "IAC" || categoryRaw === "DATABASE" || categoryRaw === "CODE_QUALITY" || categoryRaw === "ARCHITECTURE" ? categoryRaw : "SAST";
+        const isSuppressed = Array.isArray(res.suppressions) && res.suppressions.length > 0;
+        const validationStatus = isSuppressed ? "ACCEPTED_RISK" : "UNVERIFIED";
+        findings.push(
+          enrichLegacyOrExternalFinding({
+            id: `sarif-imp-${scope.runId}-${rIdx}-${idx}-${crypto27.createHash("sha256").update(`${toolName}:${ruleId}:${filePath}:${startLine}:${columnStart ?? 0}`).digest("hex").slice(0, 8)}`,
+            runId: scope.runId,
+            softwareId: scope.softwareId,
+            softwareName: scope.softwareName,
+            softwareVersion: scope.softwareVersion,
+            toolName,
+            toolVersion,
+            originType,
+            detectionMethod: "EXTERNAL_SARIF_IMPORT",
+            originalRuleId: ruleId,
+            category,
+            cwe,
+            cvss,
+            severity,
+            confidence,
+            validationStatus,
+            lifecycleState: validationStatus,
+            title: String(ruleMeta?.shortDescription?.text || messageText || ruleId).slice(0, 180),
+            description: messageText,
+            filePath,
+            lineNumber: startLine,
+            endLineNumber: endLine,
+            columnStart,
+            columnEnd,
+            snippet,
+            remediation: String(
+              res.properties?.remediation || ruleMeta?.help?.text || "Revisar achado externo importado via padr\xE3o SARIF 2.1.0 (pendente de verifica\xE7\xE3o independente no WinHood)."
+            ),
+            remediationEffortMinutes: Number(res.properties?.remediationEffortMinutes || 20),
+            executionFlows: codeFlowSteps,
+            collectedAt: nowIso
+          })
+        );
+      }
+    }
+    if (errors.length > 0) {
+      return {
+        valid: false,
+        errors,
+        warnings,
+        importedToolNames: Array.from(new Set(importedToolNames)),
+        findings: [],
+        deduplicatedCount,
+        payloadSha256: ""
+      };
+    }
+    const payloadSha256 = crypto27.createHash("sha256").update(JSON.stringify(doc)).digest("hex");
+    return {
+      valid: true,
+      errors: [],
+      warnings,
+      importedToolNames: Array.from(new Set(importedToolNames)),
+      findings,
+      deduplicatedCount,
+      payloadSha256
+    };
+  }
+};
+
 // src/analyzers/AnalyzerRegistry.ts
+function detectCodeQlLanguage(filesMap) {
+  const counts = {
+    "javascript-typescript": 0,
+    python: 0,
+    "java-kotlin": 0,
+    csharp: 0,
+    go: 0,
+    cpp: 0,
+    ruby: 0
+  };
+  for (const filePath of Object.keys(filesMap || {})) {
+    const ext = path18.extname(filePath).toLowerCase();
+    if ([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"].includes(ext)) counts["javascript-typescript"] += 1;
+    else if (ext === ".py") counts.python += 1;
+    else if (ext === ".java" || ext === ".kt") counts["java-kotlin"] += 1;
+    else if (ext === ".cs") counts.csharp += 1;
+    else if (ext === ".go") counts.go += 1;
+    else if ([".c", ".cc", ".cpp", ".cxx", ".h", ".hpp"].includes(ext)) counts.cpp += 1;
+    else if (ext === ".rb") counts.ruby += 1;
+  }
+  const ranked = Object.entries(counts).filter(([, count]) => count > 0).sort((a, b) => b[1] - a[1]);
+  return ranked.length > 0 ? ranked[0][0] : null;
+}
+function buildCodeQlLifecycleCommands(workspaceDir, language, databaseDir, sarifOutputPath) {
+  const isInterpreted = language === "javascript-typescript" || language === "python" || language === "ruby";
+  const databaseCreateArgs = [
+    "database",
+    "create",
+    databaseDir,
+    `--language=${language}`,
+    `--source-root=${workspaceDir}`,
+    "--overwrite",
+    ...isInterpreted ? [] : ["--build-mode=autobuild"]
+  ];
+  const databaseAnalyzeArgs = [
+    "database",
+    "analyze",
+    databaseDir,
+    "--format=sarifv2.1.0",
+    `--output=${sarifOutputPath}`,
+    "--no-download"
+  ];
+  return {
+    language,
+    databaseCreateArgs,
+    databaseAnalyzeArgs,
+    sarifOutputPath,
+    databaseDir
+  };
+}
 var EXTERNAL_STATIC_ENGINES = [
   {
     id: "semgrep-opengrep",
@@ -28757,7 +29540,13 @@ var EXTERNAL_STATIC_ENGINES = [
     name: "Roslyn .NET Analyzers",
     binaryNames: ["dotnet"],
     category: "CODE_QUALITY",
-    argsBuilder: (dir) => ["build", dir, "--no-restore", "/p:TreatWarningsAsErrors=false"],
+    argsBuilder: (dir) => [
+      "build",
+      dir,
+      "--no-restore",
+      "/p:TreatWarningsAsErrors=false",
+      `/p:ErrorLog=${path18.join(dir, "roslyn-analysis.sarif")},version=2.1`
+    ],
     outputFormat: "SARIF"
   },
   {
@@ -28773,10 +29562,22 @@ var EXTERNAL_STATIC_ENGINES = [
     name: "Checkstyle Java Style & Complexity",
     binaryNames: ["checkstyle"],
     category: "CODE_QUALITY",
-    argsBuilder: (dir) => ["-f", "sarif", dir],
+    argsBuilder: (dir) => ["-c", "/google_checks.xml", "-f", "sarif", dir],
     outputFormat: "SARIF"
   }
 ];
+function markExternalFindingUnverified(finding) {
+  return {
+    ...finding,
+    originType: "EXTERNAL_TOOL_EXECUTION",
+    validationStatus: "UNVERIFIED",
+    lifecycleState: "UNVERIFIED"
+  };
+}
+function normalizeRelativePath(rawPath) {
+  const s = String(rawPath || "unknown").trim().replace(/\\/g, "/");
+  return s || "unknown";
+}
 var AnalyzerRegistry = class _AnalyzerRegistry {
   static listNativePlugins() {
     return AnalyzerPluginManager.listPlugins().map((p) => ({
@@ -28840,12 +29641,6 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
     const completedAt = fixedTs || (/* @__PURE__ */ new Date()).toISOString();
     const durationMs = fixedTs ? 1 : Math.max(1, Math.round(performance.now() - startMs));
     const astFilesCount = parseResults.filter((p) => p.astParsed).length;
-    const pluginFilesSet = /* @__PURE__ */ new Set();
-    for (const f of filesEntries) {
-      if (parseResults.find((p) => p.filePath === f[0])?.astParsed) {
-        pluginFilesSet.add(f[0]);
-      }
-    }
     const iacPluginTimedOut = pluginExecution.outputs.some((o) => o.timedOut);
     const catalogSnapshot = RuleRegistry.getCatalogSnapshot();
     const canonicalFingerprintPayload = {
@@ -28853,7 +29648,7 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
       ruleCatalogSha256: catalogSnapshot.catalogSha256,
       files: filesEntries.map(([filePath, content]) => ({
         filePath,
-        sha256: crypto26.createHash("sha256").update(content, "utf8").digest("hex")
+        sha256: crypto28.createHash("sha256").update(content, "utf8").digest("hex")
       })),
       findings: findings.map((f) => ({
         ruleId: f.originalRuleId,
@@ -28865,7 +29660,7 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
         flowSteps: (f.executionFlows || []).length
       }))
     };
-    const deterministicDigestSha256 = crypto26.createHash("sha256").update(JSON.stringify(canonicalFingerprintPayload), "utf8").digest("hex");
+    const deterministicDigestSha256 = crypto28.createHash("sha256").update(JSON.stringify(canonicalFingerprintPayload), "utf8").digest("hex");
     const execution = {
       analyzerId: "winhood-native-ast-taint",
       analyzerName: "WinHood Native Compiler AST, Taint, Secrets & IaC Engine",
@@ -28922,7 +29717,8 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
   }
   /**
    * Executes installed external analyzers strictly inside SandboxExecutor (bwrap/Docker OS sandbox).
-   * Blocks host fallback cleanly if OS isolation is absent, and validates exitCode + stdout JSON schema.
+   * Blocks host fallback cleanly if OS isolation is absent, validates exitCode + output schema,
+   * and preserves standardized states: MEASURED, NOT_MEASURED, INCONCLUSIVE, FAILED, BLOCKED.
    */
   static runInstalledExternalAnalyzers(scope, timeoutMs = 12e3) {
     const results = [];
@@ -28942,7 +29738,7 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
           filesProcessed: 0,
           filesFailed: 0,
           measurementState: "NOT_MEASURED",
-          rawOutputSha256: crypto26.createHash("sha256").update(`${item.id}:EMPTY_SCOPE`).digest("hex")
+          rawOutputSha256: crypto28.createHash("sha256").update(`${item.id}:EMPTY_SCOPE`).digest("hex")
         },
         findings: [],
         limitations: ["Escopo vazio para an\xE1lise externa."]
@@ -28965,10 +29761,39 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
             filesProcessed: 0,
             filesFailed: 0,
             measurementState: "NOT_MEASURED",
-            rawOutputSha256: crypto26.createHash("sha256").update(`${item.id}:NOT_INSTALLED`).digest("hex")
+            rawOutputSha256: crypto28.createHash("sha256").update(`${item.id}:NOT_INSTALLED`).digest("hex")
           },
           findings: [],
           limitations: [`Bin\xE1rio ${item.name} n\xE3o instalado no host.`]
+        });
+        continue;
+      }
+      if (desc.id === "codeql-cli") {
+        results.push(
+          _AnalyzerRegistry.runCodeQlLifecycle(desc, item.executablePath, item.versionOutput || "CLI", scope, timeoutMs)
+        );
+        continue;
+      }
+      const filesKeys = Object.keys(scope.filesMap);
+      if (desc.id === "roslyn-analyzers" && !filesKeys.some((f) => /\.(csproj|sln|cs)$/i.test(f))) {
+        results.push({
+          execution: {
+            analyzerId: item.id,
+            analyzerName: item.name,
+            analyzerVersion: item.versionOutput || "CLI",
+            executionMethod: "NOT_EXECUTED",
+            binaryDetected: true,
+            startedAt: (/* @__PURE__ */ new Date()).toISOString(),
+            completedAt: (/* @__PURE__ */ new Date()).toISOString(),
+            durationMs: 0,
+            exitCode: null,
+            filesProcessed: 0,
+            filesFailed: 0,
+            measurementState: "NOT_MEASURED",
+            rawOutputSha256: crypto28.createHash("sha256").update(`${item.id}:NO_DOTNET_PROJECT`).digest("hex")
+          },
+          findings: [],
+          limitations: ["Nenhum projeto .NET (.csproj/.sln/.cs) encontrado no escopo para Roslyn."]
         });
         continue;
       }
@@ -28992,7 +29817,7 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
             exitCode: sbxRes.exitCode,
             filesProcessed: 0,
             filesFailed: Object.keys(scope.filesMap).length,
-            measurementState: "NOT_MEASURED",
+            measurementState: sbxRes.blocked ? "BLOCKED" : "NOT_MEASURED",
             stdout: sbxRes.stdout.slice(0, 4e3),
             stderr: sbxRes.stderr.slice(0, 2e3),
             rawOutputSha256: sbxRes.stderrSha256
@@ -29030,90 +29855,468 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
           rawOutputSha256: sbxRes.stdoutSha256
         },
         findings: parsedOut.findings,
-        limitations: parsedOut.validSchema ? sbxRes.limitations : [`Sa\xEDda do analisador ${item.name} inv\xE1lida ou vazia (exitCode=${sbxRes.exitCode}).`]
+        limitations: parsedOut.validSchema ? [...sbxRes.limitations, ...parsedOut.warnings] : [
+          ...parsedOut.errors,
+          `Sa\xEDda do analisador ${item.name} inv\xE1lida ou vazia (exitCode=${sbxRes.exitCode}).`
+        ]
       });
     }
     return results;
   }
+  static runCodeQlLifecycle(desc, executablePath, toolVersion, scope, timeoutMs) {
+    const startedAt = (/* @__PURE__ */ new Date()).toISOString();
+    const detectedLang = detectCodeQlLanguage(scope.filesMap);
+    if (!detectedLang) {
+      return {
+        execution: {
+          analyzerId: desc.id,
+          analyzerName: desc.name,
+          analyzerVersion: toolVersion,
+          executionMethod: "NOT_EXECUTED",
+          binaryDetected: true,
+          startedAt,
+          completedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          durationMs: 0,
+          exitCode: null,
+          filesProcessed: 0,
+          filesFailed: 0,
+          measurementState: "NOT_MEASURED",
+          rawOutputSha256: crypto28.createHash("sha256").update(`${desc.id}:UNSUPPORTED_LANGUAGE`).digest("hex")
+        },
+        findings: [],
+        limitations: ["Nenhuma linguagem suportada pelo CodeQL CLI detectada no escopo."]
+      };
+    }
+    const workDir = fs17.mkdtempSync(path18.join(os10.tmpdir(), "winhood-codeql-"));
+    const dbDir = path18.join(workDir, "codeql-db");
+    const sarifPath = path18.join(workDir, "codeql-results.sarif");
+    try {
+      const createRes = SandboxExecutor.runSandboxedCliBinary({
+        executablePath,
+        argsBuilder: (srcDir) => buildCodeQlLifecycleCommands(srcDir, detectedLang, dbDir, sarifPath).databaseCreateArgs,
+        filesMap: scope.filesMap,
+        timeoutMs
+      });
+      if (createRes.blocked || !createRes.executed) {
+        return {
+          execution: {
+            analyzerId: desc.id,
+            analyzerName: desc.name,
+            analyzerVersion: toolVersion,
+            executionMethod: "NOT_EXECUTED",
+            binaryDetected: true,
+            startedAt: createRes.startedAt,
+            completedAt: createRes.completedAt,
+            durationMs: createRes.durationMs,
+            exitCode: createRes.exitCode,
+            filesProcessed: 0,
+            filesFailed: Object.keys(scope.filesMap).length,
+            measurementState: createRes.blocked ? "BLOCKED" : "NOT_MEASURED",
+            stdout: createRes.stdout.slice(0, 4e3),
+            stderr: createRes.stderr.slice(0, 2e3),
+            rawOutputSha256: createRes.stderrSha256
+          },
+          findings: [],
+          limitations: createRes.limitations.length > 0 ? createRes.limitations : [createRes.stderr]
+        };
+      }
+      if (createRes.exitCode !== 0 || !fs17.existsSync(dbDir)) {
+        return {
+          execution: {
+            analyzerId: desc.id,
+            analyzerName: desc.name,
+            analyzerVersion: toolVersion,
+            executionMethod: "CLI_BINARY",
+            binaryDetected: true,
+            startedAt: createRes.startedAt,
+            completedAt: createRes.completedAt,
+            durationMs: createRes.durationMs,
+            exitCode: createRes.exitCode,
+            filesProcessed: 0,
+            filesFailed: Object.keys(scope.filesMap).length,
+            measurementState: "FAILED",
+            stdout: createRes.stdout.slice(0, 4e3),
+            stderr: createRes.stderr.slice(0, 2e3),
+            rawOutputSha256: createRes.stderrSha256
+          },
+          findings: [],
+          limitations: [`CodeQL database create falhou para linguagem ${detectedLang} (exitCode=${createRes.exitCode}).`]
+        };
+      }
+      const analyzeRes = SandboxExecutor.runSandboxedCliBinary({
+        executablePath,
+        argsBuilder: (srcDir) => buildCodeQlLifecycleCommands(srcDir, detectedLang, dbDir, sarifPath).databaseAnalyzeArgs,
+        filesMap: scope.filesMap,
+        timeoutMs
+      });
+      const sarifContent = fs17.existsSync(sarifPath) ? fs17.readFileSync(sarifPath, "utf8") : analyzeRes.stdout;
+      const parsedOut = _AnalyzerRegistry.parseExternalJsonOutputWithValidation(
+        desc,
+        sarifContent,
+        scope,
+        toolVersion
+      );
+      const measurementState = analyzeRes.blocked ? "BLOCKED" : !parsedOut.validSchema ? analyzeRes.exitCode !== 0 ? "FAILED" : "INCONCLUSIVE" : "MEASURED";
+      return {
+        execution: {
+          analyzerId: desc.id,
+          analyzerName: desc.name,
+          analyzerVersion: toolVersion,
+          executionMethod: "CLI_BINARY",
+          binaryDetected: true,
+          startedAt: createRes.startedAt,
+          completedAt: analyzeRes.completedAt,
+          durationMs: createRes.durationMs + analyzeRes.durationMs,
+          exitCode: analyzeRes.exitCode,
+          filesProcessed: parsedOut.validSchema ? Object.keys(scope.filesMap).length : 0,
+          filesFailed: parsedOut.validSchema ? 0 : Object.keys(scope.filesMap).length,
+          measurementState,
+          stdout: sarifContent.slice(0, 4e3),
+          stderr: analyzeRes.stderr.slice(0, 2e3),
+          rawOutputSha256: crypto28.createHash("sha256").update(sarifContent || "").digest("hex")
+        },
+        findings: parsedOut.findings,
+        limitations: parsedOut.validSchema ? [...analyzeRes.limitations, ...parsedOut.warnings] : [...parsedOut.errors, `CodeQL analyze n\xE3o produziu SARIF 2.1.0 v\xE1lido (exitCode=${analyzeRes.exitCode}).`]
+      };
+    } finally {
+      try {
+        fs17.rmSync(workDir, { recursive: true, force: true });
+      } catch {
+      }
+    }
+  }
+  /**
+   * Public, schema-validated parser and converter for all supported external tool outputs.
+   * Every converted finding preserves external provenance and starts as UNVERIFIED (never auto-confirmed).
+   */
   static parseExternalJsonOutputWithValidation(desc, stdout, scope, toolVersion) {
-    if (!stdout || !stdout.trim()) return { validSchema: false, findings: [] };
+    if (!stdout || !stdout.trim()) {
+      return {
+        validSchema: false,
+        findings: [],
+        errors: [`Sa\xEDda vazia recebida para ${desc.name} (${desc.outputFormat}).`],
+        warnings: []
+      };
+    }
     const findings = [];
+    const errors = [];
+    const warnings = [];
     try {
       const json = JSON.parse(stdout);
-      if (desc.outputFormat === "SEMGREP_JSON" && Array.isArray(json.results)) {
-        json.results.forEach((r, idx) => {
-          const sevMap = {
-            ERROR: "CRITICAL",
-            WARNING: "HIGH",
-            INFO: "MEDIUM"
-          };
-          findings.push(
-            FindingNormalizer.fromAstCandidate({
-              candidate: {
-                ruleId: String(r.check_id || "semgrep-rule"),
-                title: String(r.extra?.message || r.check_id || "Semgrep Finding"),
-                description: String(r.extra?.message || ""),
-                category: "SAST",
-                severity: sevMap[String(r.extra?.severity || "").toUpperCase()] || "MEDIUM",
-                cwe: Array.isArray(r.extra?.metadata?.cwe) ? String(r.extra.metadata.cwe[0]) : "CWE-710",
-                filePath: String(r.path || "unknown"),
-                lineNumber: Number(r.start?.line || 1),
-                endLineNumber: Number(r.end?.line || 1),
-                snippet: String(r.extra?.lines || ""),
-                remediation: String(r.extra?.fix || "Aplicar remedia\xE7\xE3o conforme regra Semgrep."),
-                detectionMethod: "STATIC_PATTERN",
-                confidence: "HIGH",
-                effortMinutes: 15
-              },
-              scope,
-              toolName: desc.name,
-              toolVersion,
-              filesMap: scope.filesMap,
-              index: idx
-            })
-          );
+      if (desc.outputFormat === "SARIF") {
+        const imported = SarifCodec.importSarif210(json, scope, {
+          originType: "EXTERNAL_TOOL_EXECUTION",
+          fallbackToolName: desc.name
         });
-      } else if (desc.outputFormat === "GITLEAKS_JSON" && Array.isArray(json)) {
-        json.forEach((g, idx) => {
-          findings.push(
-            FindingNormalizer.fromAstCandidate({
-              candidate: {
-                ruleId: String(g.RuleID || "gitleaks-secret"),
-                title: `Segredo detectado pelo Gitleaks: ${g.Description || g.RuleID}`,
-                description: `Regra Gitleaks ${g.RuleID} identificou potencial segredo exposto.`,
-                category: "SECRETS",
-                severity: "BLOCKER",
-                cwe: "CWE-798",
-                filePath: String(g.File || "unknown"),
-                lineNumber: Number(g.StartLine || 1),
-                endLineNumber: Number(g.EndLine || 1),
-                snippet: String(g.Match || ""),
-                remediation: "Revogar credencial imediatamente e remover do reposit\xF3rio.",
-                detectionMethod: "STATIC_PATTERN",
-                confidence: "HIGH",
-                effortMinutes: 30
-              },
-              scope,
-              toolName: desc.name,
-              toolVersion,
-              filesMap: scope.filesMap,
-              index: idx
-            })
-          );
-        });
-      } else {
-        const schemaValid = desc.outputFormat === "ESLINT_JSON" && Array.isArray(json) || desc.outputFormat === "RUFF_JSON" && Array.isArray(json) || desc.outputFormat === "BANDIT_JSON" && Array.isArray(json?.results) || desc.outputFormat === "SARIF" && Array.isArray(json?.runs);
-        return { validSchema: schemaValid, findings };
+        return {
+          validSchema: imported.valid,
+          findings: imported.findings,
+          errors: imported.errors,
+          warnings: imported.warnings
+        };
       }
-      return { validSchema: true, findings };
-    } catch {
-      return { validSchema: false, findings: [] };
+      if (desc.outputFormat === "SEMGREP_JSON") {
+        if (!json || typeof json !== "object" || Array.isArray(json) || !Array.isArray(json.results)) {
+          return {
+            validSchema: false,
+            findings: [],
+            errors: ['Schema SEMGREP_JSON inv\xE1lido: esperado objeto com array "results".'],
+            warnings: []
+          };
+        }
+        const sevMap = {
+          ERROR: "CRITICAL",
+          WARNING: "HIGH",
+          INFO: "MEDIUM"
+        };
+        for (let idx = 0; idx < json.results.length; idx++) {
+          const r = json.results[idx];
+          if (!r || typeof r !== "object" || typeof r.check_id !== "string" || typeof r.path !== "string") {
+            return {
+              validSchema: false,
+              findings: [],
+              errors: [`Entrada Semgrep results[${idx}] inv\xE1lida: campos check_id e path s\xE3o obrigat\xF3rios.`],
+              warnings: []
+            };
+          }
+          const normalized = FindingNormalizer.fromAstCandidate({
+            candidate: {
+              ruleId: r.check_id,
+              title: String(r.extra?.message || r.check_id),
+              description: String(r.extra?.message || ""),
+              category: "SAST",
+              severity: sevMap[String(r.extra?.severity || "").toUpperCase()] || "MEDIUM",
+              cwe: Array.isArray(r.extra?.metadata?.cwe) ? String(r.extra.metadata.cwe[0]) : typeof r.extra?.metadata?.cwe === "string" ? r.extra.metadata.cwe : "CWE-710",
+              filePath: normalizeRelativePath(r.path),
+              lineNumber: Math.max(1, Number(r.start?.line || 1)),
+              endLineNumber: Math.max(1, Number(r.end?.line || r.start?.line || 1)),
+              columnStart: Number.isFinite(Number(r.start?.col)) ? Number(r.start.col) : void 0,
+              columnEnd: Number.isFinite(Number(r.end?.col)) ? Number(r.end.col) : void 0,
+              snippet: String(r.extra?.lines || ""),
+              remediation: String(r.extra?.fix || "Aplicar remedia\xE7\xE3o conforme regra Semgrep."),
+              detectionMethod: "STATIC_PATTERN",
+              confidence: String(r.extra?.metadata?.confidence || "").toUpperCase() === "HIGH" ? "HIGH" : "MEDIUM",
+              effortMinutes: 15
+            },
+            scope,
+            toolName: desc.name,
+            toolVersion,
+            filesMap: scope.filesMap,
+            index: idx
+          });
+          findings.push(markExternalFindingUnverified(normalized));
+        }
+        return { validSchema: true, findings, errors, warnings };
+      }
+      if (desc.outputFormat === "GITLEAKS_JSON") {
+        if (!Array.isArray(json)) {
+          return {
+            validSchema: false,
+            findings: [],
+            errors: ["Schema GITLEAKS_JSON inv\xE1lido: esperado array JSON de detec\xE7\xF5es."],
+            warnings: []
+          };
+        }
+        for (let idx = 0; idx < json.length; idx++) {
+          const g = json[idx];
+          if (!g || typeof g !== "object" || typeof g.RuleID !== "string" || typeof g.File !== "string") {
+            return {
+              validSchema: false,
+              findings: [],
+              errors: [`Entrada Gitleaks[${idx}] inv\xE1lida: campos RuleID e File s\xE3o obrigat\xF3rios.`],
+              warnings: []
+            };
+          }
+          const normalized = FindingNormalizer.fromAstCandidate({
+            candidate: {
+              ruleId: g.RuleID,
+              title: `Segredo detectado pelo Gitleaks: ${g.Description || g.RuleID}`,
+              description: `Regra Gitleaks ${g.RuleID} identificou potencial segredo exposto em ${g.File}.`,
+              category: "SECRETS",
+              severity: "BLOCKER",
+              cwe: "CWE-798",
+              filePath: normalizeRelativePath(g.File),
+              lineNumber: Math.max(1, Number(g.StartLine || 1)),
+              endLineNumber: Math.max(1, Number(g.EndLine || g.StartLine || 1)),
+              columnStart: Number.isFinite(Number(g.StartColumn)) ? Number(g.StartColumn) : void 0,
+              columnEnd: Number.isFinite(Number(g.EndColumn)) ? Number(g.EndColumn) : void 0,
+              snippet: String(g.Match || ""),
+              remediation: "Revogar credencial imediatamente, rotacionar segredo e remover do reposit\xF3rio.",
+              detectionMethod: "STATIC_PATTERN",
+              confidence: "MEDIUM",
+              effortMinutes: 30
+            },
+            scope,
+            toolName: desc.name,
+            toolVersion,
+            filesMap: scope.filesMap,
+            index: idx
+          });
+          findings.push(markExternalFindingUnverified(normalized));
+        }
+        return { validSchema: true, findings, errors, warnings };
+      }
+      if (desc.outputFormat === "ESLINT_JSON") {
+        if (!Array.isArray(json)) {
+          return {
+            validSchema: false,
+            findings: [],
+            errors: ["Schema ESLINT_JSON inv\xE1lido: esperado array de relat\xF3rios por arquivo."],
+            warnings: []
+          };
+        }
+        let findingIdx = 0;
+        for (let fIdx = 0; fIdx < json.length; fIdx++) {
+          const fileReport = json[fIdx];
+          if (!fileReport || typeof fileReport !== "object" || typeof fileReport.filePath !== "string" || !Array.isArray(fileReport.messages)) {
+            return {
+              validSchema: false,
+              findings: [],
+              errors: [`Relat\xF3rio ESLint[${fIdx}] inv\xE1lido: campos filePath e messages[] s\xE3o obrigat\xF3rios.`],
+              warnings: []
+            };
+          }
+          const filePath = normalizeRelativePath(fileReport.filePath);
+          for (const msg of fileReport.messages) {
+            if (!msg || typeof msg !== "object") continue;
+            const rawSev = Number(msg.severity);
+            if (rawSev === 0) continue;
+            if (rawSev !== 1 && rawSev !== 2) {
+              warnings.push(`Severidade ESLint n\xE3o reconhecida (${String(msg.severity)}) em ${filePath}; ignorada.`);
+              continue;
+            }
+            const severity = rawSev === 2 ? "HIGH" : "MEDIUM";
+            const ruleId = String(msg.ruleId || (msg.fatal ? "eslint-parse-error" : "eslint-rule"));
+            const isSecurityRule = /security|no-eval|no-implied-eval|no-new-func|xss|inject/i.test(ruleId);
+            const fixHint = msg.fix ? "Corre\xE7\xE3o autom\xE1tica dispon\xEDvel via eslint --fix." : "Corrigir viola\xE7\xE3o conforme regra ESLint.";
+            const nodeNote = msg.nodeType ? ` (AST node: ${String(msg.nodeType)})` : "";
+            const normalized = FindingNormalizer.fromAstCandidate({
+              candidate: {
+                ruleId,
+                title: `${ruleId}: ${String(msg.message || "ESLint issue")}`.slice(0, 180),
+                description: `${String(msg.message || "")}${nodeNote}`,
+                category: isSecurityRule ? "SAST" : "CODE_QUALITY",
+                severity,
+                cwe: isSecurityRule ? "CWE-95" : void 0,
+                filePath,
+                lineNumber: Math.max(1, Number(msg.line || 1)),
+                endLineNumber: Math.max(1, Number(msg.endLine || msg.line || 1)),
+                columnStart: Number.isFinite(Number(msg.column)) ? Number(msg.column) : void 0,
+                columnEnd: Number.isFinite(Number(msg.endColumn)) ? Number(msg.endColumn) : void 0,
+                snippet: String(msg.source || ""),
+                remediation: fixHint,
+                detectionMethod: "STATIC_PATTERN",
+                confidence: rawSev === 2 ? "MEDIUM" : "LOW",
+                effortMinutes: msg.fix ? 5 : 15
+              },
+              scope,
+              toolName: desc.name,
+              toolVersion,
+              filesMap: scope.filesMap,
+              index: findingIdx++
+            });
+            findings.push(markExternalFindingUnverified(normalized));
+          }
+        }
+        return { validSchema: true, findings, errors, warnings };
+      }
+      if (desc.outputFormat === "RUFF_JSON") {
+        if (!Array.isArray(json)) {
+          return {
+            validSchema: false,
+            findings: [],
+            errors: ["Schema RUFF_JSON inv\xE1lido: esperado array JSON de diagn\xF3sticos Ruff."],
+            warnings: []
+          };
+        }
+        for (let idx = 0; idx < json.length; idx++) {
+          const item = json[idx];
+          if (!item || typeof item !== "object" || typeof item.filename !== "string" || typeof item.message !== "string") {
+            return {
+              validSchema: false,
+              findings: [],
+              errors: [`Diagn\xF3stico Ruff[${idx}] inv\xE1lido: campos filename e message s\xE3o obrigat\xF3rios.`],
+              warnings: []
+            };
+          }
+          const code = String(item.code || "RUFF-UNKNOWN");
+          const isSecurity = /^S\d+/i.test(code);
+          const isBugbearOrPyflakes = /^(B|F|ASYNC|BLE)\d+/i.test(code);
+          const severity = isSecurity ? "HIGH" : isBugbearOrPyflakes ? "MEDIUM" : "LOW";
+          const startLine = Math.max(1, Number(item.location?.row || 1));
+          const endLine = Math.max(startLine, Number(item.end_location?.row || startLine));
+          const normalized = FindingNormalizer.fromAstCandidate({
+            candidate: {
+              ruleId: code,
+              title: `${code}: ${item.message}`.slice(0, 180),
+              description: item.message,
+              category: isSecurity ? "SAST" : "CODE_QUALITY",
+              severity,
+              cwe: isSecurity ? "CWE-703" : void 0,
+              filePath: normalizeRelativePath(item.filename),
+              lineNumber: startLine,
+              endLineNumber: endLine,
+              columnStart: Number.isFinite(Number(item.location?.column)) ? Number(item.location.column) : void 0,
+              columnEnd: Number.isFinite(Number(item.end_location?.column)) ? Number(item.end_location.column) : void 0,
+              snippet: "",
+              remediation: item.fix?.message ? `Corre\xE7\xE3o sugerida pelo Ruff: ${String(item.fix.message)}` : "Revisar diagn\xF3stico Python reportado pelo Ruff.",
+              detectionMethod: "STATIC_PATTERN",
+              confidence: isSecurity ? "MEDIUM" : "LOW",
+              effortMinutes: item.fix ? 5 : 15
+            },
+            scope,
+            toolName: desc.name,
+            toolVersion,
+            filesMap: scope.filesMap,
+            index: idx
+          });
+          findings.push(markExternalFindingUnverified(normalized));
+        }
+        return { validSchema: true, findings, errors, warnings };
+      }
+      if (desc.outputFormat === "BANDIT_JSON") {
+        if (!json || typeof json !== "object" || Array.isArray(json) || !Array.isArray(json.results)) {
+          return {
+            validSchema: false,
+            findings: [],
+            errors: ['Schema BANDIT_JSON inv\xE1lido: esperado objeto com array "results".'],
+            warnings: []
+          };
+        }
+        const banditSevMap = {
+          HIGH: "HIGH",
+          MEDIUM: "MEDIUM",
+          LOW: "LOW"
+        };
+        const banditConfMap = {
+          HIGH: "HIGH",
+          MEDIUM: "MEDIUM",
+          LOW: "LOW"
+        };
+        for (let idx = 0; idx < json.results.length; idx++) {
+          const b = json.results[idx];
+          if (!b || typeof b !== "object" || typeof b.test_id !== "string" || typeof b.filename !== "string") {
+            return {
+              validSchema: false,
+              findings: [],
+              errors: [`Resultado Bandit results[${idx}] inv\xE1lido: campos test_id e filename s\xE3o obrigat\xF3rios.`],
+              warnings: []
+            };
+          }
+          const lineRange = Array.isArray(b.line_range) ? b.line_range.map(Number).filter((n) => Number.isFinite(n) && n > 0) : [];
+          const startLine = Math.max(1, Number(b.line_number || lineRange[0] || 1));
+          const endLine = lineRange.length > 0 ? Math.max(startLine, ...lineRange) : startLine;
+          const cweId = b.issue_cwe?.id ? `CWE-${String(b.issue_cwe.id).replace(/^CWE-/i, "")}` : void 0;
+          const rawSev = String(b.issue_severity || "MEDIUM").toUpperCase();
+          const rawConf = String(b.issue_confidence || "MEDIUM").toUpperCase();
+          const normalized = FindingNormalizer.fromAstCandidate({
+            candidate: {
+              ruleId: b.test_id,
+              title: `${b.test_id} (${String(b.test_name || "bandit")}): ${String(b.issue_text || "")}`.slice(0, 180),
+              description: String(b.issue_text || b.test_name || b.test_id),
+              category: "SAST",
+              severity: banditSevMap[rawSev] || "MEDIUM",
+              cwe: cweId,
+              filePath: normalizeRelativePath(b.filename),
+              lineNumber: startLine,
+              endLineNumber: endLine,
+              snippet: String(b.code || ""),
+              remediation: String(
+                b.more_info ? `Revisar vulnerabilidade Python (${b.test_id}) \u2014 refer\xEAncia: ${b.more_info}` : `Revisar vulnerabilidade Python (${b.test_id}) reportada pelo Bandit.`
+              ),
+              detectionMethod: "STATIC_PATTERN",
+              confidence: banditConfMap[rawConf] || "MEDIUM",
+              effortMinutes: rawSev === "HIGH" ? 30 : 15
+            },
+            scope,
+            toolName: desc.name,
+            toolVersion,
+            filesMap: scope.filesMap,
+            index: idx
+          });
+          findings.push(markExternalFindingUnverified(normalized));
+        }
+        return { validSchema: true, findings, errors, warnings };
+      }
+      return {
+        validSchema: false,
+        findings: [],
+        errors: [`Formato de sa\xEDda externo n\xE3o suportado: ${String(desc.outputFormat)}.`],
+        warnings: []
+      };
+    } catch (err) {
+      return {
+        validSchema: false,
+        findings: [],
+        errors: [`Falha ao interpretar JSON de ${desc.name}: ${err.message}`],
+        warnings: []
+      };
     }
   }
 };
 
 // src/intelligence/datasets/GoldenDatasetCorpus.ts
-import crypto27 from "node:crypto";
+import crypto29 from "node:crypto";
 var DECLARED_BENCHMARK_LANGUAGES = [
   "TypeScript",
   "JavaScript",
@@ -29126,7 +30329,7 @@ var DECLARED_BENCHMARK_LANGUAGES = [
 ];
 function computeGoldenCaseContentSha256(filesMap) {
   const orderedEntries = Object.keys(filesMap).sort().map((k) => [k, filesMap[k]]);
-  return crypto27.createHash("sha256").update(JSON.stringify(orderedEntries), "utf8").digest("hex");
+  return crypto29.createHash("sha256").update(JSON.stringify(orderedEntries), "utf8").digest("hex");
 }
 function hydrateCorpus(rawCases, datasetVersion, datasetRole) {
   return rawCases.map((item) => ({
@@ -30185,7 +31388,7 @@ var GoldenDatasetRunner = class _GoldenDatasetRunner {
     const primaryCorpus = options?.customCorpus ?? (datasetMode === "INTERNAL_HOLDOUT" ? INTERNAL_HOLDOUT_CORPUS : datasetMode === "DEVELOPMENT" ? DEVELOPMENT_DATASET_CORPUS : GOLDEN_DATASET_CORPUS);
     const primaryVersion = options?.customVersion ?? (datasetMode === "INTERNAL_HOLDOUT" ? INTERNAL_HOLDOUT_VERSION : datasetMode === "DEVELOPMENT" ? DEVELOPMENT_DATASET_VERSION : GOLDEN_DATASET_VERSION);
     const primaryOriginLabel = options?.customOriginLabel ?? (datasetMode === "INTERNAL_HOLDOUT" ? INTERNAL_HOLDOUT_ORIGIN_LABEL : datasetMode === "DEVELOPMENT" ? DEVELOPMENT_DATASET_ORIGIN_LABEL : GOLDEN_DATASET_ORIGIN_LABEL);
-    const datasetSha256 = crypto28.createHash("sha256").update(JSON.stringify(primaryCorpus), "utf8").digest("hex");
+    const datasetSha256 = crypto30.createHash("sha256").update(JSON.stringify(primaryCorpus), "utf8").digest("hex");
     const {
       cases,
       tp,
@@ -30337,250 +31540,10 @@ var GoldenDatasetRunner = class _GoldenDatasetRunner {
       byCategory,
       cases
     };
-    const reportSha256 = crypto28.createHash("sha256").update(JSON.stringify(reportBody), "utf8").digest("hex");
+    const reportSha256 = crypto30.createHash("sha256").update(JSON.stringify(reportBody), "utf8").digest("hex");
     return {
       ...reportBody,
       reportSha256
-    };
-  }
-};
-
-// src/analyzers/SarifCodec.ts
-import crypto29 from "node:crypto";
-function severityToSarifLevel(sev) {
-  if (sev === "BLOCKER" || sev === "CRITICAL" || sev === "HIGH") return "error";
-  if (sev === "MEDIUM") return "warning";
-  return "note";
-}
-function sarifLevelToSeverity(level, props) {
-  const rank = Number(props?.["security-severity"]);
-  if (!Number.isNaN(rank)) {
-    if (rank >= 9) return "CRITICAL";
-    if (rank >= 7) return "HIGH";
-    if (rank >= 4) return "MEDIUM";
-    return "LOW";
-  }
-  const norm = String(level || "warning").toLowerCase();
-  if (norm === "error") return "HIGH";
-  if (norm === "warning") return "MEDIUM";
-  return "LOW";
-}
-var SarifCodec = class {
-  /**
-   * Exports NormalizedFindings into canonical SARIF 2.1.0 with data-flow codeFlows,
-   * CWE/OWASP tags, and independent open-standard positioning.
-   */
-  static exportSarif210(findings, options = {}) {
-    const rulesMap = /* @__PURE__ */ new Map();
-    const results = findings.map((f) => {
-      const ruleMeta = RuleRegistry.findRule(f.originalRuleId);
-      if (!rulesMap.has(f.originalRuleId)) {
-        rulesMap.set(f.originalRuleId, {
-          id: f.originalRuleId,
-          name: f.originalRuleId.replace(/[^a-zA-Z0-9]/g, "_"),
-          shortDescription: { text: f.title },
-          fullDescription: { text: f.whyItIsAnIssue || f.description || f.title },
-          defaultConfiguration: {
-            level: severityToSarifLevel(f.severity)
-          },
-          properties: {
-            version: ruleMeta?.version || "1.0.0",
-            cwe: f.cwe ? [f.cwe] : [],
-            owaspTop10: ruleMeta?.owaspTop10 || null,
-            cvss: f.cvss ?? ruleMeta?.cvssBase ?? null,
-            "security-severity": String(f.cvss ?? ruleMeta?.cvssBase ?? (f.severity === "BLOCKER" ? 9.5 : 5)),
-            category: f.category,
-            cleanCodeAttribute: f.cleanCodeAttribute,
-            mqrImpacts: f.mqrImpacts || []
-          }
-        });
-      }
-      const codeFlows = f.executionFlows && f.executionFlows.length > 0 ? [
-        {
-          threadFlows: [
-            {
-              locations: f.executionFlows.map((step) => ({
-                location: {
-                  physicalLocation: {
-                    artifactLocation: {
-                      uri: step.filePath.replace(/\\/g, "/"),
-                      uriBaseId: "%SRCROOT%"
-                    },
-                    region: {
-                      startLine: step.lineNumber > 0 ? step.lineNumber : 1,
-                      snippet: { text: step.codeSnippet || step.snippet || "" }
-                    }
-                  },
-                  message: { text: `[${step.nodeType}] ${step.explanation}` }
-                }
-              }))
-            }
-          ]
-        }
-      ] : void 0;
-      return {
-        ruleId: f.originalRuleId,
-        level: severityToSarifLevel(f.severity),
-        message: { text: `[${f.softwareName}] ${f.title} \u2014 ${f.whyItIsAnIssue || f.description}` },
-        locations: [
-          {
-            physicalLocation: {
-              artifactLocation: {
-                uri: f.filePath.replace(/\\/g, "/"),
-                uriBaseId: "%SRCROOT%"
-              },
-              region: {
-                startLine: f.lineNumber > 0 ? f.lineNumber : 1,
-                endLine: f.endLineNumber && f.endLineNumber > 0 ? f.endLineNumber : f.lineNumber > 0 ? f.lineNumber : 1,
-                startColumn: f.columnStart ?? 1,
-                endColumn: f.columnEnd ?? 80,
-                snippet: { text: f.snippet || "" }
-              }
-            }
-          }
-        ],
-        ...codeFlows ? { codeFlows } : {},
-        properties: {
-          softwareId: f.softwareId,
-          softwareName: f.softwareName,
-          softwareVersion: f.softwareVersion,
-          cwe: f.cwe,
-          cvss: f.cvss,
-          evidenceSha256: f.evidenceSha256,
-          remediation: f.remediation,
-          remediationEffortMinutes: f.remediationEffortMinutes
-        }
-      };
-    });
-    return {
-      $schema: "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/Sarif-2.1.0/rc2/Schemas/sarif-schema-2.1.0.json",
-      version: "2.1.0",
-      runs: [
-        {
-          tool: {
-            driver: {
-              name: options.toolName || "WinHood Independent Audit & Benchmarking Engine",
-              version: options.toolVersion || RULE_ENGINE_VERSION,
-              informationUri: options.informationUri || "https://github.com/LilNavaHoods/Winhood-Benchmarking",
-              rules: Array.from(rulesMap.values())
-            }
-          },
-          artifacts: (options.softwareArtifacts || []).map((a) => ({
-            location: { uri: `package:${a.name}@${a.version}` }
-          })),
-          results
-        }
-      ]
-    };
-  }
-  /**
-   * Validates and imports external SARIF 2.1.0 documents without runtime coupling.
-   */
-  static importSarif210(rawPayload, scope) {
-    const errors = [];
-    if (!rawPayload || typeof rawPayload !== "object") {
-      return {
-        valid: false,
-        errors: ["SARIF payload deve ser um objeto JSON v\xE1lido."],
-        importedToolNames: [],
-        findings: [],
-        payloadSha256: ""
-      };
-    }
-    const doc = rawPayload;
-    if (doc.version !== "2.1.0") {
-      errors.push(`Vers\xE3o SARIF esperada "2.1.0", recebida "${String(doc.version)}".`);
-    }
-    if (!Array.isArray(doc.runs)) {
-      errors.push('Campo obrigat\xF3rio "runs" ausente ou n\xE3o \xE9 array.');
-    }
-    if (errors.length > 0) {
-      return {
-        valid: false,
-        errors,
-        importedToolNames: [],
-        findings: [],
-        payloadSha256: ""
-      };
-    }
-    const findings = [];
-    const importedToolNames = [];
-    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
-    for (let rIdx = 0; rIdx < doc.runs.length; rIdx++) {
-      const run = doc.runs[rIdx] || {};
-      const driver = run.tool?.driver || {};
-      const toolName = String(driver.name || `External SARIF Tool #${rIdx + 1}`);
-      const toolVersion = String(driver.version || "unknown");
-      importedToolNames.push(toolName);
-      const rulesById = /* @__PURE__ */ new Map();
-      for (const rule of Array.isArray(driver.rules) ? driver.rules : []) {
-        if (rule?.id) rulesById.set(String(rule.id), rule);
-      }
-      const results = Array.isArray(run.results) ? run.results : [];
-      for (let idx = 0; idx < results.length; idx++) {
-        const res = results[idx] || {};
-        const ruleId = String(res.ruleId || "external-sarif-rule");
-        const ruleMeta = rulesById.get(ruleId);
-        const loc = res.locations?.[0]?.physicalLocation || {};
-        const filePath = String(loc.artifactLocation?.uri || "unknown").replace(/^file:\/\//, "");
-        const startLine = Number(loc.region?.startLine || 1);
-        const endLine = Number(loc.region?.endLine || startLine);
-        const snippet = String(loc.region?.snippet?.text || "");
-        const cweList = res.properties?.cwe || ruleMeta?.properties?.cwe || [];
-        const cwe = Array.isArray(cweList) && cweList[0] ? String(cweList[0]) : void 0;
-        const severity = sarifLevelToSeverity(res.level, ruleMeta?.properties || res.properties);
-        const codeFlowSteps = Array.isArray(res.codeFlows?.[0]?.threadFlows?.[0]?.locations) ? res.codeFlows[0].threadFlows[0].locations.map((tl, sIdx) => ({
-          stepOrder: sIdx + 1,
-          nodeType: sIdx === 0 ? "SOURCE" : sIdx === res.codeFlows[0].threadFlows[0].locations.length - 1 ? "SINK" : "PROPAGATOR",
-          filePath: String(tl.location?.physicalLocation?.artifactLocation?.uri || filePath),
-          lineNumber: Number(tl.location?.physicalLocation?.region?.startLine || startLine),
-          symbolName: ruleId,
-          codeSnippet: String(tl.location?.physicalLocation?.region?.snippet?.text || ""),
-          snippet: String(tl.location?.physicalLocation?.region?.snippet?.text || ""),
-          explanation: String(tl.location?.message?.text || "Imported SARIF flow step")
-        })) : void 0;
-        const categoryRaw = String(res.properties?.category || ruleMeta?.properties?.category || "").toUpperCase();
-        const category = categoryRaw === "SECRETS" || categoryRaw === "SCA" || categoryRaw === "IAC" || categoryRaw === "DATABASE" || categoryRaw === "CODE_QUALITY" ? categoryRaw : "SAST";
-        findings.push(
-          enrichLegacyOrExternalFinding({
-            id: `sarif-imp-${scope.runId}-${rIdx}-${idx}-${crypto29.createHash("sha256").update(`${toolName}:${ruleId}:${filePath}:${startLine}`).digest("hex").slice(0, 8)}`,
-            runId: scope.runId,
-            softwareId: scope.softwareId,
-            softwareName: scope.softwareName,
-            softwareVersion: scope.softwareVersion,
-            toolName,
-            toolVersion,
-            originType: "IMPORTED_REPORT",
-            detectionMethod: "EXTERNAL_SARIF_IMPORT",
-            originalRuleId: ruleId,
-            category,
-            cwe,
-            cvss: typeof res.properties?.cvss === "number" ? res.properties.cvss : void 0,
-            severity,
-            confidence: "HIGH",
-            validationStatus: "VALIDATED",
-            lifecycleState: "CONFIRMED",
-            title: String(ruleMeta?.shortDescription?.text || res.message?.text || ruleId).slice(0, 180),
-            description: String(res.message?.text || ruleMeta?.fullDescription?.text || ""),
-            filePath,
-            lineNumber: startLine,
-            endLineNumber: endLine,
-            snippet,
-            remediation: String(res.properties?.remediation || "Revisar achado importado via padr\xE3o SARIF 2.1.0."),
-            remediationEffortMinutes: Number(res.properties?.remediationEffortMinutes || 20),
-            executionFlows: codeFlowSteps,
-            collectedAt: nowIso
-          })
-        );
-      }
-    }
-    const payloadSha256 = crypto29.createHash("sha256").update(JSON.stringify(doc)).digest("hex");
-    return {
-      valid: true,
-      errors: [],
-      importedToolNames: Array.from(new Set(importedToolNames)),
-      findings,
-      payloadSha256
     };
   }
 };
@@ -30868,13 +31831,13 @@ var PortfolioEngine = class {
 };
 
 // src/reports/PdfReportGenerator.ts
-import crypto30 from "node:crypto";
+import crypto31 from "node:crypto";
 var DEFAULT_REPORT_HMAC_KEY = process.env.WINHOOD_REPORT_HMAC_KEY || "winhood-deterministic-audit-report-hmac-key-v4";
-function sha256Hex3(input) {
-  return crypto30.createHash("sha256").update(input).digest("hex");
+function sha256Hex4(input) {
+  return crypto31.createHash("sha256").update(input).digest("hex");
 }
 function computeHmacSha256(payload, secret = DEFAULT_REPORT_HMAC_KEY) {
-  return crypto30.createHmac("sha256", secret).update(payload).digest("hex");
+  return crypto31.createHmac("sha256", secret).update(payload).digest("hex");
 }
 function escapeHtml(raw) {
   return raw.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
@@ -30904,7 +31867,7 @@ var PdfReportGenerator = class {
     const engineVersion = sm?.engineVersion || run.algorithmVersion || RULE_ENGINE_VERSION;
     const ruleCatalogVersion = sm?.rulePackVersions?.core || catalogSnapshot.engineVersion || RULE_ENGINE_VERSION;
     const ruleCatalogSha256 = sm?.ruleCatalogSha256 || catalogSnapshot.catalogSha256;
-    const findingsDigest = sha256Hex3(
+    const findingsDigest = sha256Hex4(
       JSON.stringify(
         (run.findings || []).map((f) => ({
           id: f.originalRuleId,
@@ -30914,7 +31877,7 @@ var PdfReportGenerator = class {
         }))
       )
     );
-    const codeHashSha256 = sm?.artifactHashes?.workspaceCodeSha256 || sm?.merkleOrChainRootSha256 || sha256Hex3(`${run.id}:${run.projectId}:${findingsDigest}`);
+    const codeHashSha256 = sm?.artifactHashes?.workspaceCodeSha256 || sm?.merkleOrChainRootSha256 || sha256Hex4(`${run.id}:${run.projectId}:${findingsDigest}`);
     const artifactHashes = {
       findingsDigestSha256: findingsDigest,
       gateDecisionSha256: gateEval.gateHash,
@@ -30936,7 +31899,7 @@ var PdfReportGenerator = class {
       findingsCount: (run.findings || []).length,
       generatedAt
     });
-    const reportContentSha256 = sha256Hex3(canonicalPayload);
+    const reportContentSha256 = sha256Hex4(canonicalPayload);
     const hmacSignature = computeHmacSha256(
       `${reportContentSha256}:${engineVersion}:${ruleCatalogSha256}:${codeHashSha256}:${gateEval.gateHash}`,
       hmacSecret
@@ -31687,8 +32650,8 @@ var PrDecorationAdapter = class {
 var PORT = Number(process.env.PORT || 3e3);
 var DEFAULT_DATA_DIR = resolveWinHoodDataRoot();
 var DATA_DIR = DEFAULT_DATA_DIR;
-var ISOLATED_ARTIFACTS_DIR = path17.join(DEFAULT_DATA_DIR, "isolated_artifacts");
-var STORE_FILE = path17.join(DEFAULT_DATA_DIR, "winhood_persistent_db.json");
+var ISOLATED_ARTIFACTS_DIR = path19.join(DEFAULT_DATA_DIR, "isolated_artifacts");
+var STORE_FILE = path19.join(DEFAULT_DATA_DIR, "winhood_persistent_db.json");
 function isTestRuntimeEnvironment() {
   return process.env.NODE_ENV === "test" || process.env.WINHOOD_TEST_MODE === "1";
 }
@@ -31953,37 +32916,37 @@ function createInMemoryRateLimiter(opts) {
   };
 }
 function ensureDirectories(dataDir = DATA_DIR, artifactsDir = ISOLATED_ARTIFACTS_DIR) {
-  if (!fs16.existsSync(dataDir)) {
-    fs16.mkdirSync(dataDir, { recursive: true });
+  if (!fs18.existsSync(dataDir)) {
+    fs18.mkdirSync(dataDir, { recursive: true });
   }
-  if (!fs16.existsSync(artifactsDir)) {
-    fs16.mkdirSync(artifactsDir, { recursive: true });
+  if (!fs18.existsSync(artifactsDir)) {
+    fs18.mkdirSync(artifactsDir, { recursive: true });
   }
 }
 function writeIsolatedArtifactsToDisk(softwareSlug, filesMap, artifactsDir = ISOLATED_ARTIFACTS_DIR) {
-  ensureDirectories(path17.dirname(artifactsDir), artifactsDir);
+  ensureDirectories(path19.dirname(artifactsDir), artifactsDir);
   const safeSlug = softwareSlug.replace(/[^a-zA-Z0-9_-]/g, "_");
-  const targetDir = path17.resolve(artifactsDir, safeSlug);
-  const rootCanonical = path17.resolve(artifactsDir);
-  if (!targetDir.startsWith(rootCanonical + path17.sep) && targetDir !== rootCanonical) {
+  const targetDir = path19.resolve(artifactsDir, safeSlug);
+  const rootCanonical = path19.resolve(artifactsDir);
+  if (!targetDir.startsWith(rootCanonical + path19.sep) && targetDir !== rootCanonical) {
     throw new Error("Tentativa de Directory Traversal no softwareSlug bloqueada.");
   }
-  if (!fs16.existsSync(targetDir)) {
-    fs16.mkdirSync(targetDir, { recursive: true });
+  if (!fs18.existsSync(targetDir)) {
+    fs18.mkdirSync(targetDir, { recursive: true });
   }
   for (const [relPath, content] of Object.entries(filesMap)) {
     const normalizedRel = relPath.replace(/\\/g, "/").replace(/^\/+/, "");
     if (!normalizedRel) continue;
-    const canonicalTarget = path17.resolve(targetDir, normalizedRel);
-    if (!canonicalTarget.startsWith(targetDir + path17.sep)) {
+    const canonicalTarget = path19.resolve(targetDir, normalizedRel);
+    if (!canonicalTarget.startsWith(targetDir + path19.sep)) {
       throw new Error(`Tentativa de Path Traversal bloqueada no arquivo: ${relPath}`);
     }
     try {
-      const parent = path17.dirname(canonicalTarget);
-      if (!fs16.existsSync(parent)) {
-        fs16.mkdirSync(parent, { recursive: true });
+      const parent = path19.dirname(canonicalTarget);
+      if (!fs18.existsSync(parent)) {
+        fs18.mkdirSync(parent, { recursive: true });
       }
-      fs16.writeFileSync(canonicalTarget, content, "utf8");
+      fs18.writeFileSync(canonicalTarget, content, "utf8");
     } catch (writeErr) {
       if (writeErr?.code !== "EBUSY" && writeErr?.code !== "EPERM") {
         throw writeErr;
@@ -31992,8 +32955,8 @@ function writeIsolatedArtifactsToDisk(softwareSlug, filesMap, artifactsDir = ISO
   }
   try {
     const encryptedEnvelope = PersistentDatabaseManager.encryptSourceFilesMap(filesMap);
-    const bundlePath = path17.resolve(targetDir, "vault_bundle.whenc");
-    fs16.writeFileSync(bundlePath, encryptedEnvelope, { encoding: "utf8", mode: 384 });
+    const bundlePath = path19.resolve(targetDir, "vault_bundle.whenc");
+    fs18.writeFileSync(bundlePath, encryptedEnvelope, { encoding: "utf8", mode: 384 });
   } catch {
   }
   return targetDir;
@@ -32203,8 +33166,8 @@ function buildRepresentativeCompetitorFiles(candidate) {
   };
 }
 function createInitialRealWorkspaceState(dataDir = DATA_DIR, dbManager = new PersistentDatabaseManager()) {
-  const artifactsDir = path17.join(dataDir, "isolated_artifacts");
-  const storeFile = path17.join(dataDir, "winhood_persistent_db.json");
+  const artifactsDir = path19.join(dataDir, "isolated_artifacts");
+  const storeFile = path19.join(dataDir, "winhood_persistent_db.json");
   ensureDirectories(dataDir, artifactsDir);
   const nowIso = (/* @__PURE__ */ new Date()).toISOString();
   const projectId = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -32322,7 +33285,7 @@ function createInitialRealWorkspaceState(dataDir = DATA_DIR, dbManager = new Per
   });
   const auditLogs = [
     {
-      id: `aud-${crypto31.randomUUID().slice(0, 8)}`,
+      id: `aud-${crypto32.randomUUID().slice(0, 8)}`,
       timestamp: nowIso,
       actor: "Arquiteto Chefe (admin@winhood.sec)",
       role: "ADMIN",
@@ -32333,7 +33296,7 @@ function createInitialRealWorkspaceState(dataDir = DATA_DIR, dbManager = new Per
       integrityHash: computeSha256(`AUDIT|1|${projectId}|${nowIso}`)
     },
     {
-      id: `aud-${crypto31.randomUUID().slice(0, 8)}`,
+      id: `aud-${crypto32.randomUUID().slice(0, 8)}`,
       timestamp: nowIso,
       actor: "Orquestrador de An\xE1lises WinHood",
       role: "SECURITY_LEAD",
@@ -32369,8 +33332,8 @@ function createInitialRealWorkspaceState(dataDir = DATA_DIR, dbManager = new Per
   return state;
 }
 function createInitialCleanWorkspaceState(dataDir = DATA_DIR, dbManager = new PersistentDatabaseManager()) {
-  const artifactsDir = path17.join(dataDir, "isolated_artifacts");
-  const storeFile = path17.join(dataDir, "winhood_persistent_db.json");
+  const artifactsDir = path19.join(dataDir, "isolated_artifacts");
+  const storeFile = path19.join(dataDir, "winhood_persistent_db.json");
   ensureDirectories(dataDir, artifactsDir);
   const nowIso = (/* @__PURE__ */ new Date()).toISOString();
   const state = {
@@ -32384,7 +33347,7 @@ function createInitialCleanWorkspaceState(dataDir = DATA_DIR, dbManager = new Pe
     adapters: buildFull21SecurityAdaptersCatalog(),
     auditLogs: [
       {
-        id: `aud-${crypto31.randomUUID().slice(0, 8)}`,
+        id: `aud-${crypto32.randomUUID().slice(0, 8)}`,
         timestamp: nowIso,
         actor: "Sistema WinHood Analyzer",
         role: "SYSTEM",
@@ -32410,8 +33373,8 @@ function createInitialCleanWorkspaceState(dataDir = DATA_DIR, dbManager = new Pe
   return state;
 }
 function loadDatabase(dataDir = DATA_DIR, dbManager = new PersistentDatabaseManager()) {
-  const artifactsDir = path17.join(dataDir, "isolated_artifacts");
-  const storeFile = path17.join(dataDir, "winhood_persistent_db.json");
+  const artifactsDir = path19.join(dataDir, "isolated_artifacts");
+  const storeFile = path19.join(dataDir, "winhood_persistent_db.json");
   ensureDirectories(dataDir, artifactsDir);
   const readOutcome = dbManager.readWithChecksumRecovery(storeFile);
   if (readOutcome.data) {
@@ -32563,7 +33526,7 @@ function appendAuditLog(state, action, entityType, entityId, details, actorUser)
   const actorName = actorUser?.name || "Sistema WinHood";
   const actorRole = actorUser?.role || "SYSTEM";
   const entry = {
-    id: `aud-${crypto31.randomUUID().slice(0, 8)}`,
+    id: `aud-${crypto32.randomUUID().slice(0, 8)}`,
     timestamp: nowIso,
     actor: `${actorName} (${actorRole})`,
     role: actorRole,
@@ -32578,8 +33541,8 @@ function appendAuditLog(state, action, entityType, entityId, details, actorUser)
 async function createWinHoodApp(options) {
   const dataDir = resolveWinHoodDataRoot(options?.dataDir);
   ensureWinHoodDirectories(dataDir);
-  const isolatedArtifactsDir = path17.join(dataDir, "isolated_artifacts");
-  const storeFile = path17.join(dataDir, "winhood_persistent_db.json");
+  const isolatedArtifactsDir = path19.join(dataDir, "isolated_artifacts");
+  const storeFile = path19.join(dataDir, "winhood_persistent_db.json");
   const dbManager = new PersistentDatabaseManager();
   const authService = new AuthService(dataDir);
   const app = express();
@@ -32600,6 +33563,11 @@ async function createWinHoodApp(options) {
     bucketName: "backup",
     windowMs: rateLimitWindowMs,
     maxRequests: options?.rateLimits?.backupMax ?? 30
+  });
+  const oauthRateLimiter = createInMemoryRateLimiter({
+    bucketName: "oauth",
+    windowMs: rateLimitWindowMs,
+    maxRequests: options?.rateLimits?.oauthMax ?? 60
   });
   app.disable("x-powered-by");
   const heavyUploadJsonParser = express.json({ limit: "50mb" });
@@ -32745,18 +33713,22 @@ async function createWinHoodApp(options) {
     }
     return Boolean(process.env.NG_ALLOWED_HOSTS) || reqObj.headers["sec-fetch-site"] === "cross-site" || reqObj.headers["sec-fetch-dest"] === "iframe";
   };
-  const resolveCookieSecurityContext = (res) => {
+  const resolveCookieSecurityContext = (res, opts) => {
     const reqObj = res.req;
     const hostHeader = String(reqObj?.headers?.host || "");
     const isHostedPreview = isHostedPreviewRequest(reqObj);
     const isLoopbackHttp = /^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(hostHeader) && !reqObj?.secure && reqObj?.headers["x-forwarded-proto"] !== "https" && !isHostedPreview;
-    const isHttps = !isLoopbackHttp && (Boolean(reqObj?.secure) || reqObj?.headers["x-forwarded-proto"] === "https" || Boolean(reqObj?.headers?.referer?.startsWith("https://")) || isHostedPreview);
+    const isProductionNonLoopback = process.env.NODE_ENV === "production" && !isLoopbackHttp;
+    const isHttps = !isLoopbackHttp && (isProductionNonLoopback || Boolean(reqObj?.secure) || reqObj?.headers["x-forwarded-proto"] === "https" || Boolean(reqObj?.headers?.referer?.startsWith("https://")) || isHostedPreview);
     const isCrossSiteIframe = isHttps && isHostedPreview;
-    const sameSiteAttr = isCrossSiteIframe ? "SameSite=None; Secure; Partitioned" : `SameSite=Strict${isHttps ? "; Secure" : ""}`;
-    return { sameSiteAttr, isCrossSiteIframe };
+    const sameSitePolicy = opts?.forOAuthRedirect ? "Lax" : "Strict";
+    const sameSiteAttr = isCrossSiteIframe ? "SameSite=None; Secure; Partitioned" : `SameSite=${sameSitePolicy}${isHttps ? "; Secure" : ""}`;
+    return { sameSiteAttr, isCrossSiteIframe, isHttps };
   };
   const setSessionCookies = (res, sessionId, csrfToken, opts) => {
-    const { sameSiteAttr, isCrossSiteIframe } = resolveCookieSecurityContext(res);
+    const { sameSiteAttr, isCrossSiteIframe } = resolveCookieSecurityContext(res, {
+      forOAuthRedirect: opts?.forOAuthRedirect
+    });
     const maxAgeSec = opts?.trustDevice ? Math.floor(AuthService.SESSION_TRUSTED_DEVICE_MS / 1e3) : Math.floor(AuthService.SESSION_ABSOLUTE_MS / 1e3);
     res.setHeader("Set-Cookie", [
       `winhood_session=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; ${sameSiteAttr}; Max-Age=${maxAgeSec}`,
@@ -32768,10 +33740,12 @@ async function createWinHoodApp(options) {
     }
   };
   const clearSessionCookies = (res) => {
-    const { sameSiteAttr } = resolveCookieSecurityContext(res);
+    const { sameSiteAttr, isCrossSiteIframe, isHttps } = resolveCookieSecurityContext(res);
+    const oauthStateAttr = isCrossSiteIframe ? "SameSite=None; Secure; Partitioned" : `SameSite=Lax${isHttps ? "; Secure" : ""}`;
     res.setHeader("Set-Cookie", [
       `winhood_session=; Path=/; HttpOnly; ${sameSiteAttr}; Max-Age=0`,
-      `winhood_csrf=; Path=/; ${sameSiteAttr}; Max-Age=0`
+      `winhood_csrf=; Path=/; ${sameSiteAttr}; Max-Age=0`,
+      `winhood_oauth_state=; Path=/api/auth/github/oauth; HttpOnly; ${oauthStateAttr}; Max-Age=0`
     ]);
   };
   const extractSessionTokenFromRequest = (req) => {
@@ -32934,7 +33908,7 @@ async function createWinHoodApp(options) {
         const providedCsrf = String(req.headers["x-csrf-token"] || req.headers["x-winhood-csrf"] || "").trim();
         const expBuf = Buffer.from(expectedCsrf, "utf8");
         const provBuf = Buffer.from(providedCsrf, "utf8");
-        if (!expectedCsrf || expBuf.length !== provBuf.length || !crypto31.timingSafeEqual(expBuf, provBuf)) {
+        if (!expectedCsrf || expBuf.length !== provBuf.length || !crypto32.timingSafeEqual(expBuf, provBuf)) {
           return res.status(403).json({
             error: "CSRF_INVALID",
             code: "CSRF_INVALID",
@@ -32972,7 +33946,7 @@ async function createWinHoodApp(options) {
       schemaVersion: PersistentDatabaseManager.SCHEMA_VERSION,
       storageIntegrity: loaded.integrityStatus,
       authBootstrapRequired: authService.isBootstrapRequired(),
-      storeFileExists: fs16.existsSync(storeFile),
+      storeFileExists: fs18.existsSync(storeFile),
       projectsCount: db.projects.length,
       softwaresCount: db.softwares.length,
       runsCount: db.runs.length
@@ -32985,7 +33959,7 @@ async function createWinHoodApp(options) {
       isolatedSandboxPath: isolatedArtifactsDir,
       storageEngine: PersistentDatabaseManager.STORAGE_KIND,
       schemaVersion: PersistentDatabaseManager.SCHEMA_VERSION,
-      databaseSizeBytes: fs16.existsSync(storeFile) ? fs16.statSync(storeFile).size : 0,
+      databaseSizeBytes: fs18.existsSync(storeFile) ? fs18.statSync(storeFile).size : 0,
       evidenceRecordsCount: db.runs.reduce((acc, r) => acc + r.evidenceChain.length, 0),
       auditLogsCount: db.auditLogs.length
     });
@@ -32994,7 +33968,7 @@ async function createWinHoodApp(options) {
     const meta = authService.getBootstrapMetadata();
     res.json({
       bootstrapRequired: meta.bootstrapRequired,
-      bootstrapTokenFileHint: path17.relative(process.cwd(), meta.bootstrapTokenFilePath),
+      bootstrapTokenFileHint: path19.relative(process.cwd(), meta.bootstrapTokenFilePath),
       expiresAt: meta.expiresAt
     });
   });
@@ -33028,6 +34002,8 @@ async function createWinHoodApp(options) {
       teamServerMode: process.env.WINHOOD_TEAM_SERVER === "true"
     });
     const { clientId: githubClientId, clientSecret: githubClientSecret } = resolveEffectiveGitHubOAuthCredentials();
+    const githubOAuthDirectConfigured = githubClientId.length >= 8 && githubClientSecret.length >= 8;
+    res.setHeader("Cache-Control", "no-store");
     res.json({
       mode: policy.mode,
       soloLocalAllowed: policy.allowed,
@@ -33035,7 +34011,8 @@ async function createWinHoodApp(options) {
       vaultLockEnabled: process.env.WINHOOD_VAULT_LOCK === "true",
       teamServerMode: process.env.WINHOOD_TEAM_SERVER === "true",
       githubDeviceFlowConfigured: githubClientId.length >= 8,
-      githubOAuthDirectConfigured: githubClientId.length >= 8 && githubClientSecret.length >= 8,
+      githubOAuthDirectConfigured,
+      githubOAuthStatus: githubOAuthDirectConfigured ? "CONFIGURED" : "NOT_CONFIGURED",
       githubSignupAllowed: process.env.WINHOOD_GITHUB_ALLOW_SIGNUP !== "false",
       githubPatSupported: true,
       windowsHelloNativeSupported: process.platform === "win32",
@@ -33092,37 +34069,15 @@ async function createWinHoodApp(options) {
       });
     }
   });
-  const pendingGitHubOAuthTxs = /* @__PURE__ */ new Map();
-  const consumedGitHubOAuthCodeHashes = /* @__PURE__ */ new Map();
-  const prunePendingGitHubOAuthTxs = () => {
-    const now = Date.now();
-    for (const [key, tx] of pendingGitHubOAuthTxs.entries()) {
-      if (now > tx.expiresAtMs) {
-        pendingGitHubOAuthTxs.delete(key);
-      }
-    }
-    for (const [codeHash, expMs] of consumedGitHubOAuthCodeHashes.entries()) {
-      if (now > expMs) {
-        consumedGitHubOAuthCodeHashes.delete(codeHash);
-      }
-    }
-  };
-  const findGitHubOAuthTxByState = (rawState) => {
-    const providedBuf = Buffer.from(rawState, "utf8");
-    if (providedBuf.length === 0) return void 0;
-    for (const tx of pendingGitHubOAuthTxs.values()) {
-      const expectedBuf = Buffer.from(tx.state, "utf8");
-      if (expectedBuf.length === providedBuf.length && crypto31.timingSafeEqual(expectedBuf, providedBuf)) {
-        return tx;
-      }
-    }
-    return void 0;
-  };
+  const oauthTxStore = new GitHubOAuthTransactionStore(dataDir);
   const isValidGitHubCallbackRedirectUri = (candidate) => {
     if (!candidate) return false;
     try {
       const parsed = new URL(candidate);
       if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return false;
+      }
+      if (parsed.username || parsed.password || parsed.search || parsed.hash) {
         return false;
       }
       const normalizedPath = parsed.pathname.replace(/\/+$/, "");
@@ -33131,13 +34086,18 @@ async function createWinHoodApp(options) {
       return false;
     }
   };
+  const isLoopbackRequestHost = (req) => {
+    const remoteIp = (req.socket.remoteAddress || req.ip || "").replace(/^::ffff:/, "").toLowerCase();
+    const rawHost = String(req.headers.host || "").split(":")[0].trim().toLowerCase();
+    return (remoteIp === "127.0.0.1" || remoteIp === "::1" || remoteIp === "localhost") && (rawHost === "127.0.0.1" || rawHost === "localhost" || rawHost === "::1" || rawHost === "");
+  };
   const resolveGitHubCallbackUrl = (req) => {
-    const explicit = (process.env.WINHOOD_GITHUB_OAUTH_CALLBACK_URL || "").trim();
-    if (explicit && isValidGitHubCallbackRedirectUri(explicit)) {
-      return explicit;
+    const explicitCallback = (process.env.WINHOOD_GITHUB_OAUTH_CALLBACK_URL || process.env.WINHOOD_GITHUB_OAUTH_REDIRECT_URI || "").trim();
+    if (explicitCallback && isValidGitHubCallbackRedirectUri(explicitCallback)) {
+      return explicitCallback;
     }
     const appUrlEnv = (process.env.APP_URL || "").trim();
-    if (appUrlEnv && isHostedPreviewRequest(req)) {
+    if (appUrlEnv && (isHostedPreviewRequest(req) || !isLoopbackRequestHost(req))) {
       try {
         const parsedAppUrl = new URL(appUrlEnv);
         if (parsedAppUrl.protocol === "http:" || parsedAppUrl.protocol === "https:") {
@@ -33146,19 +34106,22 @@ async function createWinHoodApp(options) {
       } catch {
       }
     }
-    const rawProto = String(req.headers["x-forwarded-proto"] || (req.secure ? "https" : "http")).split(",")[0].trim().toLowerCase();
-    const proto = rawProto === "https" ? "https" : "http";
-    const rawHost = String(req.headers["x-forwarded-host"] || req.headers.host || "localhost:3000").split(",")[0].replace(/[\r\n\s]/g, "").trim();
+    const trustProxyHeaders = process.env.WINHOOD_TRUST_PROXY === "true" || isHostedPreviewRequest(req);
+    const rawProto = trustProxyHeaders ? String(req.headers["x-forwarded-proto"] || (req.secure ? "https" : "http")) : req.secure ? "https" : "http";
+    const proto = rawProto.split(",")[0].trim().toLowerCase() === "https" ? "https" : "http";
+    const rawHost = (trustProxyHeaders ? String(req.headers["x-forwarded-host"] || req.headers.host || "localhost:3000") : String(req.headers.host || "localhost:3000")).split(",")[0].replace(/[\r\n\s]/g, "").trim();
     const safeHost = /^[a-zA-Z0-9.:-]+$/.test(rawHost) ? rawHost : "localhost:3000";
     return `${proto}://${safeHost}/api/auth/github/oauth/callback`;
   };
   const buildOAuthStateCookieAttr = (res) => {
-    const { isCrossSiteIframe } = resolveCookieSecurityContext(res);
+    const { isCrossSiteIframe, isHttps: contextIsHttps } = resolveCookieSecurityContext(res, {
+      forOAuthRedirect: true
+    });
     if (isCrossSiteIframe) {
       return "SameSite=None; Secure; Partitioned";
     }
     const reqObj = res.req;
-    const isHttps = Boolean(reqObj?.secure) || reqObj?.headers["x-forwarded-proto"] === "https";
+    const isHttps = contextIsHttps || Boolean(reqObj?.secure) || (process.env.WINHOOD_TRUST_PROXY === "true" || (reqObj ? isHostedPreviewRequest(reqObj) : false)) && reqObj?.headers["x-forwarded-proto"] === "https";
     return `SameSite=Lax${isHttps ? "; Secure" : ""}`;
   };
   const buildOAuthStateClearCookie = (res) => {
@@ -33176,7 +34139,7 @@ async function createWinHoodApp(options) {
   const renderOAuthCallbackHtml = (res, statusCode, title, message, inlineScript) => {
     res.setHeader("Cache-Control", "no-store");
     if (inlineScript) {
-      const scriptHash = crypto31.createHash("sha256").update(inlineScript, "utf8").digest("base64");
+      const scriptHash = crypto32.createHash("sha256").update(inlineScript, "utf8").digest("base64");
       res.setHeader(
         "Content-Security-Policy",
         `default-src 'self'; script-src 'self' 'sha256-${scriptHash}'; style-src 'self' 'unsafe-inline'; base-uri 'self'; object-src 'none'`
@@ -33201,15 +34164,15 @@ async function createWinHoodApp(options) {
     ].join("");
     return res.status(statusCode).type("html").send(html);
   };
-  app.get("/api/auth/github/oauth/start", (req, res) => {
-    prunePendingGitHubOAuthTxs();
+  app.get("/api/auth/github/oauth/start", oauthRateLimiter, (req, res) => {
+    oauthTxStore.pruneExpired();
+    res.setHeader("Cache-Control", "no-store");
     const rawMode = typeof req.query.mode === "string" ? req.query.mode.trim().toLowerCase() : "";
     const acceptHeader = String(req.headers.accept || "").toLowerCase();
     const wantsBrowserRedirect = rawMode === "redirect" || !rawMode && acceptHeader.includes("text/html");
     const { clientId, clientSecret } = resolveEffectiveGitHubOAuthCredentials();
     if (clientId.length < 8 || clientSecret.length < 8) {
       if (wantsBrowserRedirect) {
-        res.setHeader("Cache-Control", "no-store");
         return res.redirect(302, "/?github_oauth_error=not_configured");
       }
       return res.status(400).json({
@@ -33223,7 +34186,6 @@ async function createWinHoodApp(options) {
     const redirectUri = resolveGitHubCallbackUrl(req);
     if (!isValidGitHubCallbackRedirectUri(redirectUri)) {
       if (wantsBrowserRedirect) {
-        res.setHeader("Cache-Control", "no-store");
         return res.redirect(302, "/?github_oauth_error=invalid_redirect");
       }
       return res.status(400).json({
@@ -33233,18 +34195,22 @@ async function createWinHoodApp(options) {
     }
     const pkce = generateGitHubOAuthPkce();
     let originHint = "";
+    try {
+      originHint = new URL(redirectUri).origin;
+    } catch {
+      originHint = "";
+    }
     const rawOrigin = typeof req.headers.origin === "string" ? req.headers.origin.trim() : "";
     if (rawOrigin) {
       try {
         const parsedOrigin = new URL(rawOrigin);
-        if (parsedOrigin.protocol === "http:" || parsedOrigin.protocol === "https:") {
+        if ((parsedOrigin.protocol === "http:" || parsedOrigin.protocol === "https:") && (!originHint || parsedOrigin.origin === originHint)) {
           originHint = parsedOrigin.origin;
         }
       } catch {
-        originHint = "";
       }
     }
-    pendingGitHubOAuthTxs.set(pkce.state, {
+    oauthTxStore.saveTransaction({
       state: pkce.state,
       codeVerifier: pkce.codeVerifier,
       redirectUri,
@@ -33259,9 +34225,9 @@ async function createWinHoodApp(options) {
       clientId,
       redirectUri,
       state: pkce.state,
-      codeChallenge: pkce.codeChallenge
+      codeChallenge: pkce.codeChallenge,
+      allowSignup: process.env.WINHOOD_GITHUB_ALLOW_SIGNUP !== "false"
     });
-    res.setHeader("Cache-Control", "no-store");
     if (mode === "redirect") {
       setOAuthStateCookie(res, pkce.state);
       return res.redirect(302, authorizeUrl);
@@ -33275,14 +34241,14 @@ async function createWinHoodApp(options) {
     });
   });
   const handleGitHubOAuthCallback = async (req, res) => {
-    prunePendingGitHubOAuthTxs();
+    oauthTxStore.pruneExpired();
     const rawState = typeof req.query.state === "string" ? req.query.state : "";
     const rawCode = typeof req.query.code === "string" ? req.query.code : "";
     const oauthError = typeof req.query.error === "string" ? req.query.error : "";
     const oauthErrorDesc = typeof req.query.error_description === "string" ? req.query.error_description : "";
     const cookies = parseCookies(req.headers.cookie);
     const hasStateCookie = Boolean(cookies.winhood_oauth_state);
-    const tx = rawState ? findGitHubOAuthTxByState(rawState) : void 0;
+    const tx = rawState ? oauthTxStore.getTransactionByState(rawState) : void 0;
     const isRedirectFlow = tx ? tx.mode === "redirect" : hasStateCookie;
     const respondWithOAuthError = (statusCode, errorCode, title, message) => {
       res.setHeader("Cache-Control", "no-store");
@@ -33296,7 +34262,7 @@ async function createWinHoodApp(options) {
         errorCode,
         error: message
       }).replace(/</g, "\\u003c");
-      const targetOrigin = JSON.stringify(tx?.originHint || "*");
+      const targetOrigin = JSON.stringify(tx?.originHint || new URL(resolveGitHubCallbackUrl(req)).origin);
       const script = tx?.mode === "popup" ? `if(window.opener){window.opener.postMessage(${scriptPayload},${targetOrigin});}window.close();` : void 0;
       return renderOAuthCallbackHtml(res, statusCode, title, message, script);
     };
@@ -33305,17 +34271,20 @@ async function createWinHoodApp(options) {
       const safeErrorCode = normalizedErr === "access_denied" ? "access_denied" : "oauth_error";
       const safeMsg = safeErrorCode === "access_denied" ? "Autoriza\xE7\xE3o cancelada no GitHub. Voc\xEA pode tentar novamente quando desejar." : oauthErrorDesc ? oauthErrorDesc.slice(0, 180) : "Autoriza\xE7\xE3o recusada no GitHub.";
       if (tx) {
-        tx.consumed = true;
-        tx.status = "ERROR";
-        tx.errorMessage = safeMsg;
         if (tx.mode === "redirect") {
-          pendingGitHubOAuthTxs.delete(tx.state);
+          oauthTxStore.deleteTransaction(tx.state);
+        } else {
+          oauthTxStore.updateTransaction(tx.state, {
+            consumed: true,
+            status: "ERROR",
+            errorMessage: safeMsg
+          });
         }
       }
       return respondWithOAuthError(400, safeErrorCode, "Autoriza\xE7\xE3o GitHub n\xE3o conclu\xEDda", safeMsg);
     }
     if (!rawCode || !rawState || !tx || Date.now() > tx.expiresAtMs) {
-      if (tx) pendingGitHubOAuthTxs.delete(tx.state);
+      if (tx) oauthTxStore.deleteTransaction(tx.state);
       return respondWithOAuthError(
         400,
         "invalid_state",
@@ -33323,22 +34292,12 @@ async function createWinHoodApp(options) {
         "A solicita\xE7\xE3o de autentica\xE7\xE3o GitHub expirou ou o par\xE2metro state n\xE3o corresponde. Tente iniciar o login novamente."
       );
     }
-    const codeHash = computeSha256(rawCode);
-    if (tx.consumed || consumedGitHubOAuthCodeHashes.has(codeHash)) {
-      pendingGitHubOAuthTxs.delete(tx.state);
-      return respondWithOAuthError(
-        400,
-        "replayed_code",
-        "C\xF3digo de autoriza\xE7\xE3o j\xE1 utilizado",
-        "Este c\xF3digo de autoriza\xE7\xE3o do GitHub j\xE1 foi utilizado. Inicie um novo login."
-      );
-    }
     if (tx.stateCookieRequired) {
       const cookieState = cookies.winhood_oauth_state || "";
       const cookieBuf = Buffer.from(cookieState, "utf8");
       const expectedBuf = Buffer.from(tx.state, "utf8");
-      if (!cookieState || cookieBuf.length !== expectedBuf.length || !crypto31.timingSafeEqual(cookieBuf, expectedBuf)) {
-        pendingGitHubOAuthTxs.delete(tx.state);
+      if (!cookieState || cookieBuf.length !== expectedBuf.length || !crypto32.timingSafeEqual(cookieBuf, expectedBuf)) {
+        oauthTxStore.deleteTransaction(tx.state);
         return respondWithOAuthError(
           400,
           "invalid_state",
@@ -33348,7 +34307,7 @@ async function createWinHoodApp(options) {
       }
     }
     if (!isValidGitHubCallbackRedirectUri(tx.redirectUri)) {
-      pendingGitHubOAuthTxs.delete(tx.state);
+      oauthTxStore.deleteTransaction(tx.state);
       return respondWithOAuthError(
         400,
         "invalid_redirect",
@@ -33356,11 +34315,26 @@ async function createWinHoodApp(options) {
         "A URL de retorno OAuth configurada n\xE3o \xE9 permitida."
       );
     }
-    tx.consumed = true;
-    consumedGitHubOAuthCodeHashes.set(codeHash, Date.now() + 15 * 60 * 1e3);
+    const consumedOutcome = oauthTxStore.consumeTransactionAtomically(rawState, rawCode);
+    if (!consumedOutcome.ok) {
+      if ("reason" in consumedOutcome && consumedOutcome.reason === "REPLAYED_CODE") {
+        return respondWithOAuthError(
+          400,
+          "replayed_code",
+          "C\xF3digo de autoriza\xE7\xE3o j\xE1 utilizado",
+          "Este c\xF3digo de autoriza\xE7\xE3o do GitHub j\xE1 foi utilizado. Inicie um novo login."
+        );
+      }
+      return respondWithOAuthError(
+        400,
+        "invalid_state",
+        "Estado OAuth inv\xE1lido ou expirado",
+        "A solicita\xE7\xE3o de autentica\xE7\xE3o GitHub expirou ou o par\xE2metro state n\xE3o corresponde. Tente iniciar o login novamente."
+      );
+    }
     const { clientId, clientSecret } = resolveEffectiveGitHubOAuthCredentials();
     if (clientId.length < 8 || clientSecret.length < 8) {
-      pendingGitHubOAuthTxs.delete(tx.state);
+      oauthTxStore.deleteTransaction(tx.state);
       return respondWithOAuthError(
         400,
         "not_configured",
@@ -33384,15 +34358,19 @@ async function createWinHoodApp(options) {
         authService.revokeSession(existingSession.token);
       }
       const allowSignup = process.env.WINHOOD_GITHUB_ALLOW_SIGNUP !== "false";
+      const isInternetExposed = !isLoopbackRequestHost(req) || isHostedPreviewRequest(req) || process.env.WINHOOD_TEAM_SERVER === "true";
       const outcome = authService.issueGitHubOAuthSession({
         githubId: profile.id,
         githubLogin: profile.login,
         name: profile.name,
         email: profile.email,
+        emailVerified: profile.emailVerified !== false,
         avatarUrl: profile.avatarUrl,
         ipAddress: req.ip || "127.0.0.1",
         userAgent: String(req.headers["user-agent"] || "WinHood-GitHub-OAuth-PKCE"),
-        allowSignup
+        allowSignup,
+        isInternetExposed,
+        allowFirstUserAdmin: false
       });
       appendAuditLog(
         db,
@@ -33404,8 +34382,10 @@ async function createWinHoodApp(options) {
       );
       saveDatabase(db);
       if (tx.mode === "redirect") {
-        pendingGitHubOAuthTxs.delete(tx.state);
-        const { sameSiteAttr, isCrossSiteIframe } = resolveCookieSecurityContext(res);
+        oauthTxStore.deleteTransaction(tx.state);
+        const { sameSiteAttr, isCrossSiteIframe } = resolveCookieSecurityContext(res, {
+          forOAuthRedirect: true
+        });
         const maxAgeSec = outcome.trustDevice ? Math.floor(AuthService.SESSION_TRUSTED_DEVICE_MS / 1e3) : Math.floor(AuthService.SESSION_ABSOLUTE_MS / 1e3);
         res.setHeader("Cache-Control", "no-store");
         res.setHeader("Set-Cookie", [
@@ -33422,12 +34402,14 @@ async function createWinHoodApp(options) {
       setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
         trustDevice: outcome.trustDevice
       });
-      tx.status = "AUTHORIZED";
-      tx.sessionId = outcome.sessionId;
-      tx.csrfToken = outcome.csrfToken;
-      tx.user = outcome.user;
-      tx.isNewAccount = outcome.isNewAccount;
-      tx.expiresAtMs = Date.now() + 2 * 60 * 1e3;
+      oauthTxStore.updateTransaction(tx.state, {
+        status: "AUTHORIZED",
+        sessionId: outcome.sessionId,
+        csrfToken: outcome.csrfToken,
+        user: outcome.user,
+        isNewAccount: outcome.isNewAccount,
+        expiresAtMs: Date.now() + 2 * 60 * 1e3
+      });
       if (tx.mode === "desktop") {
         return renderOAuthCallbackHtml(
           res,
@@ -33444,7 +34426,7 @@ async function createWinHoodApp(options) {
         user: outcome.user,
         csrfToken: outcome.csrfToken
       }).replace(/</g, "\\u003c");
-      const targetOrigin = JSON.stringify(tx.originHint || "*");
+      const targetOrigin = JSON.stringify(tx.originHint || new URL(tx.redirectUri).origin);
       const script = `if(window.opener){window.opener.postMessage(${scriptPayload},${targetOrigin});setTimeout(function(){window.close();},150);}`;
       return renderOAuthCallbackHtml(
         res,
@@ -33466,27 +34448,43 @@ async function createWinHoodApp(options) {
         errorCode = "account_disabled";
         safeMsg = "Esta conta foi desabilitada pelo administrador.";
         statusCode = 403;
+      } else if (rawMsg.startsWith("AUTH_EMAIL_VERIFICATION_REQUIRED")) {
+        errorCode = "email_unverified";
+        safeMsg = "N\xE3o foi poss\xEDvel vincular automaticamente sua conta GitHub porque o endere\xE7o de e-mail n\xE3o est\xE1 verificado no GitHub.";
+        statusCode = 403;
+      } else if (rawMsg.startsWith("GITHUB_ALREADY_LINKED")) {
+        errorCode = "github_already_linked";
+        safeMsg = "Esta conta GitHub j\xE1 est\xE1 associada a outro usu\xE1rio nesta instala\xE7\xE3o.";
+        statusCode = 409;
       } else if (rawMsg.startsWith("GITHUB_PROFILE") || rawMsg.startsWith("GITHUB_TOKEN_UNAUTHORIZED")) {
         errorCode = "profile_failed";
         safeMsg = "N\xE3o foi poss\xEDvel consultar o perfil autenticado na API do GitHub.";
         statusCode = 502;
       }
-      tx.status = "ERROR";
-      tx.errorMessage = safeMsg;
       if (tx.mode === "redirect") {
-        pendingGitHubOAuthTxs.delete(tx.state);
+        oauthTxStore.deleteTransaction(tx.state);
+      } else {
+        oauthTxStore.updateTransaction(tx.state, {
+          status: "ERROR",
+          errorMessage: safeMsg
+        });
       }
       return respondWithOAuthError(statusCode, errorCode, "Falha na autentica\xE7\xE3o GitHub", safeMsg);
     }
   };
-  app.get(["/api/auth/github/oauth/callback", "/api/auth/github/oauth/callback/"], handleGitHubOAuthCallback);
-  app.get("/api/auth/github/oauth/status", (req, res) => {
-    prunePendingGitHubOAuthTxs();
+  app.get(
+    ["/api/auth/github/oauth/callback", "/api/auth/github/oauth/callback/"],
+    oauthRateLimiter,
+    handleGitHubOAuthCallback
+  );
+  app.get("/api/auth/github/oauth/status", oauthRateLimiter, (req, res) => {
+    oauthTxStore.pruneExpired();
+    res.setHeader("Cache-Control", "no-store");
     const rawState = typeof req.query.state === "string" ? req.query.state : "";
     if (!rawState) {
       return res.status(400).json({ error: "Par\xE2metro state obrigat\xF3rio.", code: "STATE_REQUIRED" });
     }
-    const tx = findGitHubOAuthTxByState(rawState);
+    const tx = oauthTxStore.getTransactionByState(rawState);
     if (!tx) {
       return res.status(404).json({
         status: "EXPIRED",
@@ -33498,7 +34496,7 @@ async function createWinHoodApp(options) {
       return res.json({ status: "PENDING", authorized: false });
     }
     if (tx.status === "ERROR") {
-      pendingGitHubOAuthTxs.delete(tx.state);
+      oauthTxStore.deleteTransaction(tx.state);
       return res.status(400).json({
         status: "ERROR",
         authorized: false,
@@ -33509,7 +34507,7 @@ async function createWinHoodApp(options) {
     const csrfToken = tx.csrfToken;
     const user = tx.user;
     const isNewAccount = Boolean(tx.isNewAccount);
-    pendingGitHubOAuthTxs.delete(tx.state);
+    oauthTxStore.deleteTransaction(tx.state);
     const { isCrossSiteIframe } = resolveCookieSecurityContext(res);
     setSessionCookies(res, sessionId, csrfToken, { trustDevice: true });
     return res.json({
@@ -33522,7 +34520,35 @@ async function createWinHoodApp(options) {
       ...isCrossSiteIframe ? { sessionId } : {}
     });
   });
-  app.post("/api/auth/github/device/start", async (req, res) => {
+  app.post("/api/auth/bootstrap-admin/claim", (req, res) => {
+    const authCtx = res.locals.authContext;
+    if (!authCtx?.user) {
+      return res.status(401).json({ error: "Autentica\xE7\xE3o necess\xE1ria para reivindicar bootstrap administrativo." });
+    }
+    const { bootstrapToken } = req.body || {};
+    if (!bootstrapToken || typeof bootstrapToken !== "string") {
+      return res.status(400).json({ error: "Informe o token \xFAnico de bootstrap administrativo." });
+    }
+    try {
+      const promoted = authService.claimAdminWithBootstrapToken(authCtx.user.id, bootstrapToken);
+      appendAuditLog(
+        db,
+        "AUTH_ADMIN_BOOTSTRAP_CLAIMED",
+        "AUTH",
+        promoted.id,
+        `Usu\xE1rio ${promoted.email} assumiu papel ADMIN mediante token \xFAnico de bootstrap.`,
+        promoted
+      );
+      saveDatabase(db);
+      return res.json({ ok: true, user: promoted });
+    } catch (err) {
+      const msg = String(err?.message || "Falha ao validar token de bootstrap.");
+      const status = msg.startsWith("BOOTSTRAP_ALREADY_COMPLETED") ? 409 : 403;
+      return res.status(status).json({ error: msg });
+    }
+  });
+  app.post("/api/auth/github/device/start", oauthRateLimiter, async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
     const bodyClientId = typeof req.body?.clientId === "string" ? req.body.clientId.trim() : "";
     const { clientId: configuredClientId } = resolveEffectiveGitHubOAuthCredentials();
     const clientId = (configuredClientId || bodyClientId).trim();
@@ -33543,7 +34569,8 @@ async function createWinHoodApp(options) {
       });
     }
   });
-  app.post("/api/auth/github/device/poll", async (req, res) => {
+  app.post("/api/auth/github/device/poll", oauthRateLimiter, async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
     const { deviceCode, clientId: bodyClientId } = req.body || {};
     const { clientId: configuredClientId } = resolveEffectiveGitHubOAuthCredentials();
     const clientId = (configuredClientId || (typeof bodyClientId === "string" ? bodyClientId.trim() : "")).trim();
@@ -33566,14 +34593,24 @@ async function createWinHoodApp(options) {
         });
       }
       const profile = await fetchGitHubAuthenticatedProfile(pollResult.accessToken);
+      const existingSession = extractSessionTokenFromRequest(req);
+      if (existingSession.token) {
+        authService.revokeSession(existingSession.token);
+      }
+      const allowSignup = process.env.WINHOOD_GITHUB_ALLOW_SIGNUP !== "false";
+      const isInternetExposed = !isLoopbackRequestHost(req) || isHostedPreviewRequest(req) || process.env.WINHOOD_TEAM_SERVER === "true";
       const outcome = authService.issueGitHubOAuthSession({
         githubId: profile.id,
         githubLogin: profile.login,
         name: profile.name,
         email: profile.email,
+        emailVerified: profile.emailVerified !== false,
         avatarUrl: profile.avatarUrl,
         ipAddress: req.ip || "127.0.0.1",
-        userAgent: String(req.headers["user-agent"] || "WinHood-GitHub-OAuth")
+        userAgent: String(req.headers["user-agent"] || "WinHood-GitHub-OAuth"),
+        allowSignup,
+        isInternetExposed,
+        allowFirstUserAdmin: false
       });
       const { isCrossSiteIframe } = resolveCookieSecurityContext(res);
       setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
@@ -33598,7 +34635,13 @@ async function createWinHoodApp(options) {
         ...isCrossSiteIframe ? { sessionId: outcome.sessionId } : {}
       });
     } catch (err) {
-      const msg = err?.message || "Erro ao consultar autoriza\xE7\xE3o do GitHub Device Flow.";
+      const msg = String(err?.message || "Erro ao consultar autoriza\xE7\xE3o do GitHub Device Flow.");
+      if (msg.startsWith("AUTH_SIGNUP_DISABLED") || msg.startsWith("AUTH_ACCOUNT_DISABLED") || msg.startsWith("AUTH_EMAIL_VERIFICATION_REQUIRED")) {
+        return res.status(403).json({ error: msg, code: msg.split(":")[0].trim() });
+      }
+      if (msg.startsWith("GITHUB_ALREADY_LINKED")) {
+        return res.status(409).json({ error: msg, code: "GITHUB_ALREADY_LINKED" });
+      }
       const status = msg.startsWith("GITHUB_TOKEN_UNAUTHORIZED") ? 401 : 502;
       return res.status(status).json({
         error: msg,
@@ -33606,7 +34649,8 @@ async function createWinHoodApp(options) {
       });
     }
   });
-  app.post("/api/auth/github/token", async (req, res) => {
+  app.post("/api/auth/github/token", oauthRateLimiter, async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
     const { token, trustDevice } = req.body || {};
     const cleanToken = typeof token === "string" ? token.trim() : "";
     if (cleanToken.length < 10) {
@@ -33617,14 +34661,24 @@ async function createWinHoodApp(options) {
     }
     try {
       const profile = await fetchGitHubAuthenticatedProfile(cleanToken);
+      const existingSession = extractSessionTokenFromRequest(req);
+      if (existingSession.token) {
+        authService.revokeSession(existingSession.token);
+      }
+      const allowSignup = process.env.WINHOOD_GITHUB_ALLOW_SIGNUP !== "false";
+      const isInternetExposed = !isLoopbackRequestHost(req) || isHostedPreviewRequest(req) || process.env.WINHOOD_TEAM_SERVER === "true";
       const outcome = authService.issueGitHubOAuthSession({
         githubId: profile.id,
         githubLogin: profile.login,
         name: profile.name,
         email: profile.email,
+        emailVerified: profile.emailVerified !== false,
         avatarUrl: profile.avatarUrl,
         ipAddress: req.ip || "127.0.0.1",
-        userAgent: String(req.headers["user-agent"] || "WinHood-GitHub-PAT")
+        userAgent: String(req.headers["user-agent"] || "WinHood-GitHub-PAT"),
+        allowSignup,
+        isInternetExposed,
+        allowFirstUserAdmin: false
       });
       const { isCrossSiteIframe } = resolveCookieSecurityContext(res);
       setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
@@ -33648,12 +34702,18 @@ async function createWinHoodApp(options) {
         ...isCrossSiteIframe ? { sessionId: outcome.sessionId } : {}
       });
     } catch (err) {
-      const msg = err?.message || "Erro de rede ao validar token na API oficial do GitHub.";
+      const msg = String(err?.message || "Erro de rede ao validar token na API oficial do GitHub.");
       if (msg.startsWith("GITHUB_TOKEN_UNAUTHORIZED")) {
         return res.status(401).json({
           error: "Token GitHub rejeitado pela API oficial (HTTP 401/403). Verifique se o PAT est\xE1 ativo e possui escopo read:user.",
           code: "GITHUB_TOKEN_UNAUTHORIZED"
         });
+      }
+      if (msg.startsWith("AUTH_SIGNUP_DISABLED") || msg.startsWith("AUTH_ACCOUNT_DISABLED") || msg.startsWith("AUTH_EMAIL_VERIFICATION_REQUIRED")) {
+        return res.status(403).json({ error: msg, code: msg.split(":")[0].trim() });
+      }
+      if (msg.startsWith("GITHUB_ALREADY_LINKED")) {
+        return res.status(409).json({ error: msg, code: "GITHUB_ALREADY_LINKED" });
       }
       const code = msg.includes(":") ? msg.split(":")[0].trim() : "GITHUB_TOKEN_NETWORK_ERROR";
       return res.status(502).json({
@@ -34183,6 +35243,7 @@ async function createWinHoodApp(options) {
     }
   });
   app.post("/api/auth/logout", (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
     const actor = req.authUser;
     const sessionToken = extractSessionTokenFromRequest(req).token;
     if (sessionToken) {
@@ -34203,6 +35264,7 @@ async function createWinHoodApp(options) {
     return res.json({ ok: true });
   });
   app.get("/api/auth/me", (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
     const sessionToken = extractSessionTokenFromRequest(req).token;
     const validated = sessionToken ? authService.validateSession(sessionToken) : null;
     const user = validated?.user || req.authUser;
@@ -34248,7 +35310,7 @@ async function createWinHoodApp(options) {
     const providedCsrf = String(req.headers["x-csrf-token"] || req.headers["x-winhood-csrf"] || "").trim();
     const expBuf = Buffer.from(expectedCsrf, "utf8");
     const provBuf = Buffer.from(providedCsrf, "utf8");
-    if (!expectedCsrf || expBuf.length !== provBuf.length || !crypto31.timingSafeEqual(expBuf, provBuf)) {
+    if (!expectedCsrf || expBuf.length !== provBuf.length || !crypto32.timingSafeEqual(expBuf, provBuf)) {
       return res.status(403).json({
         error: "CSRF_INVALID",
         code: "CSRF_INVALID",
@@ -34515,7 +35577,7 @@ async function createWinHoodApp(options) {
     saveDatabase(db);
     return res.json({
       ok: true,
-      recoveryChannelHint: outcome.recoveryFilePath ? path17.relative(process.cwd(), outcome.recoveryFilePath) : null,
+      recoveryChannelHint: outcome.recoveryFilePath ? path19.relative(process.cwd(), outcome.recoveryFilePath) : null,
       message: "Se o e-mail existir, o token tempor\xE1rio foi gravado no diret\xF3rio local seguro (chmod 0600)."
     });
   });
@@ -34644,11 +35706,11 @@ async function createWinHoodApp(options) {
   function resolveDockerBinaryPath() {
     if (process.platform === "win32") {
       const programFiles = process.env.ProgramFiles || "C:\\Program Files";
-      const candidate = path17.win32.join(programFiles, "Docker", "Docker", "resources", "bin", "docker.exe");
-      return fs16.existsSync(candidate) ? candidate : "docker";
+      const candidate = path19.win32.join(programFiles, "Docker", "Docker", "resources", "bin", "docker.exe");
+      return fs18.existsSync(candidate) ? candidate : "docker";
     }
     for (const candidate of ["/usr/bin/docker", "/usr/local/bin/docker", "/bin/docker"]) {
-      if (fs16.existsSync(candidate)) return candidate;
+      if (fs18.existsSync(candidate)) return candidate;
     }
     return "docker";
   }
@@ -34880,7 +35942,7 @@ async function createWinHoodApp(options) {
     const resolvedCategory = (category || resolvedTags[0] || "Avalia\xE7\xE3o Multi-Categoria Transversal").trim();
     const resolvedEnabledCategories = Array.isArray(enabledCategories) && enabledCategories.length > 0 ? enabledCategories : [...ALL_BENCHMARK_CATEGORIES];
     const project = {
-      id: crypto31.randomUUID(),
+      id: crypto32.randomUUID(),
       name: name.trim(),
       category: resolvedCategory,
       domainTags: resolvedTags,
@@ -35133,7 +36195,7 @@ async function createWinHoodApp(options) {
       });
     }
     const nowIso = (/* @__PURE__ */ new Date()).toISOString();
-    const projectId = crypto31.randomUUID();
+    const projectId = crypto32.randomUUID();
     const resolvedTags = Array.isArray(domainTags) && domainTags.length > 0 ? domainTags.map((t) => String(t).trim()).filter(Boolean) : category ? [category.trim(), "multi-category", "mqr-strict"] : ["multi-category", "devsecops", "mqr-strict"];
     const resolvedCategory = (category || resolvedTags[0] || "Avalia\xE7\xE3o Multi-Categoria Transversal").trim();
     const resolvedEnabledCategories = Array.isArray(enabledCategories) && enabledCategories.length > 0 ? enabledCategories : [...ALL_BENCHMARK_CATEGORIES];
@@ -35183,7 +36245,7 @@ async function createWinHoodApp(options) {
     const isolatedPath = writeIsolatedArtifactsToDisk(slug, filesMap, isolatedArtifactsDir);
     const inv = buildTechnicalInventory(filesMap, isolatedPath);
     const createdSoftware = {
-      id: `sw-${crypto31.randomUUID().slice(0, 8)}`,
+      id: `sw-${crypto32.randomUUID().slice(0, 8)}`,
       projectId: project.id,
       name: swName,
       vendor: swVendor,
@@ -35570,7 +36632,7 @@ async function createWinHoodApp(options) {
         const allBlobs = (treeData.tree || []).filter((item) => item.type === "blob" && item.path);
         totalDiscovered = allBlobs.length;
         const eligibleTreeItems = allBlobs.filter((item) => {
-          const ext = path17.extname(item.path).toLowerCase();
+          const ext = path19.extname(item.path).toLowerCase();
           const segments = item.path.split("/").filter(Boolean);
           return [".ts", ".tsx", ".js", ".jsx", ".py", ".sql", ".json", ".cs", ".java", ".go", ".rs", ".md", ".yml", ".yaml", ".toml"].includes(ext) && segments.length > 0 && segments.length <= 20 && !item.path.includes("..") && !item.path.startsWith("/") && !item.path.includes("node_modules/") && !item.path.includes("dist/") && !item.path.includes("vendor/") && !item.path.includes(".git/") && (item.size === void 0 || item.size < 5e5);
         }).slice(0, 100);
@@ -35645,7 +36707,7 @@ async function createWinHoodApp(options) {
     }
     let targetProject = existingProject;
     if (!targetProject) {
-      const projId = crypto31.randomUUID();
+      const projId = crypto32.randomUUID();
       targetProject = {
         id: projId,
         name: (newProjectName || `Benchmark ${repoName}`).trim(),
@@ -35685,7 +36747,7 @@ async function createWinHoodApp(options) {
     const isolatedPath = writeIsolatedArtifactsToDisk(slug, filesMap, isolatedArtifactsDir);
     const inv = buildTechnicalInventory(filesMap, isolatedPath);
     const newSoftware = {
-      id: `sw-${crypto31.randomUUID().slice(0, 8)}`,
+      id: `sw-${crypto32.randomUUID().slice(0, 8)}`,
       projectId: targetProject.id,
       name: repoName,
       vendor: owner || "Comunidade GitHub",
@@ -35867,7 +36929,7 @@ async function createWinHoodApp(options) {
       isolatedPath = writeIsolatedArtifactsToDisk(slug, filesMap, isolatedArtifactsDir);
       inv = buildTechnicalInventory(filesMap, isolatedPath);
     }
-    const swId = `sw-${crypto31.randomUUID().slice(0, 8)}`;
+    const swId = `sw-${crypto32.randomUUID().slice(0, 8)}`;
     const commit = hasSource ? body.commitHash && body.commitHash.trim().length > 0 ? body.commitHash.trim() : `PKG_${inv.packageSha256.slice(0, 16)}` : body.commitHash && body.commitHash.trim().length > 0 ? body.commitHash.trim() : "NOT_DECLARED";
     const resolvedDomainTags = Array.isArray(body.domainTags) && body.domainTags.length > 0 ? body.domainTags.map((t) => String(t).trim()).filter(Boolean) : body.category ? [body.category.trim(), ...Object.keys(inv.languageBreakdown).map((l) => l.toLowerCase())] : ["multi-category", ...Object.keys(inv.languageBreakdown).map((l) => l.toLowerCase())];
     const newSw = {
@@ -36108,6 +37170,8 @@ async function createWinHoodApp(options) {
       catalogVersion: METHODOLOGY_CATALOG_VERSION
     });
   });
+  const pendingRunTimers = /* @__PURE__ */ new Map();
+  const cancelledRunIds = /* @__PURE__ */ new Set();
   app.get("/api/benchmark-runs", (req, res) => {
     const projectId = req.query.projectId;
     const runs = projectId ? db.runs.filter((r) => r.projectId === projectId) : db.runs;
@@ -36155,7 +37219,7 @@ async function createWinHoodApp(options) {
     if (!targetProject) {
       const nowIso = (/* @__PURE__ */ new Date()).toISOString();
       targetProject = {
-        id: `proj-${crypto31.randomUUID().slice(0, 8)}`,
+        id: `proj-${crypto32.randomUUID().slice(0, 8)}`,
         name: "Projeto Principal (Zero-Configura\xE7\xE3o)",
         category: "Aplica\xE7\xF5es Web & Microsservi\xE7os",
         objective: "Auditoria Autom\xE1tica de Qualidade e Seguran\xE7a",
@@ -36195,7 +37259,7 @@ async function createWinHoodApp(options) {
         message: `O software "${missingSources[0].name}" n\xE3o possui c\xF3digo-fonte importado. Ingest\xE3o de fontes reais obrigat\xF3ria antes da an\xE1lise.`
       });
     }
-    const runId = `run-${crypto31.randomUUID().slice(0, 8)}`;
+    const runId = `run-${crypto32.randomUUID().slice(0, 8)}`;
     const activeEnabledCategories = targetProject.enabledCategories && targetProject.enabledCategories.length > 0 ? targetProject.enabledCategories : [...ALL_BENCHMARK_CATEGORIES];
     const activeWeights = normalizeEnabledCategoryWeights(DEFAULT_CATEGORY_WEIGHTS, activeEnabledCategories);
     const activeEnv = DEFAULT_BENCHMARK_PROFILES[0].equivalenceEnvironment;
@@ -36241,6 +37305,14 @@ async function createWinHoodApp(options) {
         });
         const targetIdx = db.runs.findIndex((r) => r.id === runId);
         if (targetIdx !== -1) {
+          const prevRecords = db.runs[targetIdx]?.executionRecords || [];
+          if (prevRecords.length > 0) {
+            const seenIds = new Set((completedRun.executionRecords || []).map((rec) => rec.id));
+            completedRun.executionRecords = [
+              ...prevRecords.filter((rec) => !seenIds.has(rec.id)),
+              ...completedRun.executionRecords || []
+            ];
+          }
           db.runs[targetIdx] = completedRun;
           db.telemetry.workerExecutionsCount += completedRun.toolExecutions.length;
           appendAuditLog(
@@ -36309,7 +37381,7 @@ async function createWinHoodApp(options) {
     if (!project) {
       const nowIso = (/* @__PURE__ */ new Date()).toISOString();
       project = {
-        id: `proj-${crypto31.randomUUID().slice(0, 8)}`,
+        id: `proj-${crypto32.randomUUID().slice(0, 8)}`,
         name: `Avalia\xE7\xE3o Independente (${selectedSoftwares.map((s) => s.name).join(" vs ")})`,
         category: "Avalia\xE7\xE3o Multi-Categoria Transversal",
         domainTags: ["multi-category", "standalone"],
@@ -36354,7 +37426,7 @@ async function createWinHoodApp(options) {
     const activeEnabledCategories = Array.isArray(enabledCategories) && enabledCategories.length > 0 ? enabledCategories : matchedSpecializedProfile ? [...matchedSpecializedProfile.enabledCategories] : project.enabledCategories && project.enabledCategories.length > 0 ? project.enabledCategories : [...ALL_BENCHMARK_CATEGORIES];
     const activeNotApplicable = Array.isArray(notApplicableCategories) ? notApplicableCategories : matchedSpecializedProfile?.notApplicableCategories || [];
     const baseWeights = weights || matchedSpecializedProfile?.weights || DEFAULT_CATEGORY_WEIGHTS;
-    const activeWeights = activeEnabledCategories.length < 12 ? normalizeEnabledCategoryWeights(baseWeights, activeEnabledCategories) : baseWeights;
+    const activeWeights = !weights && activeEnabledCategories.length < 12 ? normalizeEnabledCategoryWeights(baseWeights, activeEnabledCategories) : baseWeights;
     const weightCheck = validateCategoryWeights(activeWeights, activeEnabledCategories);
     if (!weightCheck.valid) {
       return res.status(400).json({
@@ -36371,7 +37443,7 @@ async function createWinHoodApp(options) {
     }
     const activeQualityGateId = qualityGateId || project.defaultQualityGateId || "qg-sonar-way-mqr";
     const resolvedProfileName = profileName || matchedSpecializedProfile?.name || (resolvedAssessmentMode === "INDIVIDUAL" ? `Auditoria Individual - ${selectedSoftwares[0]?.name}` : "Benchmark WinHood");
-    const runId = `run-${crypto31.randomUUID().slice(0, 8)}`;
+    const runId = `run-${crypto32.randomUUID().slice(0, 8)}`;
     const runningRun = createInitialRunningBenchmark({
       runId,
       projectId: project.id,
@@ -36394,7 +37466,11 @@ async function createWinHoodApp(options) {
     });
     db.runs.unshift(runningRun);
     saveDatabase(db, true);
-    setTimeout(() => {
+    const runTimer = setTimeout(() => {
+      pendingRunTimers.delete(runId);
+      if (cancelledRunIds.has(runId)) {
+        return;
+      }
       try {
         const completedRun = executeBenchmarkRunOrchestration({
           runId,
@@ -36416,14 +37492,26 @@ async function createWinHoodApp(options) {
           environmentMode: db.environmentMode,
           dataOrigin: selectedSoftwares[0]?.dataOrigin || "USER_SOURCE",
           onProgress: (prog) => {
+            if (cancelledRunIds.has(runId)) return;
             const current = db.runs.find((r) => r.id === runId);
             if (current && current.status === "RUNNING") {
               current.progress = prog;
             }
           }
         });
+        if (cancelledRunIds.has(runId)) {
+          return;
+        }
         const targetIdx = db.runs.findIndex((r) => r.id === runId);
         if (targetIdx !== -1) {
+          const prevRecords = db.runs[targetIdx]?.executionRecords || [];
+          if (prevRecords.length > 0) {
+            const seenIds = new Set((completedRun.executionRecords || []).map((rec) => rec.id));
+            completedRun.executionRecords = [
+              ...prevRecords.filter((rec) => !seenIds.has(rec.id)),
+              ...completedRun.executionRecords || []
+            ];
+          }
           db.runs[targetIdx] = completedRun;
           db.telemetry.workerExecutionsCount += completedRun.toolExecutions.length;
           appendAuditLog(
@@ -36436,6 +37524,7 @@ async function createWinHoodApp(options) {
           saveDatabase(db, true);
         }
       } catch (err) {
+        if (cancelledRunIds.has(runId)) return;
         const target = db.runs.find((r) => r.id === runId);
         if (target) {
           target.status = "FAILED";
@@ -36451,6 +37540,7 @@ async function createWinHoodApp(options) {
         }
       }
     }, 150);
+    pendingRunTimers.set(runId, runTimer);
     return res.status(201).json({ run: runningRun });
   });
   app.get("/api/environment", (_req, res) => {
@@ -37077,11 +38167,26 @@ async function createWinHoodApp(options) {
   app.post("/api/benchmark-runs/:id/emergency-stop", (req, res) => {
     if (!requireWritePermission(res, req, "runs:execute")) return;
     const actor = getRequestActor(req, res);
-    const run = db.runs.find((r) => r.id === req.params.id) || db.runs[0];
+    const run = db.runs.find((r) => r.id === req.params.id);
     if (!run) {
       return res.status(404).json({ error: "Execu\xE7\xE3o n\xE3o encontrada." });
     }
+    const pendingTimer = pendingRunTimers.get(run.id);
+    if (pendingTimer) {
+      clearTimeout(pendingTimer);
+      pendingRunTimers.delete(run.id);
+    }
+    cancelledRunIds.add(run.id);
     run.status = "COMPLETED_WITH_WARNINGS";
+    run.completedAt = run.completedAt || (/* @__PURE__ */ new Date()).toISOString();
+    run.executiveSummary = "Execu\xE7\xE3o interrompida via Cancelamento Emergencial pelo operador. Snapshot baseline T0 restaurado.";
+    run.progress = {
+      percent: 100,
+      stageLabel: "Cancelado pelo operador (Emergency Stop)",
+      estimatedRemainingSeconds: 0,
+      processedFiles: run.progress?.processedFiles || 0,
+      totalFiles: run.progress?.totalFiles || 0
+    };
     appendAuditLog(
       db,
       "EMERGENCY_STOP_TRIGGERED",
@@ -37090,10 +38195,11 @@ async function createWinHoodApp(options) {
       `Cancelamento emergencial acionado por ${actor.name}. Workers isolados encerrados e snapshot baseline T0 restaurado.`,
       actor
     );
-    saveDatabase(db);
+    saveDatabase(db, true);
     return res.json({
       ok: true,
       runId: run.id,
+      status: run.status,
       message: "Cancelamento emergencial executado: workers descart\xE1veis destru\xEDdos e snapshot T0 restaurado com sucesso."
     });
   });
@@ -37697,11 +38803,11 @@ async function createWinHoodApp(options) {
         comparabilityReport: run.comparabilityReport || null
       },
       section03_environmentAndHardwareTelemetry: {
-        osPlatform: os10.platform(),
-        osRelease: os10.release(),
-        cpuArch: os10.arch(),
-        cpuCores: os10.cpus().length,
-        totalMemoryGb: Number((os10.totalmem() / 1024 ** 3).toFixed(2)),
+        osPlatform: os11.platform(),
+        osRelease: os11.release(),
+        cpuArch: os11.arch(),
+        cpuCores: os11.cpus().length,
+        totalMemoryGb: Number((os11.totalmem() / 1024 ** 3).toFixed(2)),
         nodeVersion: process.version,
         hardwareProfile: getHardwareProfile(),
         executionRecords: run.executionRecords || []
@@ -37722,7 +38828,7 @@ async function createWinHoodApp(options) {
         sourceFilesSha256Manifest: Object.entries(sw.sourceFilesContent || {}).sort(([a], [b]) => a.localeCompare(b)).map(([filePath, content]) => ({
           filePath,
           bytes: Buffer.byteLength(content, "utf8"),
-          sha256: crypto31.createHash("sha256").update(content, "utf8").digest("hex")
+          sha256: crypto32.createHash("sha256").update(content, "utf8").digest("hex")
         }))
       })),
       section05_algebraicScoreCardsBreakdown: run.scoreCards.map((sc) => ({
@@ -38071,7 +39177,7 @@ async function createWinHoodApp(options) {
     );
     if (!existing) {
       existing = {
-        id: id || `sonar-proj-${crypto31.randomUUID().slice(0, 8)}`,
+        id: id || `sonar-proj-${crypto32.randomUUID().slice(0, 8)}`,
         name: (name || cleanProjectKey).trim(),
         platform: resolvedPlatform,
         serverUrl: safeOrigin,
@@ -38884,7 +39990,7 @@ async function createWinHoodApp(options) {
       const existingProfile = db.savedSonarProjects.find((p) => p.projectKey === effectiveKey);
       if (!existingProfile) {
         const newProfile = {
-          id: `sonar-proj-${crypto31.randomUUID().slice(0, 8)}`,
+          id: `sonar-proj-${crypto32.randomUUID().slice(0, 8)}`,
           name: effectiveKey,
           platform: "SONARCLOUD",
           serverUrl: safeOrigin,
@@ -40076,7 +41182,7 @@ async function createWinHoodApp(options) {
       });
     }
     const target = {
-      id: `tgt-${crypto31.randomUUID().slice(0, 8)}`,
+      id: `tgt-${crypto32.randomUUID().slice(0, 8)}`,
       label: label.trim(),
       origin: parsedOrigin.origin,
       purpose: (purpose || "Medi\xE7\xE3o controlada de lat\xEAncia HTTP").trim(),
@@ -40122,7 +41228,7 @@ async function createWinHoodApp(options) {
     let attachedToRunId = null;
     if (targetRun) {
       const execRecord = {
-        id: `uexec-test-${crypto31.randomUUID().slice(0, 8)}`,
+        id: `uexec-test-${crypto32.randomUUID().slice(0, 8)}`,
         runId: targetRun.id,
         softwareId: sw.id,
         kind: "TEST_EXECUTION",
@@ -40181,7 +41287,7 @@ async function createWinHoodApp(options) {
           sc.metricsSummary.testCoveragePercent = parsed.lineCoveragePercent;
           targetRun.executionRecords = [
             {
-              id: `uexec-cov-${crypto31.randomUUID().slice(0, 8)}`,
+              id: `uexec-cov-${crypto32.randomUUID().slice(0, 8)}`,
               runId: targetRun.id,
               softwareId,
               kind: "COVERAGE_IMPORT",
@@ -40284,7 +41390,7 @@ async function createWinHoodApp(options) {
           sc.metricsSummary.throughputRps = result.throughputRps ?? 0;
           targetRun.executionRecords = [
             {
-              id: `uexec-perf-${crypto31.randomUUID().slice(0, 8)}`,
+              id: `uexec-perf-${crypto32.randomUUID().slice(0, 8)}`,
               runId: targetRun.id,
               softwareId,
               kind: "HTTP_PERF_PROBE",
@@ -40479,14 +41585,14 @@ async function createWinHoodApp(options) {
     const probePayload = `winhood-keystore-self-test:${Date.now()}:${actor.email}`;
     const testPayloadSha256 = computeSha256(probePayload);
     const hmacKey = KeyManagementService.getActiveEvidenceHmacKey();
-    const hmacDigest = crypto31.createHmac("sha256", hmacKey.secret).update(probePayload, "utf8").digest("hex");
+    const hmacDigest = crypto32.createHmac("sha256", hmacKey.secret).update(probePayload, "utf8").digest("hex");
     const resolvedHmacSecret = KeyManagementService.getEvidenceSecretByKeyId(hmacKey.keyId);
-    const hmacExpected = resolvedHmacSecret ? crypto31.createHmac("sha256", resolvedHmacSecret).update(probePayload, "utf8").digest("hex") : "";
+    const hmacExpected = resolvedHmacSecret ? crypto32.createHmac("sha256", resolvedHmacSecret).update(probePayload, "utf8").digest("hex") : "";
     const hmacValid = Boolean(hmacDigest && hmacDigest === hmacExpected);
     const edKey = KeyManagementService.getActiveEvidenceEd25519Key();
-    const edSignature = crypto31.sign(null, Buffer.from(probePayload, "utf8"), edKey.privateKeyPem);
+    const edSignature = crypto32.sign(null, Buffer.from(probePayload, "utf8"), edKey.privateKeyPem);
     const resolvedPub = KeyManagementService.getEd25519PublicKeyByKeyId(edKey.keyId) || edKey.publicKeyPem;
-    const ed25519Valid = crypto31.verify(null, Buffer.from(probePayload, "utf8"), resolvedPub, edSignature);
+    const ed25519Valid = crypto32.verify(null, Buffer.from(probePayload, "utf8"), resolvedPub, edSignature);
     const encryptedProbe = MqrBridgeConnection.encryptToken(probePayload);
     const decryptedProbe = MqrBridgeConnection.decryptToken(encryptedProbe);
     const aesGcmValid = decryptedProbe === probePayload;
@@ -40805,11 +41911,11 @@ async function startServer(options) {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = options?.distPath || path17.resolve(process.cwd(), "dist");
-    if (fs16.existsSync(distPath)) {
+    const distPath = options?.distPath || path19.resolve(process.cwd(), "dist");
+    if (fs18.existsSync(distPath)) {
       app.use(express.static(distPath));
       app.get("*", (_req, res) => {
-        res.sendFile(path17.join(distPath, "index.html"));
+        res.sendFile(path19.join(distPath, "index.html"));
       });
     }
   }
@@ -40852,7 +41958,7 @@ async function startServer(options) {
     })
   };
 }
-var isEntrypoint = typeof process !== "undefined" && Array.isArray(process.argv) && Boolean(process.argv[1]) && path17.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+var isEntrypoint = typeof process !== "undefined" && Array.isArray(process.argv) && Boolean(process.argv[1]) && path19.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isEntrypoint) {
   void startServer().catch((err) => {
     console.error("Failed to start WinHood server:", err);

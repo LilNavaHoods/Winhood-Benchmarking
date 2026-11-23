@@ -21,7 +21,11 @@ jobs:
       positioning_outcome: ${{ steps.positioning.outcome }}
       install_outcome: ${{ steps.install.outcome }}
       audit_outcome: ${{ steps.audit.outcome }}
+      browser_imports_outcome: ${{ steps.browser_imports.outcome }}
+      typecheck_outcome: ${{ steps.typecheck.outcome }}
       lint_outcome: ${{ steps.lint.outcome }}
+      build_outcome: ${{ steps.build.outcome }}
+      wizard_tests_outcome: ${{ steps.wizard_tests.outcome }}
       security_tests_outcome: ${{ steps.security_tests.outcome }}
       coverage_outcome: ${{ steps.coverage.outcome }}
       determinism_outcome: ${{ steps.determinism.outcome }}
@@ -66,15 +70,31 @@ jobs:
           STATUS=$(grep -oE 'Status: [A-Z0-9_]+' npm-audit-governance.log | head -n1 | cut -d' ' -f2)
           echo "audit_status=${STATUS:-VERIFIED}" >> "$GITHUB_OUTPUT"
 
-      - name: Typecheck (tsc --noEmit)
+      - name: Verify browser-safe frontend dependency graph & checker test suite
+        id: browser_imports
+        run: |
+          npm run check:browser-imports
+          npm run test:browser-imports
+
+      - name: TypeScript strict typecheck
+        id: typecheck
+        run: npm run typecheck
+
+      - name: Lint verification
         id: lint
         run: npm run lint
 
-      - name: Verify browser-safe frontend dependency graph (zero Node.js imports)
-        id: browser_imports
-        run: npm run check:browser-imports
+      - name: Build production frontend bundle (Vite + browser-safe import gate)
+        id: build
+        run: |
+          npm run build
+          test -f dist/index.html
 
-      - name: Run Security & Cryptographic Hardening Suite
+      - name: Run Benchmark Wizard & A/B full-stack E2E tests
+        id: wizard_tests
+        run: ./node_modules/.bin/tsx --test src/shared/wizardAndBrowserSafety.test.ts
+
+      - name: Run OAuth 2.0 PKCE, Security & Cryptographic Hardening Suite
         id: security_tests
         run: npm run test:security
 
@@ -82,7 +102,7 @@ jobs:
         id: golden_tests
         run: npm run test:golden
 
-      - name: Run full test suite with conventional c8 Coverage Threshold Gate (13 official domains)
+      - name: Run full unit & integration test suite with conventional c8 Coverage Threshold Gate (13 official domains)
         id: coverage
         run: |
           npm run test:coverage
@@ -164,7 +184,9 @@ jobs:
     outputs:
       lockfile_outcome: ${{ steps.lockfile.outcome }}
       install_outcome: ${{ steps.install.outcome }}
+      browser_imports_outcome: ${{ steps.browser_imports.outcome }}
       lint_outcome: ${{ steps.lint.outcome }}
+      build_outcome: ${{ steps.build.outcome }}
       unit_tests_outcome: ${{ steps.unit_tests.outcome }}
       build_desktop_outcome: ${{ steps.build_desktop.outcome }}
       pack_win_outcome: ${{ steps.pack_win.outcome }}
@@ -195,15 +217,23 @@ jobs:
             node node_modules/electron/install.js
           }
 
-      - name: Typecheck on Windows (tsc --noEmit)
-        id: lint
-        run: npm run lint
-
-      - name: Verify browser-safe frontend dependency graph on Windows
+      - name: Verify browser-safe frontend dependency graph & checker tests on Windows
         id: browser_imports
-        run: npm run check:browser-imports
+        run: |
+          npm run check:browser-imports
+          npm run test:browser-imports
 
-      - name: Run Windows path, scanner .bat/.cmd, security, and desktop lifecycle tests
+      - name: Typecheck & Lint on Windows (tsc --noEmit)
+        id: lint
+        run: |
+          npm run typecheck
+          npm run lint
+
+      - name: Build production frontend bundle on Windows
+        id: build
+        run: npm run build
+
+      - name: Run Windows path, Wizard, OAuth, security, and desktop lifecycle tests
         id: unit_tests
         run: npm test
 
@@ -298,7 +328,11 @@ jobs:
                   "positioning": "${{ needs.linux-validation.outputs.positioning_outcome }}",
                   "install": "${{ needs.linux-validation.outputs.install_outcome }}",
                   "audit": "${{ needs.linux-validation.outputs.audit_outcome }}",
+                  "browser_imports": "${{ needs.linux-validation.outputs.browser_imports_outcome }}",
+                  "typecheck": "${{ needs.linux-validation.outputs.typecheck_outcome }}",
                   "lint": "${{ needs.linux-validation.outputs.lint_outcome }}",
+                  "build": "${{ needs.linux-validation.outputs.build_outcome }}",
+                  "wizard_tests": "${{ needs.linux-validation.outputs.wizard_tests_outcome }}",
                   "security_tests": "${{ needs.linux-validation.outputs.security_tests_outcome }}",
                   "coverage": "${{ needs.linux-validation.outputs.coverage_outcome }}",
                   "determinism": "${{ needs.linux-validation.outputs.determinism_outcome }}",
@@ -312,7 +346,9 @@ jobs:
                 "steps": {
                   "lockfile": "${{ needs.windows-desktop-validation.outputs.lockfile_outcome }}",
                   "install": "${{ needs.windows-desktop-validation.outputs.install_outcome }}",
+                  "browser_imports": "${{ needs.windows-desktop-validation.outputs.browser_imports_outcome }}",
                   "lint": "${{ needs.windows-desktop-validation.outputs.lint_outcome }}",
+                  "build": "${{ needs.windows-desktop-validation.outputs.build_outcome }}",
                   "unit_tests": "${{ needs.windows-desktop-validation.outputs.unit_tests_outcome }}",
                   "build_desktop": "${{ needs.windows-desktop-validation.outputs.build_desktop_outcome }}",
                   "pack_win": "${{ needs.windows-desktop-validation.outputs.pack_win_outcome }}",

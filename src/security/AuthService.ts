@@ -3312,16 +3312,21 @@ export class AuthService {
     githubLogin: string;
     name?: string;
     email?: string;
+    emailVerified?: boolean;
     avatarUrl?: string | null;
     ipAddress?: string;
     userAgent?: string;
     allowSignup?: boolean;
+    isInternetExposed?: boolean;
+    allowFirstUserAdmin?: boolean;
+    bootstrapAdminToken?: string;
   }): {
     user: PublicUserView;
     sessionId: string;
     csrfToken: string;
     trustDevice: boolean;
     isNewAccount: boolean;
+    mfaRequired?: boolean;
   } {
     const cleanLogin = (params.githubLogin || '').trim().replace(/[^a-zA-Z0-9._-]/g, '');
     if (!cleanLogin) {
@@ -3333,16 +3338,71 @@ export class AuthService {
         : `${cleanLogin}@users.noreply.github.com`;
     const candidateEmail = (params.email || fallbackNoreply).trim().toLowerCase();
     const resolvedEmail = isValidEmailAddress(candidateEmail) ? candidateEmail : fallbackNoreply;
+    const isSyntheticNoreply = resolvedEmail === fallbackNoreply;
+    const emailVerified =
+      typeof params.emailVerified === 'boolean' ? params.emailVerified : isSyntheticNoreply;
     const cleanName =
       (params.name || cleanLogin).replace(/[\r\n\0]/g, ' ').trim().slice(0, 80) || cleanLogin;
     const now = new Date().toISOString();
 
+    // 1. Authoritative match by numeric githubId
     let user =
-      (typeof params.githubId === 'number'
+      typeof params.githubId === 'number'
         ? this.db.users.find((u) => u.githubId === params.githubId)
-        : undefined) ||
-      this.db.users.find((u) => u.githubLogin?.toLowerCase() === cleanLogin.toLowerCase()) ||
-      this.db.users.find((u) => u.email === resolvedEmail);
+        : undefined;
+
+    // 2. Match by githubLogin ONLY if that account has no conflicting githubId
+    if (!user) {
+      const loginMatch = this.db.users.find(
+        (u) => u.githubLogin?.toLowerCase() === cleanLogin.toLowerCase()
+      );
+      if (loginMatch) {
+        if (
+          typeof params.githubId === 'number' &&
+          typeof loginMatch.githubId === 'number' &&
+          loginMatch.githubId !== params.githubId
+        ) {
+          throw new Error(
+            'GITHUB_ALREADY_LINKED: O login GitHub informado pertence a outra identidade já vinculada.'
+          );
+        }
+        user = loginMatch;
+      }
+    }
+
+    // 3. Match by email ONLY when email is verified by GitHub AND no conflicting githubId exists
+    if (!user) {
+      const emailMatch = this.db.users.find((u) => u.email === resolvedEmail);
+      if (emailMatch) {
+        if (
+          typeof params.githubId === 'number' &&
+          typeof emailMatch.githubId === 'number' &&
+          emailMatch.githubId !== params.githubId
+        ) {
+          throw new Error(
+            'GITHUB_ALREADY_LINKED: Este endereço de e-mail já está vinculado a outra conta GitHub.'
+          );
+        }
+        if (!emailVerified) {
+          throw new Error(
+            'AUTH_EMAIL_VERIFICATION_REQUIRED: Não é permitido vincular automaticamente uma conta existente usando e-mail GitHub não verificado.'
+          );
+        }
+        user = emailMatch;
+      }
+    }
+
+    // Prevent linking the same githubId across multiple accounts
+    if (user && typeof params.githubId === 'number') {
+      const duplicateOwner = this.db.users.find(
+        (u) => u.id !== user!.id && u.githubId === params.githubId
+      );
+      if (duplicateOwner) {
+        throw new Error(
+          'GITHUB_ALREADY_LINKED: Esta conta GitHub já está associada a outro usuário.'
+        );
+      }
+    }
 
     let isNewAccount = false;
     if (!user) {
@@ -3352,12 +3412,40 @@ export class AuthService {
         );
       }
       isNewAccount = true;
-      const isFirstUser = this.db.users.length === 0;
+
+      // Never auto-grant ADMIN to the first GitHub user on an internet-exposed installation.
+      // ADMIN requires an explicit valid single-use bootstrap token (or explicit non-exposed opt-in).
+      let grantedAdminViaBootstrap = false;
+      if (params.bootstrapAdminToken && this.db.bootstrapTokenSha256) {
+        const provided = params.bootstrapAdminToken.trim();
+        const notExpired =
+          !this.db.bootstrapTokenExpiresAt ||
+          Date.now() <= Date.parse(this.db.bootstrapTokenExpiresAt);
+        if (provided && notExpired) {
+          const providedSha = Buffer.from(sha256(provided), 'hex');
+          const storedSha = Buffer.from(this.db.bootstrapTokenSha256, 'hex');
+          if (
+            providedSha.length === storedSha.length &&
+            crypto.timingSafeEqual(providedSha, storedSha)
+          ) {
+            grantedAdminViaBootstrap = true;
+          }
+        }
+      }
+
+      const canGrantFirstLocalAdmin =
+        this.db.users.length === 0 &&
+        params.isInternetExposed !== true &&
+        params.allowFirstUserAdmin === true;
+
+      const assignedRole: RbacRole =
+        grantedAdminViaBootstrap || canGrantFirstLocalAdmin ? 'ADMIN' : 'SECURITY_LEAD';
+
       user = {
         id: `usr-gh-${crypto.randomUUID().slice(0, 8)}`,
         name: cleanName,
         email: resolvedEmail,
-        role: isFirstUser ? 'ADMIN' : 'SECURITY_LEAD',
+        role: assignedRole,
         passwordHash: hashPassword(`wh-gh-oauth-${crypto.randomBytes(24).toString('base64url')}`),
         pinHash: null,
         pinEnabled: false,
@@ -3379,7 +3467,7 @@ export class AuthService {
         updatedAt: now,
       };
       this.db.users.push(user);
-      if (isFirstUser) {
+      if (assignedRole === 'ADMIN') {
         this.completeBootstrapOnFirstAccount(now);
       }
     } else if (user.disabled) {
@@ -3398,21 +3486,70 @@ export class AuthService {
       user.updatedAt = now;
     }
 
+    // Preserve existing user MFA requirement when MFA is enabled on the account
+    const mfaVerified = !user.mfaEnabled;
     const { sessionId, session } = this.createSessionRecord(
       user,
-      true,
+      mfaVerified,
       params.ipAddress || '127.0.0.1',
       params.userAgent || 'WinHood-GitHub-OAuth',
       { trustDevice: true }
     );
     this.save();
     return {
-      user: this.toPublicUserView(user, true),
+      user: this.toPublicUserView(user, mfaVerified),
       sessionId,
       csrfToken: session.csrfToken,
       trustDevice: true,
       isNewAccount,
+      mfaRequired: user.mfaEnabled,
     };
+  }
+
+  /**
+   * Fluxo explícito, seguro e de uso único para promoção administrativa inicial via token de bootstrap.
+   * Impede escalonamento automático de privilégios para o primeiro usuário GitHub em instalações expostas.
+   */
+  public claimAdminWithBootstrapToken(
+    userId: string,
+    bootstrapToken: string
+  ): PublicUserView {
+    const user = this.db.users.find((u) => u.id === userId && !u.disabled);
+    if (!user) {
+      throw new Error('USER_NOT_FOUND: Usuário não encontrado.');
+    }
+    const existingAdmin = this.db.users.find((u) => u.role === 'ADMIN' && !u.disabled);
+    if (existingAdmin) {
+      throw new Error(
+        'BOOTSTRAP_ALREADY_COMPLETED: Esta instalação já possui um administrador ativo.'
+      );
+    }
+    const provided = (bootstrapToken || '').trim();
+    if (!provided || !this.db.bootstrapTokenSha256) {
+      throw new Error(
+        'BOOTSTRAP_TOKEN_INVALID: Token de bootstrap administrativo ausente ou já consumido.'
+      );
+    }
+    if (
+      this.db.bootstrapTokenExpiresAt &&
+      Date.now() > Date.parse(this.db.bootstrapTokenExpiresAt)
+    ) {
+      throw new Error('BOOTSTRAP_TOKEN_EXPIRED: Token de bootstrap administrativo expirado.');
+    }
+    const providedSha = Buffer.from(sha256(provided), 'hex');
+    const storedSha = Buffer.from(this.db.bootstrapTokenSha256, 'hex');
+    if (
+      providedSha.length !== storedSha.length ||
+      !crypto.timingSafeEqual(providedSha, storedSha)
+    ) {
+      throw new Error('BOOTSTRAP_TOKEN_INVALID: Token de bootstrap administrativo inválido.');
+    }
+    const now = new Date().toISOString();
+    user.role = 'ADMIN';
+    user.updatedAt = now;
+    this.completeBootstrapOnFirstAccount(now);
+    this.save();
+    return this.toPublicUserView(user, true);
   }
 
   public linkGitHubAccountToUser(

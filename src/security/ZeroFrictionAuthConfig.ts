@@ -180,6 +180,7 @@ export interface GitHubAuthenticatedProfile {
   login: string;
   name: string;
   email: string;
+  emailVerified?: boolean;
   avatarUrl: string | null;
 }
 
@@ -204,6 +205,7 @@ export function buildGitHubOAuthAuthorizeUrl(params: {
   state: string;
   codeChallenge: string;
   scope?: string;
+  allowSignup?: boolean;
 }): string {
   const qs = new URLSearchParams({
     client_id: params.clientId.trim(),
@@ -212,7 +214,7 @@ export function buildGitHubOAuthAuthorizeUrl(params: {
     state: params.state,
     code_challenge: params.codeChallenge,
     code_challenge_method: 'S256',
-    allow_signup: 'true',
+    allow_signup: params.allowSignup === false ? 'false' : 'true',
   });
   return `https://github.com/login/oauth/authorize?${qs.toString()}`;
 }
@@ -224,7 +226,9 @@ export async function exchangeGitHubOAuthCode(params: {
   redirectUri: string;
   codeVerifier: string;
 }): Promise<{ accessToken: string; tokenType: string; scope: string }> {
-  if (!params.clientId.trim() || !params.clientSecret.trim()) {
+  const cleanClientId = params.clientId.trim();
+  const cleanClientSecret = params.clientSecret.trim();
+  if (!cleanClientId || !cleanClientSecret) {
     throw new Error(
       'GITHUB_OAUTH_CONFIG_MISSING: Configure WINHOOD_GITHUB_OAUTH_CLIENT_ID e WINHOOD_GITHUB_OAUTH_CLIENT_SECRET.'
     );
@@ -236,8 +240,8 @@ export async function exchangeGitHubOAuthCode(params: {
       'Content-Type': 'application/x-www-form-urlencoded',
     },
     body: new URLSearchParams({
-      client_id: params.clientId.trim(),
-      client_secret: params.clientSecret.trim(),
+      client_id: cleanClientId,
+      client_secret: cleanClientSecret,
       code: params.code.trim(),
       redirect_uri: params.redirectUri,
       code_verifier: params.codeVerifier,
@@ -254,9 +258,12 @@ export async function exchangeGitHubOAuthCode(params: {
     error_description?: string;
   };
   if (!data.access_token) {
-    throw new Error(
-      `GITHUB_OAUTH_EXCHANGE_FAILED: ${data.error_description || data.error || 'Token ausente.'}`
-    );
+    const rawDetail = String(data.error_description || data.error || 'Token ausente.');
+    const safeDetail = rawDetail
+      .split(cleanClientSecret)
+      .join('[REDACTED]')
+      .slice(0, 200);
+    throw new Error(`GITHUB_OAUTH_EXCHANGE_FAILED: ${safeDetail}`);
   }
   return {
     accessToken: data.access_token,
@@ -293,33 +300,50 @@ export async function fetchGitHubAuthenticatedProfile(
     throw new Error('GITHUB_PROFILE_INCOMPLETE: API do GitHub não retornou id/login.');
   }
 
-  let resolvedEmail = (userJson.email || '').trim().toLowerCase();
-  if (!resolvedEmail) {
-    try {
-      const emailsRes = await fetch('https://api.github.com/user/emails', { headers });
-      if (emailsRes.ok) {
-        const emails = (await emailsRes.json()) as Array<{
-          email?: string;
-          primary?: boolean;
-          verified?: boolean;
-        }>;
-        if (Array.isArray(emails)) {
-          const primaryVerified = emails.find((e) => e.primary && e.verified && e.email);
-          const anyVerified = emails.find((e) => e.verified && e.email);
-          const primaryAny = emails.find((e) => e.primary && e.email);
-          resolvedEmail = String(
-            primaryVerified?.email || anyVerified?.email || primaryAny?.email || ''
-          )
-            .trim()
-            .toLowerCase();
+  let resolvedEmail = '';
+  let emailVerified = false;
+  const publicEmail = (userJson.email || '').trim().toLowerCase();
+
+  try {
+    const emailsRes = await fetch('https://api.github.com/user/emails', { headers });
+    if (emailsRes.ok) {
+      const emails = (await emailsRes.json()) as Array<{
+        email?: string;
+        primary?: boolean;
+        verified?: boolean;
+      }>;
+      if (Array.isArray(emails)) {
+        const primaryVerified = emails.find((e) => e.primary && e.verified && e.email);
+        const anyVerified = emails.find((e) => e.verified && e.email);
+        const primaryAny = emails.find((e) => e.primary && e.email);
+        if (primaryVerified?.email) {
+          resolvedEmail = String(primaryVerified.email).trim().toLowerCase();
+          emailVerified = true;
+        } else if (anyVerified?.email) {
+          resolvedEmail = String(anyVerified.email).trim().toLowerCase();
+          emailVerified = true;
+        } else if (publicEmail) {
+          resolvedEmail = publicEmail;
+          emailVerified = emails.some(
+            (e) => e.verified && String(e.email || '').trim().toLowerCase() === publicEmail
+          );
+        } else if (primaryAny?.email) {
+          resolvedEmail = String(primaryAny.email).trim().toLowerCase();
+          emailVerified = false;
         }
       }
-    } catch {
-      // Escopo user:email pode estar ausente em PAT read:user; fallback determinístico abaixo
     }
+  } catch {
+    // Escopo user:email pode estar ausente em PAT read:user; fallback conservador abaixo
+  }
+
+  if (!resolvedEmail && publicEmail) {
+    resolvedEmail = publicEmail;
+    emailVerified = false;
   }
   if (!resolvedEmail) {
     resolvedEmail = `${userJson.id}+${userJson.login}@users.noreply.github.com`;
+    emailVerified = true;
   }
 
   return {
@@ -327,6 +351,7 @@ export async function fetchGitHubAuthenticatedProfile(
     login: userJson.login,
     name: (userJson.name || userJson.login).trim(),
     email: resolvedEmail,
+    emailVerified,
     avatarUrl: userJson.avatar_url || null,
   };
 }

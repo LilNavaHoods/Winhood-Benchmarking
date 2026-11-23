@@ -159,7 +159,10 @@ export class SandboxExecutor {
     const bwrapBin = getBwrapBinaryPath();
     const unshareBin = getUnshareBinaryPath();
 
-    const dockerAvailable = checkBinaryCommand(dockerBin, ['info']);
+    const dockerDaemonAvailable = checkBinaryCommand(dockerBin, ['info']);
+    const dockerNodeImageAvailable =
+      dockerDaemonAvailable && checkBinaryCommand(dockerBin, ['image', 'inspect', 'node:22-alpine']);
+    const dockerAvailable = dockerNodeImageAvailable;
     const bwrapAvailable = platform === 'linux' && checkBinaryCommand(bwrapBin, ['--version']);
     const unshareAvailable =
       platform === 'linux' && checkBinaryCommand(unshareBin, ['--user', '--map-root-user', 'true']);
@@ -207,8 +210,12 @@ export class SandboxExecutor {
       );
     }
 
-    if (!dockerAvailable) {
+    if (!dockerDaemonAvailable) {
       limitations.push('Docker daemon não disponível; execução em container descartável desativada.');
+    } else if (!dockerNodeImageAvailable) {
+      limitations.push(
+        'Docker daemon disponível, porém imagem offline node:22-alpine não está em cache local; usando isolamento Node Permission Model para testes JS/MJS.'
+      );
     }
     if (platform !== 'win32') {
       limitations.push('Windows Sandbox (T0/T1/T2 Sysinternals) indisponível em host Linux.');
@@ -328,9 +335,22 @@ export class SandboxExecutor {
 
       isolationState = 'ISOLATION_VERIFIED';
       const childEnv = buildMinimalSandboxEnv(realTmpRoot);
+      const nodeRuntime = resolveNodeRuntimeForSubprocess();
 
       let res;
       if (probe.dockerAvailable) {
+        // Ensure read-only bind mount is readable by unprivileged container UID 65534:65534
+        try {
+          fs.chmodSync(realTmpRoot, 0o755);
+          for (const relPath of Object.keys(params.filesMap || {})) {
+            const p = path.resolve(realTmpRoot, relPath.replace(/^\/+/, ''));
+            if (p.startsWith(realTmpRoot + path.sep) && fs.existsSync(p)) {
+              fs.chmodSync(p, 0o644);
+            }
+          }
+        } catch {
+          // Windows/restricted fs chmod best-effort
+        }
         // Ephemeral rootless/restricted container using absolute system binary path, NEVER mounting docker.sock
         res = spawnSync(
           getDockerBinaryPath(),
@@ -368,8 +388,6 @@ export class SandboxExecutor {
       } else {
         // Node.js Permission Model: restricts FS read/write strictly to realTmpRoot,
         // denies --allow-child-process and --allow-worker by default, strips all host secrets.
-        // Write an in-process ESM test runner inside realTmpRoot so node:test runs in-process
-        // with --test-reporter=tap without needing --allow-child-process.
         const runnerFile = path.join(realTmpRoot, '.winhood_runner.mjs');
         const runnerScript = [
           `const files = ${JSON.stringify(safeTestFiles.map((tf) => './' + tf.replace(/\\/g, '/')))};`,
@@ -377,7 +395,7 @@ export class SandboxExecutor {
         ].join('\n');
         fs.writeFileSync(runnerFile, runnerScript, 'utf8');
         res = spawnSync(
-          process.execPath,
+          nodeRuntime.executablePath,
           [
             '--permission',
             `--allow-fs-read=${realTmpRoot}`,
@@ -401,16 +419,17 @@ export class SandboxExecutor {
       const durationMs = Math.max(1, Math.round(performance.now() - startMs));
       const stdout = res.stdout || '';
       const stderr = res.stderr || '';
+      const timedOut = Boolean(res.error && (res.error as NodeJS.ErrnoException).code === 'ETIMEDOUT');
 
       const result: SandboxedCommandResult = {
-        executed: res.status !== null && !res.error,
+        executed: !timedOut && res.status !== null && !res.error,
         blocked: false,
         isolationMode: probe.dockerAvailable ? 'RESTRICTED_CONTAINER' : 'NODE_PERMISSION_SUBPROCESS',
         isolationState,
         recoveryVerified: false,
         exitCode: res.status,
         stdout,
-        stderr,
+        stderr: timedOut ? `Timeout excedido (${timeoutMs}ms): processo encerrado.\n${stderr}` : stderr,
         stdoutSha256: crypto.createHash('sha256').update(stdout, 'utf8').digest('hex'),
         stderrSha256: crypto.createHash('sha256').update(stderr, 'utf8').digest('hex'),
         durationMs,
@@ -511,40 +530,54 @@ export class SandboxExecutor {
       }
 
       const childEnv = buildMinimalSandboxEnv(realTmpRoot);
+      const nodeRuntime = resolveNodeRuntimeForSubprocess();
       const res = probe.dockerAvailable
-        ? spawnSync(
-            getDockerBinaryPath(),
-            [
-              'run',
-              '--rm',
-              '--network=none',
-              '--read-only',
-              '--cap-drop=ALL',
-              '--security-opt=no-new-privileges',
-              '--pids-limit=64',
-              '--memory=512m',
-              '--cpus=1',
-              '--user=65534:65534',
-              '--tmpfs',
-              '/tmp:rw,noexec,nosuid,size=64m',
-              '-v',
-              `${realTmpRoot}:/workspace:ro`,
-              '-w',
-              '/workspace',
-              'node:22-alpine',
-              'node',
-              '--test',
-              '--test-reporter=tap',
-              ...safeTestFiles,
-            ],
-            {
-              shell: false,
-              encoding: 'utf8',
-              timeout: timeoutMs,
-              maxBuffer: 4 * 1024 * 1024,
-              env: childEnv,
+        ? (() => {
+            try {
+              fs.chmodSync(realTmpRoot, 0o755);
+              for (const relPath of Object.keys(params.filesMap || {})) {
+                const p = path.resolve(realTmpRoot, relPath.replace(/^\/+/, ''));
+                if (p.startsWith(realTmpRoot + path.sep) && fs.existsSync(p)) {
+                  fs.chmodSync(p, 0o644);
+                }
+              }
+            } catch {
+              // Best-effort chmod
             }
-          )
+            return spawnSync(
+              getDockerBinaryPath(),
+              [
+                'run',
+                '--rm',
+                '--network=none',
+                '--read-only',
+                '--cap-drop=ALL',
+                '--security-opt=no-new-privileges',
+                '--pids-limit=64',
+                '--memory=512m',
+                '--cpus=1',
+                '--user=65534:65534',
+                '--tmpfs',
+                '/tmp:rw,noexec,nosuid,size=64m',
+                '-v',
+                `${realTmpRoot}:/workspace:ro`,
+                '-w',
+                '/workspace',
+                'node:22-alpine',
+                'node',
+                '--test',
+                '--test-reporter=tap',
+                ...safeTestFiles,
+              ],
+              {
+                shell: false,
+                encoding: 'utf8',
+                timeout: timeoutMs,
+                maxBuffer: 4 * 1024 * 1024,
+                env: childEnv,
+              }
+            );
+          })()
         : (() => {
             const runnerFile = path.join(realTmpRoot, '.winhood_runner.mjs');
             const runnerScript = [
@@ -553,7 +586,7 @@ export class SandboxExecutor {
             ].join('\n');
             fs.writeFileSync(runnerFile, runnerScript, 'utf8');
             return spawnSync(
-              process.execPath,
+              nodeRuntime.executablePath,
               [
                 '--permission',
                 `--allow-fs-read=${realTmpRoot}`,

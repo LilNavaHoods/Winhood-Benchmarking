@@ -14,14 +14,43 @@ export {
 
 export {
   normalizeEnabledCategoryWeights,
-  validateCategoryWeights,
-  validateEquivalenceConditions,
-  classifyScoreScale,
 } from './benchmarkWeights';
 
 export {
+  validateCategoryWeights,
+  validateEquivalenceConditions,
+  classifyScoreScale,
+  type WeightValidationResult,
+  type EquivalenceValidationResult,
+} from './benchmarkValidation';
+
+export {
+  METHODOLOGY_CATALOG_VERSION,
+  ALL_12_CATEGORIES,
+  DEFAULT_EQUIVALENCE_ENVIRONMENT,
+  EVALUATION_CRITERIA_CATALOG,
+  DOMAIN_SPECIALIZED_PROFILES,
+  getProfileByIdOrDomain,
+  inferSoftwareDomainKey,
+  determineSourceIngestionState,
+  determineSourceAvailability,
+  evaluateCriteriaForSoftware,
+  evaluateSoftwareComparability,
+  buildPreAnalysisSummary,
+  type HardwareProfile,
+} from './benchmarkConfig';
+
+export {
   GITHUB_OAUTH_ERROR_MESSAGES,
+  GITHUB_OAUTH_START_URL,
+  GITHUB_OAUTH_UNAVAILABLE_NOTICE,
+  resolveGitHubOAuthCallbackFeedback,
   resolveGitHubOAuthErrorMessage,
+  extractGitHubOAuthErrorFromSearch,
+  resolveGitHubOAuthCtaLabel,
+  type GitHubOAuthAvailabilityState,
   type GitHubOAuthCallbackErrorCode,
+  type GitHubOAuthCallbackFeedback,
+  type ParsedGitHubOAuthSearchError,
   type WinHoodAccessMode,
 } from './authTypes';

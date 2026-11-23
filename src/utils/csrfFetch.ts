@@ -50,11 +50,12 @@ function safeStorageSet(key: string, value: string | null | undefined, persist =
 
 export function setGlobalSessionToken(
   sessionToken: string | null | undefined,
-  persist = true
+  _persist = false
 ): void {
   if (typeof window !== 'undefined') {
     window.__WINHOOD_SESSION_TOKEN__ = sessionToken || undefined;
-    safeStorageSet(SESSION_STORAGE_KEY, sessionToken, persist);
+    // Never persist session tokens in localStorage; use sessionStorage only for cross-site iframe fallback
+    safeStorageSet(SESSION_STORAGE_KEY, sessionToken, false);
   }
 }
 

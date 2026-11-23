@@ -73,6 +73,8 @@ export interface AstIssueCandidate {
   filePath: string;
   lineNumber: number;
   endLineNumber: number;
+  columnStart?: number;
+  columnEnd?: number;
   snippet: string;
   remediation: string;
   detectionMethod: 'AST_ANALYSIS' | 'TAINT_ANALYSIS' | 'STATIC_PATTERN';
@@ -163,7 +165,7 @@ export interface AnalyzerExecution {
   exitCode: number | null;
   filesProcessed: number;
   filesFailed: number;
-  measurementState: MetricMeasurementState;
+  measurementState: MetricMeasurementState | 'BLOCKED';
   stdout?: string;
   stderr?: string;
   rawOutputSha256: string;

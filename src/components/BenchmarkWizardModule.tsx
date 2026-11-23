@@ -37,16 +37,16 @@ import {
   DEFAULT_CATEGORY_WEIGHTS,
   MARKET_CATEGORIES,
 } from '../shared/benchmarkCategories';
+import { normalizeEnabledCategoryWeights } from '../shared/benchmarkWeights';
 import {
-  normalizeEnabledCategoryWeights,
   validateCategoryWeights,
   validateEquivalenceConditions,
-} from '../shared/benchmarkWeights';
+} from '../shared/benchmarkValidation';
 import {
   DOMAIN_SPECIALIZED_PROFILES,
   buildPreAnalysisSummary,
   evaluateSoftwareComparability,
-} from '../engine/methodologyCatalogEngine';
+} from '../shared/benchmarkConfig';
 
 interface BenchmarkWizardModuleProps {
   projects: Project[];
@@ -115,6 +115,7 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
   );
 
   const [executing, setExecuting] = useState<boolean>(false);
+  const [submissionError, setSubmissionError] = useState<string | null>(null);
 
   // Update primary software when project changes (or allow all softwares in cross-project mode)
   const projectSoftwares = crossProjectSelection
@@ -126,6 +127,17 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
       setPrimarySoftwareId(projectSoftwares[0].id);
     }
   }, [selectedProjectId, projectSoftwares, primarySoftwareId]);
+
+  // Keep comparison selection strictly distinct from primarySoftwareId and existing softwares
+  const effectiveComparisonIds = comparisonSoftwareIds.filter(
+    (id) => id !== primarySoftwareId && softwares.some((s) => s.id === id)
+  );
+
+  useEffect(() => {
+    if (effectiveComparisonIds.length !== comparisonSoftwareIds.length) {
+      setComparisonSoftwareIds(effectiveComparisonIds);
+    }
+  }, [primarySoftwareId, softwares]);
 
   const activePrimarySoftware = softwares.find((s) => s.id === primarySoftwareId);
   const activeProject = projects.find((p) => p.id === (selectedProjectId || activePrimarySoftware?.projectId));
@@ -296,46 +308,58 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
   };
 
   const handleExecute = async () => {
+    setSubmissionError(null);
     // Resolve final softwareIds list based on assessmentMode
     let finalSoftwareIds: string[] = [];
 
     if (assessmentMode === 'INDIVIDUAL') {
       if (!primarySoftwareId) {
-        onNotify('Selecione o software a ser avaliado.', 'error');
+        const msg = 'Selecione o software a ser avaliado.';
+        setSubmissionError(msg);
+        onNotify(msg, 'error');
         return;
       }
       finalSoftwareIds = [primarySoftwareId];
     } else if (assessmentMode === 'AB_COMPARE') {
       if (!primarySoftwareId) {
-        onNotify('Selecione o primeiro software.', 'error');
+        const msg = 'Selecione o primeiro software.';
+        setSubmissionError(msg);
+        onNotify(msg, 'error');
         return;
       }
-      if (comparisonSoftwareIds.length === 0) {
-        onNotify('Selecione ao menos um segundo software para comparação.', 'error');
+      if (effectiveComparisonIds.length === 0) {
+        const msg = 'Selecione ao menos um segundo software para comparação.';
+        setSubmissionError(msg);
+        onNotify(msg, 'error');
         return;
       }
-      finalSoftwareIds = [primarySoftwareId, ...comparisonSoftwareIds.filter((id) => id !== primarySoftwareId)];
+      finalSoftwareIds = [primarySoftwareId, ...effectiveComparisonIds];
     } else if (assessmentMode === 'MARKET_COMPETITOR') {
       if (!primarySoftwareId) {
-        onNotify('Selecione o software principal.', 'error');
+        const msg = 'Selecione o software principal.';
+        setSubmissionError(msg);
+        onNotify(msg, 'error');
         return;
       }
       if (!candidateApproved || !approvedCompetitorSoftwareId) {
-        onNotify(
-          'Homologue e aprove um concorrente de mercado antes de iniciar o benchmark.',
-          'error'
-        );
+        const msg = 'Homologue e aprove um concorrente de mercado antes de iniciar o benchmark.';
+        setSubmissionError(msg);
+        onNotify(msg, 'error');
         return;
       }
       finalSoftwareIds = [primarySoftwareId, approvedCompetitorSoftwareId];
     }
 
     if (!weightValidation.valid) {
-      onNotify(weightValidation.errors.join(' '), 'error');
+      const msg = weightValidation.errors.join(' ');
+      setSubmissionError(msg);
+      onNotify(msg, 'error');
       return;
     }
     if (!eqValidation.equivalent) {
-      onNotify(eqValidation.reasons.join(' '), 'error');
+      const msg = eqValidation.reasons.join(' ');
+      setSubmissionError(msg);
+      onNotify(msg, 'error');
       return;
     }
 
@@ -348,14 +372,14 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          projectId: selectedProjectId || projects[0]?.id,
+          projectId: selectedProjectId || activePrimarySoftware?.projectId || projects[0]?.id,
           softwareIds: finalSoftwareIds,
           profileId: selectedProfileId,
           profileName:
             assessmentMode === 'INDIVIDUAL'
-              ? `Avaliação Individual - ${activePrimarySoftware?.name} (${activeProf?.name || 'MQR'})`
+              ? `Avaliação Individual - ${activePrimarySoftware?.name || 'Software'} (${activeProf?.name || 'MQR'})`
               : assessmentMode === 'MARKET_COMPETITOR'
-                ? `Benchmark de Mercado: ${activePrimarySoftware?.name} vs ${selectedCandidate?.name}`
+                ? `Benchmark de Mercado: ${activePrimarySoftware?.name || 'Software'} vs ${selectedCandidate?.name || 'Concorrente'}`
                 : activeProf?.name || 'Benchmark Comparativo A/B WinHood',
           wizardMode,
           weights,
@@ -375,20 +399,32 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
         }),
       });
 
-      const payload = await res.json();
+      const rawText = await res.text();
+      let payload: any = {};
+      try {
+        payload = rawText ? JSON.parse(rawText) : {};
+      } catch {
+        payload = { error: rawText || `Erro HTTP ${res.status}` };
+      }
+
       if (!res.ok) {
-        onNotify(payload.error || payload.message || 'Falha ao executar avaliação.', 'error');
+        const errMsg = payload.error || payload.message || `Falha ao executar avaliação (HTTP ${res.status}).`;
+        setSubmissionError(errMsg);
+        onNotify(errMsg, 'error');
         setExecuting(false);
         return;
       }
 
+      setSubmissionError(null);
       onNotify(
-        `Avaliação iniciada com sucesso [ID: ${payload.run.id}]. Acompanhe o progresso em tempo real!`,
+        `Avaliação iniciada com sucesso [ID: ${payload.run?.id || 'N/A'}]. Acompanhe o progresso em tempo real!`,
         'success'
       );
       await onRunCompleted();
     } catch {
-      onNotify('Erro de comunicação ao orquestrar avaliação.', 'error');
+      const errMsg = 'Erro de comunicação ao orquestrar avaliação. Verifique o servidor e tente novamente.';
+      setSubmissionError(errMsg);
+      onNotify(errMsg, 'error');
     } finally {
       setExecuting(false);
     }
@@ -807,7 +843,7 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                   </h3>
                 </div>
                 <p className="text-xs text-slate-600 dark:text-slate-400">
-                  A avaliação individual de <strong>{activePrimarySoftware?.name}</strong> executará os
+                  A avaliação individual de <strong>{activePrimarySoftware?.name || 'software selecionado'}</strong> executará os
                   motores estáticos, SAST (AST/Taint), segredos (Catálogo de Entropia), dependências (CycloneDX/SPDX)
                   e MqrBridge, gerando uma nota consolidada independente de 0 a 100.
                 </p>
@@ -841,22 +877,38 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                 <div className="flex items-center justify-between">
                   <div>
                     <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
-                      Selecione o(s) Software(s) para Comparar com {activePrimarySoftware?.name}
+                      Selecione o(s) Software(s) para Comparar com {activePrimarySoftware?.name || 'o software principal'}
                     </h3>
                     <p className="text-xs text-slate-500 mt-0.5">
                       O benchmark comparativo exige ao menos 2 softwares equivalentes para análise paritária.
                     </p>
                   </div>
                   <span className="text-xs font-mono text-[#31d6c4]">
-                    Total Selecionados: {1 + comparisonSoftwareIds.length}
+                    Total Selecionados: {(activePrimarySoftware ? 1 : 0) + effectiveComparisonIds.length}
                   </span>
                 </div>
 
+                {softwares.filter((s) => s.id !== primarySoftwareId).length === 0 ? (
+                  <div className="p-6 rounded-lg border border-dashed border-slate-300 dark:border-slate-700 text-center space-y-2">
+                    <p className="text-xs text-slate-500">
+                      Cadastre ou importe pelo menos um segundo software para habilitar a comparação A/B.
+                    </p>
+                    {onRequestUpload && (
+                      <button
+                        type="button"
+                        onClick={onRequestUpload}
+                        className="px-4 py-2 rounded-lg bg-[#31d6c4] text-slate-950 text-xs font-bold cursor-pointer"
+                      >
+                        Fazer Upload do Segundo Software
+                      </button>
+                    )}
+                  </div>
+                ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   {softwares
                     .filter((s) => s.id !== primarySoftwareId)
                     .map((s) => {
-                      const isSelected = comparisonSoftwareIds.includes(s.id);
+                      const isSelected = effectiveComparisonIds.includes(s.id);
                       return (
                         <button
                           type="button"
@@ -890,6 +942,7 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                       );
                     })}
                 </div>
+                )}
               </div>
             )}
 
@@ -1215,7 +1268,7 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                     <input
                       type="range"
                       min={0}
-                      max={50}
+                      max={100}
                       disabled={!isEnabled}
                       value={val}
                       onChange={(e) => {
@@ -1263,7 +1316,7 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                 : []
               : assessmentMode === 'AB_COMPARE'
                 ? softwares.filter(
-                    (s) => s.id === primarySoftwareId || comparisonSoftwareIds.includes(s.id)
+                    (s) => s.id === primarySoftwareId || effectiveComparisonIds.includes(s.id)
                   )
                 : activePrimarySoftware
                   ? [
@@ -1300,7 +1353,7 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                     ({wizardMode})
                   </div>
                   <div className="text-slate-500 mt-1 font-sans">
-                    Software Principal: {activePrimarySoftware?.name}
+                    Software Principal: {activePrimarySoftware?.name || 'Nenhum software selecionado'}
                   </div>
                 </div>
 
@@ -1510,12 +1563,48 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                 )}
               </div>
 
-              {assessmentMode === 'AB_COMPARE' && comparisonSoftwareIds.length === 0 && (
+              {!weightValidation.valid && (
+                <div className="p-3 rounded-lg border border-rose-500/30 bg-rose-500/10 text-xs text-rose-400 flex flex-wrap items-center justify-between gap-2">
+                  <div className="space-y-0.5">
+                    {weightValidation.errors.map((err, idx) => (
+                      <div key={`w-err-${idx}`}>• {err}</div>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleNormalizeWeightsTo100}
+                    className="px-3 py-1.5 rounded-lg bg-rose-500/20 border border-rose-500/40 text-rose-200 font-bold hover:bg-rose-500/30 cursor-pointer shrink-0"
+                  >
+                    Normalizar Pesos para 100%
+                  </button>
+                </div>
+              )}
+
+              {assessmentMode === 'AB_COMPARE' && effectiveComparisonIds.length === 0 && (
                 <div className="p-3 rounded-lg border border-rose-500/30 bg-rose-500/10 text-xs text-rose-400 flex items-center gap-2">
                   <AlertTriangle className="w-4 h-4 shrink-0" />
                   <span>
                     Selecione ao menos um software concorrente na Etapa 3 para executar o Benchmark A/B.
                   </span>
+                </div>
+              )}
+
+              {submissionError && (
+                <div
+                  role="alert"
+                  className="p-3.5 rounded-lg border border-rose-500/40 bg-rose-500/10 text-xs text-rose-300 flex flex-wrap items-center justify-between gap-3"
+                >
+                  <div className="flex items-start gap-2">
+                    <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                    <span>{submissionError}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setSubmissionError(null)}
+                    className="px-2.5 py-1 rounded border border-rose-500/40 text-rose-200 font-semibold hover:bg-rose-500/20 cursor-pointer"
+                  >
+                    Dispensar
+                  </button>
                 </div>
               )}
 
@@ -1527,7 +1616,7 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                     !activePrimarySoftware ||
                     !weightValidation.valid ||
                     !eqValidation.equivalent ||
-                    (assessmentMode === 'AB_COMPARE' && comparisonSoftwareIds.length === 0) ||
+                    (assessmentMode === 'AB_COMPARE' && effectiveComparisonIds.length === 0) ||
                     (assessmentMode === 'MARKET_COMPETITOR' && !candidateApproved)
                   }
                   onClick={handleExecute}
@@ -1537,9 +1626,13 @@ export const BenchmarkWizardModule: React.FC<BenchmarkWizardModuleProps> = ({
                   {executing
                     ? 'Executando Adaptadores & Validando Evidências...'
                     : assessmentMode === 'INDIVIDUAL'
-                      ? `Iniciar Avaliação Individual de ${activePrimarySoftware?.name}`
+                      ? activePrimarySoftware
+                        ? `Iniciar Avaliação Individual de ${activePrimarySoftware.name}`
+                        : 'Selecione um Software na Etapa 2'
                       : assessmentMode === 'MARKET_COMPETITOR'
-                        ? `Iniciar Benchmark de Mercado (${activePrimarySoftware?.name} vs ${selectedCandidate?.name})`
+                        ? activePrimarySoftware && selectedCandidate
+                          ? `Iniciar Benchmark de Mercado (${activePrimarySoftware.name} vs ${selectedCandidate.name})`
+                          : 'Homologue um Concorrente na Etapa 3'
                         : 'Iniciar Benchmark Comparativo Real'}
                 </button>
               </div>

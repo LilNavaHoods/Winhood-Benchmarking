@@ -20,6 +20,12 @@ import { SecurityAssessmentSuiteModule } from './SecurityAssessmentSuiteModule';
 import { VeracityAdaptersReportsModule } from './VeracityAdaptersReportsModule';
 import { DEFAULT_SECURITY_SUITE_FILTERS } from '../utils/securityFindingsFilter';
 import { validatePairComparability } from '../comparability/index';
+import {
+  GITHUB_OAUTH_START_URL,
+  GITHUB_OAUTH_UNAVAILABLE_NOTICE,
+  resolveGitHubOAuthCallbackFeedback,
+  resolveGitHubOAuthErrorMessage,
+} from '../shared/authTypes';
 import type { BenchmarkRun } from '../types/benchmark';
 import { createWinHoodApp } from '../../server';
 
@@ -740,3 +746,102 @@ test('Phase 11 E2E: 10 real end-to-end WinHood Benchmarking full-stack HTTP flow
     fs.rmSync(tmpDataDir, { recursive: true, force: true });
   }
 });
+
+test('Module 4 GitHub Social Login UI/UX: direct same-tab redirect without window.open, zero PAT/Client ID/Secret fields for end users, and complete callback error/unconfigured feedback', () => {
+  // 1. Canonical redirect URL and friendly unconfigured notice copy
+  assert.equal(GITHUB_OAUTH_START_URL, '/api/auth/github/oauth/start?mode=redirect');
+  assert.equal(GITHUB_OAUTH_UNAVAILABLE_NOTICE.title, 'Login com GitHub indisponível');
+  assert.ok(
+    GITHUB_OAUTH_UNAVAILABLE_NOTICE.description.includes(
+      'O administrador ainda não configurou a autenticação GitHub para esta instalação.'
+    )
+  );
+  assert.ok(
+    GITHUB_OAUTH_UNAVAILABLE_NOTICE.guidance.includes(
+      'Tente novamente mais tarde ou utilize outro método de autenticação disponível.'
+    )
+  );
+
+  // 2. Callback feedback covers all backend error codes cleanly
+  const codesToCheck = [
+    'not_configured',
+    'signup_disabled',
+    'access_denied',
+    'invalid_state',
+    'expired_state',
+    'replayed_code',
+    'invalid_redirect',
+    'account_disabled',
+    'email_unverified',
+    'github_already_linked',
+    'exchange_failed',
+    'profile_failed',
+    'oauth_error',
+    'unknown_code_fallback',
+  ] as const;
+
+  for (const code of codesToCheck) {
+    const fb = resolveGitHubOAuthCallbackFeedback(code);
+    assert.ok(fb, `Feedback must resolve for ${code}`);
+    assert.ok(fb!.title.length > 5, `Title must be non-empty for ${code}`);
+    assert.ok(fb!.message.length > 15, `Message must be descriptive for ${code}`);
+    assert.equal(
+      fb!.message.toLowerCase().includes('client_secret'),
+      false,
+      `Message for ${code} must never leak client_secret`
+    );
+    assert.ok(resolveGitHubOAuthErrorMessage(code), `Error string must resolve for ${code}`);
+  }
+  assert.equal(resolveGitHubOAuthCallbackFeedback('not_configured')?.kind, 'unavailable');
+  assert.equal(resolveGitHubOAuthCallbackFeedback('signup_disabled')?.kind, 'warning');
+  assert.equal(resolveGitHubOAuthCallbackFeedback('access_denied')?.kind, 'warning');
+  assert.equal(resolveGitHubOAuthCallbackFeedback('invalid_state')?.kind, 'error');
+
+  // 3. AuthGateModal SSR output: clean CTA, accessible dialog, zero PAT/Client ID/Client Secret inputs
+  const authHtml = renderToStaticMarkup(
+    React.createElement(AuthGateModal, {
+      bootstrapRequired: false,
+      bootstrapTokenFileHint: null,
+      mfaRequired: false,
+      pendingUser: null,
+      onAuthenticated: () => {},
+      onRefreshSession: async () => {},
+    })
+  );
+  assert.ok(authHtml.includes('Entrar ou cadastrar com GitHub'));
+  assert.ok(authHtml.includes('data-testid="github-oauth-login-btn"'));
+  assert.ok(authHtml.includes('role="dialog"'));
+  assert.ok(authHtml.includes('aria-modal="true"'));
+  assert.equal(authHtml.includes('winhood-github-pat'), false, 'End-user modal must not render PAT field');
+  assert.equal(
+    authHtml.includes('winhood-github-client-id'),
+    false,
+    'End-user modal must not render Client ID field'
+  );
+  assert.equal(
+    authHtml.includes('Personal Access Token'),
+    false,
+    'End-user modal must not prompt for Personal Access Token'
+  );
+  assert.equal(
+    authHtml.includes('Client Secret'),
+    false,
+    'End-user modal must never prompt for Client Secret'
+  );
+
+  // 4. Static source contract: direct window.location.assign redirect, zero window.open popup flow
+  const modalSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/AuthGateModal.tsx'),
+    'utf8'
+  );
+  assert.ok(
+    modalSource.includes('window.location.assign(GITHUB_OAUTH_START_URL)'),
+    'AuthGateModal must redirect directly in same tab using window.location.assign(GITHUB_OAUTH_START_URL)'
+  );
+  assert.equal(
+    modalSource.includes('window.open('),
+    false,
+    'AuthGateModal must not use fetch() + window.open() popup flow'
+  );
+});
+

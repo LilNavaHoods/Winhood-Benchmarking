@@ -91,7 +91,11 @@ export function generateCiSummaryReport(input) {
     positioning: normalizeStepState(linux.steps?.positioning),
     install: normalizeStepState(linux.steps?.install),
     audit: normalizeStepState(linux.steps?.audit),
+    browser_imports: normalizeStepState(linux.steps?.browser_imports),
+    typecheck: normalizeStepState(linux.steps?.typecheck),
     lint: normalizeStepState(linux.steps?.lint),
+    build: normalizeStepState(linux.steps?.build),
+    wizard_tests: normalizeStepState(linux.steps?.wizard_tests),
     security_tests: normalizeStepState(linux.steps?.security_tests),
     coverage: normalizeStepState(linux.steps?.coverage),
     determinism: normalizeStepState(linux.steps?.determinism),
@@ -103,7 +107,9 @@ export function generateCiSummaryReport(input) {
   const windowsSteps = {
     lockfile: normalizeStepState(windows.steps?.lockfile),
     install: normalizeStepState(windows.steps?.install),
+    browser_imports: normalizeStepState(windows.steps?.browser_imports),
     lint: normalizeStepState(windows.steps?.lint),
+    build: normalizeStepState(windows.steps?.build),
     unit_tests: normalizeStepState(windows.steps?.unit_tests),
     build_desktop: normalizeStepState(windows.steps?.build_desktop),
     pack_win: normalizeStepState(windows.steps?.pack_win),
@@ -179,8 +185,12 @@ export function generateCiSummaryReport(input) {
     `| Independent Positioning (\`positioning\`) | \`${linuxSteps.positioning}\` | \`node scripts/verify-independent-positioning.mjs\` |`,
     `| Deterministic Install (\`install\`) | \`${linuxSteps.install}\` | \`npm ci --ignore-scripts\` + \`npm ls --depth=0\` |`,
     `| NPM Vulnerability Governance (\`audit\`) | \`${linuxSteps.audit}\` | \`node scripts/verify-npm-audit.mjs\` (${input.auditStatus || 'status from step output'}) |`,
+    `| Browser-Safe Imports Guardrail (\`browser_imports\`) | \`${linuxSteps.browser_imports}\` | \`npm run check:browser-imports\` + \`npm run test:browser-imports\` |`,
+    `| TypeScript Typecheck (\`typecheck\`) | \`${linuxSteps.typecheck}\` | \`npm run typecheck\` (\`tsc --noEmit\`) |`,
     `| TypeScript Strict (\`lint\`) | \`${linuxSteps.lint}\` | \`npm run lint\` (\`tsc --noEmit\`) |`,
-    `| Security & Keystore Suite (\`security_tests\`) | \`${linuxSteps.security_tests}\` | \`npm run test:security\` |`,
+    `| Production Frontend Build (\`build\`) | \`${linuxSteps.build}\` | \`npm run build\` (Vite + browser-safe import gate) |`,
+    `| Benchmark Wizard & A/B E2E (\`wizard_tests\`) | \`${linuxSteps.wizard_tests}\` | \`src/shared/wizardAndBrowserSafety.test.ts\` |`,
+    `| OAuth, Security & Keystore Suite (\`security_tests\`) | \`${linuxSteps.security_tests}\` | \`npm run test:security\` |`,
     `| Coverage Gate c8 (\`coverage\`) | \`${linuxSteps.coverage}\` | ${covEvidence} |`,
     `| Coverage Artifact | \`${coverageArtifact.status}\` | ${coverageArtifact.detail} |`,
     `| CLI Determinism (\`determinism\`) | \`${linuxSteps.determinism}\` | Consecutive SHA-256 CLI output equality |`,
@@ -194,8 +204,10 @@ export function generateCiSummaryReport(input) {
     '| :--- | :--- | :--- |',
     `| Lockfile Integrity (\`lockfile\`) | \`${windowsSteps.lockfile}\` | \`package-lock.json\` verified on Windows |`,
     `| Deterministic Install (\`install\`) | \`${windowsSteps.install}\` | \`npm ci --ignore-scripts\` + Electron runtime |`,
-    `| TypeScript Strict (\`lint\`) | \`${windowsSteps.lint}\` | \`npm run lint\` (\`tsc --noEmit\`) on win32-x64 |`,
-    `| Multiplatform Unit/Desktop Tests (\`unit_tests\`) | \`${windowsSteps.unit_tests}\` | \`npm test\` |`,
+    `| Browser-Safe Imports (\`browser_imports\`) | \`${windowsSteps.browser_imports}\` | \`npm run check:browser-imports\` + \`npm run test:browser-imports\` |`,
+    `| TypeScript Strict (\`lint\`) | \`${windowsSteps.lint}\` | \`npm run typecheck && npm run lint\` on win32-x64 |`,
+    `| Production Frontend Build (\`build\`) | \`${windowsSteps.build}\` | \`npm run build\` on win32-x64 |`,
+    `| Multiplatform Unit/Desktop/OAuth Tests (\`unit_tests\`) | \`${windowsSteps.unit_tests}\` | \`npm test\` |`,
     `| Desktop Bundle Build (\`build_desktop\`) | \`${windowsSteps.build_desktop}\` | \`npm run build:desktop\` |`,
     `| Unpacked Win32 Electron (\`pack_win\`) | \`${windowsSteps.pack_win}\` | \`npm run pack:win\` |`,
     `| Inno Setup Compile (\`inno_compile\`) | \`${windowsSteps.inno_compile}\` | ${winInstallerArtifact.detail} |`,
@@ -219,45 +231,49 @@ export function generateCiSummaryReport(input) {
 }
 
 export function runSelfTest() {
+  const allLinuxOk = {
+    lockfile: 'success',
+    positioning: 'success',
+    install: 'success',
+    audit: 'success',
+    browser_imports: 'success',
+    typecheck: 'success',
+    lint: 'success',
+    build: 'success',
+    wizard_tests: 'success',
+    security_tests: 'success',
+    coverage: 'success',
+    determinism: 'success',
+    dogfood_action: 'success',
+    vscode_ext: 'success',
+    build_desktop: 'success',
+  };
+  const allWinOk = {
+    lockfile: 'success',
+    install: 'success',
+    browser_imports: 'success',
+    lint: 'success',
+    build: 'success',
+    unit_tests: 'success',
+    build_desktop: 'success',
+    pack_win: 'success',
+    inno_compile: 'success',
+    installer_e2e: 'success',
+  };
+
   // Scenario 1: Linux success + Windows success
   const s1 = generateCiSummaryReport({
-    linux: {
-      jobResult: 'success',
-      steps: {
-        lockfile: 'success',
-        positioning: 'success',
-        install: 'success',
-        audit: 'success',
-        lint: 'success',
-        security_tests: 'success',
-        coverage: 'success',
-        determinism: 'success',
-        dogfood_action: 'success',
-        vscode_ext: 'success',
-        build_desktop: 'success',
-      },
-    },
-    windows: {
-      jobResult: 'success',
-      steps: {
-        lockfile: 'success',
-        install: 'success',
-        lint: 'success',
-        unit_tests: 'success',
-        build_desktop: 'success',
-        pack_win: 'success',
-        inno_compile: 'success',
-        installer_e2e: 'success',
-      },
-    },
+    linux: { jobResult: 'success', steps: allLinuxOk },
+    windows: { jobResult: 'success', steps: allWinOk },
     artifacts: {
       coverageSummaryPresent: true,
       desktopManifestPresent: true,
       windowsInstallerPresent: true,
     },
-    coverageTelemetry: { linesPct: 84.25, functionsPct: 89.47, branchesPct: 97.68, all13DomainsLinesPct: 48.36 },
+    coverageTelemetry: { linesPct: 84.25, functionsPct: 89.47, branchesPct: 97.68, all13DomainsLinesPct: 60.97 },
   });
   assert.equal(s1.overallStatus, 'PASSED');
+  assert.equal(s1.linuxSteps.browser_imports, 'PASSED');
   assert.equal(s1.linuxSteps.lint, 'PASSED');
   assert.equal(s1.windowsSteps.installer_e2e, 'PASSED');
 
@@ -269,7 +285,9 @@ export function runSelfTest() {
       steps: {
         lockfile: 'success',
         install: 'success',
+        browser_imports: 'success',
         lint: 'failure',
+        build: 'skipped',
         unit_tests: 'skipped',
         build_desktop: 'skipped',
         pack_win: 'skipped',
@@ -293,7 +311,11 @@ export function runSelfTest() {
         positioning: 'failure',
         install: 'skipped',
         audit: 'skipped',
+        browser_imports: 'skipped',
+        typecheck: 'skipped',
         lint: 'skipped',
+        build: 'skipped',
+        wizard_tests: 'skipped',
         security_tests: 'skipped',
         coverage: 'skipped',
         determinism: 'skipped',
@@ -310,7 +332,7 @@ export function runSelfTest() {
   assert.equal(s3.linuxSteps.lint, 'SKIPPED');
   assert.ok(!s3.markdown.includes('| TypeScript Strict (`lint`) | `PASSED`'), 'Must never hardcode lint as PASSED');
 
-  // Scenario 4: Failure before coverage (coverage = SKIPPED/NOT_EXECUTED, no artifacts)
+  // Scenario 4: Failure before coverage (browser_imports fails -> build & coverage SKIPPED)
   const s4 = generateCiSummaryReport({
     linux: {
       jobResult: 'failure',
@@ -319,7 +341,11 @@ export function runSelfTest() {
         positioning: 'success',
         install: 'success',
         audit: 'success',
-        lint: 'failure',
+        browser_imports: 'failure',
+        typecheck: 'skipped',
+        lint: 'skipped',
+        build: 'skipped',
+        wizard_tests: 'skipped',
         security_tests: 'skipped',
         coverage: 'skipped',
         determinism: 'skipped',
@@ -328,10 +354,11 @@ export function runSelfTest() {
         build_desktop: 'skipped',
       },
     },
-    windows: { jobResult: 'success', steps: { lockfile: 'success', install: 'success', lint: 'success', unit_tests: 'success', build_desktop: 'success', pack_win: 'success', inno_compile: 'success', installer_e2e: 'success' } },
+    windows: { jobResult: 'success', steps: allWinOk },
     artifacts: { coverageSummaryPresent: false, desktopManifestPresent: false, windowsInstallerPresent: true },
   });
   assert.equal(s4.overallStatus, 'FAILED');
+  assert.equal(s4.linuxSteps.browser_imports, 'FAILED');
   assert.equal(s4.linuxSteps.coverage, 'SKIPPED');
   assert.equal(s4.artifacts.coverageArtifact.status, 'SKIPPED');
 
@@ -340,12 +367,7 @@ export function runSelfTest() {
     linux: {
       jobResult: 'failure',
       steps: {
-        lockfile: 'success',
-        positioning: 'success',
-        install: 'success',
-        audit: 'success',
-        lint: 'success',
-        security_tests: 'success',
+        ...allLinuxOk,
         coverage: 'failure',
         determinism: 'skipped',
         dogfood_action: 'skipped',
@@ -353,7 +375,7 @@ export function runSelfTest() {
         build_desktop: 'skipped',
       },
     },
-    windows: { jobResult: 'success', steps: { lockfile: 'success', install: 'success', lint: 'success', unit_tests: 'success', build_desktop: 'success', pack_win: 'success', inno_compile: 'success', installer_e2e: 'success' } },
+    windows: { jobResult: 'success', steps: allWinOk },
     artifacts: { coverageSummaryPresent: false, desktopManifestPresent: false, windowsInstallerPresent: true },
   });
   assert.equal(s5.overallStatus, 'FAILED');
@@ -364,27 +386,12 @@ export function runSelfTest() {
   const s6 = generateCiSummaryReport({
     linux: {
       jobResult: 'success',
-      steps: {
-        lockfile: 'success',
-        positioning: 'success',
-        install: 'success',
-        audit: 'success',
-        lint: 'success',
-        security_tests: 'success',
-        coverage: 'success',
-        determinism: 'success',
-        dogfood_action: 'success',
-        vscode_ext: 'success',
-        build_desktop: 'not_executed',
-      },
+      steps: { ...allLinuxOk, build_desktop: 'not_executed' },
     },
     windows: {
       jobResult: 'success',
       steps: {
-        lockfile: 'success',
-        install: 'success',
-        lint: 'success',
-        unit_tests: 'success',
+        ...allWinOk,
         build_desktop: 'not_executed',
         pack_win: 'not_executed',
         inno_compile: 'not_executed',
@@ -399,34 +406,10 @@ export function runSelfTest() {
 
   // Scenario 7: Partially completed / BLOCKED (e.g. cancelled job or blocked installer)
   const s7 = generateCiSummaryReport({
-    linux: {
-      jobResult: 'success',
-      steps: {
-        lockfile: 'success',
-        positioning: 'success',
-        install: 'success',
-        audit: 'success',
-        lint: 'success',
-        security_tests: 'success',
-        coverage: 'success',
-        determinism: 'success',
-        dogfood_action: 'success',
-        vscode_ext: 'success',
-        build_desktop: 'success',
-      },
-    },
+    linux: { jobResult: 'success', steps: allLinuxOk },
     windows: {
       jobResult: 'cancelled',
-      steps: {
-        lockfile: 'success',
-        install: 'success',
-        lint: 'success',
-        unit_tests: 'success',
-        build_desktop: 'success',
-        pack_win: 'success',
-        inno_compile: 'blocked',
-        installer_e2e: 'not_executed',
-      },
+      steps: { ...allWinOk, inno_compile: 'blocked', installer_e2e: 'not_executed' },
     },
     artifacts: { coverageSummaryPresent: true, desktopManifestPresent: true, windowsInstallerPresent: false },
   });
