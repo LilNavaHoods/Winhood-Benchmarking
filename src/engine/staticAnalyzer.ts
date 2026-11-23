@@ -21,7 +21,12 @@ import { TaintAnalyzer } from '../analyzers/TaintAnalyzer';
 import { SbomGenerator } from '../analyzers/sca/SbomGenerator';
 import { ScaCorrelator } from '../analyzers/sca/ScaCorrelator';
 import { CoverageReportParser } from '../execution/CoverageReportParser';
-import { computeSha256, enrichLegacyOrExternalFinding, maskSecretsInText } from './scoringEngine';
+import {
+  compareFindingsCanonically,
+  computeSha256,
+  enrichLegacyOrExternalFinding,
+  maskSecretsInText,
+} from './scoringEngine';
 
 const LANGUAGE_BY_EXT: Record<string, string> = {
   '.ts': 'TypeScript',
@@ -394,6 +399,7 @@ export interface StaticAnalysisInputParams {
   expectedPackageSha256?: string;
   ingestionState?: string;
   isolatedStoragePath?: string;
+  deterministicTimestamp?: string;
 }
 
 export function executeRealStaticAnalysisOnSource(
@@ -424,19 +430,20 @@ export function executeRealStaticAnalysisOnSource(
     expectedPackageSha256,
     ingestionState,
     isolatedStoragePath = `/isolated/${softwareId}`,
+    deterministicTimestamp,
   } = normalizedParams;
   const analysisStartedMs = performance.now();
-  const startedAtIso = new Date().toISOString();
+  const startedAtIso = deterministicTimestamp || new Date().toISOString();
   const nowIso = startedAtIso;
   const findings: NormalizedFinding[] = [];
   const uploadCheck = validateSourceUploadSecurity(filesMap);
   const safeFilesMap: Record<string, string> = {};
-  for (const [k, v] of Object.entries(filesMap)) {
+  for (const [k, v] of Object.entries(filesMap).sort(([a], [b]) => a.localeCompare(b))) {
     if (!uploadCheck.blockedFiles.some((b) => b.path === k)) {
       safeFilesMap[k] = v;
     }
   }
-  const entries = Object.entries(safeFilesMap);
+  const entries = Object.entries(safeFilesMap).sort(([a], [b]) => a.localeCompare(b));
   const inventorySnapshot = buildTechnicalInventory(safeFilesMap, isolatedStoragePath);
 
   const eligibleEntries = entries.filter(([filePath]) =>
@@ -1768,23 +1775,27 @@ export function executeRealStaticAnalysisOnSource(
         : 0;
 
   const analysisCompletedMs = performance.now();
-  const completedAtIso = new Date().toISOString();
+  const completedAtIso = deterministicTimestamp || new Date().toISOString();
   const realTotalDurationMs = Math.max(1, Math.round(analysisCompletedMs - analysisStartedMs));
+
+  // Canonical sort of findings before building tool executions and returning
+  findings.sort(compareFindingsCanonically);
 
   // Build Tool Execution Records (Honest WinHood Native AST Passes — zero fake CLI durations)
   const adapterDefs = [
-    { id: 'opengrep-sast', name: 'WinHood Native SAST (Opengrep/Semgrep Ruleset)', version: '4.0.0', format: 'SARIF_2_1_0' },
-    { id: 'gitleaks-secrets', name: 'WinHood Native Secret Scanner (Gitleaks Ruleset)', version: '4.0.0', format: 'SARIF_2_1_0' },
-    { id: 'mqr-bridge-quality', name: 'WinHood Native Quality & Complexity Analyzer (Sonar MQR)', version: '4.0.0', format: 'SARIF_2_1_0' },
-    { id: 'syft-grype-sca', name: 'WinHood Native SCA & Manifest Inspector', version: '4.0.0', format: 'CYCLONEDX_1_5' },
-    { id: 'archunit-cruiser', name: 'WinHood Native Architecture Graph Analyzer', version: '4.0.0', format: 'ARCH_GRAPH_JSON' },
-    { id: 'sqlfluff-db', name: 'WinHood Native SQL & Schema Auditor', version: '4.0.0', format: 'SARIF_2_1_0' },
+    { id: 'opengrep-sast', name: 'WinHood Native SAST (Opengrep/Semgrep Ruleset)', version: '4.4.0', format: 'SARIF_2_1_0' },
+    { id: 'gitleaks-secrets', name: 'WinHood Native Secret Scanner (Gitleaks Ruleset)', version: '4.4.0', format: 'SARIF_2_1_0' },
+    { id: 'mqr-bridge-quality', name: 'WinHood Native Quality & Complexity Analyzer (Sonar MQR)', version: '4.4.0', format: 'SARIF_2_1_0' },
+    { id: 'syft-grype-sca', name: 'WinHood Native SCA & Manifest Inspector', version: '4.4.0', format: 'CYCLONEDX_1_5' },
+    { id: 'archunit-cruiser', name: 'WinHood Native Architecture Graph Analyzer', version: '4.4.0', format: 'ARCH_GRAPH_JSON' },
+    { id: 'sqlfluff-db', name: 'WinHood Native SQL & Schema Auditor', version: '4.4.0', format: 'SARIF_2_1_0' },
   ];
 
-  const configHash = computeSha256(JSON.stringify({ rulesVersion: '4.0.0', eligibleExtensions: Array.from(ELIGIBLE_EXTENSIONS) }));
+  const configHash = computeSha256(JSON.stringify({ rulesVersion: '4.4.0', eligibleExtensions: Array.from(ELIGIBLE_EXTENSIONS).sort() }));
 
   const toolExecutions: ToolExecutionRecord[] = adapterDefs.map((ad, idx) => {
     const toolFindings = findings.filter((f) => f.toolId === ad.id);
+    const analyzedFilePaths = eligibleEntries.map(([f]) => f);
     const rawPayload = JSON.stringify({
       schema: ad.format,
       tool: ad.name,
@@ -1792,7 +1803,7 @@ export function executeRealStaticAnalysisOnSource(
       version: ad.version,
       softwareId,
       sourceHash: inventorySnapshot.packageSha256,
-      analyzedFiles: eligibleEntries.map(([f]) => f),
+      analyzedFiles: analyzedFilePaths,
       findingsCount: toolFindings.length,
     });
     const stdoutText = `[NATIVE_AST_ENGINE] ${ad.name} v${ad.version} | Arquivos=${eligibleEntries.length} | Achados=${toolFindings.length} | SHA256=${inventorySnapshot.packageSha256.slice(0, 12)}`;
@@ -1804,6 +1815,14 @@ export function executeRealStaticAnalysisOnSource(
       toolName: ad.name,
       toolVersion: ad.version,
       executionMethod: eligibleEntries.length > 0 ? 'NATIVE_AST_ENGINE' : 'NOT_EXECUTED',
+      executionStatus: eligibleEntries.length > 0 ? 'MEASURED' : 'NOT_MEASURED',
+      commandExecuted: `winhood-native-ast --pass=${ad.id} --format=${ad.format}`,
+      scopeExecuted: `${eligibleEntries.length} arquivo(s) elegíveis em ${isolatedStoragePath}`,
+      inputArtifactsSha256: inventorySnapshot.packageSha256,
+      unavailableReason:
+        eligibleEntries.length === 0
+          ? 'Nenhum arquivo elegível encontrado no pacote de código-fonte.'
+          : null,
       configurationUsed: { ruleset: ad.id, mode: 'NATIVE_AST_ENGINE' },
       configHash,
       sourceHash: inventorySnapshot.packageSha256,
@@ -2171,7 +2190,10 @@ export function executeRealStaticAnalysisOnSource(
     version: softwareVersion,
     sourceFilesContent: safeFilesMap,
   } as Software;
-  const sbomSummary = SbomGenerator.generateFromSoftware(softwareStub);
+  const sbomSummary = SbomGenerator.generateFromSoftware(
+    softwareStub,
+    deterministicTimestamp ? { deterministicTimestamp } : undefined
+  );
   const scaResult = ScaCorrelator.correlateSbom({
     software: softwareStub,
     sbom: sbomSummary,

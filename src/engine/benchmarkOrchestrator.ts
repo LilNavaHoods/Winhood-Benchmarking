@@ -32,6 +32,7 @@ import {
   ALL_BENCHMARK_CATEGORIES,
   DEFAULT_CATEGORY_WEIGHTS,
   calculateDeterministicScoreCard,
+  compareFindingsCanonically,
   computeSha256,
   normalizeEnabledCategoryWeights,
   validateEquivalenceConditions,
@@ -212,6 +213,14 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
   const probeOsv = ToolAvailabilityService.checkBinaryInPath('osv-scanner');
   const probeK6 = ToolAvailabilityService.checkBinaryInPath('k6');
   const probeNode = ToolAvailabilityService.checkBinaryInPath('node');
+  const probeZap = ToolAvailabilityService.checkBinaryInPath('zap.sh');
+  const probeZapCli = ToolAvailabilityService.checkBinaryInPath('zap-cli');
+  const probeProcmon = isWin
+    ? ToolAvailabilityService.checkBinaryInPath('procmon')
+    : { detected: false, versionOutput: null, executablePath: null };
+  const probeWinSandbox = isWin
+    ? ToolAvailabilityService.checkBinaryInPath('WindowsSandbox')
+    : { detected: false, versionOutput: null, executablePath: null };
 
   const findLatestExecution = (toolId: string): ToolExecutionRecord | undefined => {
     if (!executedRecords || executedRecords.length === 0) return undefined;
@@ -292,8 +301,29 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
             : opts.nativeAvailable
           : opts.nativeAvailable;
 
+    let executionStatus: ToolAdapterInfo['executionStatus'];
+    let unavailableReason: string | null = null;
+    if (execRec && execRec.exitCode !== null) {
+      executionStatus = execRec.exitCode === 0 ? 'MEASURED' : 'FAILED';
+      if (execRec.exitCode !== 0) {
+        unavailableReason =
+          execRec.failureReasons?.join('; ') || `Execução encerrada com exitCode=${execRec.exitCode}.`;
+      }
+    } else if (adapterState === 'NOT_INSTALLED') {
+      executionStatus = 'NOT_INSTALLED';
+      unavailableReason = 'Binário CLI externo não encontrado no PATH do host atual.';
+    } else if (adapterState === 'NOT_CONFIGURED' || adapterState === 'NOT_CONNECTED') {
+      executionStatus = 'NOT_MEASURED';
+      unavailableReason = 'Integração remota não configurada ou sem conexão verificada.';
+    } else {
+      executionStatus = 'NOT_MEASURED';
+      unavailableReason = 'Adaptador pronto, porém ainda não executado nesta sessão.';
+    }
+
     return {
       status,
+      executionStatus,
+      unavailableReason,
       configured,
       binaryDetected: opts.externalBinaryDetected,
       signatureHash: opts.signatureSeed ? computeSha256(opts.signatureSeed) : null,
@@ -454,7 +484,7 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
       id: 'junit-functional',
       name: 'WinHood Controlled Test & Coverage Parser (LCOV/JaCoCo/Cobertura)',
       vendor: 'WinHood QA Execution',
-      version: probeNode.versionOutput || 'not-installed',
+      version: probeNode.detected && probeNode.versionOutput ? probeNode.versionOutput : 'UNAVAILABLE',
       category: 'QA_FUNCTIONAL',
       analysisType: 'Execução Isolada de Testes & Leitura Real de Relatórios de Cobertura',
       executionMethod: 'SANDBOX_WORKER',
@@ -465,17 +495,17 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
         integrationType: 'LOCAL_CLI',
         nativeAvailable: false,
         externalBinaryDetected: probeNode.detected,
-        externalVersion: probeNode.versionOutput || null,
+        externalVersion: probeNode.detected ? probeNode.versionOutput || null : null,
         configurationValid: probeNode.detected,
         connectionState: 'NOT_APPLICABLE',
-        signatureSeed: probeNode.detected ? `winhood-test-cov-4.1.0:${probeNode.versionOutput}` : null,
+        signatureSeed: probeNode.detected ? `winhood-test-cov-4.4.0:${probeNode.versionOutput}` : null,
       }),
     },
     {
       id: 'k6-perf-equivalent',
       name: 'WinHood HTTP Load Profiler & k6 Adapter',
       vendor: 'WinHood Perf / Grafana Labs',
-      version: probeK6.versionOutput || '4.1.0-http-profiler',
+      version: probeK6.detected && probeK6.versionOutput ? probeK6.versionOutput : '4.4.0-http-profiler',
       category: 'PERFORMANCE',
       analysisType: 'Latência P50/P95/P99, Throughput RPS, Memória RSS e CPU reais',
       executionMethod: probeK6.detected ? 'CLI_BINARY' : 'SANDBOX_WORKER',
@@ -488,40 +518,55 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
         integrationType: probeK6.detected ? 'LOCAL_CLI' : 'NATIVE',
         nativeAvailable: true,
         externalBinaryDetected: probeK6.detected,
-        externalVersion: probeK6.versionOutput || null,
+        externalVersion: probeK6.detected ? probeK6.versionOutput || null : null,
         configurationValid: true,
         connectionState: 'NOT_APPLICABLE',
-        signatureSeed: `winhood-http-perf-4.1.0:k6=${probeK6.detected}`,
+        signatureSeed: `winhood-http-perf-4.4.0:k6=${probeK6.detected}`,
       }),
     },
     {
       id: 'win-sandbox-snapshot',
       name: 'Windows Sandbox & Sysinternals Snapshot Differ (T0/T1/T2)',
       vendor: 'Microsoft Sysinternals / WinHood OS',
-      version: isWin ? '2026.11' : 'host-unavailable',
+      version:
+        isWin && (probeProcmon.detected || probeWinSandbox.detected)
+          ? probeProcmon.versionOutput || probeWinSandbox.versionOutput || `win32-${os.release()}`
+          : 'UNAVAILABLE',
       category: 'OS_INSTALL',
       analysisType: 'Snapshots T0 (Base), T1 (Pós-Instalação), T2 (Pós-Desinstalação) & Resíduos',
       executionMethod: 'SANDBOX_WORKER',
       canonicalFormat: 'SNAPSHOT_DIFF',
-      description: isWin
-        ? 'Host Windows detectado para inspeção de instalação/registro.'
-        : 'Sandbox Windows indisponível em host Linux; não executa inspeção dinâmica OS neste ambiente.',
+      description:
+        isWin && (probeProcmon.detected || probeWinSandbox.detected)
+          ? `Host Windows (${os.release()}) com utilitários de inspeção detectados para T0/T1/T2.`
+          : 'Sandbox Windows / Sysinternals indisponível neste host; nenhuma telemetria dinâmica OS é simulada.',
       supportedLanguages: ['Windows', 'Manifests'],
       ...resolveAdapterTelemetry('win-sandbox-snapshot', {
         integrationType: 'LOCAL_CLI',
         nativeAvailable: false,
-        externalBinaryDetected: isWin,
-        externalVersion: isWin ? '2026.11' : null,
-        configurationValid: isWin,
+        externalBinaryDetected: isWin && (probeProcmon.detected || probeWinSandbox.detected),
+        externalVersion:
+          isWin && (probeProcmon.detected || probeWinSandbox.detected)
+            ? probeProcmon.versionOutput || probeWinSandbox.versionOutput || `win32-${os.release()}`
+            : null,
+        configurationValid: isWin && (probeProcmon.detected || probeWinSandbox.detected),
         connectionState: 'NOT_APPLICABLE',
-        signatureSeed: isWin ? 'win-sandbox-snapshot-win32' : null,
+        signatureSeed:
+          isWin && (probeProcmon.detected || probeWinSandbox.detected)
+            ? `win-sandbox-snapshot-win32-${os.release()}`
+            : null,
       }),
     },
     {
       id: 'owasp-zap-dast',
       name: 'OWASP ZAP External DAST Scanner',
       vendor: 'OWASP Foundation',
-      version: '2.15.0',
+      version:
+        probeZap.detected && probeZap.versionOutput
+          ? probeZap.versionOutput
+          : probeZapCli.detected && probeZapCli.versionOutput
+            ? probeZapCli.versionOutput
+            : 'UNAVAILABLE',
       category: 'SECURITY_DEVSECOPS',
       analysisType: 'DAST (Dynamic Application Security Testing sob autorização formal)',
       executionMethod: 'EXTERNAL_API',
@@ -531,18 +576,23 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
       ...resolveAdapterTelemetry('owasp-zap-dast', {
         integrationType: 'REMOTE_API',
         nativeAvailable: false,
-        externalBinaryDetected: false,
-        externalVersion: null,
+        externalBinaryDetected: probeZap.detected || probeZapCli.detected,
+        externalVersion:
+          probeZap.detected
+            ? probeZap.versionOutput || null
+            : probeZapCli.detected
+              ? probeZapCli.versionOutput || null
+              : null,
         configurationValid: zapConfigured,
         connectionState: 'NOT_CONNECTED',
-        signatureSeed: zapConfigured ? 'owasp-zap-2.15.0' : null,
+        signatureSeed: zapConfigured ? `owasp-zap-configured:${probeZap.versionOutput || 'remote-unverified'}` : null,
       }),
     },
     {
       id: 'trivy-container-cli',
       name: 'Aqua Trivy Container & Filesystem Binary CLI',
       vendor: 'Aqua Security',
-      version: probeTrivy.versionOutput || 'not-installed',
+      version: probeTrivy.detected && probeTrivy.versionOutput ? probeTrivy.versionOutput : 'UNAVAILABLE',
       category: 'SECURITY_DEVSECOPS',
       analysisType: 'Container Image & IaC Security Scanner',
       executionMethod: 'CLI_BINARY',
@@ -555,7 +605,7 @@ export function buildToolAdaptersCatalog(executedRecords?: ToolExecutionRecord[]
         integrationType: 'LOCAL_CLI',
         nativeAvailable: false,
         externalBinaryDetected: probeTrivy.detected,
-        externalVersion: probeTrivy.versionOutput || null,
+        externalVersion: probeTrivy.detected ? probeTrivy.versionOutput || null : null,
         configurationValid: probeTrivy.detected,
         connectionState: 'NOT_APPLICABLE',
         signatureSeed: probeTrivy.detected ? `trivy-cli-${probeTrivy.versionOutput}` : null,
@@ -661,10 +711,11 @@ export function executeBenchmarkRunOrchestration(params: {
   testResultsBySoftware?: Record<string, ControlledTestExecutionResult>;
   perfResultsBySoftware?: Record<string, ControlledPerfMeasurementResult>;
   unifiedExecutions?: UnifiedExecutionRecord[];
+  deterministicTimestamp?: string;
   onProgress?: (progress: BenchmarkRunProgress) => void;
 }): BenchmarkRun {
   const runId = params.runId || `run-${crypto.randomUUID().slice(0, 8)}`;
-  const startedAt = new Date().toISOString();
+  const startedAt = params.deterministicTimestamp || new Date().toISOString();
 
   const eqValidation = validateEquivalenceConditions(params.equivalenceEnvironment);
   const environmentEquivalent = eqValidation.equivalent;
@@ -843,6 +894,7 @@ export function executeBenchmarkRunOrchestration(params: {
       expectedPackageSha256: sw.packageSha256,
       ingestionState,
       isolatedStoragePath: sw.inventory?.isolatedStoragePath || `/isolated/${sw.id}`,
+      deterministicTimestamp: params.deterministicTimestamp,
     });
 
     // Integrar execução dinâmica de testes/cobertura/perf quando fornecida ou solicitada para este software/sourceHash/commitHash
@@ -1104,6 +1156,7 @@ export function executeBenchmarkRunOrchestration(params: {
         metricProvenance: bundle.metricProvenance,
         sbomSummary: bundle.sbomSummary ?? null,
         scaCorrelations: bundle.scaCorrelations || [],
+        deterministicTimestamp: params.deterministicTimestamp,
       },
       normalizedWeights,
       params.enablePenaltyCaps
@@ -1214,6 +1267,16 @@ export function executeBenchmarkRunOrchestration(params: {
     referenceSnapshotsUsed = [];
   }
 
+  // Canonical sort of all run collections for strict determinism across identical snapshots
+  findings.sort(compareFindingsCanonically);
+  toolExecutions.sort(
+    (a, b) =>
+      a.softwareId.localeCompare(b.softwareId) ||
+      a.toolId.localeCompare(b.toolId) ||
+      a.id.localeCompare(b.id)
+  );
+  veracityResults.sort((a, b) => a.softwareId.localeCompare(b.softwareId));
+
   // Build Verifiable Hash Chain & HMAC-SHA256 Signed Manifest
   const evidenceChain = buildVerifiableEvidenceChain({
     runId,
@@ -1221,6 +1284,7 @@ export function executeBenchmarkRunOrchestration(params: {
     findings,
     toolExecutions,
     veracityResults,
+    deterministicTimestamp: params.deterministicTimestamp,
   });
 
   const artifactHashes: Record<string, string> = {};
@@ -1248,6 +1312,7 @@ export function executeBenchmarkRunOrchestration(params: {
     runId,
     algorithmVersion: ALGORITHM_VERSION,
     evidenceChain,
+    generatedAt: params.deterministicTimestamp,
     engineVersion: RULE_ENGINE_VERSION,
     rulePackVersions,
     ruleCatalogSha256: catalogSnapshot.catalogSha256,
@@ -1260,7 +1325,9 @@ export function executeBenchmarkRunOrchestration(params: {
   // Determine winner (strictly blocked if comparability/equivalence fails on multi-software comparisons)
   const eligibleCards = scoreCards.filter((sc) => sc.separatedIndicators?.technicalScore !== null);
   const sortedCards = [...eligibleCards].sort(
-    (a, b) => b.groupedScores.overallScore - a.groupedScores.overallScore
+    (a, b) =>
+      b.groupedScores.overallScore - a.groupedScores.overallScore ||
+      a.softwareId.localeCompare(b.softwareId)
   );
   const topCandidate = sortedCards[0] || null;
   const runnerUp = sortedCards[1] || null;
@@ -1276,7 +1343,7 @@ export function executeBenchmarkRunOrchestration(params: {
   const winner = canHaveWinner ? topCandidate : null;
   const isPartialEvaluation = scoreCards.some((sc) => sc.isPartialEvaluation);
 
-  const completedAt = new Date().toISOString();
+  const completedAt = params.deterministicTimestamp || new Date().toISOString();
   const executiveSummary =
     !topCandidate
       ? `Execução inconclusiva sob ${ALGORITHM_VERSION}: nenhum software apresentou código-fonte íntegro e elegível para pontuação numérica.`

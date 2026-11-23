@@ -41,16 +41,11 @@ export {
 } from './benchmarkConfig';
 
 export {
-  GITHUB_OAUTH_ERROR_MESSAGES,
-  GITHUB_OAUTH_START_URL,
-  GITHUB_OAUTH_UNAVAILABLE_NOTICE,
-  resolveGitHubOAuthCallbackFeedback,
-  resolveGitHubOAuthErrorMessage,
-  extractGitHubOAuthErrorFromSearch,
-  resolveGitHubOAuthCtaLabel,
-  type GitHubOAuthAvailabilityState,
-  type GitHubOAuthCallbackErrorCode,
-  type GitHubOAuthCallbackFeedback,
-  type ParsedGitHubOAuthSearchError,
-  type WinHoodAccessMode,
+  normalizeTotpDigits,
+  isValidTotpSixDigit,
+  normalizeRecoveryCode,
+  isValidRecoveryCodeFormat,
+  type OptionalTotpStatus,
+  type TotpSetupResponse,
+  type TotpVerifyResponse,
 } from './authTypes';

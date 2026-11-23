@@ -1782,7 +1782,7 @@ test('Phase 2 & 3: Official 13-domain coverage inventory, 3-way coverage separat
   assert.equal(classifyToolResultCompleteness(undefined), 'NOT_EXECUTED');
 });
 
-test('Phase 4: KeyManagementService Envelope Encryption V2, HKDF purpose isolation, monotonic rollback detection, Ed25519 Trust Store, and Scrypt transparent migration', async () => {
+test('Phase 4: KeyManagementService Envelope Encryption V2, HKDF purpose isolation, monotonic rollback detection, Ed25519 Trust Store, and Optional TOTP AES-256-GCM storage', async () => {
   const fsMod = await import('node:fs');
   const osMod = await import('node:os');
   const pathMod = await import('node:path');
@@ -1797,12 +1797,7 @@ test('Phase 4: KeyManagementService Envelope Encryption V2, HKDF purpose isolati
     signEvidenceManifestHmacSha256,
     verifyEvidenceChainAndManifest,
   } = await import('./evidenceProvenanceEngine');
-  const {
-    hashPassword,
-    verifyPassword,
-    needsPasswordRehash,
-    CURRENT_SCRYPT_PARAMS,
-  } = await import('../security/AuthService');
+  const { OptionalTotpService, generateTotpCode } = await import('../security/OptionalTotpService');
 
   const tmpDir = fsMod.mkdtempSync(pathMod.join(osMod.tmpdir(), 'wh-env-v2-'));
   const customStorePath = pathMod.join(tmpDir, 'keystore.json');
@@ -1872,16 +1867,16 @@ test('Phase 4: KeyManagementService Envelope Encryption V2, HKDF purpose isolati
     assert.equal(verForged.ed25519SignatureValid, false);
     assert.equal(verForged.valid, false);
 
-    // 4. Scrypt cost parameter upgrade & backward compatibility
-    const legacyHash = hashPassword('ValidPass#2026!', { N: 16384, r: 8, p: 1 });
-    assert.ok(legacyHash.startsWith('scrypt:N=16384,r=8,p=1:'));
-    assert.equal(verifyPassword('ValidPass#2026!', legacyHash), true);
-    assert.equal(needsPasswordRehash(legacyHash), true);
-
-    const modernHash = hashPassword('ValidPass#2026!');
-    assert.ok(modernHash.startsWith(`scrypt:N=${CURRENT_SCRYPT_PARAMS.N},r=8,p=1:`));
-    assert.equal(verifyPassword('ValidPass#2026!', modernHash), true);
-    assert.equal(needsPasswordRehash(modernHash), false);
+    // 4. Optional TOTP 2FA secret encryption at rest (AES-256-GCM) and RFC-6238 verification
+    const totpSvc = new OptionalTotpService(tmpDir);
+    assert.equal(totpSvc.isEnabled(), false);
+    const setup = totpSvc.beginSetup();
+    const confirm = totpSvc.confirmSetup(generateTotpCode(setup.secret));
+    assert.equal(confirm.ok, true);
+    assert.equal(totpSvc.isEnabled(), true);
+    const rawTotpFile = fsMod.readFileSync(pathMod.join(tmpDir, 'totp_config.json'), 'utf8');
+    assert.equal(rawTotpFile.includes(setup.secret), false, 'TOTP secret must never be stored in plaintext');
+    assert.ok(rawTotpFile.includes('whvault:v1:'), 'TOTP secret must use AES-256-GCM vault envelope');
   } finally {
     fsMod.rmSync(tmpDir, { recursive: true, force: true });
   }

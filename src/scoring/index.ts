@@ -2,46 +2,61 @@ export interface DimensionMeasurement {
   dimensionId: string;
   weight: number;
   score: number | null;
-  state: 'MEASURED' | 'STATIC_DERIVED' | 'NOT_MEASURED' | 'INCONCLUSIVE';
+  state: 'MEASURED' | 'STATIC_DERIVED' | 'IMPORTED' | 'NOT_MEASURED' | 'UNAVAILABLE' | 'NOT_APPLICABLE' | 'INCONCLUSIVE';
 }
 
 export interface NormalizedScoreResult {
   technicalScore: number | null;
   eligibleDimensionsCount: number;
   excludedNotMeasuredCount: number;
+  excludedUnavailableCount: number;
+  measuredCoveragePercent: number;
+  renormalizationApplied: boolean;
   killSwitchTriggered: boolean;
   normalizedWeights: Record<string, number>;
 }
 
 /**
- * Deterministic MQR scoring engine that never penalizes or rewards NOT_MEASURED
- * dimensions, renormalizes weights strictly across measured dimensions, and
- * enforces critical security kill-switch caps.
+ * Deterministic MQR scoring engine that never penalizes or rewards NOT_MEASURED / UNAVAILABLE
+ * dimensions, renormalizes weights strictly across measured dimensions, exposes
+ * Effective Measurement Coverage (`measuredCoveragePercent`), and enforces critical security kill-switch caps.
  */
 export function computeDeterministicMqrScore(params: {
   dimensions: DimensionMeasurement[];
   criticalConfirmedFindings: number;
   secretsExposed: number;
 }): NormalizedScoreResult {
-  const valid = params.dimensions.filter(
+  const applicable = params.dimensions.filter(
+    (d) => d.state !== 'NOT_APPLICABLE' && d.weight > 0
+  );
+  const valid = applicable.filter(
     (d) =>
-      (d.state === 'MEASURED' || d.state === 'STATIC_DERIVED') &&
+      (d.state === 'MEASURED' || d.state === 'STATIC_DERIVED' || d.state === 'IMPORTED') &&
       d.score !== null &&
       d.weight > 0
   );
-  const excludedNotMeasuredCount = params.dimensions.length - valid.length;
+  const excludedNotMeasuredCount = applicable.length - valid.length;
+  const excludedUnavailableCount = applicable.filter((d) => d.state === 'UNAVAILABLE').length;
+  const applicableTotalWeight = applicable.reduce((acc, d) => acc + d.weight, 0);
+  const totalWeight = valid.reduce((acc, d) => acc + d.weight, 0);
+  const measuredCoveragePercent =
+    applicableTotalWeight > 0
+      ? Number(((totalWeight / applicableTotalWeight) * 100).toFixed(1))
+      : 0;
 
   if (valid.length === 0) {
     return {
       technicalScore: null,
       eligibleDimensionsCount: 0,
       excludedNotMeasuredCount,
+      excludedUnavailableCount,
+      measuredCoveragePercent: 0,
+      renormalizationApplied: false,
       killSwitchTriggered: false,
       normalizedWeights: {},
     };
   }
 
-  const totalWeight = valid.reduce((acc, d) => acc + d.weight, 0);
   const normalizedWeights: Record<string, number> = {};
   let weightedSum = 0;
 
@@ -62,6 +77,9 @@ export function computeDeterministicMqrScore(params: {
     technicalScore: Number(finalScore.toFixed(2)),
     eligibleDimensionsCount: valid.length,
     excludedNotMeasuredCount,
+    excludedUnavailableCount,
+    measuredCoveragePercent,
+    renormalizationApplied: excludedNotMeasuredCount > 0,
     killSwitchTriggered,
     normalizedWeights,
   };

@@ -11,21 +11,14 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import App from '../App';
 import { DashboardModule, SemicircularHealthGaugeSvg } from './DashboardModule';
 import { HardwareAndDisplayBenchmarkModule } from './HardwareAndDisplayBenchmarkModule';
-import { AuthGateModal } from './AuthGateModal';
+import { TotpUnlockModal } from './TotpUnlockModal';
 import { PrivacyAndTermsModal } from './PrivacyAndTermsModal';
 import { GovernancePortfolioModule } from './GovernancePortfolioModule';
 import { ToolsAndIntegrationsModule } from './ToolsAndIntegrationsModule';
-import { GitHubOAuthAdminPanel } from './GitHubOAuthAdminPanel';
 import { SecurityAssessmentSuiteModule } from './SecurityAssessmentSuiteModule';
 import { VeracityAdaptersReportsModule } from './VeracityAdaptersReportsModule';
 import { DEFAULT_SECURITY_SUITE_FILTERS } from '../utils/securityFindingsFilter';
 import { validatePairComparability } from '../comparability/index';
-import {
-  GITHUB_OAUTH_START_URL,
-  GITHUB_OAUTH_UNAVAILABLE_NOTICE,
-  resolveGitHubOAuthCallbackFeedback,
-  resolveGitHubOAuthErrorMessage,
-} from '../shared/authTypes';
 import type { BenchmarkRun } from '../types/benchmark';
 import { createWinHoodApp } from '../../server';
 
@@ -96,15 +89,6 @@ function cookieHeader(cookies: Record<string, string>): string {
     .join('; ');
 }
 
-function readBootstrapTokenFromFile(filePath: string): string {
-  const raw = fs.readFileSync(filePath, 'utf8');
-  return (
-    raw
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter((l) => l && !l.startsWith('#'))[0] || ''
-  );
-}
 
 test('Phase 11 UI Honesty & Automated WCAG 2.2 AA structural DOM audit (SSR)', () => {
   // 1. Root App shell: skip-link, main landmark, nav aria-current, icon button labels
@@ -337,32 +321,29 @@ test('Phase 11 UI Honesty & Automated WCAG 2.2 AA structural DOM audit (SSR)', (
   assert.ok(!hwHtml.includes('6,120 MB/s'), 'Must not render fabricated 6,120 MB/s');
   assert.ok(!hwHtml.includes('9f86d081884c7d659a2feaa0c55ad015'), 'Must not render fabricated SHA-256 hash');
 
-  // 6. AuthGateModal & PrivacyAndTermsModal: WCAG dialog attributes + N=32768
-  const authHtml = renderToStaticMarkup(
-    React.createElement(AuthGateModal, {
-      bootstrapRequired: false,
-      bootstrapTokenFileHint: null,
-      mfaRequired: false,
-      pendingUser: null,
-      onAuthenticated: () => {},
-      onRefreshSession: noopAsync,
+  // 6. TotpUnlockModal & PrivacyAndTermsModal: WCAG dialog attributes + Optional TOTP copy
+  const totpHtml = renderToStaticMarkup(
+    React.createElement(TotpUnlockModal, {
+      onUnlocked: () => {},
     })
   );
-  assert.ok(authHtml.includes('role="dialog"'), 'AuthGateModal must have role="dialog"');
-  assert.ok(authHtml.includes('aria-modal="true"'), 'AuthGateModal must have aria-modal="true"');
-  assert.ok(authHtml.includes('aria-labelledby="winhood-auth-title"'));
-  assert.ok(!authHtml.includes('16384'), 'AuthGateModal must not display stale N=16384');
+  assert.ok(totpHtml.includes('role="dialog"'), 'TotpUnlockModal must have role="dialog"');
+  assert.ok(totpHtml.includes('aria-modal="true"'), 'TotpUnlockModal must have aria-modal="true"');
+  assert.ok(totpHtml.includes('aria-labelledby="totp-unlock-title"'));
+  assert.ok(!totpHtml.includes('16384'), 'TotpUnlockModal must not display stale N=16384');
 
   const privacyHtml = renderToStaticMarkup(
     React.createElement(PrivacyAndTermsModal, { isOpen: true, onClose: () => {}, initialTab: 'PRIVACY' })
   );
   assert.ok(privacyHtml.includes('role="dialog"'));
   assert.ok(privacyHtml.includes('aria-label="Fechar janela de Privacidade e Termos"'));
+  assert.ok(privacyHtml.includes('TOTP 2FA Opcional'));
 
   const securityTabHtml = renderToStaticMarkup(
     React.createElement(PrivacyAndTermsModal, { isOpen: true, onClose: () => {}, initialTab: 'SECURITY' })
   );
-  assert.ok(securityTabHtml.includes('N=32768'));
+  assert.ok(securityTabHtml.includes('AES-256-GCM'));
+  assert.ok(securityTabHtml.includes('TOTP 2FA (RFC-6238)'));
   assert.ok(!securityTabHtml.includes('16384'));
 
   // 7. Additional core workspace modules render cleanly in SSR
@@ -378,79 +359,7 @@ test('Phase 11 UI Honesty & Automated WCAG 2.2 AA structural DOM audit (SSR)', (
   assert.equal(
     toolsHtml.includes('Configuração e Status do GitHub OAuth 2.0'),
     false,
-    'Non-admin/anonymous ToolsAndIntegrationsModule must not render Admin GitHub OAuth panel'
-  );
-
-  const toolsAuditorHtml = renderToStaticMarkup(
-    React.createElement(ToolsAndIntegrationsModule, {
-      softwares: [],
-      currentUserRole: 'AUDITOR',
-      onNotify: () => {},
-    })
-  );
-  assert.equal(toolsAuditorHtml.includes('Configuração e Status do GitHub OAuth 2.0'), false);
-
-  const oauthPanelActiveHtml = renderToStaticMarkup(
-    React.createElement(GitHubOAuthAdminPanel, {
-      status: {
-        connectionStatus: 'ACTIVE',
-        configSource: 'ADMIN_VAULT',
-        vaultOverrideConfigured: true,
-        oauthDirectReady: true,
-        deviceFlowReady: true,
-        clientIdConfigured: true,
-        clientSecretConfigured: true,
-        callbackUrlOverrideConfigured: false,
-        clientIdPreview: 'Ov23••••1234',
-        callbackUrlEffective: 'http://localhost:3000/api/auth/github/oauth/callback',
-        requiredScopes: ['read:user', 'user:email'],
-        pkceMethod: 'S256',
-        docsUrl: 'https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app',
-        githubDeveloperSettingsUrl: 'https://github.com/settings/developers',
-        updatedAt: '2026-11-19T23:00:00.000Z',
-        checkedAt: '2026-11-19T23:00:00.000Z',
-      },
-      loading: false,
-      saving: false,
-      verifying: false,
-      clearing: false,
-      error: null,
-      verificationResult: {
-        verified: true,
-        status: 'VERIFIED',
-        httpStatus: 200,
-        githubErrorCode: 'bad_verification_code',
-        latencyMs: 142,
-        endpointTested: 'https://github.com/login/oauth/access_token',
-        pkceAuthorizeReady: true,
-        clientIdPreview: 'Ov23••••1234',
-        message: 'Credenciais aceitas pela API oficial do GitHub OAuth 2.0.',
-        checkedAt: '2026-11-19T23:00:05.000Z',
-      },
-      copiedCallbackUrl: false,
-      onRefresh: () => {},
-      onCopyCallbackUrl: () => {},
-      onSaveCredentials: async () => true,
-      onVerifyConnection: async () => {},
-      onClearCredentials: async () => {},
-    })
-  );
-  assert.ok(oauthPanelActiveHtml.includes('Configuração e Status do GitHub OAuth 2.0'));
-  assert.ok(oauthPanelActiveHtml.includes('CONECTADO · ATIVO (PKCE S256)'));
-  assert.ok(oauthPanelActiveHtml.includes('WINHOOD_GITHUB_OAUTH_CLIENT_ID'));
-  assert.ok(oauthPanelActiveHtml.includes('WINHOOD_GITHUB_OAUTH_CLIENT_SECRET'));
-  assert.ok(oauthPanelActiveHtml.includes('aria-label="Formulário de configuração GitHub OAuth 2.0"'));
-  assert.ok(oauthPanelActiveHtml.includes('id="winhood-admin-github-client-id"'));
-  assert.ok(oauthPanelActiveHtml.includes('id="winhood-admin-github-client-secret"'));
-  assert.ok(oauthPanelActiveHtml.includes('type="password"'));
-  assert.ok(oauthPanelActiveHtml.includes('Salvar Credenciais'));
-  assert.ok(oauthPanelActiveHtml.includes('Verificar Conexão'));
-  assert.ok(oauthPanelActiveHtml.includes('Limpar Credenciais Salvas'));
-  assert.ok(oauthPanelActiveHtml.includes('VERIFIED'));
-  assert.ok(
-    oauthPanelActiveHtml.includes(
-      'https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app'
-    )
+    'ToolsAndIntegrationsModule must never render removed Admin GitHub OAuth panel'
   );
 
   const secHtml = renderToStaticMarkup(
@@ -519,66 +428,54 @@ test('Phase 11 E2E: 10 real end-to-end WinHood Benchmarking full-stack HTTP flow
     const port = (server.address() as AddressInfo).port;
     const baseUrl = `http://127.0.0.1:${port}`;
 
-    // Flow 1: Health + Bootstrap Admin + Cadastro Secundário
+    // Flow 1: Health + Acesso Local Irrestrito por padrão (sem login/cadastro)
     const health = await requestJson(baseUrl, 'GET', '/api/health');
     assert.equal(health.status, 200);
     assert.equal(health.data.status, 'ONLINE');
+    assert.equal(health.data.accessMode, 'UNRESTRICTED_LOCAL');
+    assert.equal(health.data.totpEnabled, false);
 
-    const bsStatus = await requestJson(baseUrl, 'GET', '/api/auth/bootstrap-status');
-    assert.equal(bsStatus.status, 200);
-    assert.equal(bsStatus.data.bootstrapRequired, true);
-    const bootstrapToken = readBootstrapTokenFromFile(
-      path.resolve(process.cwd(), String(bsStatus.data.bootstrapTokenFileHint || ''))
-    );
-    assert.ok(bootstrapToken.length >= 16);
+    // Flow 2: Status TOTP Opcional desativado inicialmente e bootstrap direto sem login
+    const totpStatus0 = await requestJson(baseUrl, 'GET', '/api/totp/status');
+    assert.equal(totpStatus0.status, 200);
+    assert.equal(totpStatus0.data.enabled, false);
+    assert.equal(totpStatus0.data.unlocked, true);
 
-    const adminEmail = 'e2e-admin@winhood.local';
-    const adminPassword = 'WinHood#E2E!Strong2026';
-    const bootstrapRes = await requestJson(baseUrl, 'POST', '/api/auth/bootstrap-admin', {
-      name: 'E2E Admin',
-      email: adminEmail,
-      password: adminPassword,
-      bootstrapToken,
-    });
-    assert.equal(bootstrapRes.status, 201);
-    assert.ok(cookies['winhood_csrf'], 'Session must set CSRF token cookie');
+    const bootstrapDirect = await requestJson(baseUrl, 'GET', '/api/bootstrap');
+    assert.equal(bootstrapDirect.status, 200);
+    assert.equal(bootstrapDirect.data.totp?.enabled, false);
 
-    // Flow 2: Login & Sessão real
-    await requestJson(baseUrl, 'POST', '/api/auth/logout', {});
-    const loginRes = await requestJson(baseUrl, 'POST', '/api/auth/login', {
-      email: adminEmail,
-      password: adminPassword,
-    });
-    assert.equal(loginRes.status, 200);
-    const meRes = await requestJson(baseUrl, 'GET', '/api/auth/me');
-    assert.equal(meRes.status, 200);
-    assert.equal(meRes.data.authenticated, true);
-    assert.equal(meRes.data.user.email, adminEmail);
+    // Flow 3: Ativação TOTP 2FA Opcional (RFC 6238) + Bloqueio + Desbloqueio com TOTP
+    const totpSetup = await requestJson(baseUrl, 'POST', '/api/totp/setup', {});
+    assert.equal(totpSetup.status, 200);
+    assert.ok(totpSetup.data.secret);
+    assert.ok(String(totpSetup.data.qrDataUrl || '').startsWith('data:image/png;base64,'));
+    assert.ok(Array.isArray(totpSetup.data.recoveryCodes) && totpSetup.data.recoveryCodes.length === 8);
+    const totpSecret = String(totpSetup.data.secret);
+    const recoveryCodes = totpSetup.data.recoveryCodes as string[];
 
-    // Flow 3: Configuração TOTP + Verificação RFC 6238 + Re-login com MFA + Remoção
-    const mfaSetup = await requestJson(baseUrl, 'POST', '/api/auth/mfa/setup', {});
-    assert.equal(mfaSetup.status, 200);
-    const secretMatch = String(mfaSetup.data.otpauthUri || '').match(/secret=([A-Z2-7]+)/i);
-    assert.ok(secretMatch?.[1], 'otpauthUri must contain Base32 secret');
-    const totpSecret = secretMatch[1];
-    const mfaConfirm = await requestJson(baseUrl, 'POST', '/api/auth/mfa/confirm', {
-      totpCode: generateTotpCode(totpSecret),
+    const totpConfirm = await requestJson(baseUrl, 'POST', '/api/totp/confirm', {
+      code: generateTotpCode(totpSecret),
     });
-    assert.equal(mfaConfirm.status, 200);
+    assert.equal(totpConfirm.status, 200);
+    assert.equal(totpConfirm.data.enabled, true);
+    assert.equal(totpConfirm.data.unlocked, true);
+    assert.equal(totpConfirm.data.remainingRecoveryCodes, 8);
+    assert.ok(cookies['winhood_csrf'], 'Active TOTP unlock session must set CSRF token cookie');
 
-    // Logout & re-login requiring MFA
-    await requestJson(baseUrl, 'POST', '/api/auth/logout', {});
-    const mfaLogin = await requestJson(baseUrl, 'POST', '/api/auth/login', {
-      email: adminEmail,
-      password: adminPassword,
+    // Bloqueio explícito e bloqueio de rotas protegidas até verificação TOTP
+    const lockRes = await requestJson(baseUrl, 'POST', '/api/totp/lock', {});
+    assert.equal(lockRes.status, 200);
+    const blockedDash = await requestJson(baseUrl, 'GET', '/api/dashboard');
+    assert.equal(blockedDash.status, 401);
+    assert.equal(blockedDash.data.code, 'TOTP_LOCKED');
+
+    // Desbloqueio com próximo step TOTP
+    const unlockRes = await requestJson(baseUrl, 'POST', '/api/totp/verify', {
+      code: generateTotpCode(totpSecret, 1),
     });
-    assert.equal(mfaLogin.status, 200);
-    assert.equal(mfaLogin.data.mfaRequired, true);
-    const mfaVerify = await requestJson(baseUrl, 'POST', '/api/auth/mfa/verify', {
-      totpCode: generateTotpCode(totpSecret, 1),
-    });
-    assert.equal(mfaVerify.status, 200);
-    assert.equal(mfaVerify.data.authenticated, true);
+    assert.equal(unlockRes.status, 200);
+    assert.equal(unlockRes.data.unlocked, true);
 
     // Flow 4: Criação de Projeto & Upload de 2 Softwares reais
     const projRes = await requestJson(baseUrl, 'POST', '/api/projects', {
@@ -725,20 +622,24 @@ test('Phase 11 E2E: 10 real end-to-end WinHood Benchmarking full-stack HTTP flow
     assert.equal(evVerify.status, 200);
     assert.equal(evVerify.data.valid, true);
 
-    // Flow 10: Configurações de Segurança, Keystore status, Remoção MFA, Logout e Revogação
+    // Flow 10: Configurações de Segurança, Keystore status e Desativação TOTP Opcional (restaurando Acesso Livre)
     const ksRes = await requestJson(baseUrl, 'GET', '/api/security/keys/status');
     assert.equal(ksRes.status, 200);
-    const mfaDisable = await requestJson(baseUrl, 'POST', '/api/auth/mfa/disable', {
-      password: adminPassword,
+    const totpDisable = await requestJson(baseUrl, 'POST', '/api/totp/disable', {
+      recoveryCode: recoveryCodes[0],
     });
-    assert.equal(mfaDisable.status, 200);
-    assert.equal(mfaDisable.data.user.mfaEnabled, false);
+    assert.equal(totpDisable.status, 200);
+    assert.equal(totpDisable.data.enabled, false);
+    assert.equal(totpDisable.data.unlocked, true);
 
-    await requestJson(baseUrl, 'POST', '/api/auth/logout', {});
-    const afterLogoutMe = await requestJson(baseUrl, 'GET', '/api/auth/me');
-    assert.equal(afterLogoutMe.data.authenticated, false);
-    const blockedWrite = await requestJson(baseUrl, 'POST', '/api/projects', { name: 'Blocked' });
-    assert.ok(blockedWrite.status === 401 || blockedWrite.status === 403);
+    // Sem cookies, o acesso volta a ser irrestrito imediatamente
+    cookies = {};
+    const unrestrictedAfterDisable = await requestJson(baseUrl, 'POST', '/api/projects', {
+      name: 'Projeto Pós-Desativação TOTP',
+      category: 'Backend APIs',
+      objective: 'Confirmar retorno ao acesso livre local.',
+    });
+    assert.equal(unrestrictedAfterDisable.status, 201);
   } finally {
     if (server) {
       await new Promise<void>((resolve) => server!.close(() => resolve()));
@@ -747,101 +648,12 @@ test('Phase 11 E2E: 10 real end-to-end WinHood Benchmarking full-stack HTTP flow
   }
 });
 
-test('Module 4 GitHub Social Login UI/UX: direct same-tab redirect without window.open, zero PAT/Client ID/Secret fields for end users, and complete callback error/unconfigured feedback', () => {
-  // 1. Canonical redirect URL and friendly unconfigured notice copy
-  assert.equal(GITHUB_OAUTH_START_URL, '/api/auth/github/oauth/start?mode=redirect');
-  assert.equal(GITHUB_OAUTH_UNAVAILABLE_NOTICE.title, 'Login com GitHub indisponível');
-  assert.ok(
-    GITHUB_OAUTH_UNAVAILABLE_NOTICE.description.includes(
-      'O administrador ainda não configurou a autenticação GitHub para esta instalação.'
-    )
-  );
-  assert.ok(
-    GITHUB_OAUTH_UNAVAILABLE_NOTICE.guidance.includes(
-      'Tente novamente mais tarde ou utilize outro método de autenticação disponível.'
-    )
-  );
-
-  // 2. Callback feedback covers all backend error codes cleanly
-  const codesToCheck = [
-    'not_configured',
-    'signup_disabled',
-    'access_denied',
-    'invalid_state',
-    'expired_state',
-    'replayed_code',
-    'invalid_redirect',
-    'account_disabled',
-    'email_unverified',
-    'github_already_linked',
-    'exchange_failed',
-    'profile_failed',
-    'oauth_error',
-    'unknown_code_fallback',
-  ] as const;
-
-  for (const code of codesToCheck) {
-    const fb = resolveGitHubOAuthCallbackFeedback(code);
-    assert.ok(fb, `Feedback must resolve for ${code}`);
-    assert.ok(fb!.title.length > 5, `Title must be non-empty for ${code}`);
-    assert.ok(fb!.message.length > 15, `Message must be descriptive for ${code}`);
-    assert.equal(
-      fb!.message.toLowerCase().includes('client_secret'),
-      false,
-      `Message for ${code} must never leak client_secret`
-    );
-    assert.ok(resolveGitHubOAuthErrorMessage(code), `Error string must resolve for ${code}`);
-  }
-  assert.equal(resolveGitHubOAuthCallbackFeedback('not_configured')?.kind, 'unavailable');
-  assert.equal(resolveGitHubOAuthCallbackFeedback('signup_disabled')?.kind, 'warning');
-  assert.equal(resolveGitHubOAuthCallbackFeedback('access_denied')?.kind, 'warning');
-  assert.equal(resolveGitHubOAuthCallbackFeedback('invalid_state')?.kind, 'error');
-
-  // 3. AuthGateModal SSR output: clean CTA, accessible dialog, zero PAT/Client ID/Client Secret inputs
-  const authHtml = renderToStaticMarkup(
-    React.createElement(AuthGateModal, {
-      bootstrapRequired: false,
-      bootstrapTokenFileHint: null,
-      mfaRequired: false,
-      pendingUser: null,
-      onAuthenticated: () => {},
-      onRefreshSession: async () => {},
-    })
-  );
-  assert.ok(authHtml.includes('Entrar ou cadastrar com GitHub'));
-  assert.ok(authHtml.includes('data-testid="github-oauth-login-btn"'));
-  assert.ok(authHtml.includes('role="dialog"'));
-  assert.ok(authHtml.includes('aria-modal="true"'));
-  assert.equal(authHtml.includes('winhood-github-pat'), false, 'End-user modal must not render PAT field');
-  assert.equal(
-    authHtml.includes('winhood-github-client-id'),
-    false,
-    'End-user modal must not render Client ID field'
-  );
-  assert.equal(
-    authHtml.includes('Personal Access Token'),
-    false,
-    'End-user modal must not prompt for Personal Access Token'
-  );
-  assert.equal(
-    authHtml.includes('Client Secret'),
-    false,
-    'End-user modal must never prompt for Client Secret'
-  );
-
-  // 4. Static source contract: direct window.location.assign redirect, zero window.open popup flow
-  const modalSource = fs.readFileSync(
-    path.resolve(process.cwd(), 'src/components/AuthGateModal.tsx'),
-    'utf8'
-  );
-  assert.ok(
-    modalSource.includes('window.location.assign(GITHUB_OAUTH_START_URL)'),
-    'AuthGateModal must redirect directly in same tab using window.location.assign(GITHUB_OAUTH_START_URL)'
-  );
-  assert.equal(
-    modalSource.includes('window.open('),
-    false,
-    'AuthGateModal must not use fetch() + window.open() popup flow'
-  );
+test('App shell renders unrestricted local workspace with optional TOTP 2FA control and zero login/OAuth gates', () => {
+  const appHtml = renderToStaticMarkup(React.createElement(App));
+  assert.ok(appHtml.includes('Proteção 2FA (TOTP Opcional)'));
+  assert.ok(appHtml.includes('Acesso Local Livre'));
+  assert.equal(appHtml.includes('Entrar com GitHub'), false);
+  assert.equal(appHtml.includes('AuthGateModal'), false);
+  assert.equal(appHtml.includes('Personal Access Token'), false);
 });
 

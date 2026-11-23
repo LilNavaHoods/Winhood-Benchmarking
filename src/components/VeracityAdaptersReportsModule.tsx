@@ -375,28 +375,40 @@ export const VeracityAdaptersReportsModule: React.FC<
     }
 
     if (format === 'csv') {
+      const evidenceChainHash =
+        latestRun.signedManifest?.rootChainSha256 ||
+        latestRun.signedManifest?.merkleOrChainRootSha256 ||
+        latestRun.evidenceChain?.[latestRun.evidenceChain.length - 1]?.sha256 ||
+        'UNAVAILABLE';
       const headers = [
         'RunID',
         'SoftwareName',
         'Version',
         'OverallScore',
+        'MeasuredCoveragePercent',
         'SecurityRating',
         'ReliabilityRating',
         'MaintainabilityRating',
         'QualityGateStatus',
         'Classification',
+        'EvidenceChainHash',
       ];
       const rows = latestRun.scoreCards.map((sc) =>
         [
           latestRun.id,
           `"${sc.softwareName.replace(/"/g, '""')}"`,
           sc.softwareVersion,
-          sc.groupedScores.overallScore.toFixed(2),
-          sc.ratings?.security || 'A',
-          sc.ratings?.reliability || 'A',
-          sc.ratings?.maintainability || 'A',
-          sc.qualityGate?.status || 'PASSED',
+          sc.separatedIndicators?.technicalScore !== null &&
+          sc.separatedIndicators?.technicalScore !== undefined
+            ? sc.separatedIndicators.technicalScore.toFixed(2)
+            : 'NOT_MEASURED',
+          sc.measuredCoveragePercent ?? sc.separatedIndicators?.measuredCoveragePercent ?? 'NOT_MEASURED',
+          sc.ratings?.security || 'NOT_MEASURED',
+          sc.ratings?.reliability || 'NOT_MEASURED',
+          sc.ratings?.maintainability || 'NOT_MEASURED',
+          sc.separatedIndicators?.qualityGateDecision || sc.qualityGate?.status || 'INCONCLUSIVE',
           `"${sc.classificationLabel}"`,
+          evidenceChainHash,
         ].join(',')
       );
       return {
@@ -406,22 +418,33 @@ export const VeracityAdaptersReportsModule: React.FC<
     }
 
     if (format === 'md') {
+      const evidenceChainHash =
+        latestRun.signedManifest?.rootChainSha256 ||
+        latestRun.signedManifest?.merkleOrChainRootSha256 ||
+        latestRun.evidenceChain?.[latestRun.evidenceChain.length - 1]?.sha256 ||
+        'UNAVAILABLE';
       const mdLines: string[] = [
-        `# Relatório Técnico WinHood (${selectedReportType})`,
+        `# Relatório Técnico WinHood v4.4.0 (${selectedReportType})`,
         `- **ID da Execução**: \`${latestRun.id}\``,
         `- **Projeto**: ${latestRun.projectName}`,
         `- **Algoritmo**: \`${latestRun.algorithmVersion}\``,
+        `- **Evidence Chain Hash**: \`${evidenceChainHash}\``,
         '',
         `## Sumário Executivo`,
         latestRun.executiveSummary,
         '',
       ];
       for (const sc of latestRun.scoreCards) {
+        const techScore =
+          sc.separatedIndicators?.technicalScore !== null &&
+          sc.separatedIndicators?.technicalScore !== undefined
+            ? `${sc.separatedIndicators.technicalScore.toFixed(2)} / 5.00`
+            : 'NOT_MEASURED';
         mdLines.push(
-          `## Software: ${sc.softwareName} (v${sc.softwareVersion}) — Nota: ${sc.groupedScores.overallScore.toFixed(2)} / 5.00 (${sc.classificationLabel})`
+          `## Software: ${sc.softwareName} (v${sc.softwareVersion}) — Nota: ${techScore} (${sc.classificationLabel})`
         );
         mdLines.push(
-          `- **Quality Gate**: \`${sc.qualityGate?.status || 'PASSED'}\` | **Ratings (Seg / Conf / Manut)**: \`${sc.ratings?.security || 'A'} / ${sc.ratings?.reliability || 'A'} / ${sc.ratings?.maintainability || 'A'}\``
+          `- **Cobertura de Medição Efetiva**: \`${sc.measuredCoveragePercent ?? sc.separatedIndicators?.measuredCoveragePercent ?? 'NOT_MEASURED'}%\` | **Quality Gate**: \`${sc.separatedIndicators?.qualityGateDecision || sc.qualityGate?.status || 'INCONCLUSIVE'}\` | **Ratings (Seg / Conf / Manut)**: \`${sc.ratings?.security || 'NOT_MEASURED'} / ${sc.ratings?.reliability || 'NOT_MEASURED'} / ${sc.ratings?.maintainability || 'NOT_MEASURED'}\``
         );
         mdLines.push('');
       }
@@ -432,7 +455,7 @@ export const VeracityAdaptersReportsModule: React.FC<
     }
 
     if (format === 'html') {
-      const html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8"/><title>Dossiê Técnico WinHood MQR - ${latestRun.projectName}</title></head><body style="font-family:monospace;background:#080b10;color:#e2e8f0;padding:24px;"><h1>Dossiê Técnico MQR — ${latestRun.projectName} (${latestRun.id})</h1><pre>${JSON.stringify(
+      const html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8"/><title>Dossiê Técnico WinHood MQR v4.4.0 - ${latestRun.projectName}</title></head><body style="font-family:monospace;background:#080b10;color:#e2e8f0;padding:24px;"><h1>Dossiê Técnico MQR v4.4.0 — ${latestRun.projectName} (${latestRun.id})</h1><pre>${JSON.stringify(
         latestRun,
         null,
         2
@@ -446,9 +469,14 @@ export const VeracityAdaptersReportsModule: React.FC<
     return {
       content: JSON.stringify(
         {
+          winhoodVersion: '4.4.0',
           reportType: selectedReportType,
           generatedAt: new Date().toISOString(),
           algorithmVersion: latestRun.algorithmVersion,
+          evidenceChainHash:
+            latestRun.signedManifest?.rootChainSha256 ||
+            latestRun.evidenceChain?.[latestRun.evidenceChain.length - 1]?.sha256 ||
+            'UNAVAILABLE',
           run: latestRun,
         },
         null,

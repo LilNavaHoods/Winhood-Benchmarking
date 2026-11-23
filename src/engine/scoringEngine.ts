@@ -23,7 +23,10 @@ import {
   ALL_BENCHMARK_CATEGORIES,
   DEFAULT_CATEGORY_WEIGHTS,
 } from '../shared/benchmarkCategories';
-import { normalizeEnabledCategoryWeights } from '../shared/benchmarkWeights';
+import {
+  computeRenormalizedCategoryWeights,
+  normalizeEnabledCategoryWeights,
+} from '../shared/benchmarkWeights';
 import {
   classifyScoreScale,
   validateCategoryWeights,
@@ -34,6 +37,7 @@ export {
   ALL_BENCHMARK_CATEGORIES,
   DEFAULT_CATEGORY_WEIGHTS,
   classifyScoreScale,
+  computeRenormalizedCategoryWeights,
   normalizeEnabledCategoryWeights,
   validateCategoryWeights,
   validateEquivalenceConditions,
@@ -43,6 +47,22 @@ export const ALGORITHM_VERSION = 'WINHOOD-SONAR-MQR-v3.0.0';
 
 export function computeSha256(content: string): string {
   return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
+}
+
+/**
+ * Canonical deterministic comparator for NormalizedFinding records so identical snapshots
+ * always yield identical finding ordering, scoring deltas, and cryptographic evidence hashes.
+ */
+export function compareFindingsCanonically(a: NormalizedFinding, b: NormalizedFinding): number {
+  return (
+    (a.softwareId || '').localeCompare(b.softwareId || '') ||
+    (a.filePath || '').localeCompare(b.filePath || '') ||
+    (a.lineNumber || 0) - (b.lineNumber || 0) ||
+    (a.originalRuleId || '').localeCompare(b.originalRuleId || '') ||
+    (a.severity || '').localeCompare(b.severity || '') ||
+    (a.evidenceSha256 || '').localeCompare(b.evidenceSha256 || '') ||
+    (a.id || '').localeCompare(b.id || '')
+  );
 }
 
 export function maskSecretsInText(input: string): string {
@@ -399,6 +419,8 @@ export interface RawEvaluationInput {
     technicalDebtRatioPercent?: number;
   };
   metricProvenance?: Record<string, MetricProvenanceRecord>;
+  unmeasuredCategories?: BenchmarkCategoryKey[];
+  deterministicTimestamp?: string;
   sbomSummary?: SbomDocumentBundle | null;
   scaCorrelations?: ScaVulnerabilityCorrelation[];
   sonarNativeResults?: SoftwareScoreCard['sonarNativeResults'];
@@ -411,6 +433,7 @@ export function calculateDeterministicScoreCard(
 ): SoftwareScoreCard {
   const round2 = (v: number) => Math.round(v * 100) / 100;
   const clamp05 = (val: number) => Math.max(0, Math.min(5, round2(val)));
+  const evaluationTimestamp = input.deterministicTimestamp || new Date().toISOString();
 
   const notApplicableSet = new Set<BenchmarkCategoryKey>(input.notApplicableCategories || []);
   const enabledList = (
@@ -431,11 +454,16 @@ export function calculateDeterministicScoreCard(
     input.coveragePercent > 0;
 
   const hasExplicitFindingsArray = Array.isArray(input.findings);
-  const enrichedFindings = (input.findings || []).map((f) => ({
-    ...enrichLegacyOrExternalFinding(f),
-    validationStatus: f.lifecycleState || f.validationStatus || 'VALIDATED',
-    lifecycleState: f.lifecycleState || f.validationStatus || 'VALIDATED',
-  }));
+  const enrichedFindings = (input.findings || [])
+    .map((f) => ({
+      ...enrichLegacyOrExternalFinding({
+        ...f,
+        collectedAt: f.collectedAt || evaluationTimestamp,
+      }),
+      validationStatus: f.lifecycleState || f.validationStatus || 'VALIDATED',
+      lifecycleState: f.lifecycleState || f.validationStatus || 'VALIDATED',
+    }))
+    .sort(compareFindingsCanonically);
   const EXEMPT_LIFECYCLE_STATES = new Set([
     'FALSE_POSITIVE_REVIEWED',
     'FALSE_POSITIVE',
@@ -448,6 +476,27 @@ export function calculateDeterministicScoreCard(
   const activeFindings = enrichedFindings.filter(
     (f) => !EXEMPT_LIFECYCLE_STATES.has(f.validationStatus) && !EXEMPT_LIFECYCLE_STATES.has(f.lifecycleState || '')
   );
+
+  // Determine explicitly unmeasured/unavailable categories from caller metadata or provenance
+  const explicitlyUnmeasuredSet = new Set<BenchmarkCategoryKey>(input.unmeasuredCategories || []);
+  const unavailableCategorySet = new Set<BenchmarkCategoryKey>();
+  if (input.metricProvenance) {
+    for (const catKey of ALL_BENCHMARK_CATEGORIES) {
+      const prov =
+        input.metricProvenance[`category.${catKey}`] || input.metricProvenance[catKey];
+      if (
+        prov &&
+        (prov.state === 'NOT_MEASURED' ||
+          prov.state === 'UNAVAILABLE' ||
+          prov.state === 'INCONCLUSIVE')
+      ) {
+        explicitlyUnmeasuredSet.add(catKey);
+        if (prov.state === 'UNAVAILABLE') {
+          unavailableCategorySet.add(catKey);
+        }
+      }
+    }
+  }
 
   // Reconcile metricsSummary with activeFindings if findings were passed (so DevSecOps triage updates counts in real time)
   const m: SoftwareScoreCard['metricsSummary'] = { ...input.metrics };
@@ -764,7 +813,67 @@ export function calculateDeterministicScoreCard(
       remediationEffortMinutes: input.visualOnlyFeaturesCount * 45,
     });
   }
-  if (reasonsByCat.functionality.length === 0) {
+  // Anti-inflation guard: when invoked without an explicit `findings` array (raw-metrics fallback),
+  // categories lacking verifiable metric evidence MUST be marked NOT_MEASURED instead of receiving default 5.00.
+  const hasRawEvidenceForCategory = (cat: BenchmarkCategoryKey): boolean => {
+    if (hasExplicitFindingsArray) return true;
+    const catProv = input.metricProvenance?.[`category.${cat}`] || input.metricProvenance?.[cat];
+    if (catProv && (catProv.state === 'MEASURED' || catProv.state === 'STATIC_DERIVED' || catProv.state === 'IMPORTED')) {
+      return true;
+    }
+    switch (cat) {
+      case 'functionality':
+        return m.functionalTestsTotal > 0 || input.essentialFeaturesMissing > 0 || input.visualOnlyFeaturesCount > 0;
+      case 'code_quality':
+        return (
+          m.bugs > 0 ||
+          m.codeSmells > 0 ||
+          m.technicalDebtMinutes > 0 ||
+          m.duplicatedLinesPercent > 0 ||
+          m.deadCodeSymbols > 0 ||
+          Boolean(input.staticMetrics && input.staticMetrics.loc > 0)
+        );
+      case 'security':
+        return (
+          m.criticalVulns > 0 ||
+          m.highVulns > 0 ||
+          m.mediumVulns > 0 ||
+          m.lowVulns > 0 ||
+          m.vulnerabilities > 0 ||
+          m.secretsExposed > 0
+        );
+      case 'performance':
+        return input.environmentEquivalent && input.runtimeMetrics?.status === 'MEASURED' && (m.p95LatencyMs > 0 || m.throughputRps > 0);
+      case 'architecture':
+        return (
+          m.circularDependencies > 0 ||
+          Boolean(input.staticMetrics && input.staticMetrics.loc > 0)
+        );
+      case 'database':
+        return m.dbSchemaIssues > 0;
+      case 'reliability':
+        return m.functionalTestsTotal > 0 || m.testCoveragePercent > 0 || m.bugs > 0;
+      case 'installation':
+        return input.hasCleanSandboxUninstall !== null;
+      case 'compatibility':
+      case 'usability':
+      case 'privacy':
+      case 'documentation':
+        return Boolean(input.staticMetrics && input.staticMetrics.loc > 0);
+      default:
+        return false;
+    }
+  };
+
+  if (!hasExplicitFindingsArray) {
+    for (const catKey of ALL_BENCHMARK_CATEGORIES) {
+      if (!hasRawEvidenceForCategory(catKey)) {
+        explicitlyUnmeasuredSet.add(catKey);
+      }
+    }
+  }
+
+  if (reasonsByCat.functionality.length === 0 && !explicitlyUnmeasuredSet.has('functionality') && m.functionalTestsTotal > 0) {
     pushReason('functionality', {
       impactType: 'BONUS',
       scoreDelta: 0,
@@ -820,7 +929,7 @@ export function calculateDeterministicScoreCard(
       remediationEffortMinutes: m.deadCodeSymbols * 10,
     });
   }
-  if (reasonsByCat.code_quality.length === 0) {
+  if (reasonsByCat.code_quality.length === 0 && !explicitlyUnmeasuredSet.has('code_quality')) {
     pushReason('code_quality', {
       impactType: 'BONUS',
       scoreDelta: 0,
@@ -832,28 +941,30 @@ export function calculateDeterministicScoreCard(
     });
   }
 
-  // 3. SECURITY encryption at rest bonus/penalty
-  if (input.hasEncryptionAtRest) {
-    pushReason('security', {
-      impactType: 'BONUS',
-      scoreDelta: 0.2,
-      severity: 'INFO',
-      ruleId: 'crypto.at-rest.aes256gcm-verified',
-      title: 'Criptografia autenticada em repouso e derivação KDF forte verificadas (+0.20 pts)',
-      whyExplanation: 'Verificada implementação de cifra autenticada (AES-256-GCM / ChaCha20) e derivação de chave resistente a GPU (Argon2id / PBKDF2-HMAC-SHA512), concedendo bônus técnico de +0.20 pts (limitado ao teto 5.00 da escala).',
-      remediationEffortMinutes: 0,
-    });
-  } else {
-    pushReason('security', {
-      impactType: 'METRIC_THRESHOLD',
-      scoreDelta: -0.8,
-      severity: 'HIGH',
-      ruleId: 'crypto.at-rest.missing',
-      title: 'Ausência de criptografia autenticada em repouso (AES-256-GCM / Argon2id)',
-      whyExplanation: 'Não foram detectadas primitivas de criptografia autenticada em repouso nem KDF forte no código-fonte analisado, aplicando penalidade estrutural de -0.80 pts em Segurança.',
-      remediationSummary: 'Cifrar payloads sensíveis com AES-256-GCM e derivar chaves com Argon2id ou PBKDF2-SHA512 (>= 600.000 iterações).',
-      remediationEffortMinutes: 90,
-    });
+  // 3. SECURITY encryption at rest bonus/penalty (never fabricate bonus when security category is NOT_MEASURED)
+  if (!explicitlyUnmeasuredSet.has('security')) {
+    if (input.hasEncryptionAtRest) {
+      pushReason('security', {
+        impactType: 'BONUS',
+        scoreDelta: 0.2,
+        severity: 'INFO',
+        ruleId: 'crypto.at-rest.aes256gcm-verified',
+        title: 'Criptografia autenticada em repouso e derivação KDF forte verificadas (+0.20 pts)',
+        whyExplanation: 'Verificada implementação de cifra autenticada (AES-256-GCM / ChaCha20) e derivação de chave resistente a GPU (Argon2id / PBKDF2-HMAC-SHA512), concedendo bônus técnico de +0.20 pts (limitado ao teto 5.00 da escala).',
+        remediationEffortMinutes: 0,
+      });
+    } else {
+      pushReason('security', {
+        impactType: 'METRIC_THRESHOLD',
+        scoreDelta: -0.8,
+        severity: 'HIGH',
+        ruleId: 'crypto.at-rest.missing',
+        title: 'Ausência de criptografia autenticada em repouso (AES-256-GCM / Argon2id)',
+        whyExplanation: 'Não foram detectadas primitivas de criptografia autenticada em repouso nem KDF forte no código-fonte analisado, aplicando penalidade estrutural de -0.80 pts em Segurança.',
+        remediationSummary: 'Cifrar payloads sensíveis com AES-256-GCM e derivar chaves com Argon2id ou PBKDF2-SHA512 (>= 600.000 iterações).',
+        remediationEffortMinutes: 90,
+      });
+    }
   }
 
   // 4. PERFORMANCE
@@ -965,7 +1076,7 @@ export function calculateDeterministicScoreCard(
   }
 
   // 6. DATABASE
-  if (reasonsByCat.database.length === 0) {
+  if (reasonsByCat.database.length === 0 && !explicitlyUnmeasuredSet.has('database')) {
     pushReason('database', {
       impactType: 'BONUS',
       scoreDelta: 0,
@@ -1191,6 +1302,31 @@ export function calculateDeterministicScoreCard(
       categoryScores[key] = null;
       continue;
     }
+    if (explicitlyUnmeasuredSet.has(key)) {
+      categoryScores[key] = null;
+      reasonsByCat[key] = [
+        {
+          id: `evr-${computeSha256(`${input.softwareId}|${key}|not-measured`).slice(0, 10)}`,
+          category: key,
+          impactType: 'METRIC_THRESHOLD',
+          originType: 'METRIC_THRESHOLD',
+          toolName: 'WinHood Veracity Guard',
+          scoreDelta: 0,
+          severity: 'INFO',
+          ruleId: unavailableCategorySet.has(key)
+            ? `metric.${key}.unavailable`
+            : `metric.${key}.not-measured`,
+          title: unavailableCategorySet.has(key)
+            ? `Categoria ${key} indisponível (UNAVAILABLE) — excluída da média ponderada`
+            : `Categoria ${key} sem evidências medidas (NOT_MEASURED) — excluída da média ponderada`,
+          whyExplanation:
+            'Política Anti-Mock: ausência de achados ou ferramentas medidas nunca é convertida em nota positiva/neutra. A categoria é excluída do cálculo ponderado com renormalização explícita dos pesos restantes.',
+          remediationSummary: 'Executar analisador ou fornecer evidências verificáveis para esta dimensão.',
+          remediationEffortMinutes: 0,
+        },
+      ];
+      continue;
+    }
     if (key === 'performance' && !isPerformanceMeasured) {
       categoryScores[key] = null;
       continue;
@@ -1306,19 +1442,30 @@ export function calculateDeterministicScoreCard(
     }
   }
 
-  // Sort evaluationReasons inside each category by largest deduction first (most negative scoreDelta first)
+  // Sort evaluationReasons inside each category deterministically (largest deduction first, then canonical tie-breakers)
   for (const key of ALL_BENCHMARK_CATEGORIES) {
-    reasonsByCat[key].sort((a, b) => a.scoreDelta - b.scoreDelta);
+    reasonsByCat[key].sort(
+      (a, b) =>
+        a.scoreDelta - b.scoreDelta ||
+        (a.ruleId || '').localeCompare(b.ruleId || '') ||
+        (a.filePath || '').localeCompare(b.filePath || '') ||
+        (a.lineNumber || 0) - (b.lineNumber || 0) ||
+        (a.id || '').localeCompare(b.id || '')
+    );
   }
 
   // Step E: Normalize effectiveWeights strictly over categories that were actually ASSESSED (score !== null)
   const assessedCategories = ALL_BENCHMARK_CATEGORIES.filter(
     (k) => categoryScores[k] !== null && enabledSet.has(k) && !notApplicableSet.has(k)
   );
-  const effectiveWeights =
-    assessedCategories.length > 0
-      ? normalizeEnabledCategoryWeights(weights, assessedCategories)
-      : Object.fromEntries(ALL_BENCHMARK_CATEGORIES.map((k) => [k, 0])) as Record<BenchmarkCategoryKey, number>;
+  const weightRenorm = computeRenormalizedCategoryWeights(
+    weights,
+    enabledList,
+    assessedCategories
+  );
+  const effectiveWeights = weightRenorm.effectiveWeights;
+  const hasAnyAssessedCategory = isEligibleForScoring && assessedCategories.length > 0;
+  const measuredCoveragePercent = isEligibleForScoring ? weightRenorm.measuredCoveragePercent : 0;
 
   let weightedSum = 0;
   let activeWeightSum = 0;
@@ -1333,7 +1480,7 @@ export function calculateDeterministicScoreCard(
   }
 
   let overallScore =
-    isEligibleForScoring && activeWeightSum > 0 ? clamp05(weightedSum / activeWeightSum) : 0;
+    hasAnyAssessedCategory && activeWeightSum > 0 ? clamp05(weightedSum / activeWeightSum) : 0;
 
   // Overall kill switch if critical security vulnerability exists
   if (enablePenaltyCaps && isEligibleForScoring && (m.criticalVulns > 0 || m.secretsExposed > 0) && overallScore > 2.9) {
@@ -1386,10 +1533,12 @@ export function calculateDeterministicScoreCard(
       risks.push('Degradação progressiva de manutenibilidade e acoplamento estreito entre camadas.');
     }
 
-    if (m.testCoveragePercent >= 80) {
-      advantages.push(`Alta cobertura de testes verificada (${m.testCoveragePercent.toFixed(1)}%).`);
-    } else {
-      deficiencies.push(`Cobertura de testes (${m.testCoveragePercent.toFixed(1)}%) abaixo da meta de referência (80%).`);
+    if (m.testCoveragePercent !== null && m.testCoveragePercent !== undefined) {
+      if (m.testCoveragePercent >= 80) {
+        advantages.push(`Alta cobertura de testes verificada (${m.testCoveragePercent.toFixed(1)}%).`);
+      } else {
+        deficiencies.push(`Cobertura de testes (${m.testCoveragePercent.toFixed(1)}%) abaixo da meta de referência (80%).`);
+      }
     }
 
     if (isPerformanceMeasured && m.p95LatencyMs <= 45) {
@@ -1525,7 +1674,7 @@ export function calculateDeterministicScoreCard(
   ];
 
   const sharedGateEval = QualityGateEngine.evaluateSharedContract({
-    eligibleForScoring: isEligibleForScoring,
+    eligibleForScoring: hasAnyAssessedCategory,
     criticalVulns: m.criticalVulns,
     secretsExposed: m.secretsExposed,
     bugs: m.bugs,
@@ -1534,7 +1683,7 @@ export function calculateDeterministicScoreCard(
     duplicatedLinesPercent: m.duplicatedLinesPercent,
     hasMeasuredCoverage,
     testCoveragePercent: m.testCoveragePercent,
-    scopeCoveragePercent: input.coveragePercent,
+    scopeCoveragePercent: hasAnyAssessedCategory ? input.coveragePercent : 0,
   });
 
   const failedConditions = sharedGateEval.failedConditions;
@@ -1549,6 +1698,7 @@ export function calculateDeterministicScoreCard(
     if (notApplicableSet.has(cat)) return 'NOT_APPLICABLE';
     if (!isEligibleForScoring) return 'INCONCLUSIVE';
     if (!enabledSet.has(cat)) return 'NOT_ASSESSED';
+    if (explicitlyUnmeasuredSet.has(cat) || categoryScores[cat] === null) return 'NOT_ASSESSED';
     if (!defaultAssessed) return 'NOT_ASSESSED';
     return 'ASSESSED';
   };
@@ -1562,6 +1712,7 @@ export function calculateDeterministicScoreCard(
   ): MetricMeasurementState => {
     if (status === 'NOT_APPLICABLE') return 'NOT_APPLICABLE';
     if (status === 'INCONCLUSIVE') return 'INCONCLUSIVE';
+    if (unavailableCategorySet.has(cat)) return 'UNAVAILABLE';
     if (status === 'NOT_ASSESSED') return 'NOT_MEASURED';
     if (cat === 'performance' && isPerformanceMeasured) return 'MEASURED';
     if (cat === 'functionality' && m.functionalTestsTotal > 0) return 'MEASURED';
@@ -1858,6 +2009,13 @@ export function calculateDeterministicScoreCard(
     if (!det.measurementState) {
       det.measurementState = resolveMeasurementState(catKey, det.status);
     }
+    if (det.status === 'NOT_ASSESSED' && det.limitations.length === 0) {
+      det.limitations = [
+        det.measurementState === 'UNAVAILABLE'
+          ? 'Dimensão indisponível (UNAVAILABLE) — excluída da média ponderada com renormalização explícita.'
+          : 'Dimensão não medida (NOT_MEASURED) — excluída da média ponderada com renormalização explícita.',
+      ];
+    }
     if (!det.metricProvenance) {
       det.metricProvenance = [
         {
@@ -1870,10 +2028,10 @@ export function calculateDeterministicScoreCard(
               ? 'Medição dinâmica controlada em runtime'
               : det.measurementState === 'STATIC_DERIVED'
               ? 'Cálculo determinístico sobre achados AST/estáticos'
-              : `Categoria não avaliada (${det.status})`,
+              : `Categoria não avaliada (${det.measurementState})`,
           toolName: det.toolsUsed[0] || 'WinHood Deterministic Scoring Engine',
           toolVersion: ALGORITHM_VERSION,
-          measuredAt: new Date().toISOString(),
+          measuredAt: evaluationTimestamp,
           scope: `${input.softwareName} (${catKey})`,
         },
       ];
@@ -1888,15 +2046,25 @@ export function calculateDeterministicScoreCard(
     categoryDetails,
     groupedScores,
     separatedIndicators: {
-      technicalScore: isEligibleForScoring ? overallScore : null,
+      technicalScore: hasAnyAssessedCategory ? overallScore : null,
       scopeCoveragePercent,
+      measuredCoveragePercent,
       evidenceConfidence,
       qualityGateDecision: executiveDecision,
       veracityState: input.veracityClassification,
     },
+    measuredCoveragePercent,
+    weightRenormalization: {
+      applied: weightRenorm.applied,
+      excludedCategories: weightRenorm.excludedCategories,
+      originalWeightSum: weightRenorm.totalEnabledWeightSum,
+      measuredWeightSum: weightRenorm.measuredWeightSum,
+      redistributedWeightPercent: weightRenorm.redistributedWeightPercent,
+      explanation: weightRenorm.explanation,
+    },
     originalWeights,
     effectiveWeights,
-    classificationLabel: isEligibleForScoring
+    classificationLabel: hasAnyAssessedCategory
       ? classifyScoreScale(overallScore)
       : 'Inconclusivo / Cobertura Insuficiente',
     penaltyCapsTriggered,
@@ -1971,13 +2139,13 @@ export function calculateDeterministicScoreCard(
       const sqaleRatio = Number(
         Math.min(100, (m.technicalDebtMinutes / Math.max(1, loc * 30)) * 100).toFixed(2)
       );
-      const nowIso = new Date().toISOString();
+      const nowIso = evaluationTimestamp;
       return {
         ...(input.metricProvenance || {}),
         smellsPerKloc: {
           metricKey: 'staticMetrics.codeSmellsPerKloc',
           value: smellsPerKloc,
-          state: (isEligibleForScoring ? 'STATIC_DERIVED' : 'NOT_MEASURED') as MetricMeasurementState,
+          state: (hasAnyAssessedCategory ? 'STATIC_DERIVED' : 'NOT_MEASURED') as MetricMeasurementState,
           origin: 'WinHood KLOC Normalizer (SQALE)',
           method: 'codeSmells / max(0.1, LOC / 1000)',
           toolName: 'WinHood Deterministic Scoring Engine',
@@ -1988,7 +2156,7 @@ export function calculateDeterministicScoreCard(
         bugsPerKloc: {
           metricKey: 'staticMetrics.bugsPerKloc',
           value: bugsPerKloc,
-          state: (isEligibleForScoring ? 'STATIC_DERIVED' : 'NOT_MEASURED') as MetricMeasurementState,
+          state: (hasAnyAssessedCategory ? 'STATIC_DERIVED' : 'NOT_MEASURED') as MetricMeasurementState,
           origin: 'WinHood KLOC Normalizer',
           method: 'bugs / max(0.1, LOC / 1000)',
           toolName: 'WinHood Deterministic Scoring Engine',
@@ -1999,7 +2167,7 @@ export function calculateDeterministicScoreCard(
         technicalDebtRatioPercent: {
           metricKey: 'staticMetrics.technicalDebtRatioPercent',
           value: sqaleRatio,
-          state: (isEligibleForScoring ? 'STATIC_DERIVED' : 'NOT_MEASURED') as MetricMeasurementState,
+          state: (hasAnyAssessedCategory ? 'STATIC_DERIVED' : 'NOT_MEASURED') as MetricMeasurementState,
           origin: 'MqrBridge SQALE Debt Ratio Formula',
           method: '(technicalDebtMinutes / (LOC * 30)) * 100',
           toolName: 'WinHood Deterministic Scoring Engine',
@@ -2021,7 +2189,7 @@ export function calculateDeterministicScoreCard(
       note: 'Resultados nativos do MqrBridge ainda não sincronizados de uma instância externa conectada.',
     },
     winhoodCalculatedResults: {
-      compositeScore: isEligibleForScoring ? overallScore : null,
+      compositeScore: hasAnyAssessedCategory ? overallScore : null,
       algorithmVersion: ALGORITHM_VERSION,
       assessedCategoriesCount: assessedCategories.length,
       totalCategoriesCount: applicableCategoriesCount,

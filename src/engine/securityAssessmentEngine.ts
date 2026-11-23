@@ -103,7 +103,7 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
       id: 'syft-sbom',
       name: 'Anchore Syft SBOM Generator',
       vendor: 'Anchore / WinHood SBOM',
-      version: '1.18.0',
+      version: '4.4.0-native',
       category: 'SECURITY_DEVSECOPS',
       analysisType: 'Geração de SBOM CycloneDX 1.5 / SPDX 2.3',
       executionMethod: 'NATIVE_AST_ENGINE',
@@ -113,7 +113,7 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
         return {
           detected: true, // Gerador nativo de lockfiles/manifests sempre operacional; syft CLI opcional
           configured: true,
-          detectedVersion: cli.detected ? cli.versionOutput : 'WinHood SBOM Parser v4.1.0',
+          detectedVersion: cli.detected ? cli.versionOutput : 'WinHood SBOM Parser v4.4.0',
         };
       },
       description: 'Parser nativo CycloneDX 1.5 / SPDX 2.3 com suporte opcional ao binário Anchore Syft.',
@@ -123,7 +123,7 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
       id: 'grype-sca',
       name: 'Anchore Grype / OSV.dev SCA',
       vendor: 'Anchore / OSV.dev',
-      version: '0.121.0',
+      version: '4.4.0-native',
       category: 'SECURITY_DEVSECOPS',
       analysisType: 'SCA Vulnerability Scanner (CVE, GHSA, CVSS, EPSS, KEV)',
       executionMethod: 'NATIVE_AST_ENGINE',
@@ -133,7 +133,7 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
         return {
           detected: true, // Correlator SCA nativo via snapshots OSV/NVD/EPSS/KEV sempre operacional
           configured: true,
-          detectedVersion: cli.detected ? cli.versionOutput : 'WinHood SCA Correlator v4.1.0',
+          detectedVersion: cli.detected ? cli.versionOutput : 'WinHood SCA Correlator v4.4.0',
         };
       },
       description: 'Correlação real de dependências diretas e transitivas contra snapshots OSV.dev, NVD, EPSS e CISA KEV.',
@@ -433,16 +433,19 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
       id: 'sysinternals-sandbox',
       name: 'Microsoft Sysinternals (ProcMon, Autoruns & T0/T1/T2 Snapshot)',
       vendor: 'Microsoft Sysinternals',
-      version: '2026.11',
+      version: 'UNAVAILABLE',
       category: 'OS_INSTALL',
       analysisType: 'Windows Security Assessment, Registro, Serviços e Snapshots T0/T1/T2',
       executionMethod: 'SANDBOX_WORKER',
       canonicalFormat: 'SNAPSHOT_DIFF',
       binaryOrEnvCheck: () => {
-        const procmon = isWindowsHost && ToolAvailabilityService.checkBinaryInPath('procmon').detected;
+        const procmon = isWindowsHost
+          ? ToolAvailabilityService.checkBinaryInPath('procmon')
+          : { detected: false, versionOutput: null };
         return {
-          detected: procmon,
-          configured: isWindowsHost,
+          detected: procmon.detected,
+          configured: isWindowsHost && procmon.detected,
+          detectedVersion: procmon.detected ? procmon.versionOutput || `win32-${os.release()}` : null,
         };
       },
       description: 'Execução dinâmica de registro/serviços requer host Windows Sandbox; em Linux executa apenas inspeção estática de manifestos.',
@@ -470,30 +473,53 @@ export function buildFull21SecurityAdaptersCatalog(): ToolAdapterInfo[] {
           ? 'PARTIAL'
           : 'NOT_READY';
 
-    const status: ToolAdapterInfo['status'] = check.detected
+    const status: ToolAdapterInfo['status'] = check.detected || isNativeInProcess
       ? 'OPERATIONAL'
       : check.configured
         ? 'INTEGRAÇÃO CONFIGURADA'
         : 'FERRAMENTA NÃO INSTALADA';
 
+    // Política Anti-Mock: nunca exibir versão hardcoded de ferramenta externa não detectada no host
+    const resolvedVersion = isNativeInProcess
+      ? check.detectedVersion || '4.4.0-native'
+      : check.detected
+        ? check.detectedVersion || 'DETECTED_VERSION_UNKNOWN'
+        : 'UNAVAILABLE';
+
+    const executionStatus: ToolAdapterInfo['executionStatus'] =
+      isNativeInProcess || check.detected
+        ? 'NOT_MEASURED'
+        : check.configured
+          ? 'NOT_MEASURED'
+          : 'NOT_INSTALLED';
+
+    const unavailableReason =
+      !isNativeInProcess && !check.detected
+        ? check.configured
+          ? 'Integração configurada via ambiente, porém binário/daemon local não detectado neste host.'
+          : 'Binário CLI ou integração externa não instalada/configurada no host atual.'
+        : null;
+
     return {
       id: d.id,
       name: d.name,
       vendor: d.vendor,
-      version: check.detectedVersion || d.version,
+      version: resolvedVersion,
       category: d.category,
       analysisType: d.analysisType,
       executionMethod: d.executionMethod,
       canonicalFormat: d.canonicalFormat,
       status,
+      executionStatus,
+      unavailableReason,
       availabilityState,
       configurationState,
       readinessState,
       executionState: 'NOT_EXECUTED',
       binaryDetected: check.detected,
       configured: check.configured,
-      signatureHash: check.detected
-        ? computeSha256(`${d.id}:${check.detectedVersion || d.version}:detected`)
+      signatureHash: check.detected || isNativeInProcess
+        ? computeSha256(`${d.id}:${resolvedVersion}:detected`)
         : null,
       description: d.description,
       supportedLanguages: d.supportedLanguages,
@@ -539,9 +565,10 @@ export function executeSecurityAssessmentSuite(params: {
   findings: NormalizedFinding[];
   scopeAllowlist?: string[];
   emergencyStopTriggered?: boolean;
+  deterministicTimestamp?: string;
 }): SecurityAssessmentSuiteBundle {
   const suiteStart = performance.now();
-  const nowIso = new Date().toISOString();
+  const nowIso = params.deterministicTimestamp || new Date().toISOString();
   const allowlist = params.scopeAllowlist?.length
     ? params.scopeAllowlist
     : ['sandbox://local-isolated-worker/*', '127.0.0.1:3000/isolated-bench/*'];
@@ -991,6 +1018,9 @@ export function executeSecurityAssessmentSuite(params: {
 
   // Keep reference to suiteStart to ensure measurement consistency
   void suiteStart;
+
+  attackPaths.sort((a, b) => a.id.localeCompare(b.id));
+  executionRecords.sort((a, b) => a.id.localeCompare(b.id));
 
   return {
     runId: params.runId,

@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { KeyManagementService } from '../security/KeyManagementService';
+import { compareFindingsCanonically } from './scoringEngine';
 import {
   EvidenceRecord,
   ManifestVerificationState,
@@ -11,6 +12,12 @@ import {
 } from '../types/benchmark';
 
 export const GENESIS_EVIDENCE_HASH = '0'.repeat(64);
+
+export function computeEvidenceChainHash(evidenceChain: EvidenceRecord[]): string {
+  return evidenceChain.length > 0
+    ? evidenceChain[evidenceChain.length - 1]!.sha256
+    : GENESIS_EVIDENCE_HASH;
+}
 
 function sha256Hex(payload: string): string {
   return crypto.createHash('sha256').update(payload, 'utf8').digest('hex');
@@ -58,6 +65,7 @@ export function buildVerifiableEvidenceChain(params: {
   toolExecutions: ToolExecutionRecord[];
   veracityResults: VeracityCheckResult[];
   responsibleActor?: string;
+  deterministicTimestamp?: string;
 }): EvidenceRecord[] {
   const {
     runId,
@@ -66,6 +74,7 @@ export function buildVerifiableEvidenceChain(params: {
     toolExecutions,
     veracityResults,
     responsibleActor = 'winhood-audit-engine',
+    deterministicTimestamp,
   } = params;
 
   const softwareById = new Map<string, Software>();
@@ -73,12 +82,24 @@ export function buildVerifiableEvidenceChain(params: {
     softwareById.set(sw.id, sw);
   }
 
+  // Canonical ordering ensures identical snapshots always yield identical evidenceChain hashes
+  const sortedVeracityResults = [...veracityResults].sort((a, b) =>
+    a.softwareId.localeCompare(b.softwareId)
+  );
+  const sortedToolExecutions = [...toolExecutions].sort(
+    (a, b) =>
+      a.softwareId.localeCompare(b.softwareId) ||
+      a.toolId.localeCompare(b.toolId) ||
+      a.id.localeCompare(b.id)
+  );
+  const sortedFindings = [...findings].sort(compareFindingsCanonically);
+
   const evidenceChain: EvidenceRecord[] = [];
   let previousHash = GENESIS_EVIDENCE_HASH;
   let immutableIndex = 0;
 
   // 1. Record Veracity Attestations for each Software
-  for (const vr of veracityResults) {
+  for (const vr of sortedVeracityResults) {
     const sw = softwareById.get(vr.softwareId);
     const baseRecord: Omit<EvidenceRecord, 'sha256'> = {
       id: `ev-veracity-${runId}-${vr.softwareId}-${immutableIndex}`,
@@ -94,8 +115,8 @@ export function buildVerifiableEvidenceChain(params: {
       responsibleActor,
       category: 'VERACITY_AUDIT',
       toolName: 'WinHood Veracity & Provenance Auditor',
-      toolVersion: '4.2.0',
-      timestamp: vr.auditedAt,
+      toolVersion: '4.4.0',
+      timestamp: deterministicTimestamp || vr.auditedAt,
       resultSummary: `Classificação=${vr.overallClassification} | Cobertura=${vr.overallCoveragePercent}% | Elegível=${vr.checks.eligibleForScoring}`,
       severity: vr.checks.eligibleForScoring ? 'INFO' : 'HIGH',
       fileOrComponent: 'SOURCE_MANIFEST',
@@ -118,9 +139,16 @@ export function buildVerifiableEvidenceChain(params: {
     immutableIndex += 1;
   }
 
-  // 2. Record Tool Execution Proofs
-  for (const exec of toolExecutions) {
+  // 2. Record Tool Execution Proofs (uses deterministic output hash rather than volatile wall-clock durationMs)
+  for (const exec of sortedToolExecutions) {
     const sw = softwareById.get(exec.softwareId);
+    const resolvedExecStatus =
+      exec.executionStatus ||
+      (exec.exitCode === 0
+        ? 'MEASURED'
+        : exec.exitCode === null
+          ? 'NOT_MEASURED'
+          : 'FAILED');
     const baseRecord: Omit<EvidenceRecord, 'sha256'> = {
       id: `ev-exec-${runId}-${exec.id}-${immutableIndex}`,
       runId,
@@ -136,8 +164,8 @@ export function buildVerifiableEvidenceChain(params: {
       category: exec.canonicalFormat,
       toolName: exec.toolName,
       toolVersion: exec.toolVersion,
-      timestamp: exec.completedAt,
-      resultSummary: `Status=${exec.veracityStatus} | Método=${exec.executionMethod || 'NATIVE_AST_ENGINE'} | Arquivos=${exec.analyzedFilesCount}/${exec.eligibleFilesCount} | Exit=${exec.exitCode} | Duração=${exec.durationMs}ms`,
+      timestamp: deterministicTimestamp || exec.completedAt,
+      resultSummary: `Status=${exec.veracityStatus} | ExecStatus=${resolvedExecStatus} | Método=${exec.executionMethod || 'NATIVE_AST_ENGINE'} | Arquivos=${exec.analyzedFilesCount}/${exec.eligibleFilesCount} | Exit=${exec.exitCode} | RawOutputSHA256=${(exec.rawOutputSha256 || '').slice(0, 16)}`,
       severity: exec.veracityStatus === 'SUCCESS_VALIDATED' ? 'INFO' : 'LOW',
       fileOrComponent: exec.workingDirectory || sw?.inventory?.isolatedStoragePath || 'workspace',
       validationStatus: exec.veracityStatus,
@@ -155,7 +183,7 @@ export function buildVerifiableEvidenceChain(params: {
   }
 
   // 3. Record Individual Findings with Code Location & Hash
-  for (const f of findings) {
+  for (const f of sortedFindings) {
     const sw = softwareById.get(f.softwareId);
     const baseRecord: Omit<EvidenceRecord, 'sha256'> = {
       id: `ev-finding-${runId}-${f.id}-${immutableIndex}`,
@@ -172,7 +200,7 @@ export function buildVerifiableEvidenceChain(params: {
       category: f.category,
       toolName: f.toolName,
       toolVersion: f.toolVersion,
-      timestamp: f.collectedAt,
+      timestamp: deterministicTimestamp || f.collectedAt,
       resultSummary: `[${f.severity}] ${f.originalRuleId}: ${f.title} (${f.filePath}:${f.lineNumber})`,
       severity: f.severity,
       fileOrComponent: `${f.filePath}:${f.lineNumber}`,

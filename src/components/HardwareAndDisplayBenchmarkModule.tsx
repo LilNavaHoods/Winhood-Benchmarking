@@ -101,9 +101,11 @@ interface DisplayGpuTelemetry {
   gpuVendor: string;
   gpuRenderer: string;
   webglVersion: string;
-  maxTextureSize: number;
+  maxTextureSize: number | null;
   maxViewportDims: string;
-  maxAnisotropy: number;
+  maxAnisotropy: number | null;
+  webglAvailable: boolean;
+  webglUnavailableReason: string | null;
   webGpuAvailable: boolean;
   hardwareConcurrency: number;
   deviceMemoryGB: number | null;
@@ -124,9 +126,10 @@ interface FramePacingResult {
 }
 
 interface ClientGpuStressResult {
-  canvas2dFps: number;
+  canvas2dFps: number | null;
   trigShaderOpsPerSec: number;
-  gpuNormalizedScore: number;
+  gpuNormalizedScore: number | null;
+  unavailableReason: string | null;
   executedAt: string;
 }
 
@@ -261,12 +264,14 @@ function collectDisplayGpuTelemetry(): DisplayGpuTelemetry {
     globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches
   );
 
-  let gpuVendor = 'WebGL Standard Vendor';
-  let gpuRenderer = 'Hardware Accelerated WebGL Renderer';
-  let webglVersion = 'WebGL 2.0';
-  let maxTextureSize = 16384;
-  let maxViewportDims = '16384 x 16384';
-  let maxAnisotropy = 16;
+  let gpuVendor = 'UNAVAILABLE';
+  let gpuRenderer = 'UNAVAILABLE';
+  let webglVersion = 'UNAVAILABLE';
+  let maxTextureSize: number | null = null;
+  let maxViewportDims = 'UNAVAILABLE';
+  let maxAnisotropy: number | null = null;
+  let webglAvailable = false;
+  let webglUnavailableReason: string | null = null;
 
   try {
     const canvas = document.createElement('canvas');
@@ -274,19 +279,21 @@ function collectDisplayGpuTelemetry(): DisplayGpuTelemetry {
       (canvas.getContext('webgl2') as WebGL2RenderingContext | null) ||
       (canvas.getContext('webgl') as WebGLRenderingContext | null);
     if (gl) {
+      webglAvailable = true;
       webglVersion =
         typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext
           ? 'WebGL 2.0 (OpenGL ES 3.0)'
           : 'WebGL 1.0 (OpenGL ES 2.0)';
       const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
       if (debugInfo) {
-        gpuVendor = gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) || gpuVendor;
-        gpuRenderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) || gpuRenderer;
+        gpuVendor = String(gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) || 'UNAVAILABLE');
+        gpuRenderer = String(gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) || 'UNAVAILABLE');
       } else {
-        gpuVendor = gl.getParameter(gl.VENDOR) || gpuVendor;
-        gpuRenderer = gl.getParameter(gl.RENDERER) || gpuRenderer;
+        gpuVendor = String(gl.getParameter(gl.VENDOR) || 'UNAVAILABLE');
+        gpuRenderer = String(gl.getParameter(gl.RENDERER) || 'UNAVAILABLE');
       }
-      maxTextureSize = Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || 8192;
+      const texParam = Number(gl.getParameter(gl.MAX_TEXTURE_SIZE));
+      maxTextureSize = Number.isFinite(texParam) && texParam > 0 ? texParam : null;
       const vpDims = gl.getParameter(gl.MAX_VIEWPORT_DIMS);
       if (vpDims && vpDims.length >= 2) {
         maxViewportDims = `${vpDims[0]} × ${vpDims[1]}`;
@@ -295,12 +302,18 @@ function collectDisplayGpuTelemetry(): DisplayGpuTelemetry {
         gl.getExtension('EXT_texture_filter_anisotropic') ||
         gl.getExtension('WEBKIT_EXT_texture_filter_anisotropic');
       if (extAniso) {
-        maxAnisotropy =
-          Number(gl.getParameter(extAniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT)) || 16;
+        const anisoParam = Number(gl.getParameter(extAniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT));
+        maxAnisotropy = Number.isFinite(anisoParam) && anisoParam > 0 ? anisoParam : null;
       }
+    } else {
+      webglUnavailableReason =
+        'Contexto WebGL2/WebGL1 indisponível neste navegador ou ambiente headless.';
     }
-  } catch {
-    // Fallback gracefully in headless environments
+  } catch (err) {
+    webglUnavailableReason =
+      err instanceof Error
+        ? `Falha ao inicializar contexto WebGL: ${err.message}`
+        : 'Falha ao inicializar contexto WebGL neste ambiente.';
   }
 
   const nav = globalThis.navigator as Navigator & {
@@ -331,8 +344,10 @@ function collectDisplayGpuTelemetry(): DisplayGpuTelemetry {
     maxTextureSize,
     maxViewportDims,
     maxAnisotropy,
+    webglAvailable,
+    webglUnavailableReason,
     webGpuAvailable: Boolean(nav?.gpu),
-    hardwareConcurrency: nav?.hardwareConcurrency || 4,
+    hardwareConcurrency: nav?.hardwareConcurrency || 0,
     deviceMemoryGB: typeof nav?.deviceMemory === 'number' ? nav.deviceMemory : null,
   };
 }
@@ -462,7 +477,15 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
       if (count <= targetFrames) {
         requestAnimationFrame(step);
       } else {
-        const valid = frameDeltas.length > 0 ? frameDeltas : [16.67];
+        if (frameDeltas.length === 0) {
+          setFramePacing(null);
+          setHostError(
+            'Amostragem de Frame Pacing UNAVAILABLE: nenhum intervalo válido coletado via requestAnimationFrame (aba em segundo plano ou ambiente sem compositor gráfico).'
+          );
+          setSamplingHz(false);
+          return;
+        }
+        const valid = frameDeltas;
         const totalDuration = valid.reduce((acc, v) => acc + v, 0);
         const avgDelta = totalDuration / valid.length;
         const measuredFps = Number((1000 / avgDelta).toFixed(1));
@@ -557,10 +580,22 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
         }
       }
       const canvasElapsedSec = Math.max(0.001, (performance.now() - startCanvas) / 1000);
+      if (!ctx || framesRendered === 0) {
+        setClientGpuStress({
+          canvas2dFps: null,
+          trigShaderOpsPerSec,
+          gpuNormalizedScore: null,
+          unavailableReason:
+            'Contexto Canvas 2D indisponível ou 0 quadros renderizados neste ambiente — nenhuma pontuação gráfica foi fabricada.',
+          executedAt: new Date().toISOString(),
+        });
+        setRunningGpuStress(false);
+        return;
+      }
       const rawCanvasFps = Math.min(240, Math.round(framesRendered / canvasElapsedSec));
       const gpuNormalizedScore = Math.round(
         Math.max(
-          35,
+          0,
           Math.min(
             100,
             (rawCanvasFps / 120) * 55 + Math.min(45, (trigShaderOpsPerSec / 25000000) * 45)
@@ -572,6 +607,7 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
         canvas2dFps: rawCanvasFps,
         trigShaderOpsPerSec,
         gpuNormalizedScore,
+        unavailableReason: null,
         executedAt: new Date().toISOString(),
       });
       setRunningGpuStress(false);
@@ -1140,7 +1176,12 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
           </div>
           <div className="mt-2 text-xs text-slate-400 font-mono tabular-nums truncate">
             GPU Score:{' '}
-            {clientGpuStress ? `${clientGpuStress.gpuNormalizedScore}/100` : 'NOT_MEASURED'} ({telemetry.colorGamut})
+            {clientGpuStress && clientGpuStress.gpuNormalizedScore !== null
+              ? `${clientGpuStress.gpuNormalizedScore}/100`
+              : clientGpuStress?.unavailableReason
+                ? 'UNAVAILABLE'
+                : 'NOT_MEASURED'}{' '}
+            ({telemetry.colorGamut})
           </div>
         </div>
       </div>
@@ -1228,10 +1269,28 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
               </div>
               <div className="text-xs text-slate-400 font-mono mt-0.5 flex flex-wrap items-center gap-3">
                 <span>Vendor: {telemetry.gpuVendor}</span>
-                <span>Max Texture: {telemetry.maxTextureSize}px</span>
-                <span>Aniso: {telemetry.maxAnisotropy}x</span>
-                <span>WebGPU: {telemetry.webGpuAvailable ? 'Ativo' : 'Fallback WebGL2'}</span>
+                <span>
+                  Max Texture:{' '}
+                  {telemetry.maxTextureSize !== null ? `${telemetry.maxTextureSize}px` : 'UNAVAILABLE'}
+                </span>
+                <span>
+                  Aniso:{' '}
+                  {telemetry.maxAnisotropy !== null ? `${telemetry.maxAnisotropy}x` : 'UNAVAILABLE'}
+                </span>
+                <span>
+                  WebGPU:{' '}
+                  {telemetry.webGpuAvailable
+                    ? 'Ativo'
+                    : telemetry.webglAvailable
+                      ? `Fallback ${telemetry.webglVersion}`
+                      : 'UNAVAILABLE'}
+                </span>
               </div>
+              {telemetry.webglUnavailableReason && (
+                <div className="text-[11px] text-amber-300 mt-1">
+                  {telemetry.webglUnavailableReason}
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -1939,11 +1998,16 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
             <div className="p-3 rounded-lg bg-slate-900/70 border border-slate-800">
               <div className="text-xs text-slate-400">Canvas2D & Shader Trig Ops</div>
               <div className="text-base font-bold text-white font-mono tabular-nums mt-0.5">
-                {clientGpuStress ? `${clientGpuStress.canvas2dFps} FPS` : 'NOT_MEASURED'}
+                {clientGpuStress
+                  ? clientGpuStress.canvas2dFps !== null
+                    ? `${clientGpuStress.canvas2dFps} FPS`
+                    : 'UNAVAILABLE'
+                  : 'NOT_MEASURED'}
               </div>
               <div className="text-xs text-slate-400 font-mono mt-0.5">
                 {clientGpuStress
-                  ? `${(clientGpuStress.trigShaderOpsPerSec / 1_000_000).toFixed(1)}M trig ops/s`
+                  ? clientGpuStress.unavailableReason ||
+                    `${(clientGpuStress.trigShaderOpsPerSec / 1_000_000).toFixed(1)}M trig ops/s`
                   : 'Execute Stress GPU Cliente'}
               </div>
             </div>
@@ -2036,7 +2100,9 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
                 Adequação Operacional & Vínculo ao Relatório
               </h3>
               <span className="text-xs font-mono text-teal-300 font-bold">
-                Score {consolidatedIndex.totalScore}/100 (Tier {consolidatedIndex.tier})
+                {consolidatedIndex.totalScore !== null
+                  ? `Score ${consolidatedIndex.totalScore}/100 (Tier ${consolidatedIndex.tier})`
+                  : 'NOT_MEASURED'}
               </span>
             </div>
 

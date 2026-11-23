@@ -18,7 +18,7 @@ import {
   Github,
   KeyRound,
   LayoutDashboard,
-  LogOut,
+  Lock,
   Monitor,
   Moon,
   PanelLeftClose,
@@ -31,9 +31,7 @@ import {
   Sparkles,
   Sun,
   Server,
-  Trash2,
   Upload,
-  UserCheck,
   Wrench,
   XCircle,
 } from 'lucide-react';
@@ -46,25 +44,25 @@ import type {
   Software,
   ToolAdapterInfo,
 } from './types/benchmark';
+import type { OptionalTotpStatus, TotpSetupResponse, TotpVerifyResponse } from './shared/authTypes';
 import { DashboardModule } from './components/DashboardModule';
 import { HeaderQuickSearch } from './components/HeaderQuickSearch';
 import { StepByStepJourneyBar, type AppNavSection } from './components/StepByStepJourneyBar';
 import { ContextualScreenHelpBanner } from './components/ContextualScreenHelpBanner';
 import { AnalysisProgressHeaderBanner } from './components/AnalysisProgressHeaderBanner';
 import { WinHoodLogo } from './components/WinHoodLogo';
-import { AuthGateModal, type AuthUserView } from './components/AuthGateModal';
-import { extractGitHubOAuthErrorFromSearch } from './shared/authTypes';
+import { TotpUnlockModal } from './components/TotpUnlockModal';
 import { ModuleErrorBoundary } from './components/ModuleErrorBoundary';
 import {
   clearClientAuthTokens,
   csrfFetch as fetch,
   setGlobalCsrfToken,
+  setGlobalSessionToken,
 } from './utils/csrfFetch';
 import {
   DEFAULT_SECURITY_SUITE_FILTERS,
   type SecuritySuiteFilterState,
 } from './utils/securityFindingsFilter';
-import QRCode from 'qrcode';
 
 // Lazy-loaded modules (Seção 11.7 — Otimização do frontend: Code Splitting & Lazy Loading sob demanda)
 const ProjectsAndSoftwaresModule = lazy(() =>
@@ -152,31 +150,23 @@ export default function App() {
   const [darkMode, setDarkMode] = useState<boolean>(true);
   const [loading, setLoading] = useState<boolean>(true);
 
-  const [currentUser, setCurrentUser] = useState<AuthUserView | null>(null);
-  const [authStatus, setAuthStatus] = useState<
-    'loading' | 'authenticated' | 'unauthenticated' | 'error'
-  >('loading');
-  const [authLoading, setAuthLoading] = useState<boolean>(true);
-  const [authenticated, setAuthenticated] = useState<boolean>(false);
-  const [mfaRequired, setMfaRequired] = useState<boolean>(false);
-  const [bootstrapRequired, setBootstrapRequired] = useState<boolean>(false);
+  const [totpStatus, setTotpStatus] = useState<OptionalTotpStatus>({
+    enabled: false,
+    unlocked: true,
+    remainingRecoveryCodes: 0,
+    configuredAt: null,
+    serverTimeIso: '',
+    totpPeriodSeconds: 30,
+  });
   const [backendState, setBackendState] = useState<BackendConnectivityState>('STARTING');
   const [backendErrorDetail, setBackendErrorDetail] = useState<string | null>(null);
-  const [bootstrapTokenFileHint, setBootstrapTokenFileHint] = useState<string>(
-    '.winhood_data/bootstrap_admin_token.txt'
-  );
-  const [isAdminOrigin, setIsAdminOrigin] = useState<boolean>(false);
-  const authCheckInFlightRef = React.useRef<boolean>(false);
-  const lastAuthConfirmedAtRef = React.useRef<number>(0);
-  const [isMfaSetupOpen, setIsMfaSetupOpen] = useState<boolean>(false);
-  const [mfaSetupPayload, setMfaSetupPayload] = useState<{
-    secret: string;
-    otpauthUrl: string;
-    qrDataUrl?: string | null;
-    recoveryCodes?: string[];
-  } | null>(null);
-  const [mfaVerifyCode, setMfaVerifyCode] = useState<string>('');
-  const [mfaCopiedRecovery, setMfaCopiedRecovery] = useState<boolean>(false);
+  const [isTotpModalOpen, setIsTotpModalOpen] = useState<boolean>(false);
+  const [totpSetupPayload, setTotpSetupPayload] = useState<TotpSetupResponse | null>(null);
+  const [totpConfirmSuccessCodes, setTotpConfirmSuccessCodes] = useState<string[] | null>(null);
+  const [totpVerifyCode, setTotpVerifyCode] = useState<string>('');
+  const [totpDisableCode, setTotpDisableCode] = useState<string>('');
+  const [totpCopiedRecovery, setTotpCopiedRecovery] = useState<boolean>(false);
+  const [totpBusy, setTotpBusy] = useState<boolean>(false);
 
   const [dashboardData, setDashboardData] = useState<{
     hasEvaluations: boolean;
@@ -248,94 +238,44 @@ export default function App() {
 
   const [activeRunningRun, setActiveRunningRun] = useState<BenchmarkRun | null>(null);
 
-  const checkAuthSession = useCallback(async (isRecovery = false) => {
-    if (authCheckInFlightRef.current && !isRecovery) {
-      return;
-    }
-    authCheckInFlightRef.current = true;
-    setAuthLoading(true);
-    setAuthStatus((prev) => (prev === 'authenticated' && !isRecovery ? prev : 'loading'));
+  const checkTotpStatus = useCallback(async (isRecovery = false) => {
     if (isRecovery) {
       setBackendState('RECOVERING');
     }
     try {
-      const [sessRes, bsRes] = await Promise.all([
-        fetch('/api/auth/session', { cache: 'no-store' }),
-        fetch('/api/auth/bootstrap-status', { cache: 'no-store' }),
-      ]);
-      if (sessRes.status >= 500 || bsRes.status >= 500) {
-        setAuthStatus('error');
+      const res = await fetch('/api/totp/status', { cache: 'no-store' });
+      if (res.status >= 500) {
         setBackendState('API_ERROR');
-        setBackendErrorDetail(
-          `Servidor backend respondeu com erro interno (HTTP ${sessRes.status >= 500 ? sessRes.status : bsRes.status}).`
-        );
-        return;
+        setBackendErrorDetail(`Servidor backend respondeu com erro interno (HTTP ${res.status}).`);
+        return null;
       }
-      if (bsRes.ok) {
-        const bsData = await bsRes.json();
-        setBootstrapRequired(Boolean(bsData.bootstrapRequired));
-        if (bsData.bootstrapTokenFileHint) {
-          setBootstrapTokenFileHint(bsData.bootstrapTokenFileHint);
-        }
-      }
-      if (sessRes.ok) {
-        const sessData = await sessRes.json();
-        if (sessData.csrfToken) {
-          setGlobalCsrfToken(sessData.csrfToken);
-        }
-        const isAuthed = Boolean(sessData.authenticated);
-        const isMfaReq = Boolean(sessData.mfaRequired);
-        setAuthenticated(isAuthed);
-        setMfaRequired(isMfaReq);
-        setBootstrapRequired(Boolean(sessData.bootstrapRequired));
-        setCurrentUser(sessData.user || null);
-        setBackendErrorDetail(null);
-        if (sessData.user?.role === 'ADMIN') {
-          setIsAdminOrigin(true);
-        }
-        if (isAuthed && !isMfaReq) {
-          lastAuthConfirmedAtRef.current = Date.now();
-          setAuthStatus('authenticated');
-          setBackendState('ONLINE');
-        } else {
-          setAuthStatus('unauthenticated');
-          setBackendState('AUTH_REQUIRED');
-        }
-      } else if (sessRes.status === 401 || sessRes.status === 403) {
-        clearClientAuthTokens();
-        setAuthenticated(false);
-        setMfaRequired(false);
-        setCurrentUser(null);
-        setBackendErrorDetail(null);
-        setAuthStatus('unauthenticated');
-        setBackendState('AUTH_REQUIRED');
-      } else {
-        setAuthStatus('error');
+      if (!res.ok) {
         setBackendState('API_ERROR');
-        setBackendErrorDetail(`Resposta inesperada da sessão: HTTP ${sessRes.status}`);
+        setBackendErrorDetail(`Resposta inesperada em /api/totp/status: HTTP ${res.status}`);
+        return null;
       }
+      const data = (await res.json()) as OptionalTotpStatus;
+      setTotpStatus(data);
+      setBackendErrorDetail(null);
+      setBackendState('ONLINE');
+      return data;
     } catch (err: any) {
-      setAuthStatus('error');
       setBackendState('OFFLINE');
       setBackendErrorDetail(
         err?.message || 'Não foi possível estabelecer conexão HTTP com o servidor backend local.'
       );
-    } finally {
-      authCheckInFlightRef.current = false;
-      setAuthLoading(false);
+      return null;
     }
   }, []);
 
-  // Requisição consolidada única (/api/bootstrap) substituindo chamadas paralelas redundantes
+  // Requisição consolidada única (/api/bootstrap) com acesso local irrestrito por padrão
   const fetchAllBackendState = useCallback(async () => {
-    if (!authenticated || mfaRequired) return;
     setLoading(true);
     try {
       const res = await fetch('/api/bootstrap');
-      if (res.status === 401 || res.status === 403) {
-        setAuthenticated(false);
-        setAuthStatus('unauthenticated');
-        setBackendState('AUTH_REQUIRED');
+      if (res.status === 401) {
+        setTotpStatus((prev) => ({ ...prev, enabled: true, unlocked: false }));
+        setLoading(false);
         return;
       }
       if (!res.ok) {
@@ -346,11 +286,9 @@ export default function App() {
       }
       const data = await res.json();
       setBackendState('ONLINE');
-      setAuthStatus('authenticated');
       setBackendErrorDetail(null);
-      if (data.user) {
-        setCurrentUser(data.user);
-        if (data.user.role === 'ADMIN') setIsAdminOrigin(true);
+      if (data.totp) {
+        setTotpStatus(data.totp);
       }
       if (data.dashboard) {
         setDashboardData(data.dashboard);
@@ -376,41 +314,30 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [authenticated, mfaRequired, notify]);
+  }, [notify]);
 
   useEffect(() => {
-    void checkAuthSession();
-  }, [checkAuthSession]);
-
-  useEffect(() => {
-    if (authenticated && !mfaRequired) {
-      if (typeof window !== 'undefined') {
-        const parsedErr = extractGitHubOAuthErrorFromSearch(window.location.search);
-        if (parsedErr.errorCode) {
-          if (parsedErr.message) {
-            notify(parsedErr.message, 'error');
-          }
-          const nextUrl = `${window.location.pathname}${parsedErr.cleanedSearch}${window.location.hash}`;
-          window.history.replaceState({}, document.title, nextUrl);
-        }
+    let active = true;
+    void checkTotpStatus().then((status) => {
+      if (!active) return;
+      if (status && (!status.enabled || status.unlocked)) {
+        void fetchAllBackendState();
+      } else {
+        setLoading(false);
       }
-      void fetchAllBackendState();
-    } else if (!authLoading) {
-      setLoading(false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authenticated, mfaRequired]);
-
-  useEffect(() => {
-    const onAuthRequired = () => {
-      if (Date.now() - lastAuthConfirmedAtRef.current < 1500) {
-        return;
-      }
-      void checkAuthSession();
+    });
+    return () => {
+      active = false;
     };
-    window.addEventListener('winhood:auth-required', onAuthRequired);
-    return () => window.removeEventListener('winhood:auth-required', onAuthRequired);
-  }, [checkAuthSession]);
+  }, [checkTotpStatus, fetchAllBackendState]);
+
+  useEffect(() => {
+    const onTotpRequired = () => {
+      setTotpStatus((prev) => ({ ...prev, enabled: true, unlocked: false }));
+    };
+    window.addEventListener('winhood:totp-required', onTotpRequired);
+    return () => window.removeEventListener('winhood:totp-required', onTotpRequired);
+  }, []);
 
   const handleRunUpdated = useCallback((updatedRun: BenchmarkRun) => {
     setDashboardData((prev) => {
@@ -462,7 +389,7 @@ export default function App() {
 
   // Polling leve para verificar se há alguma corrida com status RUNNING ativa
   useEffect(() => {
-    if (!authenticated || mfaRequired) return;
+    if (totpStatus.enabled && !totpStatus.unlocked) return;
     const checkActiveProgress = async () => {
       try {
         const res = await fetch('/api/benchmark-runs/active-progress');
@@ -485,7 +412,7 @@ export default function App() {
       void checkActiveProgress();
     }, activeRunningRun ? 1200 : 3500);
     return () => clearInterval(interval);
-  }, [authenticated, mfaRequired, activeRunningRun, fetchAllBackendState]);
+  }, [totpStatus.enabled, totpStatus.unlocked, activeRunningRun, fetchAllBackendState]);
 
   const handleEmergencyCancelRun = async (runId: string) => {
     try {
@@ -505,159 +432,118 @@ export default function App() {
     }
   };
 
-  const handleSwitchRole = async (
-    role: 'ADMIN' | 'SECURITY_LEAD' | 'AUDITOR' | 'QA_ENGINEER'
-  ) => {
-    try {
-      const res = await fetch('/api/auth/switch-role', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role }),
-      });
-      const data = await res.json();
-      if (res.ok && data.user) {
-        setCurrentUser(data.user);
-        notify(`Perfil RBAC alterado para ${role}.`, 'success');
-        await fetchAllBackendState();
-      } else {
-        notify(data.message || data.error || 'Alteração de perfil bloqueada.', 'error');
-      }
-    } catch {
-      notify('Erro ao alterar perfil RBAC.', 'error');
+  const handleOpenTotpModal = async () => {
+    setTotpVerifyCode('');
+    setTotpDisableCode('');
+    setTotpConfirmSuccessCodes(null);
+    setTotpCopiedRecovery(false);
+    if (totpStatus.enabled) {
+      setTotpSetupPayload(null);
+      setIsTotpModalOpen(true);
+      return;
     }
-  };
-
-  const handleLogout = async () => {
+    setTotpBusy(true);
     try {
-      await fetch('/api/auth/logout', { method: 'POST' });
-    } finally {
-      clearClientAuthTokens();
-      lastAuthConfirmedAtRef.current = 0;
-      setAuthenticated(false);
-      setAuthStatus('unauthenticated');
-      setMfaRequired(false);
-      setIsAdminOrigin(false);
-      setCurrentUser(null);
-      setDashboardData(null);
-      setProjects([]);
-      setSoftwares([]);
-      setSecuritySuiteFilters(DEFAULT_SECURITY_SUITE_FILTERS);
-      notify('Sessão encerrada com segurança.', 'success');
-      await checkAuthSession();
-    }
-  };
-
-  const [isDeleteAccountOpen, setIsDeleteAccountOpen] = useState(false);
-  const [deleteVerifyPassword, setDeleteVerifyPassword] = useState('');
-  const [deleteVerifyPin, setDeleteVerifyPin] = useState('');
-  const [deletingAccount, setDeletingAccount] = useState(false);
-
-  const handleDeleteOwnAccount = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!currentUser) return;
-    setDeletingAccount(true);
-    try {
-      const res = await fetch('/api/auth/me', {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          password: deleteVerifyPassword.trim() || undefined,
-          pin: deleteVerifyPin.trim() || undefined,
-        }),
-      });
-      const data = await res.json().catch(() => ({}));
+      const res = await fetch('/api/totp/setup', { method: 'POST', body: '{}' });
+      const data = (await res.json()) as TotpSetupResponse & { error?: string; message?: string };
       if (!res.ok) {
-        notify(
-          data.error || 'Falha ao excluir conta. Verifique sua senha ou PIN de confirmação.',
-          'error'
-        );
+        notify(data.message || data.error || 'Falha ao iniciar configuração TOTP 2FA.', 'error');
         return;
       }
-      setIsDeleteAccountOpen(false);
-      setDeleteVerifyPassword('');
-      setDeleteVerifyPin('');
-      clearClientAuthTokens();
-      lastAuthConfirmedAtRef.current = 0;
-      setAuthenticated(false);
-      setAuthStatus('unauthenticated');
-      setMfaRequired(false);
-      setIsAdminOrigin(false);
-      setCurrentUser(null);
-      setDashboardData(null);
-      setProjects([]);
-      setSoftwares([]);
-      notify('Sua conta local e todas as sessões ativas foram excluídas permanentemente.', 'success');
-      await checkAuthSession();
+      setTotpSetupPayload(data);
+      setIsTotpModalOpen(true);
     } catch {
-      notify('Erro de comunicação ao tentar excluir conta local.', 'error');
+      notify('Erro ao iniciar configuração TOTP 2FA opcional.', 'error');
     } finally {
-      setDeletingAccount(false);
+      setTotpBusy(false);
     }
   };
 
-  const handleOpenMfaSetup = async () => {
-    try {
-      const res = await fetch('/api/auth/totp/setup', { method: 'POST' });
-      const data = await res.json();
-      if (!res.ok) {
-        notify(data.error || 'Falha ao iniciar configuração TOTP MFA.', 'error');
-        return;
-      }
-      const secret = data.secret || data.secretBase32;
-      const otpauthUrl = data.otpauthUrl || data.otpauthUri;
-      let qrDataUrl: string | null = null;
-      if (otpauthUrl) {
-        try {
-          qrDataUrl = await QRCode.toDataURL(otpauthUrl, { width: 180, margin: 2 });
-        } catch {
-          qrDataUrl = null;
-        }
-      }
-      setMfaSetupPayload({ secret, otpauthUrl, qrDataUrl, recoveryCodes: undefined });
-      setMfaVerifyCode('');
-      setMfaCopiedRecovery(false);
-      setIsMfaSetupOpen(true);
-    } catch {
-      notify('Erro ao configurar MFA.', 'error');
-    }
-  };
-
-  const verifyMfaSetupCode = async (codeOverride?: string) => {
-    const cleanCode = (codeOverride ?? mfaVerifyCode).replace(/\D/g, '').slice(0, 6);
+  const confirmTotpSetupCode = async (codeOverride?: string) => {
+    const cleanCode = (codeOverride ?? totpVerifyCode).replace(/\D/g, '').slice(0, 6);
     if (cleanCode.length !== 6) {
       notify('Informe os 6 dígitos do aplicativo autenticador.', 'error');
       return;
     }
+    setTotpBusy(true);
     try {
-      const res = await fetch('/api/auth/totp/verify-setup', {
+      const res = await fetch('/api/totp/confirm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ totpCode: cleanCode }),
+        body: JSON.stringify({ code: cleanCode }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        notify(data.error || 'Código TOTP inválido.', 'error');
+      const data = (await res.json()) as TotpVerifyResponse & { error?: string; message?: string };
+      if (!res.ok || !data.ok) {
+        notify(data.message || data.error || 'Código TOTP inválido.', 'error');
         return;
       }
-      if (data.user) setCurrentUser(data.user);
-      if (Array.isArray(data.recoveryCodes) && data.recoveryCodes.length > 0) {
-        setMfaSetupPayload((prev) =>
-          prev ? { ...prev, recoveryCodes: data.recoveryCodes } : null
-        );
-        notify('MFA ativado! Salve os 8 códigos de recuperação exibidos no modal.', 'success');
+      if (data.csrfToken) setGlobalCsrfToken(data.csrfToken, false);
+      if (data.unlockToken) setGlobalSessionToken(data.unlockToken, false);
+      await checkTotpStatus();
+      if (totpSetupPayload?.recoveryCodes?.length) {
+        setTotpConfirmSuccessCodes(totpSetupPayload.recoveryCodes);
       } else {
-        setIsMfaSetupOpen(false);
-        setMfaSetupPayload(null);
-        notify('Autenticação MFA (TOTP) ativada e verificada!', 'success');
+        setIsTotpModalOpen(false);
       }
+      notify('Proteção opcional 2FA (TOTP RFC-6238) ativada com sucesso!', 'success');
     } catch {
-      notify('Erro ao confirmar código MFA.', 'error');
+      notify('Erro ao confirmar ativação do TOTP 2FA.', 'error');
+    } finally {
+      setTotpBusy(false);
     }
   };
 
-  const handleConfirmMfaSetup = async (e: React.FormEvent) => {
+  const handleConfirmTotpSetup = async (e: React.FormEvent) => {
     e.preventDefault();
-    await verifyMfaSetupCode();
+    await confirmTotpSetupCode();
+  };
+
+  const handleLockTotpSession = async () => {
+    setTotpBusy(true);
+    try {
+      const res = await fetch('/api/totp/lock', { method: 'POST', body: '{}' });
+      if (res.ok) {
+        clearClientAuthTokens();
+        setIsTotpModalOpen(false);
+        setTotpStatus((prev) => ({ ...prev, enabled: true, unlocked: false }));
+        notify('Workspace local bloqueado. Informe seu código TOTP para desbloquear.', 'success');
+      }
+    } catch {
+      notify('Erro ao bloquear sessão TOTP.', 'error');
+    } finally {
+      setTotpBusy(false);
+    }
+  };
+
+  const handleDisableTotp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = totpDisableCode.trim();
+    if (!trimmed) {
+      notify('Informe o código TOTP de 6 dígitos ou código de recuperação para desativar.', 'error');
+      return;
+    }
+    setTotpBusy(true);
+    try {
+      const res = await fetch('/api/totp/disable', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: trimmed }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        notify(data.message || data.error || 'Código TOTP ou código de recuperação inválido.', 'error');
+        return;
+      }
+      clearClientAuthTokens();
+      setIsTotpModalOpen(false);
+      setTotpDisableCode('');
+      await checkTotpStatus();
+      notify('Proteção 2FA (TOTP) desativada. Acesso local livre restaurado.', 'success');
+    } catch {
+      notify('Erro ao desativar proteção TOTP 2FA.', 'error');
+    } finally {
+      setTotpBusy(false);
+    }
   };
 
   const handleSeedRealWorkspace = async () => {
@@ -935,86 +821,48 @@ export default function App() {
           </nav>
         </div>
 
-        {/* User Status & RBAC / MFA / Logout in Sidebar Footer */}
+        {/* Local-First Unrestricted Workspace & Optional TOTP 2FA Control in Sidebar Footer */}
         {!sidebarCollapsed && (
           <div className="p-4 border-t border-slate-200 dark:border-slate-800/80 space-y-2.5 text-xs">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 text-slate-700 dark:text-slate-300 font-semibold min-w-0">
-                <UserCheck className="w-4 h-4 text-[#31d6c4] shrink-0" />
-                <span className="truncate">{currentUser?.name || 'Sessão não iniciada'}</span>
+                <ShieldCheck className="w-4 h-4 text-[#31d6c4] shrink-0" />
+                <span className="truncate">Acesso Local Livre</span>
               </div>
-              {currentUser && (
+              {totpStatus.enabled && (
                 <button
                   type="button"
-                  onClick={handleLogout}
-                  aria-label="Encerrar Sessão"
-                  title="Encerrar Sessão"
-                  className="p-1 rounded border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-rose-500 hover:border-rose-400 cursor-pointer shrink-0"
+                  onClick={() => void handleLockTotpSession()}
+                  aria-label="Bloquear Workspace"
+                  title="Bloquear Workspace agora"
+                  className="p-1 rounded border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-amber-500 hover:border-amber-400 cursor-pointer shrink-0"
                 >
-                  <LogOut className="w-3.5 h-3.5" />
+                  <Lock className="w-3.5 h-3.5" />
                 </button>
               )}
             </div>
 
-            {currentUser && (
-              <>
-                <div className="text-[11px] font-mono text-slate-500 truncate">
-                  {currentUser.email}
-                </div>
-                <div className="flex items-center justify-between gap-2 text-[11px] font-mono">
-                  <span className="text-emerald-600 dark:text-[#31d6c4] font-bold">
-                    Perfil: {currentUser.role}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={handleOpenMfaSetup}
-                    className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border border-slate-300 dark:border-slate-700 hover:border-[#31d6c4] text-slate-600 dark:text-slate-300 cursor-pointer"
-                  >
-                    <KeyRound className="w-3 h-3 text-[#31d6c4]" />
-                    <span>{currentUser.mfaEnabled ? 'MFA Ativo' : 'Ativar MFA'}</span>
-                  </button>
-                </div>
-                <div className="pt-1 flex items-center justify-between gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setDeleteVerifyPassword('');
-                      setDeleteVerifyPin('');
-                      setIsDeleteAccountOpen(true);
-                    }}
-                    className="inline-flex items-center gap-1 text-[10px] font-semibold text-rose-500 hover:text-rose-400 hover:underline cursor-pointer"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                    <span>Excluir minha conta</span>
-                  </button>
-                </div>
-                {isAdminOrigin && (
-                  <div>
-                    <label
-                      htmlFor="sidebar-role-switcher"
-                      className="block text-[10px] text-slate-400 mb-1"
-                    >
-                      Pré-visualização RBAC (Sessão ADMIN):
-                    </label>
-                    <select
-                      id="sidebar-role-switcher"
-                      value={currentUser.role}
-                      onChange={(e) =>
-                        handleSwitchRole(
-                          e.target.value as 'ADMIN' | 'SECURITY_LEAD' | 'AUDITOR' | 'QA_ENGINEER'
-                        )
-                      }
-                      className="w-full rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-2 py-1 text-[11px] font-mono text-slate-900 dark:text-slate-100"
-                    >
-                      <option value="ADMIN">ADMIN (Total)</option>
-                      <option value="SECURITY_LEAD">SECURITY_LEAD</option>
-                      <option value="QA_ENGINEER">QA_ENGINEER</option>
-                      <option value="AUDITOR">AUDITOR (Somente Leitura)</option>
-                    </select>
-                  </div>
-                )}
-              </>
-            )}
+            <div className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">
+              Sem login, cadastro, senha ou OAuth. Proteção 2FA opcional configurável abaixo.
+            </div>
+
+            <button
+              type="button"
+              onClick={() => void handleOpenTotpModal()}
+              disabled={totpBusy}
+              className={`w-full inline-flex items-center justify-center gap-1.5 text-[11px] font-semibold px-2.5 py-2 rounded-lg border transition-colors cursor-pointer ${
+                totpStatus.enabled
+                  ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-[#31d6c4] hover:bg-emerald-500/20'
+                  : 'border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:border-[#31d6c4]'
+              }`}
+            >
+              <KeyRound className="w-3.5 h-3.5 text-[#31d6c4] shrink-0" />
+              <span>
+                {totpStatus.enabled
+                  ? 'Proteção 2FA (TOTP Opcional) · Ativa'
+                  : 'Proteção 2FA (TOTP Opcional)'}
+              </span>
+            </button>
           </div>
         )}
       </aside>
@@ -1164,7 +1012,11 @@ export default function App() {
             <button
               type="button"
               onClick={() => {
-                void checkAuthSession(true);
+                void checkTotpStatus(true).then((st) => {
+                  if (st && (!st.enabled || st.unlocked)) {
+                    void fetchAllBackendState();
+                  }
+                });
               }}
               className="px-3 py-1 rounded bg-amber-500 text-slate-950 font-bold hover:bg-amber-400 transition-colors cursor-pointer shrink-0"
             >
@@ -1182,13 +1034,9 @@ export default function App() {
           />
 
           <ModuleErrorBoundary resetKey={activeNav} moduleName={activeNavLabel}>
-            {authStatus === 'loading' ? (
-              <div className="h-64 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] animate-pulse p-6 text-xs text-slate-500 font-mono flex items-center justify-center">
-                Verificando sessão autenticada e integridade do cofre KMS...
-              </div>
-            ) : !authenticated || mfaRequired ? (
+            {totpStatus.enabled && !totpStatus.unlocked ? (
               <div className="h-64 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0f141c] p-6 text-xs text-slate-500 font-mono flex items-center justify-center">
-                Aguardando autenticação na plataforma WinHood...
+                Workspace bloqueado pela proteção opcional 2FA (TOTP). Informe seu código para desbloquear...
               </div>
             ) : (
             <Suspense
@@ -1251,7 +1099,6 @@ export default function App() {
             {activeNav === 'tools_integrations' && (
               <ToolsAndIntegrationsModule
                 softwares={softwares}
-                currentUserRole={currentUser?.role}
                 onNotify={notify}
               />
             )}
@@ -1379,27 +1226,29 @@ export default function App() {
         </ModuleErrorBoundary>
       )}
 
-      {/* TOTP MFA Configuration Modal */}
-      {isMfaSetupOpen && mfaSetupPayload && (
+      {/* Optional TOTP 2FA Management Modal (Setup / Recovery Codes / Lock / Disable) */}
+      {isTotpModalOpen && (
         <div
           role="dialog"
           aria-modal="true"
+          aria-labelledby="optional-totp-modal-title"
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4"
         >
-          <form
-            onSubmit={handleConfirmMfaSetup}
-            className="w-full max-w-md rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0c1017] p-5 space-y-4 text-xs shadow-2xl"
-          >
+          <div className="w-full max-w-md rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0c1017] p-5 space-y-4 text-xs shadow-2xl">
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+              <h3
+                id="optional-totp-modal-title"
+                className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2"
+              >
                 <KeyRound className="w-4 h-4 text-[#31d6c4]" />
-                <span>Configurar Autenticação 2FA (TOTP RFC-6238)</span>
+                <span>Proteção 2FA (TOTP Opcional — RFC-6238)</span>
               </h3>
               <button
                 type="button"
                 onClick={() => {
-                  setIsMfaSetupOpen(false);
-                  setMfaSetupPayload(null);
+                  setIsTotpModalOpen(false);
+                  setTotpSetupPayload(null);
+                  setTotpConfirmSuccessCodes(null);
                 }}
                 className="text-slate-400 hover:text-slate-200 cursor-pointer"
               >
@@ -1407,13 +1256,13 @@ export default function App() {
               </button>
             </div>
 
-            {mfaSetupPayload.recoveryCodes && mfaSetupPayload.recoveryCodes.length > 0 ? (
+            {totpConfirmSuccessCodes && totpConfirmSuccessCodes.length > 0 ? (
               <div className="space-y-3">
                 <div className="p-3 rounded-lg border border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 font-semibold">
-                  Autenticação 2FA ativada com sucesso! Guarde seus 8 códigos de recuperação de uso único:
+                  Proteção 2FA (TOTP) ativada! Guarde seus 8 códigos de recuperação de uso único:
                 </div>
                 <div className="grid grid-cols-2 gap-2 font-mono text-xs">
-                  {mfaSetupPayload.recoveryCodes.map((code) => (
+                  {totpConfirmSuccessCodes.map((code) => (
                     <div
                       key={code}
                       className="p-2 rounded border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10] text-center select-all font-bold"
@@ -1427,30 +1276,30 @@ export default function App() {
                     type="button"
                     onClick={() => {
                       void navigator.clipboard
-                        .writeText(mfaSetupPayload.recoveryCodes!.join('\n'))
+                        .writeText(totpConfirmSuccessCodes.join('\n'))
                         .then(() => {
-                          setMfaCopiedRecovery(true);
-                          setTimeout(() => setMfaCopiedRecovery(false), 2500);
+                          setTotpCopiedRecovery(true);
+                          setTimeout(() => setTotpCopiedRecovery(false), 2500);
                         })
                         .catch(() => undefined);
                     }}
                     className="flex-1 py-2 rounded-lg border border-slate-300 dark:border-slate-700 font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
                   >
-                    {mfaCopiedRecovery ? (
+                    {totpCopiedRecovery ? (
                       <Check className="w-3.5 h-3.5 text-emerald-500" />
                     ) : (
                       <Copy className="w-3.5 h-3.5" />
                     )}
-                    <span>{mfaCopiedRecovery ? 'Copiado!' : 'Copiar Códigos'}</span>
+                    <span>{totpCopiedRecovery ? 'Copiado!' : 'Copiar Códigos'}</span>
                   </button>
                   <button
                     type="button"
                     onClick={() => {
                       const content = [
-                        '# WinHood Security Benchmark — Códigos de Recuperação TOTP',
+                        '# WinHood Benchmarking — Códigos de Recuperação TOTP 2FA',
                         `# Gerado em: ${new Date().toISOString()}`,
                         '',
-                        ...mfaSetupPayload.recoveryCodes!,
+                        ...totpConfirmSuccessCodes,
                       ].join('\n');
                       const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
                       const url = URL.createObjectURL(blob);
@@ -1471,42 +1320,84 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => {
-                    setIsMfaSetupOpen(false);
-                    setMfaSetupPayload(null);
+                    setIsTotpModalOpen(false);
+                    setTotpSetupPayload(null);
+                    setTotpConfirmSuccessCodes(null);
                   }}
                   className="w-full py-2 rounded-lg font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] cursor-pointer"
                 >
                   Concluir e Fechar
                 </button>
               </div>
-            ) : (
-              <>
+            ) : totpStatus.enabled ? (
+              <div className="space-y-4">
+                <div className="p-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">
+                  <div className="font-bold">Proteção opcional 2FA (TOTP) ativa</div>
+                  <div className="text-[11px] mt-0.5">
+                    Códigos de recuperação restantes: <strong>{totpStatus.remainingRecoveryCodes}</strong>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => void handleLockTotpSession()}
+                  disabled={totpBusy}
+                  className="w-full py-2 rounded-lg font-semibold border border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 hover:bg-amber-500/20 inline-flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                >
+                  <Lock className="w-3.5 h-3.5" />
+                  <span>Bloquear Workspace Agora</span>
+                </button>
+
+                <form onSubmit={handleDisableTotp} className="space-y-2.5 pt-2 border-t border-slate-200 dark:border-slate-800">
+                  <label htmlFor="app-totp-disable-input" className="block font-semibold text-slate-700 dark:text-slate-200">
+                    Desativar 2FA (informe código TOTP de 6 dígitos ou código de recuperação):
+                  </label>
+                  <input
+                    id="app-totp-disable-input"
+                    type="text"
+                    autoComplete="one-time-code"
+                    value={totpDisableCode}
+                    onChange={(e) => setTotpDisableCode(e.target.value.toUpperCase().slice(0, 12))}
+                    placeholder="000000 ou XXXX-XXXX"
+                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 font-mono text-center text-sm tracking-[0.2em]"
+                  />
+                  <button
+                    type="submit"
+                    disabled={totpBusy || !totpDisableCode.trim()}
+                    className="w-full py-2 rounded-lg font-bold bg-rose-600 text-white hover:bg-rose-500 cursor-pointer disabled:opacity-50"
+                  >
+                    Desativar 2FA e Restaurar Acesso Livre
+                  </button>
+                </form>
+              </div>
+            ) : totpSetupPayload ? (
+              <form onSubmit={handleConfirmTotpSetup} className="space-y-4">
                 <div className="p-3 rounded border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10] space-y-2.5 text-center">
                   <div className="text-slate-600 dark:text-slate-300 font-semibold">
-                    Escaneie no Google Authenticator / Authy:
+                    Escaneie no Google Authenticator / Authy / 1Password:
                   </div>
-                  {mfaSetupPayload.qrDataUrl && (
+                  {totpSetupPayload.qrDataUrl && (
                     <div className="flex justify-center p-2 bg-white rounded shadow-inner">
                       <img
-                        src={mfaSetupPayload.qrDataUrl}
-                        alt="QR Code TOTP MFA"
-                        className="w-36 h-36 object-contain"
+                        src={totpSetupPayload.qrDataUrl}
+                        alt="QR Code TOTP 2FA"
+                        className="w-40 h-40 object-contain"
                       />
                     </div>
                   )}
                   <div className="text-left space-y-1">
                     <div className="text-slate-500">Chave Secreta Base32 (Manual):</div>
                     <div className="font-mono font-bold text-[#0e9f8e] dark:text-[#31d6c4] break-all select-all">
-                      {mfaSetupPayload.secret}
+                      {totpSetupPayload.secret}
                     </div>
                   </div>
                 </div>
                 <div>
-                  <label htmlFor="app-mfa-verify-input" className="block font-semibold mb-1">
+                  <label htmlFor="app-totp-verify-input" className="block font-semibold mb-1">
                     Informe o código de 6 dígitos para ativar:
                   </label>
                   <input
-                    id="app-mfa-verify-input"
+                    id="app-totp-verify-input"
                     name="one-time-code"
                     type="text"
                     required
@@ -1514,12 +1405,12 @@ export default function App() {
                     pattern="[0-9]*"
                     autoComplete="one-time-code"
                     maxLength={6}
-                    value={mfaVerifyCode}
+                    value={totpVerifyCode}
                     onChange={(e) => {
                       const clean = e.target.value.replace(/\D/g, '').slice(0, 6);
-                      setMfaVerifyCode(clean);
+                      setTotpVerifyCode(clean);
                       if (clean.length === 6) {
-                        void verifyMfaSetupCode(clean);
+                        void confirmTotpSetupCode(clean);
                       }
                     }}
                     placeholder="000000"
@@ -1528,124 +1419,28 @@ export default function App() {
                 </div>
                 <button
                   type="submit"
-                  className="w-full py-2 rounded-lg font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] cursor-pointer"
+                  disabled={totpBusy}
+                  className="w-full py-2 rounded-lg font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] cursor-pointer disabled:opacity-50"
                 >
-                  Validar e Ativar TOTP MFA
+                  Validar e Ativar TOTP 2FA Opcional
                 </button>
-              </>
-            )}
-          </form>
+              </form>
+            ) : null}
+          </div>
         </div>
       )}
 
-      {/* Local Account Deletion Confirmation Modal (DELETE /api/auth/me) */}
-      {isDeleteAccountOpen && currentUser && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4"
-        >
-          <form
-            onSubmit={handleDeleteOwnAccount}
-            className="w-full max-w-md rounded-xl border border-rose-500/40 bg-white dark:bg-[#0c1017] p-5 space-y-4 text-xs shadow-2xl"
-          >
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-bold text-rose-600 dark:text-rose-400 flex items-center gap-2">
-                <Trash2 className="w-4 h-4" />
-                <span>Excluir minha conta local</span>
-              </h3>
-              <button
-                type="button"
-                onClick={() => setIsDeleteAccountOpen(false)}
-                className="text-slate-400 hover:text-slate-200 cursor-pointer"
-              >
-                Fechar
-              </button>
-            </div>
-
-            <p className="text-slate-600 dark:text-slate-300 leading-relaxed">
-              Esta ação removerá permanentemente o registro da conta{' '}
-              <strong className="font-mono">{currentUser.email}</strong> de{' '}
-              <code className="font-mono">auth_users.json</code> e revogará todas as sessões ativas.
-            </p>
-
-            <div className="space-y-3">
-              <div>
-                <label htmlFor="delete-account-password" className="block font-semibold mb-1">
-                  Confirme sua Senha atual (ou preencha o PIN abaixo):
-                </label>
-                <input
-                  id="delete-account-password"
-                  type="password"
-                  autoComplete="current-password"
-                  value={deleteVerifyPassword}
-                  onChange={(e) => setDeleteVerifyPassword(e.target.value)}
-                  placeholder="Senha atual da conta"
-                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 text-slate-900 dark:text-slate-100"
-                />
-              </div>
-
-              <div>
-                <label htmlFor="delete-account-pin" className="block font-semibold mb-1">
-                  Ou confirme com seu PIN Rápido (6 a 8 dígitos):
-                </label>
-                <input
-                  id="delete-account-pin"
-                  type="password"
-                  inputMode="numeric"
-                  pattern="[0-9]*"
-                  maxLength={8}
-                  value={deleteVerifyPin}
-                  onChange={(e) => setDeleteVerifyPin(e.target.value.replace(/\D/g, '').slice(0, 8))}
-                  placeholder="PIN de 6 a 8 dígitos"
-                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#080b10] px-3 py-2 font-mono tracking-widest text-slate-900 dark:text-slate-100"
-                />
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2 pt-1">
-              <button
-                type="submit"
-                disabled={deletingAccount}
-                className="flex-1 py-2.5 rounded-lg font-bold bg-rose-600 text-white hover:bg-rose-500 transition-colors cursor-pointer disabled:opacity-50"
-              >
-                {deletingAccount ? 'Excluindo...' : 'Confirmar Exclusão Permanente'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setIsDeleteAccountOpen(false)}
-                className="px-4 py-2.5 rounded-lg font-semibold border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 cursor-pointer"
-              >
-                Cancelar
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
-
-      {/* Global Auth Gate (Somente quando o backend respondeu AUTH_REQUIRED, nunca quando OFFLINE ou API_ERROR) */}
-      {!authLoading &&
-        authStatus !== 'loading' &&
-        backendState !== 'OFFLINE' &&
+      {/* Optional TOTP 2FA Unlock Dialog (Only when user explicitly enabled TOTP 2FA and session is locked) */}
+      {backendState !== 'OFFLINE' &&
         backendState !== 'API_ERROR' &&
         backendState !== 'RECOVERING' &&
-        (!authenticated || mfaRequired) && (
-          <AuthGateModal
-            bootstrapRequired={bootstrapRequired}
-            bootstrapTokenFileHint={bootstrapTokenFileHint}
-            mfaRequired={mfaRequired}
-            pendingUser={currentUser}
-            onAuthenticated={(user) => {
-              lastAuthConfirmedAtRef.current = Date.now();
-              setCurrentUser(user);
-              setAuthenticated(true);
-              setAuthStatus('authenticated');
-              setMfaRequired(false);
-              setBootstrapRequired(false);
-              setBackendState('ONLINE');
-              if (user.role === 'ADMIN') setIsAdminOrigin(true);
+        totpStatus.enabled &&
+        !totpStatus.unlocked && (
+          <TotpUnlockModal
+            onUnlocked={(_res: TotpVerifyResponse) => {
+              setTotpStatus((prev) => ({ ...prev, enabled: true, unlocked: true }));
+              void fetchAllBackendState();
             }}
-            onRefreshSession={() => checkAuthSession(false)}
           />
         )}
     </div>

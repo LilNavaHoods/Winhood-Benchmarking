@@ -27,12 +27,13 @@ import * as scoringEngine from '../engine/scoringEngine';
 import * as marketDiscovery from '../engine/marketCompetitorDiscoveryEngine';
 import * as methodologyCatalog from '../engine/methodologyCatalogEngine';
 import {
-  extractGitHubOAuthErrorFromSearch,
-  resolveGitHubOAuthCtaLabel,
-  resolveGitHubOAuthErrorMessage,
+  isValidRecoveryCodeFormat,
+  isValidTotpSixDigit,
+  normalizeRecoveryCode,
+  normalizeTotpDigits,
 } from './authTypes';
 import { BenchmarkWizardModule } from '../components/BenchmarkWizardModule';
-import { AuthGateModal } from '../components/AuthGateModal';
+import { TotpUnlockModal } from '../components/TotpUnlockModal';
 import {
   analyzeBrowserDependencyGraph,
   extractRuntimeSpecifiersFromSource,
@@ -127,7 +128,7 @@ test('validateEquivalenceConditions validates boundaries and rejects out-of-rang
   assert.equal(outOfRange.reasons.length, 4);
 });
 
-test('classifyScoreScale and resolveGitHubOAuthErrorMessage return deterministic outputs', () => {
+test('classifyScoreScale and browser-safe Optional TOTP helpers return deterministic outputs', () => {
   assert.equal(classifyScoreScale(0.2), 'Inexistente');
   assert.equal(classifyScoreScale(1.5), 'Crítico');
   assert.equal(classifyScoreScale(2.5), 'Insuficiente');
@@ -135,11 +136,13 @@ test('classifyScoreScale and resolveGitHubOAuthErrorMessage return deterministic
   assert.equal(classifyScoreScale(4.2), 'Muito bom');
   assert.equal(classifyScoreScale(4.9), 'Excelente');
 
-  assert.ok(resolveGitHubOAuthErrorMessage('access_denied')?.includes('cancelada'));
-  assert.ok(resolveGitHubOAuthErrorMessage('not_configured')?.includes('administrador'));
-  assert.ok(resolveGitHubOAuthErrorMessage('signup_disabled')?.includes('desabilitado'));
-  assert.ok(resolveGitHubOAuthErrorMessage('unknown_code_xyz')?.includes('GitHub'));
-  assert.equal(resolveGitHubOAuthErrorMessage(null), null);
+  assert.equal(normalizeTotpDigits(' 123-456 78 '), '123456');
+  assert.equal(isValidTotpSixDigit('123456'), true);
+  assert.equal(isValidTotpSixDigit('12345'), false);
+  assert.equal(normalizeRecoveryCode(' abcd-12ef '), 'ABCD12EF');
+  assert.equal(isValidRecoveryCodeFormat('ABCD-12EF'), true);
+  assert.equal(isValidRecoveryCodeFormat('ABCD12EF'), true);
+  assert.equal(isValidRecoveryCodeFormat('ZZZ'), false);
 });
 
 test('Browser-import checker passes on real WinHood frontend and catches all forbidden Node import patterns', () => {
@@ -152,7 +155,7 @@ test('Browser-import checker passes on real WinHood frontend and catches all for
   );
   assert.ok(liveReport.scannedFiles.includes('src/components/BenchmarkWizardModule.tsx'));
   assert.ok(liveReport.scannedFiles.includes('src/components/VeracityAdaptersReportsModule.tsx'));
-  assert.ok(liveReport.scannedFiles.includes('src/components/AuthGateModal.tsx'));
+  assert.ok(liveReport.scannedFiles.includes('src/components/TotpUnlockModal.tsx'));
   assert.ok(liveReport.scannedFiles.includes('src/shared/benchmarkWeights.ts'));
 
   // 2. Specifier detection: type-only imports must be ignored; runtime imports caught
@@ -223,7 +226,7 @@ test('Browser-import checker passes on real WinHood frontend and catches all for
   }
 });
 
-test('BenchmarkWizardModule and AuthGateModal render cleanly via SSR without Node-only runtime crashes', () => {
+test('BenchmarkWizardModule and TotpUnlockModal render cleanly via SSR without Node-only runtime crashes', () => {
   const wizardHtml = renderToStaticMarkup(
     React.createElement(BenchmarkWizardModule, {
       projects: [],
@@ -240,19 +243,17 @@ test('BenchmarkWizardModule and AuthGateModal render cleanly via SSR without Nod
   assert.ok(wizardHtml.includes('Modalidade B'), 'Wizard must render Modalidade B (A/B Compare)');
   assert.ok(!wizardHtml.includes('node:child_process'), 'Wizard must never leak Node error');
 
-  const authHtml = renderToStaticMarkup(
-    React.createElement(AuthGateModal, {
-      bootstrapRequired: false,
-      mfaRequired: false,
-      pendingUser: null,
-      onAuthenticated: () => {},
-      onRefreshSession: async () => {},
+  const totpHtml = renderToStaticMarkup(
+    React.createElement(TotpUnlockModal, {
+      onUnlocked: () => {},
     })
   );
   assert.ok(
-    authHtml.includes('Entrar ou cadastrar com GitHub'),
-    'AuthGateModal must present clean GitHub social login CTA'
+    totpHtml.includes('Sessão Protegida por 2FA (TOTP)'),
+    'TotpUnlockModal must present clean TOTP unlock dialog'
   );
+  assert.ok(totpHtml.includes('role="dialog"'));
+  assert.ok(totpHtml.includes('aria-modal="true"'));
 });
 
 test('Canonical single-source-of-truth identity: backend engines re-export exact shared implementations with zero duplication', () => {
@@ -467,10 +468,11 @@ test('Full-stack Benchmarking A/B flow: validation errors, cancellation, recover
     const port = (server.address() as import('node:net').AddressInfo).port;
     const baseUrl = `http://127.0.0.1:${port}`;
 
-    // 1. Authenticate via solo-local workspace session (1-click flow)
-    const authRes = await reqJson(baseUrl, 'POST', '/api/auth/solo-local', {});
-    assert.equal(authRes.status, 200);
-    assert.equal(authRes.data.authenticated, true);
+    // 1. Verify immediate Unrestricted Local Access (no login/signup required)
+    const totpStatusRes = await reqJson(baseUrl, 'GET', '/api/totp/status');
+    assert.equal(totpStatusRes.status, 200);
+    assert.equal(totpStatusRes.data.enabled, false);
+    assert.equal(totpStatusRes.data.unlocked, true);
 
     // 2. Create project + 2 real softwares + 1 metadata-only software
     const projRes = await reqJson(baseUrl, 'POST', '/api/projects', {
@@ -736,72 +738,16 @@ test('Full-stack Benchmarking A/B flow: validation errors, cancellation, recover
   }
 });
 
-test('GitHub Social OAuth frontend helpers: URL error parsing, query cleanup, rate_limited message, and dynamic CTA label', () => {
-  const none = extractGitHubOAuthErrorFromSearch('?tab=dashboard');
-  assert.equal(none.errorCode, null);
-  assert.equal(none.isNotConfigured, false);
-  assert.equal(none.message, null);
-  assert.equal(none.cleanedSearch, '?tab=dashboard');
-
-  const notConf = extractGitHubOAuthErrorFromSearch('?github_oauth_error=not_configured&ref=login');
-  assert.equal(notConf.errorCode, 'not_configured');
-  assert.equal(notConf.isNotConfigured, true);
-  assert.ok(notConf.message?.includes('indisponível'));
-  assert.equal(notConf.cleanedSearch, '?ref=login');
-
-  const signupBlocked = extractGitHubOAuthErrorFromSearch('?github_oauth_error=SIGNUP_DISABLED');
-  assert.equal(signupBlocked.errorCode, 'signup_disabled');
-  assert.equal(signupBlocked.isNotConfigured, false);
-  assert.ok(signupBlocked.message?.includes('desabilitado'));
-  assert.equal(signupBlocked.cleanedSearch, '');
-
-  const rateLimited = resolveGitHubOAuthErrorMessage('rate_limited');
-  assert.ok(rateLimited?.includes('Muitas tentativas'));
-
-  const unknown = resolveGitHubOAuthErrorMessage('unexpected_vendor_code');
-  assert.ok(unknown?.includes('Não foi possível concluir o login com GitHub'));
-
-  assert.equal(
-    resolveGitHubOAuthCtaLabel({ redirecting: false, signupAllowed: true }),
-    'Entrar ou cadastrar com GitHub'
-  );
-  assert.equal(
-    resolveGitHubOAuthCtaLabel({ redirecting: false, signupAllowed: false }),
-    'Entrar com GitHub'
-  );
-  assert.equal(
-    resolveGitHubOAuthCtaLabel({ redirecting: true, signupAllowed: true }),
-    'Redirecionando ao GitHub...'
-  );
-});
-
-test('AuthGateModal end-user UX keeps PAT/Device Flow tucked inside advanced details and avoids technical crypto jargon in header', () => {
+test('TotpUnlockModal UX renders clean RFC-6238 unlock prompt with zero login, password, PIN, or OAuth fields', () => {
   const html = renderToStaticMarkup(
-    React.createElement(AuthGateModal, {
-      bootstrapRequired: false,
-      mfaRequired: false,
-      pendingUser: null,
-      onAuthenticated: () => {},
-      onRefreshSession: async () => {},
+    React.createElement(TotpUnlockModal, {
+      onUnlocked: () => {},
     })
   );
-  assert.ok(html.includes('Entrar ou cadastrar com GitHub'));
-  assert.ok(html.includes('Autenticação segura para análise e benchmarking de software'));
-  assert.equal(html.includes('Scrypt N=32768'), false, 'End-user header must not expose Scrypt parameters');
-
-  // PAT and Client ID fields must NEVER be rendered in the initial end-user view (mounted only on explicit technical toggle inside <details>)
-  const detailsIdx = html.indexOf('<details');
-  assert.ok(detailsIdx > 0, 'Advanced details container must exist');
-  assert.equal(html.includes('winhood-github-pat'), false, 'PAT input must not be mounted in initial end-user DOM');
-  assert.equal(
-    html.includes('winhood-github-client-id'),
-    false,
-    'Client ID input must not be mounted in initial end-user DOM'
-  );
-  assert.ok(
-    html.indexOf('Compatibilidade técnica / CI') > detailsIdx,
-    'Technical compatibility toggle must remain tucked inside collapsed advanced details'
-  );
+  assert.ok(html.includes('Sessão Protegida por 2FA (TOTP)'));
+  assert.ok(html.includes('id="totp-unlock-code"'));
+  assert.equal(html.includes('Entrar com GitHub'), false, 'Must not render GitHub OAuth CTA');
+  assert.equal(html.includes('type="password"'), false, 'Must not render password login field');
+  assert.equal(html.includes('Personal Access Token'), false, 'Must not render PAT input');
+  assert.equal(html.includes('Client Secret'), false, 'Must not render OAuth Client Secret');
 });
-
-

@@ -65,24 +65,19 @@ test('VS Code Extension MVP: integrates with live WinHood API and automatically 
     const port = (server.address() as AddressInfo).port;
     const baseUrl = `http://127.0.0.1:${port}`;
 
-    // Bootstrap admin to obtain valid session/token or test public/authenticated SARIF route
-    const rawToken = fs
-      .readFileSync(path.join(tmpDataDir, 'bootstrap_admin_token.txt'), 'utf8')
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .find((l) => l && !l.startsWith('#'))!;
-
-    const bsRes = await fetch(`${baseUrl}/api/auth/bootstrap-admin`, {
+    // Live WinHood API works directly without login under Unrestricted Local Access
+    const liveSarifRes = await fetch(`${baseUrl}/api/analyze/sarif`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        bootstrapToken: rawToken,
-        name: 'IDE Tester',
-        email: 'ide@winhood.local',
-        password: 'WinHood#IdePassword2026!',
+        softwareName: 'IdeLiveSample',
+        filesMap: { 'app.ts': 'export function run(input: string) { return eval(input); }\n' },
+        deterministicTimestamp: '2026-11-14T00:00:00.000Z',
       }),
     });
-    assert.equal(bsRes.status, 201);
+    assert.equal(liveSarifRes.status, 200);
+    const liveSarifJson = (await liveSarifRes.json()) as { sarif?: { version?: string } };
+    assert.equal(liveSarifJson.sarif?.version, '2.1.0');
 
     // Offline fallback test against an unreachable port
     const tmpWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'winhood-vscode-ws-'));

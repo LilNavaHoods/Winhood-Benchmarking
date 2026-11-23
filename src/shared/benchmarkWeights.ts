@@ -88,3 +88,75 @@ export function normalizeEnabledCategoryWeights(
 
   return normalized;
 }
+
+export interface WeightRenormalizationSummary {
+  originalWeights: Record<BenchmarkCategoryKey, number>;
+  effectiveWeights: Record<BenchmarkCategoryKey, number>;
+  assessedCategories: BenchmarkCategoryKey[];
+  excludedCategories: BenchmarkCategoryKey[];
+  totalEnabledWeightSum: number;
+  measuredWeightSum: number;
+  redistributedWeightPercent: number;
+  measuredCoveragePercent: number;
+  applied: boolean;
+  explanation: string;
+}
+
+/**
+ * Excludes NOT_MEASURED / UNAVAILABLE / INCONCLUSIVE categories from the weighted average
+ * and explicitly renormalizes remaining measured category weights to 100%, returning
+ * the exact Effective Measurement Coverage percentage (`measuredCoveragePercent`).
+ */
+export function computeRenormalizedCategoryWeights(
+  weights: Partial<Record<BenchmarkCategoryKey, number>>,
+  enabledCategories: BenchmarkCategoryKey[],
+  assessedCategories: BenchmarkCategoryKey[]
+): WeightRenormalizationSummary {
+  const enabledList =
+    enabledCategories.length > 0 ? enabledCategories : [...ALL_BENCHMARK_CATEGORIES];
+  const originalWeights = normalizeEnabledCategoryWeights(weights, enabledList);
+  const assessedSet = new Set<BenchmarkCategoryKey>(assessedCategories);
+  const effectiveAssessed = enabledList.filter((k) => assessedSet.has(k));
+  const excludedCategories = enabledList.filter((k) => !assessedSet.has(k));
+
+  const totalEnabledWeightSum =
+    Math.round(enabledList.reduce((acc, k) => acc + (originalWeights[k] ?? 0), 0) * 100) / 100;
+  const measuredWeightSum =
+    Math.round(effectiveAssessed.reduce((acc, k) => acc + (originalWeights[k] ?? 0), 0) * 100) / 100;
+  const redistributedWeightPercent =
+    Math.round(Math.max(0, totalEnabledWeightSum - measuredWeightSum) * 100) / 100;
+
+  const measuredCoveragePercent =
+    totalEnabledWeightSum > 0
+      ? Math.round((measuredWeightSum / totalEnabledWeightSum) * 1000) / 10
+      : 0;
+
+  const effectiveWeights =
+    effectiveAssessed.length > 0
+      ? normalizeEnabledCategoryWeights(originalWeights, effectiveAssessed)
+      : (Object.fromEntries(
+          ALL_BENCHMARK_CATEGORIES.map((k) => [k, 0])
+        ) as Record<BenchmarkCategoryKey, number>);
+
+  const applied = excludedCategories.length > 0;
+  const explanation =
+    effectiveAssessed.length === 0
+      ? `Nenhuma das ${enabledList.length} categoria(s) habilitada(s) possui medição válida (Cobertura de Medição Efetiva: 0%). Nenhuma nota foi fabricada.`
+      : applied
+        ? `${excludedCategories.length} categoria(s) não medida(s)/indisponível(is) [${excludedCategories.join(', ')}] (${redistributedWeightPercent.toFixed(1)}% do peso original) excluída(s) da média ponderada; os ${measuredWeightSum.toFixed(1)}% restantes foram renormalizados proporcionalmente para 100.0% (Cobertura de Medição Efetiva: ${measuredCoveragePercent.toFixed(1)}%).`
+        : `100% do peso habilitado (${effectiveAssessed.length}/${enabledList.length} categorias) foi efetivamente medido; nenhuma renormalização necessária.`;
+
+  return {
+    originalWeights,
+    effectiveWeights,
+    assessedCategories: effectiveAssessed,
+    excludedCategories,
+    totalEnabledWeightSum,
+    measuredWeightSum,
+    redistributedWeightPercent,
+    measuredCoveragePercent,
+    applied,
+    explanation,
+  };
+}
+

@@ -73,11 +73,12 @@ export async function apiFetchJson<T>(
     if (
       response.status === 401 &&
       typeof window !== 'undefined' &&
-      !secureUrl.includes('/api/auth/') &&
+      !secureUrl.includes('/api/totp/') &&
+      !secureUrl.includes('/api/security/totp/') &&
       !getGlobalSessionToken()
     ) {
       window.dispatchEvent(
-        new CustomEvent('winhood:auth-required', { detail: { pathname: secureUrl, status: 401 } })
+        new CustomEvent('winhood:totp-required', { detail: { pathname: secureUrl, status: 401 } })
       );
     }
 

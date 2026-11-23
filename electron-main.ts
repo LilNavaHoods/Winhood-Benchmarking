@@ -1,13 +1,13 @@
 /**
  * WinHood Enterprise — Windows Desktop Main Process (Electron + Embedded Backend)
  *
- * Implements the mandatory sequential desktop lifecycle (Seções 9, 10, 11 e 13):
+ * Implements the mandatory sequential Local-First desktop lifecycle:
  * 1. Resolve writable per-user directory (`app.getPath('userData')` / `%APPDATA%\WinHood`).
  * 2. Ensure directory hierarchy (`database/`, `security/`, `keys/`, `reports/`, `sonar/`, `cache/`, `logs/`, `isolated_artifacts/`).
  * 3. Start embedded Express backend on `127.0.0.1` (port 3000 or dynamic fallback port if 3000 is busy).
  * 4. Poll `GET http://127.0.0.1:<port>/api/health` until `status === 'ONLINE' && ready === true`.
  * 5. Register validated IPC handlers with senderFrame origin verification.
- * 6. Create hardened `BrowserWindow` (`nodeIntegration: false`, `contextIsolation: true`, `sandbox: true`, `webSecurity: true`) and load `http://127.0.0.1:<port>`.
+ * 6. Create hardened `BrowserWindow` (`nodeIntegration: false`, `contextIsolation: true`, `sandbox: true`, `webSecurity: true`) and open directly in the workspace.
  * 7. Block unauthorized navigation and popups; cleanly close backend on application exit.
  */
 
@@ -137,12 +137,21 @@ export function isAuthorizedLoopbackSender(
   }
 }
 
-export function isAllowedExternalAuthUrl(rawUrl: string): boolean {
+/**
+ * Allows opening external HTTPS repository/documentation URLs on github.com
+ * while blocking OAuth/login redirect routes and non-HTTPS schemes.
+ */
+export function isAllowedExternalRepoUrl(rawUrl: string): boolean {
   try {
     const parsed = new URL(rawUrl);
     if (parsed.protocol !== 'https:') return false;
     const host = parsed.hostname.toLowerCase();
-    return host === 'github.com' || host === 'www.github.com';
+    if (host !== 'github.com' && host !== 'www.github.com') return false;
+    const lowerPath = parsed.pathname.toLowerCase();
+    if (lowerPath.startsWith('/login/oauth') || lowerPath.startsWith('/login/device')) {
+      return false;
+    }
+    return true;
   } catch {
     return false;
   }
@@ -241,23 +250,16 @@ export async function bootstrapWindowsDesktop(options?: {
 
   await app.whenReady();
 
-  // Ensure WebAuthn / FIDO2 / Windows Hello permissions on authorized loopback origin are not blocked
+  // Strict permission allowlist for loopback Electron desktop window
   if (session?.defaultSession) {
-    const allowedPermissions = new Set([
-      'publickey-credentials-get',
-      'publickey-credentials-create',
-      'clipboard-sanitized-write',
-      'clipboard-read',
-      'hid',
-      'usb',
-    ]);
+    const allowedPermissions = new Set(['clipboard-sanitized-write', 'clipboard-read']);
     session.defaultSession.setPermissionCheckHandler?.(
       (webContents: any, permission: string, requestingOrigin: string) => {
         const originToCheck = requestingOrigin || webContents?.getURL?.() || '';
         if (!isAuthorizedLoopbackSender(originToCheck, startedBackend.url)) {
           return false;
         }
-        return allowedPermissions.has(permission) || permission.startsWith('publickey');
+        return allowedPermissions.has(permission);
       }
     );
     session.defaultSession.setPermissionRequestHandler?.(
@@ -267,12 +269,12 @@ export async function bootstrapWindowsDesktop(options?: {
           callback(false);
           return;
         }
-        callback(allowedPermissions.has(permission) || permission.startsWith('publickey'));
+        callback(allowedPermissions.has(permission));
       }
     );
   }
 
-  // 5. Register validated IPC handlers
+  // 6. Register validated IPC handlers
   const preloadCandidates = [
     path.resolve(__dirname, 'electron-preload.cjs'),
     path.resolve(__dirname, 'electron-preload.js'),
@@ -328,8 +330,10 @@ export async function bootstrapWindowsDesktop(options?: {
         throw new Error('UNAUTHORIZED_IPC_SENDER');
       }
       const targetUrl = typeof payload?.url === 'string' ? payload.url.trim() : '';
-      if (!isAllowedExternalAuthUrl(targetUrl)) {
-        throw new Error('EXTERNAL_URL_FORBIDDEN: Apenas URLs HTTPS oficiais do GitHub são permitidas.');
+      if (!isAllowedExternalRepoUrl(targetUrl)) {
+        throw new Error(
+          'EXTERNAL_URL_FORBIDDEN: Apenas URLs HTTPS de repositórios públicos do GitHub são permitidas.'
+        );
       }
       if (shell?.openExternal) {
         await shell.openExternal(targetUrl);
@@ -338,7 +342,7 @@ export async function bootstrapWindowsDesktop(options?: {
     });
   }
 
-  // 6. Create hardened BrowserWindow
+  // 7. Create hardened BrowserWindow
   const mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -353,9 +357,9 @@ export async function bootstrapWindowsDesktop(options?: {
     },
   });
 
-  // 7. Navigation and popup hardening
+  // 8. Navigation and popup hardening
   mainWindow.webContents.setWindowOpenHandler?.(({ url }: { url: string }) => {
-    if (isAllowedExternalAuthUrl(url) && shell?.openExternal) {
+    if (isAllowedExternalRepoUrl(url) && shell?.openExternal) {
       void shell.openExternal(url);
     }
     return { action: 'deny' };
@@ -366,7 +370,6 @@ export async function bootstrapWindowsDesktop(options?: {
     }
   });
 
-  // Load via http://localhost:<port> so Windows Hello / WebAuthn FIDO2 accepts valid rpId="localhost"
   await mainWindow.loadURL(desktopWindowUrl);
   mainWindow.show();
 

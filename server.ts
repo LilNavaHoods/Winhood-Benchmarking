@@ -6,6 +6,7 @@ import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import express from 'express';
+import QRCode from 'qrcode';
 import { createServer as createViteServer } from 'vite';
 import type {
   AppEnvironment,
@@ -97,25 +98,7 @@ import {
 import { GitarReviewWorker } from './src/workers/GitarReviewWorker';
 import { getHardwareProfile, updateHardwareProfile } from './src/engine/workerPool';
 import { KeyManagementService } from './src/security/KeyManagementService';
-import {
-  AuthService,
-  type PublicUserView,
-  type RbacPermission,
-  type RbacRole,
-} from './src/security/AuthService';
-import {
-  buildGitHubOAuthAuthorizeUrl,
-  evaluateSoloLocalAutoSession,
-  exchangeGitHubOAuthCode,
-  fetchGitHubAuthenticatedProfile,
-  generateGitHubOAuthPkce,
-  inspectGitHubOAuthServerStatus,
-  pollGitHubDeviceToken,
-  startGitHubDeviceAuth,
-  validateOAuthCredentialInput,
-  verifyGitHubOAuthConnection,
-} from './src/security/ZeroFrictionAuthConfig';
-import { GitHubOAuthTransactionStore } from './src/security/GitHubOAuthTransactionStore';
+import { OptionalTotpService } from './src/security/OptionalTotpService';
 import { PersistentDatabaseManager } from './src/storage/PersistentDatabaseManager';
 import { ProjectBackupService } from './src/services/backup/ProjectBackupService';
 import { SsrfGuard, type AuthorizedPerfTarget } from './src/execution/SsrfGuard';
@@ -267,12 +250,6 @@ interface PersistentDatabaseState {
   auditLogs: AuditLogEntry[];
   toolsDb: SonarAndToolsDatabaseBundle;
   savedSonarProjects?: SavedSonarProjectProfile[];
-  githubOAuthConfig?: {
-    encryptedClientId: string | null;
-    encryptedClientSecret: string | null;
-    updatedAt: string;
-    updatedByUserId?: string;
-  };
   authorizedTargets?: AuthorizedPerfTarget[];
   demoData?: {
     projects: Project[];
@@ -1231,13 +1208,27 @@ function loadDatabase(
   };
 }
 
+interface LocalOperatorActor {
+  id: string;
+  name: string;
+  email: string;
+  role: 'LOCAL_OPERATOR';
+}
+
+const DEFAULT_LOCAL_OPERATOR: LocalOperatorActor = {
+  id: 'local-workspace',
+  name: 'Operador Local',
+  email: 'local@winhood.local',
+  role: 'LOCAL_OPERATOR',
+};
+
 function appendAuditLog(
   state: PersistentDatabaseState,
   action: string,
   entityType: string,
   entityId: string,
   details: string,
-  actorUser?: PublicUserView | null
+  actorUser?: LocalOperatorActor | null
 ) {
   const nowIso = new Date().toISOString();
   const prevHash = state.auditLogs[0]?.integrityHash || 'GENESIS';
@@ -1259,17 +1250,11 @@ function appendAuditLog(
 
 export async function createWinHoodApp(options?: {
   dataDir?: string;
-  enforceProductionAuth?: boolean;
   rateLimits?: {
     ingestionMax?: number;
     analysisMax?: number;
     backupMax?: number;
-    oauthMax?: number;
     windowMs?: number;
-  };
-  githubOAuthHooks?: {
-    exchangeCode?: typeof exchangeGitHubOAuthCode;
-    fetchProfile?: typeof fetchGitHubAuthenticatedProfile;
   };
 }) {
   const dataDir = resolveWinHoodDataRoot(options?.dataDir);
@@ -1277,7 +1262,7 @@ export async function createWinHoodApp(options?: {
   const isolatedArtifactsDir = path.join(dataDir, 'isolated_artifacts');
   const storeFile = path.join(dataDir, 'winhood_persistent_db.json');
   const dbManager = new PersistentDatabaseManager();
-  const authService = new AuthService(dataDir);
+  const totpService = new OptionalTotpService(dataDir);
 
   const app = express();
   app.set('trust proxy', 1);
@@ -1297,11 +1282,6 @@ export async function createWinHoodApp(options?: {
     bucketName: 'backup',
     windowMs: rateLimitWindowMs,
     maxRequests: options?.rateLimits?.backupMax ?? 30,
-  });
-  const oauthRateLimiter = createInMemoryRateLimiter({
-    bucketName: 'oauth',
-    windowMs: rateLimitWindowMs,
-    maxRequests: options?.rateLimits?.oauthMax ?? 60,
   });
   app.disable('x-powered-by');
   // Limite global conservador (2MB) contra DoS; rotas autenticadas de upload usam heavyUploadJsonParser (50MB).
@@ -1446,21 +1426,9 @@ export async function createWinHoodApp(options?: {
   };
 
   const getRequestActor = (
-    req?: express.Request,
-    res?: express.Response
-  ): PublicUserView => {
-    const reqObj = req || ((res as any)?.req as express.Request | undefined);
-    const attached = (reqObj as any)?.authUser as PublicUserView | undefined;
-    if (attached) return attached;
-    return {
-      id: 'usr-anonymous',
-      name: 'Operador Não Autenticado',
-      email: 'anonymous@winhood.local',
-      role: 'AUDITOR',
-      mfaEnabled: false,
-      mfaVerified: false,
-    };
-  };
+    _req?: express.Request,
+    _res?: express.Response
+  ): LocalOperatorActor => DEFAULT_LOCAL_OPERATOR;
 
   const isHostedPreviewRequest = (reqObj: express.Request | undefined): boolean => {
     if (!reqObj) return false;
@@ -1489,10 +1457,7 @@ export async function createWinHoodApp(options?: {
     );
   };
 
-  const resolveCookieSecurityContext = (
-    res: express.Response,
-    opts?: { forOAuthRedirect?: boolean }
-  ) => {
+  const resolveCookieSecurityContext = (res: express.Response) => {
     const reqObj = (res as any).req as express.Request | undefined;
     const hostHeader = String(reqObj?.headers?.host || '');
     const isHostedPreview = isHostedPreviewRequest(reqObj);
@@ -1510,56 +1475,47 @@ export async function createWinHoodApp(options?: {
         Boolean(reqObj?.headers?.referer?.startsWith('https://')) ||
         isHostedPreview);
     const isCrossSiteIframe = isHttps && isHostedPreview;
-    const sameSitePolicy = opts?.forOAuthRedirect ? 'Lax' : 'Strict';
     const sameSiteAttr = isCrossSiteIframe
       ? 'SameSite=None; Secure; Partitioned'
-      : `SameSite=${sameSitePolicy}${isHttps ? '; Secure' : ''}`;
+      : `SameSite=Strict${isHttps ? '; Secure' : ''}`;
     return { sameSiteAttr, isCrossSiteIframe, isHttps };
   };
 
-  const setSessionCookies = (
+  const setTotpUnlockCookies = (
     res: express.Response,
-    sessionId: string,
-    csrfToken: string,
-    opts?: { trustDevice?: boolean; forOAuthRedirect?: boolean }
+    unlockToken: string,
+    csrfToken: string
   ) => {
-    const { sameSiteAttr, isCrossSiteIframe } = resolveCookieSecurityContext(res, {
-      forOAuthRedirect: opts?.forOAuthRedirect,
-    });
-    const maxAgeSec = opts?.trustDevice
-      ? Math.floor(AuthService.SESSION_TRUSTED_DEVICE_MS / 1000)
-      : Math.floor(AuthService.SESSION_ABSOLUTE_MS / 1000);
+    const { sameSiteAttr, isCrossSiteIframe } = resolveCookieSecurityContext(res);
+    const maxAgeSec = Math.floor(OptionalTotpService.SESSION_TTL_MS / 1000);
     res.setHeader('Set-Cookie', [
-      `winhood_session=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; ${sameSiteAttr}; Max-Age=${maxAgeSec}`,
+      `winhood_totp_unlock=${encodeURIComponent(unlockToken)}; Path=/; HttpOnly; ${sameSiteAttr}; Max-Age=${maxAgeSec}`,
       `winhood_csrf=${encodeURIComponent(csrfToken)}; Path=/; ${sameSiteAttr}; Max-Age=${maxAgeSec}`,
     ]);
     res.setHeader('X-WinHood-CSRF-Token', csrfToken);
     if (isCrossSiteIframe) {
-      res.setHeader('X-WinHood-Session-Token', sessionId);
+      res.setHeader('X-WinHood-Session-Token', unlockToken);
     }
+    return { isCrossSiteIframe };
   };
 
-  const clearSessionCookies = (res: express.Response) => {
-    const { sameSiteAttr, isCrossSiteIframe, isHttps } = resolveCookieSecurityContext(res);
-    const oauthStateAttr = isCrossSiteIframe
-      ? 'SameSite=None; Secure; Partitioned'
-      : `SameSite=Lax${isHttps ? '; Secure' : ''}`;
+  const clearTotpUnlockCookies = (res: express.Response) => {
+    const { sameSiteAttr } = resolveCookieSecurityContext(res);
     res.setHeader('Set-Cookie', [
-      `winhood_session=; Path=/; HttpOnly; ${sameSiteAttr}; Max-Age=0`,
+      `winhood_totp_unlock=; Path=/; HttpOnly; ${sameSiteAttr}; Max-Age=0`,
       `winhood_csrf=; Path=/; ${sameSiteAttr}; Max-Age=0`,
-      `winhood_oauth_state=; Path=/api/auth/github/oauth; HttpOnly; ${oauthStateAttr}; Max-Age=0`,
     ]);
   };
 
-  const extractSessionTokenFromRequest = (
+  const extractTotpUnlockTokenFromRequest = (
     req: express.Request
   ): {
     token: string | undefined;
     source: 'COOKIE' | 'BEARER' | null;
   } => {
     const cookies = parseCookies(req.headers.cookie);
-    if (cookies.winhood_session && cookies.winhood_session.length >= 32) {
-      return { token: cookies.winhood_session, source: 'COOKIE' };
+    if (cookies.winhood_totp_unlock && cookies.winhood_totp_unlock.length >= 32) {
+      return { token: cookies.winhood_totp_unlock, source: 'COOKIE' };
     }
     const headerSession =
       typeof req.headers['x-winhood-session'] === 'string'
@@ -1605,7 +1561,7 @@ export async function createWinHoodApp(options?: {
     return allowedOriginMap.get(origin) ?? null;
   };
 
-  // Global Security Headers (Seção 10.5 Microsoft Store & AppSec Hardening)
+  // Global Security Headers (AppSec Hardening)
   app.use((req, res, next) => {
     const isHostedPreviewIframe = isHostedPreviewRequest(req);
     const isDevViteMode =
@@ -1617,10 +1573,6 @@ export async function createWinHoodApp(options?: {
       res.setHeader('X-Frame-Options', 'SAMEORIGIN');
     }
     res.setHeader('Referrer-Policy', 'no-referrer');
-    res.setHeader(
-      'Permissions-Policy',
-      'publickey-credentials-create=*, publickey-credentials-get=*'
-    );
     const frameAncestorsDirective = isHostedPreviewIframe
       ? "frame-ancestors 'self' https://*.google.com https://*.googleusercontent.com"
       : "frame-ancestors 'self'";
@@ -1634,7 +1586,7 @@ export async function createWinHoodApp(options?: {
     next();
   });
 
-  // Security CORS + Telemetry + Session Authentication + CSRF double-submit middleware
+  // Security CORS + Telemetry + Optional TOTP 2FA Gate (Unrestricted Local Access when TOTP is disabled)
   app.use('/api', (req, res, next) => {
     const rawOrigin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
     const canonicalCorsOrigin = resolveAllowedCorsOrigin(rawOrigin);
@@ -1643,7 +1595,7 @@ export async function createWinHoodApp(options?: {
       res.setHeader('Access-Control-Allow-Credentials', 'true');
       res.setHeader(
         'Access-Control-Allow-Headers',
-        'Content-Type, Authorization, x-csrf-token, x-winhood-session, x-winhood-role'
+        'Content-Type, Authorization, x-csrf-token, x-winhood-session'
       );
       res.setHeader(
         'Access-Control-Expose-Headers',
@@ -1670,127 +1622,62 @@ export async function createWinHoodApp(options?: {
       }
     });
 
-    const extracted = extractSessionTokenFromRequest(req);
-    if (extracted.token) {
-      const validated = authService.validateSession(extracted.token);
-      if (validated) {
-        (req as any).authUser = validated.user;
-        (req as any).authSession = validated.session;
-        (req as any).authMethod = extracted.source;
-      }
-    }
-
-    const testHeaderAllowed = !options?.enforceProductionAuth && isTestRuntimeEnvironment();
-    const headerRoleRaw = req.headers['x-winhood-role'];
-    const headerRole = typeof headerRoleRaw === 'string' ? headerRoleRaw.trim() : '';
-    if (
-      !(req as any).authUser &&
-      testHeaderAllowed &&
-      ['ADMIN', 'SECURITY_LEAD', 'QA_ENGINEER', 'AUDITOR'].includes(headerRole)
-    ) {
-      (req as any).authUser = {
-        id: 'usr-test-header',
-        name: `Test Actor (${headerRole})`,
-        email: 'test-actor@winhood.local',
-        role: headerRole as RbacRole,
-        mfaEnabled: false,
-        mfaVerified: true,
-      } satisfies PublicUserView;
-      (req as any).authMethod = 'TEST_HEADER';
+    // When Optional TOTP 2FA is disabled, grant immediate unrestricted local access to all routes.
+    if (!totpService.isEnabled()) {
+      return next();
     }
 
     const reqPath = req.path;
-    const publicApiPaths = new Set([
+    const publicWhenTotpEnabled = new Set([
       '/health',
       '/openapi.json',
-      '/auth/access-mode',
-      '/auth/solo-local',
-      '/auth/github/oauth/start',
-      '/auth/github/oauth/callback',
-      '/auth/github/oauth/callback/',
-      '/auth/github/oauth/status',
-      '/auth/github/device/start',
-      '/auth/github/device/poll',
-      '/auth/github/token',
-      '/auth/windows-hello/status',
-      '/auth/bootstrap-status',
-      '/auth/bootstrap-admin',
-      '/auth/register',
-      '/auth/login',
-      '/auth/login-pin',
-      '/auth/webauthn/register-account/options',
-      '/auth/webauthn/register-account/verify',
-      '/auth/webauthn/login/options',
-      '/auth/webauthn/login/verify',
-      '/auth/windows-hello/native-register',
-      '/auth/windows-hello/native-login',
-      '/auth/logout',
-      '/auth/session',
-      '/auth/mfa/verify',
-      '/auth/totp/authenticate',
-      '/auth/recovery/request',
-      '/auth/recovery/confirm',
+      '/totp/status',
+      '/totp/verify',
+      '/security/totp/status',
+      '/security/totp/verify',
     ]);
 
-    const isPublicRequest =
-      publicApiPaths.has(reqPath) || (reqPath === '/auth/me' && req.method.toUpperCase() === 'GET');
+    if (publicWhenTotpEnabled.has(reqPath)) {
+      return next();
+    }
 
-    if (!isPublicRequest) {
-      if (!(req as any).authUser) {
-        return res.status(401).json({
-          error: 'AUTH_REQUIRED',
-          code: 'SESSION_INVALID',
-          bootstrapRequired: authService.isBootstrapRequired(),
-          message: authService.isBootstrapRequired()
-            ? 'Administrador inicial ainda não configurado. Execute o bootstrap inicial antes de operar a plataforma.'
-            : 'Sessão autenticada obrigatória. Faça login para acessar a API do WinHood.',
+    const extracted = extractTotpUnlockTokenFromRequest(req);
+    if (!totpService.isRequestUnlocked(extracted.token)) {
+      return res.status(401).json({
+        error: 'TOTP_LOCKED',
+        code: 'TOTP_LOCKED',
+        totpEnabled: true,
+        unlocked: false,
+        message:
+          'Sessão bloqueada pela proteção opcional 2FA (TOTP). Informe o código de 6 dígitos ou código de recuperação para desbloquear.',
+      });
+    }
+
+    if (
+      extracted.source === 'COOKIE' &&
+      ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method.toUpperCase())
+    ) {
+      const providedCsrf = String(
+        req.headers['x-csrf-token'] || req.headers['x-winhood-csrf'] || ''
+      ).trim();
+      if (!totpService.validateCsrfToken(extracted.token, providedCsrf)) {
+        return res.status(403).json({
+          error: 'CSRF_INVALID',
+          code: 'CSRF_INVALID',
+          message: 'Token CSRF ausente ou inválido na requisição mutável com TOTP ativo.',
         });
-      }
-
-      if (
-        (req as any).authMethod === 'COOKIE' &&
-        ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method.toUpperCase())
-      ) {
-        const expectedCsrf = String((req as any).authSession?.csrfToken || '');
-        const providedCsrf = String(req.headers['x-csrf-token'] || req.headers['x-winhood-csrf'] || '').trim();
-        const expBuf = Buffer.from(expectedCsrf, 'utf8');
-        const provBuf = Buffer.from(providedCsrf, 'utf8');
-        if (
-          !expectedCsrf ||
-          expBuf.length !== provBuf.length ||
-          !crypto.timingSafeEqual(expBuf, provBuf)
-        ) {
-          return res.status(403).json({
-            error: 'CSRF_INVALID',
-            code: 'CSRF_INVALID',
-            message: 'Token CSRF ausente ou inválido na requisição mutável.',
-          });
-        }
       }
     }
 
     return next();
   });
 
-  // RBAC helper enforcing granular permission matrix
+  // Unrestricted Local Workspace: zero RBAC restrictions on local operations
   const requireWritePermission = (
-    res: express.Response,
-    req?: express.Request,
-    permission: RbacPermission = 'projects:write'
-  ): boolean => {
-    const requestObj = req || ((res as any).req as express.Request | undefined);
-    const actor = getRequestActor(requestObj, res);
-    if (!AuthService.hasPermission(actor.role, permission)) {
-      res.status(403).json({
-        error: 'ACESSO NÃO AUTORIZADO',
-        requiredPermission: permission,
-        currentRole: actor.role,
-        message: `ACESSO NÃO AUTORIZADO: O perfil ${actor.role} não possui permissão '${permission}'.`,
-      });
-      return false;
-    }
-    return true;
-  };
+    _res?: express.Response,
+    _req?: express.Request,
+    _scope?: string
+  ): boolean => true;
 
   // 1. Health & Observability
   app.get('/api/health', (_req, res) => {
@@ -1798,6 +1685,8 @@ export async function createWinHoodApp(options?: {
       status: 'ONLINE',
       healthStatus: 'HEALTHY',
       ready: true,
+      accessMode: 'UNRESTRICTED_LOCAL',
+      totpEnabled: totpService.isEnabled(),
       pid: process.pid,
       service: 'WinHood Software Benchmark & Quality Analyzer API',
       timestamp: new Date().toISOString(),
@@ -1805,7 +1694,6 @@ export async function createWinHoodApp(options?: {
       storageEngine: PersistentDatabaseManager.STORAGE_KIND,
       schemaVersion: PersistentDatabaseManager.SCHEMA_VERSION,
       storageIntegrity: loaded.integrityStatus,
-      authBootstrapRequired: authService.isBootstrapRequired(),
       storeFileExists: fs.existsSync(storeFile),
       projectsCount: db.projects.length,
       softwaresCount: db.softwares.length,
@@ -1826,2090 +1714,147 @@ export async function createWinHoodApp(options?: {
     });
   });
 
-  // 2. Auth & RBAC
-  app.get('/api/auth/bootstrap-status', (_req, res) => {
-    const meta = authService.getBootstrapMetadata();
-    res.json({
-      bootstrapRequired: meta.bootstrapRequired,
-      bootstrapTokenFileHint: path.relative(process.cwd(), meta.bootstrapTokenFilePath),
-      expiresAt: meta.expiresAt,
-    });
+  // 2. Optional RFC-6238 TOTP 2FA Protection (No accounts, no login, no passwords, no OAuth, no RBAC)
+  app.get(['/api/totp/status', '/api/security/totp/status'], (req, res) => {
+    const extracted = extractTotpUnlockTokenFromRequest(req);
+    return res.json(totpService.getStatus(extracted.token));
   });
 
-  const resolveStoredGitHubOAuthOverride = (): {
-    clientId: string;
-    clientSecret: string;
-    updatedAt: string | null;
-  } => {
-    const cfg = db.githubOAuthConfig;
-    if (!cfg) {
-      return { clientId: '', clientSecret: '', updatedAt: null };
-    }
-    const clientId = cfg.encryptedClientId
-      ? (MqrBridgeConnection.decryptToken(cfg.encryptedClientId) || '').trim()
-      : '';
-    const clientSecret = cfg.encryptedClientSecret
-      ? (MqrBridgeConnection.decryptToken(cfg.encryptedClientSecret) || '').trim()
-      : '';
-    return {
-      clientId,
-      clientSecret,
-      updatedAt: cfg.updatedAt || null,
-    };
-  };
-
-  const resolveEffectiveGitHubOAuthCredentials = (): {
-    clientId: string;
-    clientSecret: string;
-    override: { clientId: string; clientSecret: string; updatedAt: string | null };
-  } => {
-    const override = resolveStoredGitHubOAuthOverride();
-    const clientId = override.clientId || (process.env.WINHOOD_GITHUB_OAUTH_CLIENT_ID || '').trim();
-    const clientSecret =
-      override.clientSecret || (process.env.WINHOOD_GITHUB_OAUTH_CLIENT_SECRET || '').trim();
-    return { clientId, clientSecret, override };
-  };
-
-  app.get('/api/auth/access-mode', (req, res) => {
-    const policy = evaluateSoloLocalAutoSession({
-      runtimeEnv: process.env.WINHOOD_RUNTIME_ENV,
-      remoteAddress: req.socket.remoteAddress || req.ip,
-      hostHeader: String(req.headers['x-forwarded-host'] || req.headers.host || ''),
-      isHostedPreview: isHostedPreviewRequest(req),
-      nodeEnv: process.env.NODE_ENV,
-      vaultLockEnabled: process.env.WINHOOD_VAULT_LOCK === 'true',
-      teamServerMode: process.env.WINHOOD_TEAM_SERVER === 'true',
-    });
-    const { clientId: githubClientId, clientSecret: githubClientSecret } =
-      resolveEffectiveGitHubOAuthCredentials();
-    const githubOAuthDirectConfigured =
-      githubClientId.length >= 8 && githubClientSecret.length >= 8;
-    res.setHeader('Cache-Control', 'no-store');
-    res.json({
-      mode: policy.mode,
-      soloLocalAllowed: policy.allowed,
-      reason: policy.reason,
-      vaultLockEnabled: process.env.WINHOOD_VAULT_LOCK === 'true',
-      teamServerMode: process.env.WINHOOD_TEAM_SERVER === 'true',
-      githubDeviceFlowConfigured: githubClientId.length >= 8,
-      githubOAuthDirectConfigured,
-      githubOAuthStatus: githubOAuthDirectConfigured ? 'CONFIGURED' : 'NOT_CONFIGURED',
-      githubSignupAllowed: process.env.WINHOOD_GITHUB_ALLOW_SIGNUP !== 'false',
-      githubPatSupported: true,
-      windowsHelloNativeSupported: process.platform === 'win32',
-      hasRegisteredWebAuthnCredentials: authService.hasAnyWebAuthnCredentials(),
-      runtimeEnv: process.env.WINHOOD_RUNTIME_ENV || 'WEB',
-    });
-  });
-
-  app.post('/api/auth/solo-local', (req, res) => {
-    const policy = evaluateSoloLocalAutoSession({
-      runtimeEnv: process.env.WINHOOD_RUNTIME_ENV,
-      remoteAddress: req.socket.remoteAddress || req.ip,
-      hostHeader: String(req.headers['x-forwarded-host'] || req.headers.host || ''),
-      isHostedPreview: isHostedPreviewRequest(req),
-      nodeEnv: process.env.NODE_ENV,
-      vaultLockEnabled: process.env.WINHOOD_VAULT_LOCK === 'true',
-      teamServerMode: process.env.WINHOOD_TEAM_SERVER === 'true',
-    });
-    if (!policy.allowed) {
-      return res.status(403).json({
-        error: policy.reason,
-        code: 'SOLO_LOCAL_DENIED',
-        mode: policy.mode,
-      });
-    }
+  app.post(['/api/totp/setup', '/api/security/totp/setup'], async (_req, res) => {
     try {
-      const outcome = authService.issueSoloLocalDesktopSession({
-        ipAddress: req.socket.remoteAddress || req.ip || '127.0.0.1',
-        userAgent: String(req.headers['user-agent'] || 'WinHood-Local-Workspace'),
+      const setup = totpService.beginSetup();
+      const qrDataUrl = await QRCode.toDataURL(setup.otpauthUrl, {
+        width: 220,
+        margin: 2,
       });
-      const { isCrossSiteIframe } = resolveCookieSecurityContext(res);
-      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
-        trustDevice: outcome.trustDevice,
-      });
-      appendAuditLog(
-        db,
-        'AUTH_SOLO_LOCAL_DESKTOP',
-        'AUTH',
-        outcome.user.id,
-        `Sessão Solo Local emitida (${policy.mode}).`,
-        outcome.user
-      );
-      saveDatabase(db);
-      return res.json({
-        authenticated: true,
-        mode: policy.mode,
-        user: outcome.user,
-        csrfToken: outcome.csrfToken,
-        ...(isCrossSiteIframe ? { sessionId: outcome.sessionId } : {}),
-      });
-    } catch (err: any) {
-      return res.status(403).json({
-        error: err?.message || 'Falha ao iniciar sessão local.',
-        code: 'SOLO_LOCAL_FAILED',
-      });
-    }
-  });
-
-  const oauthTxStore = new GitHubOAuthTransactionStore(dataDir);
-
-  const isValidGitHubCallbackRedirectUri = (candidate: string): boolean => {
-    if (!candidate) return false;
-    try {
-      const parsed = new URL(candidate);
-      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-        return false;
-      }
-      if (parsed.username || parsed.password || parsed.search || parsed.hash) {
-        return false;
-      }
-      const normalizedPath = parsed.pathname.replace(/\/+$/, '');
-      return normalizedPath === '/api/auth/github/oauth/callback';
-    } catch {
-      return false;
-    }
-  };
-
-  const isLoopbackRequestHost = (req: express.Request): boolean => {
-    const remoteIp = (req.socket.remoteAddress || req.ip || '').replace(/^::ffff:/, '').toLowerCase();
-    const rawHost = String(req.headers.host || '').split(':')[0]!.trim().toLowerCase();
-    return (
-      (remoteIp === '127.0.0.1' || remoteIp === '::1' || remoteIp === 'localhost') &&
-      (rawHost === '127.0.0.1' || rawHost === 'localhost' || rawHost === '::1' || rawHost === '')
-    );
-  };
-
-  const resolveGitHubCallbackUrl = (req: express.Request): string => {
-    const explicitCallback = (
-      process.env.WINHOOD_GITHUB_OAUTH_CALLBACK_URL ||
-      process.env.WINHOOD_GITHUB_OAUTH_REDIRECT_URI ||
-      ''
-    ).trim();
-    if (explicitCallback && isValidGitHubCallbackRedirectUri(explicitCallback)) {
-      return explicitCallback;
-    }
-    const appUrlEnv = (process.env.APP_URL || '').trim();
-    if (appUrlEnv && (isHostedPreviewRequest(req) || !isLoopbackRequestHost(req))) {
-      try {
-        const parsedAppUrl = new URL(appUrlEnv);
-        if (parsedAppUrl.protocol === 'http:' || parsedAppUrl.protocol === 'https:') {
-          return `${parsedAppUrl.origin}/api/auth/github/oauth/callback`;
-        }
-      } catch {
-        // Fallback below
-      }
-    }
-    const trustProxyHeaders =
-      process.env.WINHOOD_TRUST_PROXY === 'true' || isHostedPreviewRequest(req);
-    const rawProto = trustProxyHeaders
-      ? String(req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http'))
-      : req.secure
-        ? 'https'
-        : 'http';
-    const proto = rawProto.split(',')[0]!.trim().toLowerCase() === 'https' ? 'https' : 'http';
-    const rawHost = (
-      trustProxyHeaders
-        ? String(req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000')
-        : String(req.headers.host || 'localhost:3000')
-    )
-      .split(',')[0]!
-      .replace(/[\r\n\s]/g, '')
-      .trim();
-    const safeHost = /^[a-zA-Z0-9.:-]+$/.test(rawHost) ? rawHost : 'localhost:3000';
-    return `${proto}://${safeHost}/api/auth/github/oauth/callback`;
-  };
-
-  const buildOAuthStateCookieAttr = (res: express.Response): string => {
-    const { isCrossSiteIframe, isHttps: contextIsHttps } = resolveCookieSecurityContext(res, {
-      forOAuthRedirect: true,
-    });
-    if (isCrossSiteIframe) {
-      return 'SameSite=None; Secure; Partitioned';
-    }
-    const reqObj = (res as any).req as express.Request | undefined;
-    const isHttps =
-      contextIsHttps ||
-      Boolean(reqObj?.secure) ||
-      ((process.env.WINHOOD_TRUST_PROXY === 'true' ||
-        (reqObj ? isHostedPreviewRequest(reqObj) : false)) &&
-        reqObj?.headers['x-forwarded-proto'] === 'https');
-    return `SameSite=Lax${isHttps ? '; Secure' : ''}`;
-  };
-
-  const buildOAuthStateClearCookie = (res: express.Response): string => {
-    const attr = buildOAuthStateCookieAttr(res);
-    return `winhood_oauth_state=; Path=/api/auth/github/oauth; HttpOnly; ${attr}; Max-Age=0`;
-  };
-
-  const setOAuthStateCookie = (res: express.Response, state: string): void => {
-    const attr = buildOAuthStateCookieAttr(res);
-    res.setHeader(
-      'Set-Cookie',
-      `winhood_oauth_state=${encodeURIComponent(state)}; Path=/api/auth/github/oauth; HttpOnly; ${attr}; Max-Age=600`
-    );
-  };
-
-  const escapeHtmlForOAuth = (raw: string): string =>
-    raw
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#39;');
-
-  const renderOAuthCallbackHtml = (
-    res: express.Response,
-    statusCode: number,
-    title: string,
-    message: string,
-    inlineScript?: string
-  ) => {
-    res.setHeader('Cache-Control', 'no-store');
-    if (inlineScript) {
-      const scriptHash = crypto.createHash('sha256').update(inlineScript, 'utf8').digest('base64');
-      res.setHeader(
-        'Content-Security-Policy',
-        `default-src 'self'; script-src 'self' 'sha256-${scriptHash}'; style-src 'self' 'unsafe-inline'; base-uri 'self'; object-src 'none'`
-      );
-    }
-    const html = [
-      '<!doctype html>',
-      '<html lang="pt-BR">',
-      '<head>',
-      '<meta charset="utf-8">',
-      `<title>${escapeHtmlForOAuth(title)}</title>`,
-      '<style>body{font-family:system-ui,-apple-system,sans-serif;background:#080b10;color:#f8fafc;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px;}main{max-width:440px;padding:24px;border:1px solid #1e293b;border-radius:12px;background:#0c1017;}h1{font-size:18px;margin:0 0 10px;}p{font-size:14px;line-height:1.5;color:#cbd5e1;margin:0;}</style>',
-      '</head>',
-      '<body>',
-      '<main>',
-      `<h1>${escapeHtmlForOAuth(title)}</h1>`,
-      `<p>${escapeHtmlForOAuth(message)}</p>`,
-      '</main>',
-      inlineScript ? `<script>${inlineScript}</script>` : '',
-      '</body>',
-      '</html>',
-    ].join('');
-    return res.status(statusCode).type('html').send(html);
-  };
-
-  app.get('/api/auth/github/oauth/start', oauthRateLimiter, (req, res) => {
-    oauthTxStore.pruneExpired();
-    res.setHeader('Cache-Control', 'no-store');
-    const rawMode = typeof req.query.mode === 'string' ? req.query.mode.trim().toLowerCase() : '';
-    const acceptHeader = String(req.headers.accept || '').toLowerCase();
-    const wantsBrowserRedirect =
-      rawMode === 'redirect' || (!rawMode && acceptHeader.includes('text/html'));
-
-    const { clientId, clientSecret } = resolveEffectiveGitHubOAuthCredentials();
-    if (clientId.length < 8 || clientSecret.length < 8) {
-      if (wantsBrowserRedirect) {
-        return res.redirect(302, '/?github_oauth_error=not_configured');
-      }
-      return res.status(400).json({
-        error:
-          'GITHUB_OAUTH_NOT_CONFIGURED: O administrador ainda não configurou WINHOOD_GITHUB_OAUTH_CLIENT_ID e WINHOOD_GITHUB_OAUTH_CLIENT_SECRET nesta instalação.',
-        code: 'GITHUB_OAUTH_NOT_CONFIGURED',
-        patLoginEndpoint: '/api/auth/github/token',
-        deviceFlowEndpoint: '/api/auth/github/device/start',
-      });
-    }
-
-    const mode: 'popup' | 'redirect' | 'desktop' =
-      wantsBrowserRedirect ? 'redirect' : rawMode === 'desktop' ? 'desktop' : 'popup';
-    const redirectUri = resolveGitHubCallbackUrl(req);
-    if (!isValidGitHubCallbackRedirectUri(redirectUri)) {
-      if (wantsBrowserRedirect) {
-        return res.redirect(302, '/?github_oauth_error=invalid_redirect');
-      }
-      return res.status(400).json({
-        error: 'GITHUB_OAUTH_REDIRECT_INVALID: Callback URL inválida configurada no servidor.',
-        code: 'GITHUB_OAUTH_REDIRECT_INVALID',
-      });
-    }
-    const pkce = generateGitHubOAuthPkce();
-
-    let originHint = '';
-    try {
-      originHint = new URL(redirectUri).origin;
-    } catch {
-      originHint = '';
-    }
-    const rawOrigin = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
-    if (rawOrigin) {
-      try {
-        const parsedOrigin = new URL(rawOrigin);
-        if (
-          (parsedOrigin.protocol === 'http:' || parsedOrigin.protocol === 'https:') &&
-          (!originHint || parsedOrigin.origin === originHint)
-        ) {
-          originHint = parsedOrigin.origin;
-        }
-      } catch {
-        // Keep canonical originHint
-      }
-    }
-
-    oauthTxStore.saveTransaction({
-      state: pkce.state,
-      codeVerifier: pkce.codeVerifier,
-      redirectUri,
-      mode,
-      originHint,
-      expiresAtMs: Date.now() + 10 * 60 * 1000,
-      status: 'PENDING',
-      consumed: false,
-      stateCookieRequired: mode === 'redirect',
-    });
-
-    const authorizeUrl = buildGitHubOAuthAuthorizeUrl({
-      clientId,
-      redirectUri,
-      state: pkce.state,
-      codeChallenge: pkce.codeChallenge,
-      allowSignup: process.env.WINHOOD_GITHUB_ALLOW_SIGNUP !== 'false',
-    });
-
-    if (mode === 'redirect') {
-      setOAuthStateCookie(res, pkce.state);
-      return res.redirect(302, authorizeUrl);
-    }
-
-    return res.json({
-      authorizeUrl,
-      state: pkce.state,
-      mode,
-      redirectUri,
-      codeChallengeMethod: pkce.codeChallengeMethod,
-    });
-  });
-
-  const handleGitHubOAuthCallback: express.RequestHandler = async (req, res) => {
-    oauthTxStore.pruneExpired();
-    const rawState = typeof req.query.state === 'string' ? req.query.state : '';
-    const rawCode = typeof req.query.code === 'string' ? req.query.code : '';
-    const oauthError = typeof req.query.error === 'string' ? req.query.error : '';
-    const oauthErrorDesc =
-      typeof req.query.error_description === 'string' ? req.query.error_description : '';
-    const cookies = parseCookies(req.headers.cookie);
-    const hasStateCookie = Boolean(cookies.winhood_oauth_state);
-
-    const tx = rawState ? oauthTxStore.getTransactionByState(rawState) : undefined;
-    const isRedirectFlow = tx ? tx.mode === 'redirect' : hasStateCookie;
-
-    const respondWithOAuthError = (
-      statusCode: number,
-      errorCode: string,
-      title: string,
-      message: string
-    ) => {
-      res.setHeader('Cache-Control', 'no-store');
-      if (isRedirectFlow) {
-        res.setHeader('Set-Cookie', buildOAuthStateClearCookie(res));
-        return res.redirect(302, `/?github_oauth_error=${encodeURIComponent(errorCode)}`);
-      }
-      const scriptPayload = JSON.stringify({
-        type: 'winhood-github-oauth-result',
-        ok: false,
-        errorCode,
-        error: message,
-      }).replace(/</g, '\\u003c');
-      const targetOrigin = JSON.stringify(tx?.originHint || new URL(resolveGitHubCallbackUrl(req)).origin);
-      const script =
-        tx?.mode === 'popup'
-          ? `if(window.opener){window.opener.postMessage(${scriptPayload},${targetOrigin});}window.close();`
-          : undefined;
-      return renderOAuthCallbackHtml(res, statusCode, title, message, script);
-    };
-
-    if (oauthError) {
-      const normalizedErr = oauthError.trim().toLowerCase();
-      const safeErrorCode = normalizedErr === 'access_denied' ? 'access_denied' : 'oauth_error';
-      const safeMsg =
-        safeErrorCode === 'access_denied'
-          ? 'Autorização cancelada no GitHub. Você pode tentar novamente quando desejar.'
-          : oauthErrorDesc
-            ? oauthErrorDesc.slice(0, 180)
-            : 'Autorização recusada no GitHub.';
-      if (tx) {
-        if (tx.mode === 'redirect') {
-          oauthTxStore.deleteTransaction(tx.state);
-        } else {
-          oauthTxStore.updateTransaction(tx.state, {
-            consumed: true,
-            status: 'ERROR',
-            errorMessage: safeMsg,
-          });
-        }
-      }
-      return respondWithOAuthError(400, safeErrorCode, 'Autorização GitHub não concluída', safeMsg);
-    }
-
-    if (!rawCode || !rawState || !tx || Date.now() > tx.expiresAtMs) {
-      if (tx) oauthTxStore.deleteTransaction(tx.state);
-      return respondWithOAuthError(
-        400,
-        'invalid_state',
-        'Estado OAuth inválido ou expirado',
-        'A solicitação de autenticação GitHub expirou ou o parâmetro state não corresponde. Tente iniciar o login novamente.'
-      );
-    }
-
-    if (tx.stateCookieRequired) {
-      const cookieState = cookies.winhood_oauth_state || '';
-      const cookieBuf = Buffer.from(cookieState, 'utf8');
-      const expectedBuf = Buffer.from(tx.state, 'utf8');
-      if (
-        !cookieState ||
-        cookieBuf.length !== expectedBuf.length ||
-        !crypto.timingSafeEqual(cookieBuf, expectedBuf)
-      ) {
-        oauthTxStore.deleteTransaction(tx.state);
-        return respondWithOAuthError(
-          400,
-          'invalid_state',
-          'Validação de sessão OAuth falhou',
-          'Não foi possível validar o vínculo de segurança (state) da sessão OAuth. Tente novamente.'
-        );
-      }
-    }
-
-    if (!isValidGitHubCallbackRedirectUri(tx.redirectUri)) {
-      oauthTxStore.deleteTransaction(tx.state);
-      return respondWithOAuthError(
-        400,
-        'invalid_redirect',
-        'Redirect URI inválida',
-        'A URL de retorno OAuth configurada não é permitida.'
-      );
-    }
-
-    // Consume atomically in persistent store BEFORE any external network I/O to eliminate replay races
-    const consumedOutcome = oauthTxStore.consumeTransactionAtomically(rawState, rawCode);
-    if (!consumedOutcome.ok) {
-      if ('reason' in consumedOutcome && consumedOutcome.reason === 'REPLAYED_CODE') {
-        return respondWithOAuthError(
-          400,
-          'replayed_code',
-          'Código de autorização já utilizado',
-          'Este código de autorização do GitHub já foi utilizado. Inicie um novo login.'
-        );
-      }
-      return respondWithOAuthError(
-        400,
-        'invalid_state',
-        'Estado OAuth inválido ou expirado',
-        'A solicitação de autenticação GitHub expirou ou o parâmetro state não corresponde. Tente iniciar o login novamente.'
-      );
-    }
-
-    const { clientId, clientSecret } = resolveEffectiveGitHubOAuthCredentials();
-    if (clientId.length < 8 || clientSecret.length < 8) {
-      oauthTxStore.deleteTransaction(tx.state);
-      return respondWithOAuthError(
-        400,
-        'not_configured',
-        'Login com GitHub indisponível',
-        'O administrador ainda não configurou a autenticação GitHub para esta instalação.'
-      );
-    }
-
-    const exchangeCodeFn = options?.githubOAuthHooks?.exchangeCode || exchangeGitHubOAuthCode;
-    const fetchProfileFn =
-      options?.githubOAuthHooks?.fetchProfile || fetchGitHubAuthenticatedProfile;
-
-    try {
-      const tokenRes = await exchangeCodeFn({
-        clientId,
-        clientSecret,
-        code: rawCode,
-        redirectUri: tx.redirectUri,
-        codeVerifier: tx.codeVerifier,
-      });
-      const profile = await fetchProfileFn(tokenRes.accessToken);
-
-      // Prevent session fixation: revoke any pre-existing session before issuing the new OAuth session
-      const existingSession = extractSessionTokenFromRequest(req);
-      if (existingSession.token) {
-        authService.revokeSession(existingSession.token);
-      }
-
-      const allowSignup = process.env.WINHOOD_GITHUB_ALLOW_SIGNUP !== 'false';
-      const isInternetExposed =
-        !isLoopbackRequestHost(req) ||
-        isHostedPreviewRequest(req) ||
-        process.env.WINHOOD_TEAM_SERVER === 'true';
-      const outcome = authService.issueGitHubOAuthSession({
-        githubId: profile.id,
-        githubLogin: profile.login,
-        name: profile.name,
-        email: profile.email,
-        emailVerified: profile.emailVerified !== false,
-        avatarUrl: profile.avatarUrl,
-        ipAddress: req.ip || '127.0.0.1',
-        userAgent: String(req.headers['user-agent'] || 'WinHood-GitHub-OAuth-PKCE'),
-        allowSignup,
-        isInternetExposed,
-        allowFirstUserAdmin: false,
-      });
-
-      appendAuditLog(
-        db,
-        outcome.isNewAccount ? 'AUTH_GITHUB_OAUTH_REGISTERED' : 'AUTH_GITHUB_OAUTH_LOGIN',
-        'AUTH',
-        outcome.user.id,
-        `Autenticação GitHub OAuth PKCE concluída para @${profile.login} (${outcome.isNewAccount ? 'nova conta' : 'conta existente'}).`,
-        outcome.user
-      );
-      saveDatabase(db);
-
-      if (tx.mode === 'redirect') {
-        oauthTxStore.deleteTransaction(tx.state);
-        const { sameSiteAttr, isCrossSiteIframe } = resolveCookieSecurityContext(res, {
-          forOAuthRedirect: true,
-        });
-        const maxAgeSec = outcome.trustDevice
-          ? Math.floor(AuthService.SESSION_TRUSTED_DEVICE_MS / 1000)
-          : Math.floor(AuthService.SESSION_ABSOLUTE_MS / 1000);
-        res.setHeader('Cache-Control', 'no-store');
-        res.setHeader('Set-Cookie', [
-          buildOAuthStateClearCookie(res),
-          `winhood_session=${encodeURIComponent(outcome.sessionId)}; Path=/; HttpOnly; ${sameSiteAttr}; Max-Age=${maxAgeSec}`,
-          `winhood_csrf=${encodeURIComponent(outcome.csrfToken)}; Path=/; ${sameSiteAttr}; Max-Age=${maxAgeSec}`,
-        ]);
-        res.setHeader('X-WinHood-CSRF-Token', outcome.csrfToken);
-        if (isCrossSiteIframe) {
-          res.setHeader('X-WinHood-Session-Token', outcome.sessionId);
-        }
-        return res.redirect(302, '/');
-      }
-
-      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
-        trustDevice: outcome.trustDevice,
-      });
-
-      oauthTxStore.updateTransaction(tx.state, {
-        status: 'AUTHORIZED',
-        sessionId: outcome.sessionId,
-        csrfToken: outcome.csrfToken,
-        user: outcome.user,
-        isNewAccount: outcome.isNewAccount,
-        expiresAtMs: Date.now() + 2 * 60 * 1000,
-      });
-
-      if (tx.mode === 'desktop') {
-        return renderOAuthCallbackHtml(
-          res,
-          200,
-          'WinHood Desktop autenticado com GitHub',
-          `Conta @${profile.login} autenticada com sucesso. Você pode fechar esta aba do navegador e retornar ao aplicativo WinHood.`
-        );
-      }
-
-      const scriptPayload = JSON.stringify({
-        type: 'winhood-github-oauth-result',
-        ok: true,
-        state: tx.state,
-        isNewAccount: outcome.isNewAccount,
-        user: outcome.user,
-        csrfToken: outcome.csrfToken,
-      }).replace(/</g, '\\u003c');
-      const targetOrigin = JSON.stringify(tx.originHint || new URL(tx.redirectUri).origin);
-      const script = `if(window.opener){window.opener.postMessage(${scriptPayload},${targetOrigin});setTimeout(function(){window.close();},150);}`;
-      return renderOAuthCallbackHtml(
-        res,
-        200,
-        'Conta GitHub conectada ao WinHood',
-        `Autenticação concluída para @${profile.login}. Esta janela fechará automaticamente.`,
-        script
-      );
-    } catch (err: any) {
-      const rawMsg = String(err?.message || '');
-      let errorCode = 'exchange_failed';
-      let safeMsg = 'Não foi possível concluir a autenticação com o GitHub. Tente novamente.';
-      let statusCode = 502;
-      if (rawMsg.startsWith('AUTH_SIGNUP_DISABLED')) {
-        errorCode = 'signup_disabled';
-        safeMsg =
-          'O cadastro de novos usuários via GitHub está desabilitado pelo administrador desta instalação.';
-        statusCode = 403;
-      } else if (rawMsg.startsWith('AUTH_ACCOUNT_DISABLED')) {
-        errorCode = 'account_disabled';
-        safeMsg = 'Esta conta foi desabilitada pelo administrador.';
-        statusCode = 403;
-      } else if (rawMsg.startsWith('AUTH_EMAIL_VERIFICATION_REQUIRED')) {
-        errorCode = 'email_unverified';
-        safeMsg =
-          'Não foi possível vincular automaticamente sua conta GitHub porque o endereço de e-mail não está verificado no GitHub.';
-        statusCode = 403;
-      } else if (rawMsg.startsWith('GITHUB_ALREADY_LINKED')) {
-        errorCode = 'github_already_linked';
-        safeMsg = 'Esta conta GitHub já está associada a outro usuário nesta instalação.';
-        statusCode = 409;
-      } else if (rawMsg.startsWith('GITHUB_PROFILE') || rawMsg.startsWith('GITHUB_TOKEN_UNAUTHORIZED')) {
-        errorCode = 'profile_failed';
-        safeMsg = 'Não foi possível consultar o perfil autenticado na API do GitHub.';
-        statusCode = 502;
-      }
-      if (tx.mode === 'redirect') {
-        oauthTxStore.deleteTransaction(tx.state);
-      } else {
-        oauthTxStore.updateTransaction(tx.state, {
-          status: 'ERROR',
-          errorMessage: safeMsg,
-        });
-      }
-      return respondWithOAuthError(statusCode, errorCode, 'Falha na autenticação GitHub', safeMsg);
-    }
-  };
-
-  app.get(
-    ['/api/auth/github/oauth/callback', '/api/auth/github/oauth/callback/'],
-    oauthRateLimiter,
-    handleGitHubOAuthCallback
-  );
-
-  app.get('/api/auth/github/oauth/status', oauthRateLimiter, (req, res) => {
-    oauthTxStore.pruneExpired();
-    res.setHeader('Cache-Control', 'no-store');
-    const rawState = typeof req.query.state === 'string' ? req.query.state : '';
-    if (!rawState) {
-      return res.status(400).json({ error: 'Parâmetro state obrigatório.', code: 'STATE_REQUIRED' });
-    }
-    const tx = oauthTxStore.getTransactionByState(rawState);
-    if (!tx) {
-      return res.status(404).json({
-        status: 'EXPIRED',
-        error: 'Transação OAuth não encontrada ou expirada.',
-        code: 'GITHUB_OAUTH_TX_NOT_FOUND',
-      });
-    }
-    if (tx.status === 'PENDING') {
-      return res.json({ status: 'PENDING', authorized: false });
-    }
-    if (tx.status === 'ERROR') {
-      oauthTxStore.deleteTransaction(tx.state);
-      return res.status(400).json({
-        status: 'ERROR',
-        authorized: false,
-        error: tx.errorMessage || 'Autorização GitHub recusada.',
-      });
-    }
-    const sessionId = tx.sessionId!;
-    const csrfToken = tx.csrfToken!;
-    const user = tx.user!;
-    const isNewAccount = Boolean(tx.isNewAccount);
-    oauthTxStore.deleteTransaction(tx.state);
-
-    const { isCrossSiteIframe } = resolveCookieSecurityContext(res);
-    setSessionCookies(res, sessionId, csrfToken, { trustDevice: true });
-    return res.json({
-      status: 'AUTHORIZED',
-      authorized: true,
-      authenticated: true,
-      isNewAccount,
-      user,
-      csrfToken,
-      ...(isCrossSiteIframe ? { sessionId } : {}),
-    });
-  });
-
-  app.post('/api/auth/bootstrap-admin/claim', (req, res) => {
-    const authCtx = res.locals.authContext as { user: PublicUserView } | undefined;
-    if (!authCtx?.user) {
-      return res.status(401).json({ error: 'Autenticação necessária para reivindicar bootstrap administrativo.' });
-    }
-    const { bootstrapToken } = (req.body || {}) as { bootstrapToken?: string };
-    if (!bootstrapToken || typeof bootstrapToken !== 'string') {
-      return res.status(400).json({ error: 'Informe o token único de bootstrap administrativo.' });
-    }
-    try {
-      const promoted = authService.claimAdminWithBootstrapToken(authCtx.user.id, bootstrapToken);
-      appendAuditLog(
-        db,
-        'AUTH_ADMIN_BOOTSTRAP_CLAIMED',
-        'AUTH',
-        promoted.id,
-        `Usuário ${promoted.email} assumiu papel ADMIN mediante token único de bootstrap.`,
-        promoted
-      );
-      saveDatabase(db);
-      return res.json({ ok: true, user: promoted });
-    } catch (err: any) {
-      const msg = String(err?.message || 'Falha ao validar token de bootstrap.');
-      const status = msg.startsWith('BOOTSTRAP_ALREADY_COMPLETED') ? 409 : 403;
-      return res.status(status).json({ error: msg });
-    }
-  });
-
-  app.post('/api/auth/github/device/start', oauthRateLimiter, async (req, res) => {
-    res.setHeader('Cache-Control', 'no-store');
-    const bodyClientId = typeof req.body?.clientId === 'string' ? req.body.clientId.trim() : '';
-    const { clientId: configuredClientId } = resolveEffectiveGitHubOAuthCredentials();
-    const clientId = (configuredClientId || bodyClientId).trim();
-    if (clientId.length < 8) {
-      return res.status(400).json({
-        error:
-          'Informe seu GitHub OAuth Client ID ou utilize um Personal Access Token (PAT) do GitHub para entrar imediatamente.',
-        code: 'GITHUB_CLIENT_ID_MISSING',
-        patLoginEndpoint: '/api/auth/github/token',
-      });
-    }
-    try {
-      const deviceResp = await startGitHubDeviceAuth(clientId);
-      return res.json(deviceResp);
-    } catch (err: any) {
-      return res.status(502).json({
-        error: err?.message || 'Falha ao iniciar GitHub OAuth Device Flow.',
-        code: 'GITHUB_DEVICE_FLOW_FAILED',
-      });
-    }
-  });
-
-  app.post('/api/auth/github/device/poll', oauthRateLimiter, async (req, res) => {
-    res.setHeader('Cache-Control', 'no-store');
-    const { deviceCode, clientId: bodyClientId } = (req.body || {}) as {
-      deviceCode?: string;
-      clientId?: string;
-    };
-    const { clientId: configuredClientId } = resolveEffectiveGitHubOAuthCredentials();
-    const clientId = (
-      configuredClientId ||
-      (typeof bodyClientId === 'string' ? bodyClientId.trim() : '')
-    ).trim();
-    if (clientId.length < 8) {
-      return res.status(400).json({
-        error: 'GITHUB_CLIENT_ID_MISSING: Informe um GitHub OAuth Client ID válido.',
-        code: 'GITHUB_CLIENT_ID_MISSING',
-      });
-    }
-    if (!deviceCode || typeof deviceCode !== 'string') {
-      return res.status(400).json({ error: 'deviceCode obrigatório.', code: 'INVALID_REQUEST' });
-    }
-    try {
-      const pollResult = await pollGitHubDeviceToken(clientId, deviceCode);
-      if (pollResult.status !== 'AUTHORIZED' || !pollResult.accessToken) {
-        return res.json({
-          authorized: false,
-          status: pollResult.status,
-          errorDescription: pollResult.errorDescription,
-        });
-      }
-
-      const profile = await fetchGitHubAuthenticatedProfile(pollResult.accessToken);
-      const existingSession = extractSessionTokenFromRequest(req);
-      if (existingSession.token) {
-        authService.revokeSession(existingSession.token);
-      }
-      const allowSignup = process.env.WINHOOD_GITHUB_ALLOW_SIGNUP !== 'false';
-      const isInternetExposed =
-        !isLoopbackRequestHost(req) ||
-        isHostedPreviewRequest(req) ||
-        process.env.WINHOOD_TEAM_SERVER === 'true';
-      const outcome = authService.issueGitHubOAuthSession({
-        githubId: profile.id,
-        githubLogin: profile.login,
-        name: profile.name,
-        email: profile.email,
-        emailVerified: profile.emailVerified !== false,
-        avatarUrl: profile.avatarUrl,
-        ipAddress: req.ip || '127.0.0.1',
-        userAgent: String(req.headers['user-agent'] || 'WinHood-GitHub-OAuth'),
-        allowSignup,
-        isInternetExposed,
-        allowFirstUserAdmin: false,
-      });
-      const { isCrossSiteIframe } = resolveCookieSecurityContext(res);
-      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
-        trustDevice: outcome.trustDevice,
-      });
-      appendAuditLog(
-        db,
-        'AUTH_GITHUB_DEVICE_FLOW_SUCCESS',
-        'AUTH',
-        outcome.user.id,
-        `Login via GitHub OAuth Device Flow concluído para @${profile.login} (${outcome.user.email}).`,
-        outcome.user
-      );
-      saveDatabase(db);
-      return res.json({
-        authorized: true,
-        status: 'AUTHORIZED',
-        authenticated: true,
-        isNewAccount: outcome.isNewAccount,
-        user: outcome.user,
-        csrfToken: outcome.csrfToken,
-        ...(isCrossSiteIframe ? { sessionId: outcome.sessionId } : {}),
-      });
-    } catch (err: any) {
-      const msg = String(err?.message || 'Erro ao consultar autorização do GitHub Device Flow.');
-      if (
-        msg.startsWith('AUTH_SIGNUP_DISABLED') ||
-        msg.startsWith('AUTH_ACCOUNT_DISABLED') ||
-        msg.startsWith('AUTH_EMAIL_VERIFICATION_REQUIRED')
-      ) {
-        return res.status(403).json({ error: msg, code: msg.split(':')[0]!.trim() });
-      }
-      if (msg.startsWith('GITHUB_ALREADY_LINKED')) {
-        return res.status(409).json({ error: msg, code: 'GITHUB_ALREADY_LINKED' });
-      }
-      const status = msg.startsWith('GITHUB_TOKEN_UNAUTHORIZED') ? 401 : 502;
-      return res.status(status).json({
-        error: msg,
-        code: 'GITHUB_DEVICE_POLL_FAILED',
-      });
-    }
-  });
-
-  app.post('/api/auth/github/token', oauthRateLimiter, async (req, res) => {
-    res.setHeader('Cache-Control', 'no-store');
-    const { token, trustDevice } = (req.body || {}) as {
-      token?: string;
-      trustDevice?: boolean;
-    };
-    const cleanToken = typeof token === 'string' ? token.trim() : '';
-    if (cleanToken.length < 10) {
-      return res.status(400).json({
-        error: 'Informe um GitHub Personal Access Token (PAT) válido (ghp_... ou github_pat_...).',
-        code: 'GITHUB_TOKEN_INVALID',
-      });
-    }
-    try {
-      const profile = await fetchGitHubAuthenticatedProfile(cleanToken);
-      const existingSession = extractSessionTokenFromRequest(req);
-      if (existingSession.token) {
-        authService.revokeSession(existingSession.token);
-      }
-      const allowSignup = process.env.WINHOOD_GITHUB_ALLOW_SIGNUP !== 'false';
-      const isInternetExposed =
-        !isLoopbackRequestHost(req) ||
-        isHostedPreviewRequest(req) ||
-        process.env.WINHOOD_TEAM_SERVER === 'true';
-      const outcome = authService.issueGitHubOAuthSession({
-        githubId: profile.id,
-        githubLogin: profile.login,
-        name: profile.name,
-        email: profile.email,
-        emailVerified: profile.emailVerified !== false,
-        avatarUrl: profile.avatarUrl,
-        ipAddress: req.ip || '127.0.0.1',
-        userAgent: String(req.headers['user-agent'] || 'WinHood-GitHub-PAT'),
-        allowSignup,
-        isInternetExposed,
-        allowFirstUserAdmin: false,
-      });
-      const { isCrossSiteIframe } = resolveCookieSecurityContext(res);
-      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
-        trustDevice: trustDevice !== false,
-      });
-      appendAuditLog(
-        db,
-        'AUTH_GITHUB_PAT_LOGIN_SUCCESS',
-        'AUTH',
-        outcome.user.id,
-        `Login via GitHub Personal Access Token validado na API oficial para @${profile.login}.`,
-        outcome.user
-      );
-      saveDatabase(db);
-      return res.json({
-        authenticated: true,
-        provider: 'github-pat',
-        isNewAccount: outcome.isNewAccount,
-        user: outcome.user,
-        csrfToken: outcome.csrfToken,
-        ...(isCrossSiteIframe ? { sessionId: outcome.sessionId } : {}),
-      });
-    } catch (err: any) {
-      const msg = String(err?.message || 'Erro de rede ao validar token na API oficial do GitHub.');
-      if (msg.startsWith('GITHUB_TOKEN_UNAUTHORIZED')) {
-        return res.status(401).json({
-          error:
-            'Token GitHub rejeitado pela API oficial (HTTP 401/403). Verifique se o PAT está ativo e possui escopo read:user.',
-          code: 'GITHUB_TOKEN_UNAUTHORIZED',
-        });
-      }
-      if (
-        msg.startsWith('AUTH_SIGNUP_DISABLED') ||
-        msg.startsWith('AUTH_ACCOUNT_DISABLED') ||
-        msg.startsWith('AUTH_EMAIL_VERIFICATION_REQUIRED')
-      ) {
-        return res.status(403).json({ error: msg, code: msg.split(':')[0]!.trim() });
-      }
-      if (msg.startsWith('GITHUB_ALREADY_LINKED')) {
-        return res.status(409).json({ error: msg, code: 'GITHUB_ALREADY_LINKED' });
-      }
-      const code = msg.includes(':') ? msg.split(':')[0]!.trim() : 'GITHUB_TOKEN_NETWORK_ERROR';
-      return res.status(502).json({
-        error: msg,
-        code,
-      });
-    }
-  });
-
-  app.post('/api/auth/bootstrap-admin', (req, res) => {
-    try {
-      const { bootstrapToken, name, email, password, enableMfa } = (req.body || {}) as {
-        bootstrapToken?: string;
-        name?: string;
-        email?: string;
-        password?: string;
-        enableMfa?: boolean;
-      };
-      const result = authService.bootstrapInitialAdmin({
-        bootstrapToken: bootstrapToken || '',
-        name: name || '',
-        email: email || '',
-        password: password || '',
-        enableMfa: Boolean(enableMfa),
-        ipAddress: req.ip || '127.0.0.1',
-        userAgent: String(req.headers['user-agent'] || 'unknown'),
-      });
-      setSessionCookies(res, result.sessionId, result.csrfToken);
-      appendAuditLog(
-        db,
-        'ADMIN_BOOTSTRAP_COMPLETED',
-        'AUTH',
-        result.user.id,
-        `Administrador inicial "${result.user.email}" provisionado com token single-use.`,
-        result.user
-      );
-      saveDatabase(db, true);
-      return res.status(201).json({
-        authenticated: !result.totpSetup,
-        mfaRequired: Boolean(result.totpSetup),
-        user: result.user,
-        sessionId: result.sessionId,
-        csrfToken: result.csrfToken,
-        totpSetup: result.totpSetup,
-      });
-    } catch (err: any) {
-      const msg = err?.message || 'Falha no bootstrap inicial.';
-      const status =
-        msg.startsWith('BOOTSTRAP_ALREADY_COMPLETED') || msg.startsWith('BOOTSTRAP_CONFLICT')
-          ? 409
-          : 400;
-      const code = msg.includes(':') ? msg.split(':')[0].trim() : 'BOOTSTRAP_FAILED';
-      return res.status(status).json({ error: msg, code });
-    }
-  });
-
-  app.post('/api/auth/register', (req, res) => {
-    try {
-      const { name, email, password, pin, role, enableMfa } = (req.body || {}) as {
-        name?: string;
-        email?: string;
-        password?: string;
-        pin?: string;
-        role?: RbacRole;
-        enableMfa?: boolean;
-      };
-      const result = authService.registerAccount({
-        name: name || '',
-        email: email || '',
-        password: password || '',
-        pin: pin || undefined,
-        role,
-        enableMfa: Boolean(enableMfa),
-        ipAddress: req.ip || '127.0.0.1',
-        userAgent: String(req.headers['user-agent'] || 'unknown'),
-      });
-      setSessionCookies(res, result.sessionId, result.csrfToken);
-      appendAuditLog(
-        db,
-        'USER_SELF_REGISTERED',
-        'AUTH',
-        result.user.id,
-        `Novo usuário "${result.user.email}" cadastrado com perfil ${result.user.role} (MFA=${result.user.mfaEnabled}, PIN=${Boolean(result.user.pinEnabled)}).`,
-        result.user
-      );
-      saveDatabase(db);
-      return res.status(201).json({
-        authenticated: !result.totpSetup,
-        mfaRequired: Boolean(result.totpSetup),
-        user: result.user,
-        sessionId: result.sessionId,
-        csrfToken: result.csrfToken,
-        totpSetup: result.totpSetup,
-      });
-    } catch (err: any) {
-      const msg = err?.message || 'Falha ao realizar cadastro.';
-      const status = msg.startsWith('EMAIL_ALREADY_EXISTS')
-        ? 409
-        : msg.startsWith('ROLE_ELEVATION_BLOCKED') || msg.startsWith('BOOTSTRAP_REQUIRED')
-          ? 403
-          : msg.startsWith('AUTH_RATE_LIMITED')
-            ? 429
-            : 400;
-      const code = msg.startsWith('EMAIL_ALREADY_EXISTS')
-        ? 'ACCOUNT_ALREADY_EXISTS'
-        : msg.startsWith('BOOTSTRAP_REQUIRED')
-          ? 'BOOTSTRAP_REQUIRED'
-          : msg.startsWith('ROLE_ELEVATION_BLOCKED')
-            ? 'ROLE_ELEVATION_BLOCKED'
-            : msg.startsWith('AUTH_RATE_LIMITED')
-              ? 'RATE_LIMITED'
-              : msg.startsWith('WEAK_PIN')
-                ? 'WEAK_PIN'
-                : msg.startsWith('INVALID_PIN')
-                  ? 'INVALID_PIN'
-                  : 'VALIDATION_ERROR';
-      appendAuditLog(db, 'AUTH_REGISTER_FAILED', 'AUTH', String(req.body?.email || 'unknown'), msg);
-      saveDatabase(db);
-      return res.status(status).json({ error: msg, code });
-    }
-  });
-
-  app.post('/api/auth/login', (req, res) => {
-    try {
-      const { email, password, totpCode, trustDevice } = (req.body || {}) as {
-        email?: string;
-        password?: string;
-        totpCode?: string;
-        trustDevice?: boolean;
-      };
-      const outcome = authService.login({
-        email: email || '',
-        password: password || '',
-        totpCode,
-        trustDevice: Boolean(trustDevice),
-        ipAddress: req.ip || '127.0.0.1',
-        userAgent: String(req.headers['user-agent'] || 'unknown'),
-      });
-      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
-        trustDevice: outcome.trustDevice,
-      });
-      appendAuditLog(
-        db,
-        outcome.mfaRequired ? 'AUTH_LOGIN_PENDING_MFA' : 'AUTH_LOGIN_SUCCESS',
-        'AUTH',
-        outcome.user.id,
-        `Login efetuado para ${outcome.user.email} (MFA=${outcome.user.mfaEnabled}, verified=${outcome.user.mfaVerified}, trustDevice=${outcome.trustDevice}).`,
-        outcome.user
-      );
-      saveDatabase(db);
-      return res.json({
-        authenticated: !outcome.mfaRequired,
-        mfaRequired: outcome.mfaRequired,
-        requiresTotp: outcome.requiresTotp,
-        preAuthToken: outcome.preAuthToken,
-        trustDevice: outcome.trustDevice,
-        serverTimeIso: outcome.serverTimeIso,
-        totpPeriodSeconds: outcome.totpPeriodSeconds,
-        user: outcome.user,
-        sessionId: outcome.sessionId,
-        csrfToken: outcome.csrfToken,
-      });
-    } catch (err: any) {
-      const msg = err?.message || 'Falha na autenticação.';
-      const status =
-        msg.startsWith('AUTH_RATE_LIMITED') || msg.startsWith('AUTH_ACCOUNT_LOCKED')
-          ? 429
-          : msg.startsWith('AUTH_ACCOUNT_DISABLED')
-            ? 403
-            : 401;
-      const code =
-        msg.startsWith('AUTH_RATE_LIMITED') || msg.startsWith('AUTH_ACCOUNT_LOCKED')
-          ? 'RATE_LIMITED'
-          : msg.startsWith('AUTH_ACCOUNT_DISABLED')
-            ? 'ACCOUNT_DISABLED'
-            : msg.startsWith('AUTH_MFA_REQUIRED')
-              ? 'TOTP_REQUIRED'
-              : msg.startsWith('AUTH_MFA_INVALID')
-                ? 'INVALID_TOTP'
-                : 'INVALID_CREDENTIALS';
-      appendAuditLog(db, 'AUTH_LOGIN_FAILED', 'AUTH', String(req.body?.email || 'unknown'), msg);
-      saveDatabase(db);
-      return res.status(status).json({ error: msg, code });
-    }
-  });
-
-  app.post('/api/auth/login-pin', (req, res) => {
-    try {
-      const { email, pin, totpCode, trustDevice } = (req.body || {}) as {
-        email?: string;
-        pin?: string;
-        totpCode?: string;
-        trustDevice?: boolean;
-      };
-      const outcome = authService.loginWithPin({
-        email: email || '',
-        pin: pin || '',
-        totpCode,
-        trustDevice: Boolean(trustDevice),
-        ipAddress: req.ip || '127.0.0.1',
-        userAgent: String(req.headers['user-agent'] || 'unknown'),
-      });
-      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
-        trustDevice: outcome.trustDevice,
-      });
-      appendAuditLog(
-        db,
-        outcome.mfaRequired ? 'AUTH_LOGIN_PIN_PENDING_MFA' : 'AUTH_LOGIN_PIN_SUCCESS',
-        'AUTH',
-        outcome.user.id,
-        `Login por PIN Rápido efetuado para ${outcome.user.email} (MFA=${outcome.user.mfaEnabled}, verified=${outcome.user.mfaVerified}).`,
-        outcome.user
-      );
-      saveDatabase(db);
-      return res.json({
-        authenticated: !outcome.mfaRequired,
-        mfaRequired: outcome.mfaRequired,
-        requiresTotp: outcome.requiresTotp,
-        preAuthToken: outcome.preAuthToken,
-        trustDevice: outcome.trustDevice,
-        serverTimeIso: outcome.serverTimeIso,
-        totpPeriodSeconds: outcome.totpPeriodSeconds,
-        user: outcome.user,
-        sessionId: outcome.sessionId,
-        csrfToken: outcome.csrfToken,
-      });
-    } catch (err: any) {
-      const msg = err?.message || 'Falha na autenticação com PIN.';
-      const status =
-        msg.startsWith('AUTH_RATE_LIMITED') || msg.startsWith('AUTH_ACCOUNT_LOCKED')
-          ? 429
-          : 401;
-      const code =
-        msg.startsWith('AUTH_RATE_LIMITED') || msg.startsWith('AUTH_ACCOUNT_LOCKED')
-          ? 'RATE_LIMITED'
-          : 'INVALID_CREDENTIALS';
-      appendAuditLog(db, 'AUTH_LOGIN_PIN_FAILED', 'AUTH', String(req.body?.email || 'unknown'), msg);
-      saveDatabase(db);
-      return res.status(status).json({ error: msg, code });
-    }
-  });
-
-  app.post('/api/auth/pin/setup', (req, res) => {
-    const actor = getRequestActor(req, res);
-    if (actor.id === 'usr-anonymous') {
-      return res.status(401).json({ error: 'AUTH_REQUIRED' });
-    }
-    const { pin } = (req.body || {}) as { pin?: string };
-    try {
-      const updatedUser = authService.setupPinForUser(actor.id, pin || '');
-      appendAuditLog(
-        db,
-        'AUTH_PIN_CONFIGURED',
-        'AUTH',
-        updatedUser.id,
-        `PIN Rápido (6-8 dígitos) configurado para ${updatedUser.email}.`,
-        updatedUser
-      );
-      saveDatabase(db);
-      return res.json({ ok: true, user: updatedUser });
-    } catch (err: any) {
-      const msg = err?.message || 'Falha ao configurar PIN.';
-      return res.status(400).json({ error: msg, code: 'INVALID_PIN' });
-    }
-  });
-
-  const resolveWebAuthnRpId = (req: express.Request): string => {
-    const sanitizeHost = (raw: string): string => {
-      const cleaned = raw.trim().toLowerCase().replace(/^https?:\/\//, '').split('/')[0] || '';
-      const hostOnly = cleaned.startsWith('[')
-        ? cleaned.slice(0, cleaned.indexOf(']') + 1)
-        : cleaned.split(':')[0] || '';
-      if (/^[a-z0-9.-]+$/.test(hostOnly) || hostOnly === '[::1]') {
-        return hostOnly;
-      }
-      return '';
-    };
-
-    const bodyRpId =
-      typeof req.body?.rpId === 'string' ? sanitizeHost(req.body.rpId) : '';
-    if (bodyRpId) return bodyRpId;
-
-    const originHeader = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
-    if (originHeader) {
-      try {
-        const originHost = sanitizeHost(new URL(originHeader).hostname);
-        if (originHost) return originHost;
-      } catch {
-        // Ignore malformed Origin header and fall back to Host header
-      }
-    }
-
-    const hostHeader = typeof req.headers.host === 'string' ? sanitizeHost(req.headers.host) : '';
-    return hostHeader || 'localhost';
-  };
-
-  app.post('/api/auth/webauthn/register-account/options', (req, res) => {
-    try {
-      const { name, email, role } = (req.body || {}) as {
-        name?: string;
-        email?: string;
-        role?: RbacRole;
-        rpId?: string;
-      };
-      const resolvedRpId = resolveWebAuthnRpId(req);
-      const options = authService.createWebAuthnRegistrationOptions({
-        name: name || '',
-        email: email || '',
-        role,
-        rpId: resolvedRpId,
-        ipAddress: req.ip || '127.0.0.1',
-      });
-      return res.json({ ...options, publicKey: options });
-    } catch (err: any) {
-      const msg = err?.message || 'Falha ao gerar opções WebAuthn de cadastro.';
-      const status = msg.startsWith('EMAIL_ALREADY_EXISTS')
-        ? 409
-        : msg.startsWith('ROLE_ELEVATION_BLOCKED')
-          ? 403
-          : msg.startsWith('AUTH_RATE_LIMITED')
-            ? 429
-            : 400;
-      return res.status(status).json({ error: msg });
-    }
-  });
-
-  app.post('/api/auth/webauthn/register-account/verify', (req, res) => {
-    try {
-      const {
-        challengeId,
-        credentialId,
-        clientDataJSON,
-        attestationObject,
-        authenticatorData,
-        publicKeySpkiBase64,
-        coseAlgorithm,
-        transports,
-        trustDevice,
-        credential,
-      } = (req.body || {}) as {
-        challengeId?: string;
-        credentialId?: string;
-        clientDataJSON?: string;
-        attestationObject?: string;
-        authenticatorData?: string;
-        publicKeySpkiBase64?: string;
-        coseAlgorithm?: number;
-        transports?: string[];
-        trustDevice?: boolean;
-        credential?: {
-          id?: string;
-          rawId?: string;
-          response?: {
-            clientDataJSON?: string;
-            attestationObject?: string;
-            authenticatorData?: string;
-            publicKey?: string;
-            publicKeyAlgorithm?: number;
-            transports?: string[];
-          };
-        };
-      };
-      const result = authService.verifyWebAuthnAccountRegistration({
-        challengeId,
-        credentialId: credentialId || credential?.id || credential?.rawId || '',
-        clientDataJSON: clientDataJSON || credential?.response?.clientDataJSON || '',
-        attestationObject: attestationObject || credential?.response?.attestationObject,
-        authenticatorData: authenticatorData || credential?.response?.authenticatorData,
-        publicKeySpkiBase64: publicKeySpkiBase64 || credential?.response?.publicKey,
-        coseAlgorithm: coseAlgorithm ?? credential?.response?.publicKeyAlgorithm,
-        transports: transports || credential?.response?.transports,
-        trustDevice: trustDevice !== false,
-        ipAddress: req.ip || '127.0.0.1',
-        userAgent: String(req.headers['user-agent'] || 'unknown'),
-      });
-      setSessionCookies(res, result.sessionId, result.csrfToken, {
-        trustDevice: result.trustDevice,
-      });
-      appendAuditLog(
-        db,
-        'USER_WEBAUTHN_REGISTERED',
-        'AUTH',
-        result.user.id,
-        `Conta "${result.user.email}" cadastrada via Windows Hello / WebAuthn FIDO2 com perfil ${result.user.role}.`,
-        result.user
-      );
-      saveDatabase(db);
-      return res.status(201).json({
-        authenticated: true,
-        mfaRequired: false,
-        user: result.user,
-        sessionId: result.sessionId,
-        csrfToken: result.csrfToken,
-      });
-    } catch (err: any) {
-      const msg = err?.message || 'Falha na verificação WebAuthn de cadastro.';
-      const status = msg.startsWith('ROLE_ELEVATION_BLOCKED')
-        ? 403
-        : msg.startsWith('EMAIL_ALREADY_EXISTS')
-          ? 409
-          : 400;
-      return res.status(status).json({ error: msg });
-    }
-  });
-
-  app.post('/api/auth/webauthn/login/options', (req, res) => {
-    try {
-      const { email } = (req.body || {}) as { email?: string; rpId?: string };
-      const resolvedRpId = resolveWebAuthnRpId(req);
-      const options = authService.createWebAuthnLoginOptions({
-        email,
-        rpId: resolvedRpId,
-        ipAddress: req.ip || '127.0.0.1',
-      });
-      return res.json({ ...options, publicKey: options });
-    } catch (err: any) {
-      const msg = err?.message || 'Falha ao gerar desafio de login WebAuthn.';
-      return res.status(400).json({ error: msg });
-    }
-  });
-
-  app.post('/api/auth/webauthn/login/verify', (req, res) => {
-    try {
-      const {
-        challengeId,
-        credentialId,
-        clientDataJSON,
-        authenticatorData,
-        signature,
-        email,
-        trustDevice,
-        credential,
-      } = (req.body || {}) as {
-        challengeId?: string;
-        credentialId?: string;
-        clientDataJSON?: string;
-        authenticatorData?: string;
-        signature?: string;
-        email?: string;
-        trustDevice?: boolean;
-        credential?: {
-          id?: string;
-          rawId?: string;
-          response?: {
-            clientDataJSON?: string;
-            authenticatorData?: string;
-            signature?: string;
-          };
-        };
-      };
-      const outcome = authService.verifyWebAuthnLogin({
-        challengeId,
-        credentialId: credentialId || credential?.id || credential?.rawId || '',
-        clientDataJSON: clientDataJSON || credential?.response?.clientDataJSON || '',
-        authenticatorData: authenticatorData || credential?.response?.authenticatorData || '',
-        signature: signature || credential?.response?.signature || '',
-        email,
-        trustDevice: trustDevice !== false,
-        ipAddress: req.ip || '127.0.0.1',
-        userAgent: String(req.headers['user-agent'] || 'unknown'),
-      });
-      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
-        trustDevice: outcome.trustDevice,
-      });
-      appendAuditLog(
-        db,
-        'AUTH_WEBAUTHN_LOGIN_SUCCESS',
-        'AUTH',
-        outcome.user.id,
-        `Login via Windows Hello / WebAuthn FIDO2 efetuado para ${outcome.user.email}.`,
-        outcome.user
-      );
-      saveDatabase(db);
-      return res.json({
-        authenticated: !outcome.mfaRequired,
-        mfaRequired: outcome.mfaRequired,
-        requiresTotp: outcome.requiresTotp,
-        preAuthToken: outcome.preAuthToken,
-        trustDevice: outcome.trustDevice,
-        serverTimeIso: outcome.serverTimeIso,
-        totpPeriodSeconds: outcome.totpPeriodSeconds,
-        user: outcome.user,
-        sessionId: outcome.sessionId,
-        csrfToken: outcome.csrfToken,
-      });
-    } catch (err: any) {
-      const msg = err?.message || 'Falha na autenticação Windows Hello / WebAuthn.';
-      const status =
-        msg.startsWith('AUTH_RATE_LIMITED') || msg.startsWith('AUTH_ACCOUNT_LOCKED') ? 429 : 401;
-      appendAuditLog(db, 'AUTH_WEBAUTHN_LOGIN_FAILED', 'AUTH', String(req.body?.email || 'unknown'), msg);
-      saveDatabase(db);
-      return res.status(status).json({ error: msg });
-    }
-  });
-
-  app.post('/api/auth/windows-hello/native-register', async (req, res) => {
-    try {
-      const { name, email, role, trustDevice } = (req.body || {}) as {
-        name?: string;
-        email?: string;
-        role?: RbacRole;
-        trustDevice?: boolean;
-      };
-      const result = await authService.registerNativeWindowsHelloAccount({
-        name: name || '',
-        email: email || '',
-        role,
-        trustDevice: trustDevice !== false,
-        ipAddress: req.ip || '127.0.0.1',
-        userAgent: String(req.headers['user-agent'] || 'unknown'),
-      });
-      setSessionCookies(res, result.sessionId, result.csrfToken, {
-        trustDevice: result.trustDevice,
-      });
-      appendAuditLog(
-        db,
-        'USER_WINHELLO_NATIVE_REGISTERED',
-        'AUTH',
-        result.user.id,
-        `Conta "${result.user.email}" cadastrada via Windows Hello Nativo (UserConsentVerifier + ES256 P-256) com perfil ${result.user.role}.`,
-        result.user
-      );
-      saveDatabase(db);
-      return res.status(201).json({
-        authenticated: true,
-        mfaRequired: false,
-        nativeWindowsHello: true,
-        keyAlgorithm: result.keyAlgorithm,
-        credentialId: result.credentialId,
-        user: result.user,
-        sessionId: result.sessionId,
-        csrfToken: result.csrfToken,
-      });
-    } catch (err: any) {
-      const msg = err?.message || 'Falha ao cadastrar com Windows Hello nativo.';
-      const code = msg.includes(':') ? msg.split(':')[0]!.trim() : 'WINDOWS_HELLO_NATIVE_FAILED';
-      const status =
-        code === 'WINDOWS_HELLO_OS_UNSUPPORTED'
-          ? 501
-          : code === 'EMAIL_ALREADY_EXISTS'
-            ? 409
-            : code === 'ROLE_ELEVATION_BLOCKED'
-              ? 403
-              : code === 'AUTH_RATE_LIMITED'
-                ? 429
-                : code === 'WINDOWS_HELLO_CANCELLED'
-                  ? 401
-                  : 400;
-      appendAuditLog(
-        db,
-        'AUTH_WINHELLO_NATIVE_REGISTER_FAILED',
-        'AUTH',
-        String(req.body?.email || 'unknown'),
-        msg
-      );
-      saveDatabase(db);
-      return res.status(status).json({ error: msg, code, platform: process.platform });
-    }
-  });
-
-  app.post('/api/auth/windows-hello/native-login', async (req, res) => {
-    try {
-      const { email, trustDevice } = (req.body || {}) as {
-        email?: string;
-        trustDevice?: boolean;
-      };
-      const outcome = await authService.loginNativeWindowsHelloAccount({
-        email,
-        trustDevice: trustDevice !== false,
-        ipAddress: req.ip || '127.0.0.1',
-        userAgent: String(req.headers['user-agent'] || 'unknown'),
-      });
-      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
-        trustDevice: outcome.trustDevice,
-      });
-      appendAuditLog(
-        db,
-        'AUTH_WINHELLO_NATIVE_LOGIN_SUCCESS',
-        'AUTH',
-        outcome.user.id,
-        `Login via Windows Hello Nativo (UserConsentVerifier) efetuado para ${outcome.user.email}.`,
-        outcome.user
-      );
-      saveDatabase(db);
-      return res.json({
-        authenticated: !outcome.mfaRequired,
-        mfaRequired: outcome.mfaRequired,
-        requiresTotp: outcome.requiresTotp,
-        preAuthToken: outcome.preAuthToken,
-        trustDevice: outcome.trustDevice,
-        serverTimeIso: outcome.serverTimeIso,
-        totpPeriodSeconds: outcome.totpPeriodSeconds,
-        nativeWindowsHello: true,
-        user: outcome.user,
-        sessionId: outcome.sessionId,
-        csrfToken: outcome.csrfToken,
-      });
-    } catch (err: any) {
-      const msg = err?.message || 'Falha ao autenticar via Windows Hello nativo.';
-      const code = msg.includes(':') ? msg.split(':')[0]!.trim() : 'WINDOWS_HELLO_NATIVE_FAILED';
-      const status =
-        code === 'WINDOWS_HELLO_OS_UNSUPPORTED'
-          ? 501
-          : code === 'AUTH_RATE_LIMITED' || code === 'AUTH_ACCOUNT_LOCKED'
-            ? 429
-            : code === 'WEBAUTHN_CREDENTIAL_NOT_FOUND'
-              ? 404
-              : 401;
-      appendAuditLog(
-        db,
-        'AUTH_WINHELLO_NATIVE_LOGIN_FAILED',
-        'AUTH',
-        String(req.body?.email || 'unknown'),
-        msg
-      );
-      saveDatabase(db);
-      return res.status(status).json({ error: msg, code, platform: process.platform });
-    }
-  });
-
-  app.get('/api/auth/windows-hello/status', (_req, res) => {
-    res.json({
-      platform: process.platform,
-      nativeSupported: process.platform === 'win32',
-      webauthnSupported: true,
-      hasRegisteredCredentials: authService.hasAnyWebAuthnCredentials(),
-    });
-  });
-
-  app.post('/api/auth/webauthn/link-credential/options', (req, res) => {
-    const actor = getRequestActor(req, res);
-    if (actor.id === 'usr-anonymous') {
-      return res.status(401).json({ error: 'AUTH_REQUIRED' });
-    }
-    try {
-      const options = authService.createWebAuthnLinkOptions({
-        userId: actor.id,
-        rpId: resolveWebAuthnRpId(req),
-        ipAddress: req.ip || '127.0.0.1',
-      });
-      return res.json({ ...options, publicKey: options });
-    } catch (err: any) {
-      return res.status(400).json({ error: err?.message || 'Falha ao gerar desafio para vincular Passkey.' });
-    }
-  });
-
-  app.post('/api/auth/webauthn/link-credential/verify', (req, res) => {
-    const actor = getRequestActor(req, res);
-    if (actor.id === 'usr-anonymous') {
-      return res.status(401).json({ error: 'AUTH_REQUIRED' });
-    }
-    try {
-      const {
-        challengeId,
-        credentialId,
-        clientDataJSON,
-        attestationObject,
-        authenticatorData,
-        publicKeySpkiBase64,
-        coseAlgorithm,
-        transports,
-        label,
-        credential,
-      } = (req.body || {}) as {
-        challengeId?: string;
-        credentialId?: string;
-        clientDataJSON?: string;
-        attestationObject?: string;
-        authenticatorData?: string;
-        publicKeySpkiBase64?: string;
-        coseAlgorithm?: number;
-        transports?: string[];
-        label?: string;
-        credential?: {
-          id?: string;
-          rawId?: string;
-          response?: {
-            clientDataJSON?: string;
-            attestationObject?: string;
-            authenticatorData?: string;
-            publicKey?: string;
-            publicKeyAlgorithm?: number;
-            transports?: string[];
-          };
-        };
-      };
-      const result = authService.verifyWebAuthnLinkCredential({
-        userId: actor.id,
-        challengeId,
-        credentialId: credentialId || credential?.id || credential?.rawId || '',
-        clientDataJSON: clientDataJSON || credential?.response?.clientDataJSON || '',
-        attestationObject: attestationObject || credential?.response?.attestationObject,
-        authenticatorData: authenticatorData || credential?.response?.authenticatorData,
-        publicKeySpkiBase64: publicKeySpkiBase64 || credential?.response?.publicKey,
-        coseAlgorithm: coseAlgorithm ?? credential?.response?.publicKeyAlgorithm,
-        transports: transports || credential?.response?.transports,
-        label,
-        ipAddress: req.ip || '127.0.0.1',
-      });
-      appendAuditLog(
-        db,
-        'USER_WEBAUTHN_CREDENTIAL_LINKED',
-        'AUTH',
-        result.user.id,
-        `Nova Passkey / Windows Hello vinculada à conta ${result.user.email}.`,
-        result.user
-      );
-      saveDatabase(db);
-      return res.json({
-        ok: true,
-        user: result.user,
-        credentialId: result.credentialId,
-      });
-    } catch (err: any) {
-      return res.status(400).json({ error: err?.message || 'Falha ao vincular Passkey à conta.' });
-    }
-  });
-
-  app.post('/api/auth/logout', (req, res) => {
-    res.setHeader('Cache-Control', 'no-store');
-    const actor = (req as any).authUser as PublicUserView | undefined;
-    const sessionToken = extractSessionTokenFromRequest(req).token;
-    if (sessionToken) {
-      authService.revokeSession(sessionToken);
-    }
-    if (actor) {
-      appendAuditLog(
-        db,
-        'AUTH_LOGOUT',
-        'AUTH',
-        actor.id,
-        `Sessão encerrada para ${actor.email}.`,
-        actor
-      );
-      saveDatabase(db);
-    }
-    clearSessionCookies(res);
-    return res.json({ ok: true });
-  });
-
-  app.get('/api/auth/me', (req, res) => {
-    res.setHeader('Cache-Control', 'no-store');
-    const sessionToken = extractSessionTokenFromRequest(req).token;
-    const validated = sessionToken ? authService.validateSession(sessionToken) : null;
-    const user = validated?.user || ((req as any).authUser as PublicUserView | undefined);
-    if (!user) {
-      return res.status(401).json({
-        authenticated: false,
-        error: 'SESSION_INVALID',
-        code: 'SESSION_INVALID',
-        bootstrapRequired: authService.isBootstrapRequired(),
-        message: 'Sessão ausente, expirada ou inválida.',
-      });
-    }
-    const storedMeta = authService.listUsers().find((u) => u.id === user.id);
-    return res.json({
-      authenticated: true,
-      id: user.id,
-      email: user.email,
-      name: user.name,
-      role: user.role,
-      totpEnabled: user.mfaEnabled,
-      mfaEnabled: user.mfaEnabled,
-      mfaVerified: user.mfaVerified,
-      createdAt: storedMeta?.createdAt || new Date().toISOString(),
-      user: {
-        ...user,
-        totpEnabled: user.mfaEnabled,
-        createdAt: storedMeta?.createdAt || new Date().toISOString(),
-      },
-      csrfToken: validated?.session.csrfToken || (req as any).authSession?.csrfToken,
-    });
-  });
-
-  app.delete('/api/auth/me', (req, res) => {
-    const actor = (req as any).authUser as PublicUserView | undefined;
-    const authSession = (req as any).authSession as { csrfToken?: string } | undefined;
-    if (!actor || actor.id === 'usr-anonymous' || actor.id === 'usr-test-header') {
-      return res.status(401).json({
-        error: 'AUTH_REQUIRED',
-        code: 'SESSION_INVALID',
-        message: 'Sessão autenticada obrigatória para excluir conta local.',
-      });
-    }
-
-    // Require valid CSRF token for account deletion regardless of transport
-    const expectedCsrf = String(authSession?.csrfToken || '');
-    const providedCsrf = String(req.headers['x-csrf-token'] || req.headers['x-winhood-csrf'] || '').trim();
-    const expBuf = Buffer.from(expectedCsrf, 'utf8');
-    const provBuf = Buffer.from(providedCsrf, 'utf8');
-    if (
-      !expectedCsrf ||
-      expBuf.length !== provBuf.length ||
-      !crypto.timingSafeEqual(expBuf, provBuf)
-    ) {
-      return res.status(403).json({
-        error: 'CSRF_INVALID',
-        code: 'CSRF_INVALID',
-        message: 'Token CSRF ausente ou inválido para exclusão de conta.',
-      });
-    }
-
-    const { password, pin } = (req.body || {}) as { password?: string; pin?: string };
-    try {
-      const outcome = authService.deleteOwnAccount(actor.id, { password, pin });
-      clearSessionCookies(res);
-      appendAuditLog(
-        db,
-        'USER_ACCOUNT_DELETED',
-        'AUTH',
-        outcome.deletedUserId,
-        `Conta local "${outcome.email}" excluída pelo próprio titular (${outcome.revokedSessionsCount} sessões revogadas).`,
-        actor
-      );
-      saveDatabase(db, true);
-      return res.json({
-        ok: true,
-        deletedUserId: outcome.deletedUserId,
-        revokedSessionsCount: outcome.revokedSessionsCount,
-      });
-    } catch (err: any) {
-      const msg = err?.message || 'Falha ao excluir conta local.';
-      const status = msg.startsWith('AUTH_INVALID_CREDENTIALS')
-        ? 401
-        : msg.startsWith('USER_NOT_FOUND')
-          ? 404
-          : 400;
-      return res.status(status).json({ error: msg });
-    }
-  });
-
-  app.get('/api/auth/session', (req, res) => {
-    const sessionToken = extractSessionTokenFromRequest(req).token;
-    const pendingSession = sessionToken
-      ? authService.validateSession(sessionToken, { allowPendingMfa: true })
-      : null;
-    if (pendingSession) {
-      const mfaRequired = pendingSession.user.mfaEnabled && !pendingSession.user.mfaVerified;
-      return res.json({
-        authenticated: !mfaRequired,
-        mfaRequired,
-        requiresTotp: mfaRequired,
-        serverTimeIso: new Date().toISOString(),
-        totpPeriodSeconds: 30,
-        bootstrapRequired: authService.isBootstrapRequired(),
-        user: pendingSession.user,
-        csrfToken: pendingSession.session.csrfToken,
-      });
-    }
-    if ((req as any).authUser) {
-      return res.json({
-        authenticated: true,
-        mfaRequired: false,
-        requiresTotp: false,
-        serverTimeIso: new Date().toISOString(),
-        totpPeriodSeconds: 30,
-        bootstrapRequired: authService.isBootstrapRequired(),
-        user: (req as any).authUser,
-        csrfToken: (req as any).authSession?.csrfToken,
-      });
-    }
-    return res.json({
-      authenticated: false,
-      mfaRequired: false,
-      requiresTotp: false,
-      serverTimeIso: new Date().toISOString(),
-      totpPeriodSeconds: 30,
-      bootstrapRequired: authService.isBootstrapRequired(),
-      user: null,
-    });
-  });
-
-  app.post('/api/auth/refresh', (req, res) => {
-    const sessionToken = extractSessionTokenFromRequest(req).token;
-    const renewed = sessionToken ? authService.renewSession(sessionToken) : null;
-    if (!renewed) {
-      return res.status(401).json({ error: 'AUTH_SESSION_INVALID', code: 'SESSION_EXPIRED' });
-    }
-    setSessionCookies(res, renewed.sessionId, renewed.csrfToken);
-    return res.json({ ok: true, sessionId: renewed.sessionId, csrfToken: renewed.csrfToken });
-  });
-
-  app.post(['/api/auth/mfa/setup', '/api/auth/totp/setup'], (req, res) => {
-    const actor = getRequestActor(req, res);
-    if (actor.id === 'usr-anonymous') {
-      return res.status(401).json({ error: 'AUTH_REQUIRED' });
-    }
-    try {
-      const setup = authService.setupMfaForUser(actor.id);
-      appendAuditLog(db, 'AUTH_MFA_CONFIGURED', 'AUTH', actor.id, `TOTP MFA configurado para ${actor.email}.`, actor);
-      saveDatabase(db);
       return res.json({
         ...setup,
-        serverTimeIso: new Date().toISOString(),
+        qrDataUrl,
       });
     } catch (err: any) {
-      return res.status(400).json({ error: err?.message || 'Falha ao configurar MFA.' });
+      return res.status(500).json({
+        error: 'TOTP_SETUP_FAILED',
+        message: err?.message || 'Falha ao iniciar configuração TOTP 2FA.',
+      });
     }
   });
 
-  app.post(['/api/auth/mfa/confirm', '/api/auth/totp/verify-setup'], (req, res) => {
-    const actor = getRequestActor(req, res);
-    if (actor.id === 'usr-anonymous') {
-      return res.status(401).json({ error: 'AUTH_REQUIRED' });
-    }
-    const { totpCode } = (req.body || {}) as { totpCode?: string };
+  app.post(['/api/totp/confirm', '/api/security/totp/confirm'], (req, res) => {
     try {
-      const confirmed = authService.confirmMfaEnrollment(actor.id, totpCode || '');
-      const { recoveryCodes, ...user } = confirmed;
-      appendAuditLog(db, 'AUTH_MFA_CONFIRMED', 'AUTH', user.id, `MFA ativado e confirmado para ${user.email}. Códigos de recuperação emitidos.`, user);
-      saveDatabase(db);
-      return res.json({ ok: true, user, recoveryCodes });
-    } catch (err: any) {
-      return res.status(400).json({ error: err?.message || 'Falha ao confirmar MFA.' });
-    }
-  });
-
-  app.post(['/api/auth/mfa/disable', '/api/auth/totp/disable'], (req, res) => {
-    const actor = getRequestActor(req, res);
-    if (actor.id === 'usr-anonymous') {
-      return res.status(401).json({ error: 'AUTH_REQUIRED' });
-    }
-    const { password, totpCode, recoveryCode } = (req.body || {}) as {
-      password?: string;
-      totpCode?: string;
-      recoveryCode?: string;
-    };
-    const sessionToken = extractSessionTokenFromRequest(req).token || undefined;
-    try {
-      const updatedUser = authService.disableMfaForUser(
-        actor.id,
-        { password, totpCode, recoveryCode },
-        sessionToken
-      );
+      const body = (req.body || {}) as { code?: string; totpCode?: string };
+      const code = String(body.code || body.totpCode || '').trim();
+      const result = totpService.confirmSetup(code, req.ip || 'local');
+      const { isCrossSiteIframe } = setTotpUnlockCookies(res, result.unlockToken, result.csrfToken);
       appendAuditLog(
         db,
-        'AUTH_MFA_DISABLED',
-        'AUTH',
-        actor.id,
-        `Autenticação TOTP MFA removida para ${actor.email}.`,
-        updatedUser
-      );
-      saveDatabase(db);
-      return res.json({ ok: true, user: updatedUser });
-    } catch (err: any) {
-      const msg = err?.message || 'Falha ao desabilitar MFA.';
-      const status =
-        msg.startsWith('AUTH_INVALID_') || msg.startsWith('AUTH_TOTP_REPLAY') ? 401 : 400;
-      const code = msg.includes(':') ? msg.split(':')[0].trim() : 'MFA_DISABLE_FAILED';
-      return res.status(status).json({ error: msg, code });
-    }
-  });
-
-  app.post('/api/auth/totp/authenticate', (req, res) => {
-    const { preAuthToken, totpCode, recoveryCode, trustDevice } = (req.body || {}) as {
-      preAuthToken?: string;
-      totpCode?: string;
-      recoveryCode?: string;
-      trustDevice?: boolean;
-    };
-    if (!preAuthToken) {
-      return res.status(400).json({ error: 'AUTH_PREAUTH_REQUIRED: Token de desafio MFA obrigatório.' });
-    }
-    try {
-      const outcome = authService.authenticateWithTotpPreAuth({
-        preAuthToken,
-        totpCode,
-        recoveryCode,
-        trustDevice: typeof trustDevice === 'boolean' ? trustDevice : undefined,
-        ipAddress: req.ip || '127.0.0.1',
-        userAgent: String(req.headers['user-agent'] || 'unknown'),
-      });
-      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
-        trustDevice: outcome.trustDevice,
-      });
-      appendAuditLog(
-        db,
-        outcome.usedRecoveryCode ? 'AUTH_RECOVERY_CODE_USED' : 'AUTH_MFA_VERIFIED',
-        'AUTH',
-        outcome.user.id,
-        outcome.usedRecoveryCode
-          ? `Acesso 2FA concluído com código de recuperação para ${outcome.user.email} (restantes: ${outcome.remainingRecoveryCodesCount}).`
-          : `TOTP 2FA validado para ${outcome.user.email} (trustDevice=${outcome.trustDevice}).`,
-        outcome.user
+        'TOTP_2FA_ENABLED',
+        'SECURITY',
+        'optional-totp',
+        'Proteção opcional TOTP 2FA (RFC-6238) ativada para o workspace local.',
+        DEFAULT_LOCAL_OPERATOR
       );
       saveDatabase(db);
       return res.json({
-        authenticated: true,
-        mfaRequired: false,
-        requiresTotp: false,
-        user: outcome.user,
-        sessionId: outcome.sessionId,
-        csrfToken: outcome.csrfToken,
-        trustDevice: outcome.trustDevice,
-        usedRecoveryCode: outcome.usedRecoveryCode,
-        remainingRecoveryCodesCount: outcome.remainingRecoveryCodesCount,
+        ok: true,
+        enabled: true,
+        unlocked: true,
+        remainingRecoveryCodes: result.remainingRecoveryCodes,
+        csrfToken: result.csrfToken,
+        ...(isCrossSiteIframe ? { unlockToken: result.unlockToken } : {}),
       });
     } catch (err: any) {
-      const msg = err?.message || 'Código TOTP inválido.';
-      const status = msg.startsWith('AUTH_RATE_LIMITED') ? 429 : 401;
-      return res.status(status).json({ error: msg });
+      const msg = String(err?.message || 'Código TOTP inválido.');
+      const statusCode = msg.includes('TOTP_RATE_LIMITED') ? 429 : 400;
+      return res.status(statusCode).json({ error: msg, message: msg });
     }
   });
 
-  app.post('/api/auth/mfa/verify', (req, res) => {
-    const sessionToken = extractSessionTokenFromRequest(req).token || '';
-    const { totpCode, recoveryCode, trustDevice } = (req.body || {}) as {
-      totpCode?: string;
-      recoveryCode?: string;
-      trustDevice?: boolean;
-    };
+  app.post(['/api/totp/verify', '/api/security/totp/verify'], (req, res) => {
     try {
-      const result = authService.verifySessionMfa(sessionToken, totpCode || '', {
-        recoveryCode,
-        trustDevice: Boolean(trustDevice),
-      });
-      const validated = sessionToken ? authService.validateSession(sessionToken) : null;
-      if (trustDevice && validated) {
-        setSessionCookies(res, sessionToken, validated.session.csrfToken, {
-          trustDevice: true,
-        });
-      }
-      const { usedRecoveryCode, remainingRecoveryCodesCount, ...user } = result;
-      appendAuditLog(
-        db,
-        usedRecoveryCode ? 'AUTH_RECOVERY_CODE_USED' : 'AUTH_MFA_VERIFIED',
-        'AUTH',
-        user.id,
-        usedRecoveryCode
-          ? `MFA concluído com código de recuperação para ${user.email}.`
-          : `MFA verificado para ${user.email}.`,
-        user
-      );
-      saveDatabase(db);
-      return res.json({
-        authenticated: true,
-        mfaRequired: false,
-        user,
-        sessionId: sessionToken || undefined,
-        csrfToken: validated?.session.csrfToken,
-        usedRecoveryCode: Boolean(usedRecoveryCode),
-        remainingRecoveryCodesCount,
-      });
-    } catch (err: any) {
-      return res.status(401).json({ error: err?.message || 'Código TOTP inválido.' });
-    }
-  });
-
-  app.get('/api/auth/users', (req, res) => {
-    if (!requireWritePermission(res, req, 'users:manage')) return;
-    res.json({ users: authService.listUsers() });
-  });
-
-  app.post('/api/auth/users', (req, res) => {
-    if (!requireWritePermission(res, req, 'users:manage')) return;
-    const actor = getRequestActor(req, res);
-    try {
-      const { name, email, password, role, enableMfa } = (req.body || {}) as {
-        name?: string;
-        email?: string;
-        password?: string;
-        role?: RbacRole;
-        enableMfa?: boolean;
+      const body = (req.body || {}) as {
+        code?: string;
+        totpCode?: string;
+        recoveryCode?: string;
       };
-      if (!role || !['ADMIN', 'SECURITY_LEAD', 'AUDITOR', 'QA_ENGINEER'].includes(role)) {
-        return res.status(400).json({ error: 'Perfil RBAC inválido.' });
-      }
-      const created = authService.createUser({
-        name: name || '',
-        email: email || '',
-        password: password || '',
-        role,
-        enableMfa: Boolean(enableMfa),
+      const result = totpService.verifyUnlock({
+        code: body.code,
+        totpCode: body.totpCode,
+        recoveryCode: body.recoveryCode,
+        ipKey: req.ip || 'local',
       });
+      const { isCrossSiteIframe } = setTotpUnlockCookies(res, result.unlockToken, result.csrfToken);
       appendAuditLog(
         db,
-        'USER_CREATED',
-        'AUTH',
-        created.id,
-        `Usuário ${created.email} criado com perfil ${created.role}.`,
-        actor
+        result.usedRecoveryCode ? 'TOTP_2FA_UNLOCKED_RECOVERY' : 'TOTP_2FA_UNLOCKED',
+        'SECURITY',
+        'optional-totp',
+        result.usedRecoveryCode
+          ? 'Workspace local desbloqueado com código de recuperação de uso único.'
+          : 'Workspace local desbloqueado com código TOTP RFC-6238.',
+        DEFAULT_LOCAL_OPERATOR
       );
       saveDatabase(db);
-      return res.status(201).json({ user: created });
+      return res.json({
+        ok: true,
+        enabled: true,
+        unlocked: true,
+        usedRecoveryCode: result.usedRecoveryCode,
+        remainingRecoveryCodes: result.remainingRecoveryCodes,
+        csrfToken: result.csrfToken,
+        ...(isCrossSiteIframe ? { unlockToken: result.unlockToken } : {}),
+      });
     } catch (err: any) {
-      return res.status(400).json({ error: err?.message || 'Erro ao criar usuário.' });
+      const msg = String(err?.message || 'Código TOTP ou código de recuperação inválido.');
+      const statusCode = msg.includes('TOTP_RATE_LIMITED') ? 429 : 401;
+      return res.status(statusCode).json({ error: msg, message: msg });
     }
   });
 
-  app.post('/api/auth/recovery/request', (req, res) => {
-    const { email } = (req.body || {}) as { email?: string };
-    const outcome = authService.requestPasswordRecovery(email || '');
+  app.post(['/api/totp/lock', '/api/security/totp/lock'], (req, res) => {
+    const extracted = extractTotpUnlockTokenFromRequest(req);
+    const result = totpService.lock(extracted.token);
+    clearTotpUnlockCookies(res);
     appendAuditLog(
       db,
-      'AUTH_RECOVERY_REQUESTED',
-      'AUTH',
-      String(email || 'unknown'),
-      'Solicitação de recuperação de senha registrada no canal local seguro.'
+      'TOTP_2FA_LOCKED',
+      'SECURITY',
+      'optional-totp',
+      'Workspace local bloqueado manualmente pelo operador.',
+      DEFAULT_LOCAL_OPERATOR
     );
     saveDatabase(db);
-    return res.json({
-      ok: true,
-      recoveryChannelHint: outcome.recoveryFilePath
-        ? path.relative(process.cwd(), outcome.recoveryFilePath)
-        : null,
-      message: 'Se o e-mail existir, o token temporário foi gravado no diretório local seguro (chmod 0600).',
-    });
+    return res.json(result);
   });
 
-  app.post('/api/auth/recovery/confirm', (req, res) => {
+  app.post(['/api/totp/disable', '/api/security/totp/disable'], (req, res) => {
     try {
-      const { email, recoveryToken, newPassword } = (req.body || {}) as {
-        email?: string;
-        recoveryToken?: string;
-        newPassword?: string;
+      const body = (req.body || {}) as {
+        code?: string;
+        totpCode?: string;
+        recoveryCode?: string;
       };
-      authService.confirmPasswordRecovery({
-        email: email || '',
-        recoveryToken: recoveryToken || '',
-        newPassword: newPassword || '',
+      const result = totpService.disable({
+        code: body.code,
+        totpCode: body.totpCode,
+        recoveryCode: body.recoveryCode,
+        ipKey: req.ip || 'local',
       });
+      clearTotpUnlockCookies(res);
       appendAuditLog(
         db,
-        'AUTH_PASSWORD_RECOVERED',
-        'AUTH',
-        String(email || 'unknown'),
-        'Senha redefinida via token de recuperação de uso único; sessões anteriores revogadas.'
+        'TOTP_2FA_DISABLED',
+        'SECURITY',
+        'optional-totp',
+        'Proteção opcional TOTP 2FA desativada; acesso local irrestrito restaurado.',
+        DEFAULT_LOCAL_OPERATOR
       );
       saveDatabase(db);
-      return res.json({ ok: true });
+      return res.json(result);
     } catch (err: any) {
-      return res.status(400).json({ error: err?.message || 'Falha na recuperação de senha.' });
+      const msg = String(err?.message || 'Código TOTP ou código de recuperação inválido.');
+      const statusCode = msg.includes('TOTP_RATE_LIMITED') ? 429 : 401;
+      return res.status(statusCode).json({ error: msg, message: msg });
     }
-  });
-
-  app.post('/api/auth/switch-role', (req, res) => {
-    const { role, userId } = (req.body || {}) as {
-      role?: RbacRole;
-      userId?: string;
-    };
-    if (!role || !['ADMIN', 'SECURITY_LEAD', 'AUDITOR', 'QA_ENGINEER'].includes(role)) {
-      return res.status(400).json({ error: 'Perfil RBAC inválido.' });
-    }
-    const actor = getRequestActor(req, res);
-    const sessionToken = extractSessionTokenFromRequest(req).token;
-
-    if (userId) {
-      if (!requireWritePermission(res, req, 'users:manage')) return;
-      try {
-        const updated = authService.updateUserRole(userId, role);
-        appendAuditLog(db, 'RBAC_USER_ROLE_UPDATED', 'AUTH', userId, `Perfil de ${updated.email} atualizado para ${role}`, actor);
-        saveDatabase(db);
-        return res.json({ user: updated });
-      } catch (err: any) {
-        return res.status(404).json({ error: err?.message || 'Usuário não encontrado.' });
-      }
-    }
-
-    if (sessionToken) {
-      try {
-        const updatedUser = authService.switchSessionPreviewRole(sessionToken, role);
-        appendAuditLog(db, 'RBAC_ROLE_SWITCHED', 'AUTH', actor.id, `Perfil de sessão alterado para ${role}`, actor);
-        saveDatabase(db);
-        return res.json({ user: updatedUser });
-      } catch (err: any) {
-        return res.status(403).json({ error: 'ROLE_ELEVATION_BLOCKED', message: err?.message });
-      }
-    }
-
-    return res.status(403).json({
-      error: 'ROLE_ELEVATION_BLOCKED',
-      message: 'Alternância de perfil requer sessão ADMIN autenticada.',
-    });
   });
 
   // 3. System Workspace Reset / Seed (to test both Empty State and Real Populated State)
@@ -4229,8 +2174,10 @@ export async function createWinHoodApp(options?: {
 
   // 4. Consolidated Bootstrap & Dashboard Summary (Seção 11.6, 11.7 e 11.8)
   app.get('/api/bootstrap', (req, res) => {
+    const extracted = extractTotpUnlockTokenFromRequest(req);
     res.json({
-      user: getRequestActor(req, res),
+      accessMode: 'UNRESTRICTED_LOCAL',
+      totp: totpService.getStatus(extracted.token),
       dashboard: buildDashboardPayload(),
       projects: db.projects,
       softwares: db.softwares.map(stripSoftwareHeavySource),
@@ -7912,187 +5859,7 @@ export async function createWinHoodApp(options?: {
     });
   });
 
-  app.get('/api/admin/integrations/github-oauth', (req, res) => {
-    const actor = getRequestActor(req, res);
-    if (actor.role !== 'ADMIN') {
-      return res.status(403).json({
-        error: 'ADMIN_REQUIRED',
-        code: 'ADMIN_REQUIRED',
-        currentRole: actor.role,
-        message:
-          'ACESSO RESTRITO: Apenas administradores (ADMIN) podem inspecionar o status de configuração do GitHub OAuth 2.0.',
-      });
-    }
-    res.setHeader('Cache-Control', 'no-store');
-    return res.json(
-      inspectGitHubOAuthServerStatus({
-        env: process.env,
-        callbackUrl: resolveGitHubCallbackUrl(req),
-        overrideCredentials: resolveStoredGitHubOAuthOverride(),
-      })
-    );
-  });
 
-  app.put('/api/admin/integrations/github-oauth', analysisRateLimiter, (req, res) => {
-    const actor = getRequestActor(req, res);
-    if (actor.role !== 'ADMIN') {
-      return res.status(403).json({
-        error: 'ADMIN_REQUIRED',
-        code: 'ADMIN_REQUIRED',
-        currentRole: actor.role,
-        message:
-          'ACESSO RESTRITO: Apenas administradores (ADMIN) podem atualizar credenciais do GitHub OAuth 2.0.',
-      });
-    }
-
-    const body = (req.body || {}) as {
-      clientId?: unknown;
-      clientSecret?: unknown;
-    };
-    const rawClientId = typeof body.clientId === 'string' ? body.clientId.trim() : '';
-    const rawClientSecret = typeof body.clientSecret === 'string' ? body.clientSecret.trim() : '';
-
-    if (!rawClientId && !rawClientSecret) {
-      return res.status(400).json({
-        error: 'OAUTH_CREDENTIALS_REQUIRED',
-        code: 'OAUTH_CREDENTIALS_REQUIRED',
-        message:
-          'Informe WINHOOD_GITHUB_OAUTH_CLIENT_ID e/ou WINHOOD_GITHUB_OAUTH_CLIENT_SECRET para salvar.',
-      });
-    }
-
-    let nextEncryptedClientId = db.githubOAuthConfig?.encryptedClientId ?? null;
-    let nextEncryptedClientSecret = db.githubOAuthConfig?.encryptedClientSecret ?? null;
-
-    if (rawClientId) {
-      const check = validateOAuthCredentialInput(rawClientId, 'WINHOOD_GITHUB_OAUTH_CLIENT_ID');
-      if ('error' in check) {
-        return res.status(400).json({
-          error: 'INVALID_CLIENT_ID',
-          code: 'INVALID_CLIENT_ID',
-          message: check.error,
-        });
-      }
-      nextEncryptedClientId = MqrBridgeConnection.encryptToken(check.value);
-    }
-
-    if (rawClientSecret) {
-      const check = validateOAuthCredentialInput(
-        rawClientSecret,
-        'WINHOOD_GITHUB_OAUTH_CLIENT_SECRET'
-      );
-      if ('error' in check) {
-        return res.status(400).json({
-          error: 'INVALID_CLIENT_SECRET',
-          code: 'INVALID_CLIENT_SECRET',
-          message: check.error,
-        });
-      }
-      nextEncryptedClientSecret = MqrBridgeConnection.encryptToken(check.value);
-    }
-
-    const now = new Date().toISOString();
-    db.githubOAuthConfig = {
-      encryptedClientId: nextEncryptedClientId,
-      encryptedClientSecret: nextEncryptedClientSecret,
-      updatedAt: now,
-      updatedByUserId: actor.id,
-    };
-
-    appendAuditLog(
-      db,
-      'GITHUB_OAUTH_CONFIG_UPDATED',
-      'AUTH',
-      'github-oauth',
-      `Credenciais GitHub OAuth 2.0 atualizadas e cifradas em AES-256-GCM (${rawClientId ? 'Client ID atualizado' : 'Client ID mantido'}; ${rawClientSecret ? 'Client Secret atualizado' : 'Client Secret mantido'}).`,
-      actor
-    );
-    saveDatabase(db, true);
-
-    res.setHeader('Cache-Control', 'no-store');
-    return res.json(
-      inspectGitHubOAuthServerStatus({
-        env: process.env,
-        callbackUrl: resolveGitHubCallbackUrl(req),
-        overrideCredentials: resolveStoredGitHubOAuthOverride(),
-      })
-    );
-  });
-
-  app.delete('/api/admin/integrations/github-oauth', analysisRateLimiter, (req, res) => {
-    const actor = getRequestActor(req, res);
-    if (actor.role !== 'ADMIN') {
-      return res.status(403).json({
-        error: 'ADMIN_REQUIRED',
-        code: 'ADMIN_REQUIRED',
-        currentRole: actor.role,
-        message:
-          'ACESSO RESTRITO: Apenas administradores (ADMIN) podem remover credenciais salvas do GitHub OAuth 2.0.',
-      });
-    }
-
-    delete db.githubOAuthConfig;
-    appendAuditLog(
-      db,
-      'GITHUB_OAUTH_CONFIG_CLEARED',
-      'AUTH',
-      'github-oauth',
-      'Credenciais salvas de GitHub OAuth 2.0 removidas do cofre local (fallback para variáveis de ambiente, se presentes).',
-      actor
-    );
-    saveDatabase(db, true);
-
-    res.setHeader('Cache-Control', 'no-store');
-    return res.json(
-      inspectGitHubOAuthServerStatus({
-        env: process.env,
-        callbackUrl: resolveGitHubCallbackUrl(req),
-        overrideCredentials: resolveStoredGitHubOAuthOverride(),
-      })
-    );
-  });
-
-  app.post('/api/admin/integrations/github-oauth/verify', analysisRateLimiter, async (req, res) => {
-    const actor = getRequestActor(req, res);
-    if (actor.role !== 'ADMIN') {
-      return res.status(403).json({
-        error: 'ADMIN_REQUIRED',
-        code: 'ADMIN_REQUIRED',
-        currentRole: actor.role,
-        message:
-          'ACESSO RESTRITO: Apenas administradores (ADMIN) podem executar teste de conexão do GitHub OAuth 2.0.',
-      });
-    }
-
-    const body = (req.body || {}) as {
-      clientId?: unknown;
-      clientSecret?: unknown;
-    };
-    const effective = resolveEffectiveGitHubOAuthCredentials();
-    const candidateClientId =
-      (typeof body.clientId === 'string' && body.clientId.trim()) || effective.clientId;
-    const candidateClientSecret =
-      (typeof body.clientSecret === 'string' && body.clientSecret.trim()) || effective.clientSecret;
-
-    const verification = await verifyGitHubOAuthConnection({
-      clientId: candidateClientId,
-      clientSecret: candidateClientSecret,
-      redirectUri: resolveGitHubCallbackUrl(req),
-    });
-
-    appendAuditLog(
-      db,
-      'GITHUB_OAUTH_CONNECTION_VERIFIED',
-      'AUTH',
-      'github-oauth',
-      `Teste de conexão GitHub OAuth 2.0 executado: status=${verification.status} (http=${verification.httpStatus ?? 'N/A'}, latência=${verification.latencyMs}ms).`,
-      actor
-    );
-    saveDatabase(db);
-
-    res.setHeader('Cache-Control', 'no-store');
-    return res.json(verification);
-  });
 
   // ============================================================================
   // 12.0 MULTI-PROJECT SONARCLOUD / MQR_BRIDGE JSON REPORT EXPORTER & TOKEN MONITOR
@@ -10983,29 +8750,7 @@ export async function createWinHoodApp(options?: {
       if (gitarAdapter.getConnection().reencryptStoredToken(ctx)) {
         reencryptedCount += 1;
       }
-      if (db.githubOAuthConfig) {
-        if (db.githubOAuthConfig.encryptedClientId) {
-          const reencId = MqrBridgeConnection.reencryptToken(
-            db.githubOAuthConfig.encryptedClientId,
-            ctx
-          );
-          if (reencId) {
-            db.githubOAuthConfig.encryptedClientId = reencId;
-            reencryptedCount += 1;
-          }
-        }
-        if (db.githubOAuthConfig.encryptedClientSecret) {
-          const reencSecret = MqrBridgeConnection.reencryptToken(
-            db.githubOAuthConfig.encryptedClientSecret,
-            ctx
-          );
-          if (reencSecret) {
-            db.githubOAuthConfig.encryptedClientSecret = reencSecret;
-            reencryptedCount += 1;
-          }
-        }
-      }
-      reencryptedCount += authService.reencryptTotpSecrets(ctx);
+      reencryptedCount += totpService.reencryptTotpSecrets(ctx);
     });
 
     appendAuditLog(
@@ -11441,7 +9186,7 @@ export async function createWinHoodApp(options?: {
   return {
     app,
     dbManager,
-    authService,
+    totpService,
     getDb: () => db,
   };
 }
@@ -11459,7 +9204,6 @@ export interface StartWinHoodServerOptions {
     | 'WINDOWS_PACKAGED'
     | 'REMOTE_DEPLOYMENT';
   enableVite?: boolean;
-  enforceProductionAuth?: boolean;
 }
 
 export interface StartedWinHoodServer {
@@ -11478,7 +9222,6 @@ export async function startServer(
   const dataDir = resolveWinHoodDataRoot(options?.dataDir);
   const { app } = await createWinHoodApp({
     dataDir,
-    enforceProductionAuth: options?.enforceProductionAuth,
   });
 
   const isElectronDesktop =

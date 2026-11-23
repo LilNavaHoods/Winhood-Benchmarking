@@ -1,12 +1,13 @@
 // server.ts
-import crypto32 from "node:crypto";
-import fs18 from "node:fs";
+import crypto30 from "node:crypto";
+import fs17 from "node:fs";
 import os11 from "node:os";
-import path19 from "node:path";
-import { execFile as execFile2 } from "node:child_process";
+import path18 from "node:path";
+import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { promisify as promisify2 } from "node:util";
+import { promisify } from "node:util";
 import express from "express";
+import QRCode from "qrcode";
 import { createServer as createViteServer } from "vite";
 
 // src/engine/scoringEngine.ts
@@ -2405,11 +2406,42 @@ function normalizeEnabledCategoryWeights(weights, enabledCategories) {
   }
   return normalized;
 }
+function computeRenormalizedCategoryWeights(weights, enabledCategories, assessedCategories) {
+  const enabledList = enabledCategories.length > 0 ? enabledCategories : [...ALL_BENCHMARK_CATEGORIES];
+  const originalWeights = normalizeEnabledCategoryWeights(weights, enabledList);
+  const assessedSet = new Set(assessedCategories);
+  const effectiveAssessed = enabledList.filter((k) => assessedSet.has(k));
+  const excludedCategories = enabledList.filter((k) => !assessedSet.has(k));
+  const totalEnabledWeightSum = Math.round(enabledList.reduce((acc, k) => acc + (originalWeights[k] ?? 0), 0) * 100) / 100;
+  const measuredWeightSum = Math.round(effectiveAssessed.reduce((acc, k) => acc + (originalWeights[k] ?? 0), 0) * 100) / 100;
+  const redistributedWeightPercent = Math.round(Math.max(0, totalEnabledWeightSum - measuredWeightSum) * 100) / 100;
+  const measuredCoveragePercent = totalEnabledWeightSum > 0 ? Math.round(measuredWeightSum / totalEnabledWeightSum * 1e3) / 10 : 0;
+  const effectiveWeights = effectiveAssessed.length > 0 ? normalizeEnabledCategoryWeights(originalWeights, effectiveAssessed) : Object.fromEntries(
+    ALL_BENCHMARK_CATEGORIES.map((k) => [k, 0])
+  );
+  const applied = excludedCategories.length > 0;
+  const explanation = effectiveAssessed.length === 0 ? `Nenhuma das ${enabledList.length} categoria(s) habilitada(s) possui medi\xE7\xE3o v\xE1lida (Cobertura de Medi\xE7\xE3o Efetiva: 0%). Nenhuma nota foi fabricada.` : applied ? `${excludedCategories.length} categoria(s) n\xE3o medida(s)/indispon\xEDvel(is) [${excludedCategories.join(", ")}] (${redistributedWeightPercent.toFixed(1)}% do peso original) exclu\xEDda(s) da m\xE9dia ponderada; os ${measuredWeightSum.toFixed(1)}% restantes foram renormalizados proporcionalmente para 100.0% (Cobertura de Medi\xE7\xE3o Efetiva: ${measuredCoveragePercent.toFixed(1)}%).` : `100% do peso habilitado (${effectiveAssessed.length}/${enabledList.length} categorias) foi efetivamente medido; nenhuma renormaliza\xE7\xE3o necess\xE1ria.`;
+  return {
+    originalWeights,
+    effectiveWeights,
+    assessedCategories: effectiveAssessed,
+    excludedCategories,
+    totalEnabledWeightSum,
+    measuredWeightSum,
+    redistributedWeightPercent,
+    measuredCoveragePercent,
+    applied,
+    explanation
+  };
+}
 
 // src/engine/scoringEngine.ts
 var ALGORITHM_VERSION = "WINHOOD-SONAR-MQR-v3.0.0";
 function computeSha256(content) {
   return crypto3.createHash("sha256").update(content, "utf8").digest("hex");
+}
+function compareFindingsCanonically(a, b) {
+  return (a.softwareId || "").localeCompare(b.softwareId || "") || (a.filePath || "").localeCompare(b.filePath || "") || (a.lineNumber || 0) - (b.lineNumber || 0) || (a.originalRuleId || "").localeCompare(b.originalRuleId || "") || (a.severity || "").localeCompare(b.severity || "") || (a.evidenceSha256 || "").localeCompare(b.evidenceSha256 || "") || (a.id || "").localeCompare(b.id || "");
 }
 function maskSecretsInText(input) {
   if (!input) return input;
@@ -2650,6 +2682,7 @@ function scoreToCategoryRating(score) {
 function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = true) {
   const round2 = (v) => Math.round(v * 100) / 100;
   const clamp05 = (val) => Math.max(0, Math.min(5, round2(val)));
+  const evaluationTimestamp = input.deterministicTimestamp || (/* @__PURE__ */ new Date()).toISOString();
   const notApplicableSet = new Set(input.notApplicableCategories || []);
   const enabledList = (input.enabledCategories && input.enabledCategories.length > 0 ? input.enabledCategories : ALL_BENCHMARK_CATEGORIES).filter((c) => !notApplicableSet.has(c));
   const enabledSet = new Set(enabledList);
@@ -2658,10 +2691,13 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
   const isEligibleForScoring = input.eligibleForScoring !== false && input.veracityClassification !== "EMPTY_ERROR" && input.veracityClassification !== "SOURCE_MISSING" && input.veracityClassification !== "NOT_AVAILABLE" && input.veracityClassification !== "EXECUTION_FAILED" && input.coveragePercent > 0;
   const hasExplicitFindingsArray = Array.isArray(input.findings);
   const enrichedFindings = (input.findings || []).map((f) => ({
-    ...enrichLegacyOrExternalFinding(f),
+    ...enrichLegacyOrExternalFinding({
+      ...f,
+      collectedAt: f.collectedAt || evaluationTimestamp
+    }),
     validationStatus: f.lifecycleState || f.validationStatus || "VALIDATED",
     lifecycleState: f.lifecycleState || f.validationStatus || "VALIDATED"
-  }));
+  })).sort(compareFindingsCanonically);
   const EXEMPT_LIFECYCLE_STATES = /* @__PURE__ */ new Set([
     "FALSE_POSITIVE_REVIEWED",
     "FALSE_POSITIVE",
@@ -2674,6 +2710,19 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
   const activeFindings = enrichedFindings.filter(
     (f) => !EXEMPT_LIFECYCLE_STATES.has(f.validationStatus) && !EXEMPT_LIFECYCLE_STATES.has(f.lifecycleState || "")
   );
+  const explicitlyUnmeasuredSet = new Set(input.unmeasuredCategories || []);
+  const unavailableCategorySet = /* @__PURE__ */ new Set();
+  if (input.metricProvenance) {
+    for (const catKey of ALL_BENCHMARK_CATEGORIES) {
+      const prov = input.metricProvenance[`category.${catKey}`] || input.metricProvenance[catKey];
+      if (prov && (prov.state === "NOT_MEASURED" || prov.state === "UNAVAILABLE" || prov.state === "INCONCLUSIVE")) {
+        explicitlyUnmeasuredSet.add(catKey);
+        if (prov.state === "UNAVAILABLE") {
+          unavailableCategorySet.add(catKey);
+        }
+      }
+    }
+  }
   const m = { ...input.metrics };
   if (hasExplicitFindingsArray) {
     let activeCrit = 0;
@@ -2972,7 +3021,46 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
       remediationEffortMinutes: input.visualOnlyFeaturesCount * 45
     });
   }
-  if (reasonsByCat.functionality.length === 0) {
+  const hasRawEvidenceForCategory = (cat) => {
+    if (hasExplicitFindingsArray) return true;
+    const catProv = input.metricProvenance?.[`category.${cat}`] || input.metricProvenance?.[cat];
+    if (catProv && (catProv.state === "MEASURED" || catProv.state === "STATIC_DERIVED" || catProv.state === "IMPORTED")) {
+      return true;
+    }
+    switch (cat) {
+      case "functionality":
+        return m.functionalTestsTotal > 0 || input.essentialFeaturesMissing > 0 || input.visualOnlyFeaturesCount > 0;
+      case "code_quality":
+        return m.bugs > 0 || m.codeSmells > 0 || m.technicalDebtMinutes > 0 || m.duplicatedLinesPercent > 0 || m.deadCodeSymbols > 0 || Boolean(input.staticMetrics && input.staticMetrics.loc > 0);
+      case "security":
+        return m.criticalVulns > 0 || m.highVulns > 0 || m.mediumVulns > 0 || m.lowVulns > 0 || m.vulnerabilities > 0 || m.secretsExposed > 0;
+      case "performance":
+        return input.environmentEquivalent && input.runtimeMetrics?.status === "MEASURED" && (m.p95LatencyMs > 0 || m.throughputRps > 0);
+      case "architecture":
+        return m.circularDependencies > 0 || Boolean(input.staticMetrics && input.staticMetrics.loc > 0);
+      case "database":
+        return m.dbSchemaIssues > 0;
+      case "reliability":
+        return m.functionalTestsTotal > 0 || m.testCoveragePercent > 0 || m.bugs > 0;
+      case "installation":
+        return input.hasCleanSandboxUninstall !== null;
+      case "compatibility":
+      case "usability":
+      case "privacy":
+      case "documentation":
+        return Boolean(input.staticMetrics && input.staticMetrics.loc > 0);
+      default:
+        return false;
+    }
+  };
+  if (!hasExplicitFindingsArray) {
+    for (const catKey of ALL_BENCHMARK_CATEGORIES) {
+      if (!hasRawEvidenceForCategory(catKey)) {
+        explicitlyUnmeasuredSet.add(catKey);
+      }
+    }
+  }
+  if (reasonsByCat.functionality.length === 0 && !explicitlyUnmeasuredSet.has("functionality") && m.functionalTestsTotal > 0) {
     pushReason("functionality", {
       impactType: "BONUS",
       scoreDelta: 0,
@@ -3026,7 +3114,7 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
       remediationEffortMinutes: m.deadCodeSymbols * 10
     });
   }
-  if (reasonsByCat.code_quality.length === 0) {
+  if (reasonsByCat.code_quality.length === 0 && !explicitlyUnmeasuredSet.has("code_quality")) {
     pushReason("code_quality", {
       impactType: "BONUS",
       scoreDelta: 0,
@@ -3037,27 +3125,29 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
       remediationEffortMinutes: 0
     });
   }
-  if (input.hasEncryptionAtRest) {
-    pushReason("security", {
-      impactType: "BONUS",
-      scoreDelta: 0.2,
-      severity: "INFO",
-      ruleId: "crypto.at-rest.aes256gcm-verified",
-      title: "Criptografia autenticada em repouso e deriva\xE7\xE3o KDF forte verificadas (+0.20 pts)",
-      whyExplanation: "Verificada implementa\xE7\xE3o de cifra autenticada (AES-256-GCM / ChaCha20) e deriva\xE7\xE3o de chave resistente a GPU (Argon2id / PBKDF2-HMAC-SHA512), concedendo b\xF4nus t\xE9cnico de +0.20 pts (limitado ao teto 5.00 da escala).",
-      remediationEffortMinutes: 0
-    });
-  } else {
-    pushReason("security", {
-      impactType: "METRIC_THRESHOLD",
-      scoreDelta: -0.8,
-      severity: "HIGH",
-      ruleId: "crypto.at-rest.missing",
-      title: "Aus\xEAncia de criptografia autenticada em repouso (AES-256-GCM / Argon2id)",
-      whyExplanation: "N\xE3o foram detectadas primitivas de criptografia autenticada em repouso nem KDF forte no c\xF3digo-fonte analisado, aplicando penalidade estrutural de -0.80 pts em Seguran\xE7a.",
-      remediationSummary: "Cifrar payloads sens\xEDveis com AES-256-GCM e derivar chaves com Argon2id ou PBKDF2-SHA512 (>= 600.000 itera\xE7\xF5es).",
-      remediationEffortMinutes: 90
-    });
+  if (!explicitlyUnmeasuredSet.has("security")) {
+    if (input.hasEncryptionAtRest) {
+      pushReason("security", {
+        impactType: "BONUS",
+        scoreDelta: 0.2,
+        severity: "INFO",
+        ruleId: "crypto.at-rest.aes256gcm-verified",
+        title: "Criptografia autenticada em repouso e deriva\xE7\xE3o KDF forte verificadas (+0.20 pts)",
+        whyExplanation: "Verificada implementa\xE7\xE3o de cifra autenticada (AES-256-GCM / ChaCha20) e deriva\xE7\xE3o de chave resistente a GPU (Argon2id / PBKDF2-HMAC-SHA512), concedendo b\xF4nus t\xE9cnico de +0.20 pts (limitado ao teto 5.00 da escala).",
+        remediationEffortMinutes: 0
+      });
+    } else {
+      pushReason("security", {
+        impactType: "METRIC_THRESHOLD",
+        scoreDelta: -0.8,
+        severity: "HIGH",
+        ruleId: "crypto.at-rest.missing",
+        title: "Aus\xEAncia de criptografia autenticada em repouso (AES-256-GCM / Argon2id)",
+        whyExplanation: "N\xE3o foram detectadas primitivas de criptografia autenticada em repouso nem KDF forte no c\xF3digo-fonte analisado, aplicando penalidade estrutural de -0.80 pts em Seguran\xE7a.",
+        remediationSummary: "Cifrar payloads sens\xEDveis com AES-256-GCM e derivar chaves com Argon2id ou PBKDF2-SHA512 (>= 600.000 itera\xE7\xF5es).",
+        remediationEffortMinutes: 90
+      });
+    }
   }
   const isPerformanceMeasured = input.environmentEquivalent && input.runtimeMetrics?.status !== "NOT_MEASURED" && (m.p95LatencyMs > 0 || m.throughputRps > 0);
   if (isPerformanceMeasured) {
@@ -3158,7 +3248,7 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
       remediationEffortMinutes: 0
     });
   }
-  if (reasonsByCat.database.length === 0) {
+  if (reasonsByCat.database.length === 0 && !explicitlyUnmeasuredSet.has("database")) {
     pushReason("database", {
       impactType: "BONUS",
       scoreDelta: 0,
@@ -3344,6 +3434,26 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
       categoryScores[key] = null;
       continue;
     }
+    if (explicitlyUnmeasuredSet.has(key)) {
+      categoryScores[key] = null;
+      reasonsByCat[key] = [
+        {
+          id: `evr-${computeSha256(`${input.softwareId}|${key}|not-measured`).slice(0, 10)}`,
+          category: key,
+          impactType: "METRIC_THRESHOLD",
+          originType: "METRIC_THRESHOLD",
+          toolName: "WinHood Veracity Guard",
+          scoreDelta: 0,
+          severity: "INFO",
+          ruleId: unavailableCategorySet.has(key) ? `metric.${key}.unavailable` : `metric.${key}.not-measured`,
+          title: unavailableCategorySet.has(key) ? `Categoria ${key} indispon\xEDvel (UNAVAILABLE) \u2014 exclu\xEDda da m\xE9dia ponderada` : `Categoria ${key} sem evid\xEAncias medidas (NOT_MEASURED) \u2014 exclu\xEDda da m\xE9dia ponderada`,
+          whyExplanation: "Pol\xEDtica Anti-Mock: aus\xEAncia de achados ou ferramentas medidas nunca \xE9 convertida em nota positiva/neutra. A categoria \xE9 exclu\xEDda do c\xE1lculo ponderado com renormaliza\xE7\xE3o expl\xEDcita dos pesos restantes.",
+          remediationSummary: "Executar analisador ou fornecer evid\xEAncias verific\xE1veis para esta dimens\xE3o.",
+          remediationEffortMinutes: 0
+        }
+      ];
+      continue;
+    }
     if (key === "performance" && !isPerformanceMeasured) {
       categoryScores[key] = null;
       continue;
@@ -3442,12 +3552,21 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
     }
   }
   for (const key of ALL_BENCHMARK_CATEGORIES) {
-    reasonsByCat[key].sort((a, b) => a.scoreDelta - b.scoreDelta);
+    reasonsByCat[key].sort(
+      (a, b) => a.scoreDelta - b.scoreDelta || (a.ruleId || "").localeCompare(b.ruleId || "") || (a.filePath || "").localeCompare(b.filePath || "") || (a.lineNumber || 0) - (b.lineNumber || 0) || (a.id || "").localeCompare(b.id || "")
+    );
   }
   const assessedCategories = ALL_BENCHMARK_CATEGORIES.filter(
     (k) => categoryScores[k] !== null && enabledSet.has(k) && !notApplicableSet.has(k)
   );
-  const effectiveWeights = assessedCategories.length > 0 ? normalizeEnabledCategoryWeights(weights, assessedCategories) : Object.fromEntries(ALL_BENCHMARK_CATEGORIES.map((k) => [k, 0]));
+  const weightRenorm = computeRenormalizedCategoryWeights(
+    weights,
+    enabledList,
+    assessedCategories
+  );
+  const effectiveWeights = weightRenorm.effectiveWeights;
+  const hasAnyAssessedCategory = isEligibleForScoring && assessedCategories.length > 0;
+  const measuredCoveragePercent = isEligibleForScoring ? weightRenorm.measuredCoveragePercent : 0;
   let weightedSum = 0;
   let activeWeightSum = 0;
   for (const key of ALL_BENCHMARK_CATEGORIES) {
@@ -3458,7 +3577,7 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
       activeWeightSum += w;
     }
   }
-  let overallScore = isEligibleForScoring && activeWeightSum > 0 ? clamp05(weightedSum / activeWeightSum) : 0;
+  let overallScore = hasAnyAssessedCategory && activeWeightSum > 0 ? clamp05(weightedSum / activeWeightSum) : 0;
   if (enablePenaltyCaps && isEligibleForScoring && (m.criticalVulns > 0 || m.secretsExposed > 0) && overallScore > 2.9) {
     penaltyCapsTriggered.push({
       ruleId: "CAP-GLOBAL-SEC",
@@ -3499,10 +3618,12 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
       deficiencies.push(`${m.circularDependencies} ciclo(s) de depend\xEAncia estrutural entre m\xF3dulos.`);
       risks.push("Degrada\xE7\xE3o progressiva de manutenibilidade e acoplamento estreito entre camadas.");
     }
-    if (m.testCoveragePercent >= 80) {
-      advantages.push(`Alta cobertura de testes verificada (${m.testCoveragePercent.toFixed(1)}%).`);
-    } else {
-      deficiencies.push(`Cobertura de testes (${m.testCoveragePercent.toFixed(1)}%) abaixo da meta de refer\xEAncia (80%).`);
+    if (m.testCoveragePercent !== null && m.testCoveragePercent !== void 0) {
+      if (m.testCoveragePercent >= 80) {
+        advantages.push(`Alta cobertura de testes verificada (${m.testCoveragePercent.toFixed(1)}%).`);
+      } else {
+        deficiencies.push(`Cobertura de testes (${m.testCoveragePercent.toFixed(1)}%) abaixo da meta de refer\xEAncia (80%).`);
+      }
     }
     if (isPerformanceMeasured && m.p95LatencyMs <= 45) {
       advantages.push(`Baixa lat\xEAncia P95 (${m.p95LatencyMs.toFixed(1)} ms) e inicializa\xE7\xE3o r\xE1pida (${m.startupTimeMs} ms).`);
@@ -3589,7 +3710,7 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
     }
   ];
   const sharedGateEval = QualityGateEngine.evaluateSharedContract({
-    eligibleForScoring: isEligibleForScoring,
+    eligibleForScoring: hasAnyAssessedCategory,
     criticalVulns: m.criticalVulns,
     secretsExposed: m.secretsExposed,
     bugs: m.bugs,
@@ -3598,7 +3719,7 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
     duplicatedLinesPercent: m.duplicatedLinesPercent,
     hasMeasuredCoverage,
     testCoveragePercent: m.testCoveragePercent,
-    scopeCoveragePercent: input.coveragePercent
+    scopeCoveragePercent: hasAnyAssessedCategory ? input.coveragePercent : 0
   });
   const failedConditions = sharedGateEval.failedConditions;
   const unmeasuredMandatoryConditions = sharedGateEval.unmeasuredMandatoryConditions;
@@ -3609,6 +3730,7 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
     if (notApplicableSet.has(cat)) return "NOT_APPLICABLE";
     if (!isEligibleForScoring) return "INCONCLUSIVE";
     if (!enabledSet.has(cat)) return "NOT_ASSESSED";
+    if (explicitlyUnmeasuredSet.has(cat) || categoryScores[cat] === null) return "NOT_ASSESSED";
     if (!defaultAssessed) return "NOT_ASSESSED";
     return "ASSESSED";
   };
@@ -3616,6 +3738,7 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
   const resolveMeasurementState = (cat, status) => {
     if (status === "NOT_APPLICABLE") return "NOT_APPLICABLE";
     if (status === "INCONCLUSIVE") return "INCONCLUSIVE";
+    if (unavailableCategorySet.has(cat)) return "UNAVAILABLE";
     if (status === "NOT_ASSESSED") return "NOT_MEASURED";
     if (cat === "performance" && isPerformanceMeasured) return "MEASURED";
     if (cat === "functionality" && m.functionalTestsTotal > 0) return "MEASURED";
@@ -3882,6 +4005,11 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
     if (!det.measurementState) {
       det.measurementState = resolveMeasurementState(catKey, det.status);
     }
+    if (det.status === "NOT_ASSESSED" && det.limitations.length === 0) {
+      det.limitations = [
+        det.measurementState === "UNAVAILABLE" ? "Dimens\xE3o indispon\xEDvel (UNAVAILABLE) \u2014 exclu\xEDda da m\xE9dia ponderada com renormaliza\xE7\xE3o expl\xEDcita." : "Dimens\xE3o n\xE3o medida (NOT_MEASURED) \u2014 exclu\xEDda da m\xE9dia ponderada com renormaliza\xE7\xE3o expl\xEDcita."
+      ];
+    }
     if (!det.metricProvenance) {
       det.metricProvenance = [
         {
@@ -3889,10 +4017,10 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
           value: det.finalScore,
           state: det.measurementState,
           origin: det.toolsUsed[0] || "WinHood Scoring Engine",
-          method: det.measurementState === "MEASURED" ? "Medi\xE7\xE3o din\xE2mica controlada em runtime" : det.measurementState === "STATIC_DERIVED" ? "C\xE1lculo determin\xEDstico sobre achados AST/est\xE1ticos" : `Categoria n\xE3o avaliada (${det.status})`,
+          method: det.measurementState === "MEASURED" ? "Medi\xE7\xE3o din\xE2mica controlada em runtime" : det.measurementState === "STATIC_DERIVED" ? "C\xE1lculo determin\xEDstico sobre achados AST/est\xE1ticos" : `Categoria n\xE3o avaliada (${det.measurementState})`,
           toolName: det.toolsUsed[0] || "WinHood Deterministic Scoring Engine",
           toolVersion: ALGORITHM_VERSION,
-          measuredAt: (/* @__PURE__ */ new Date()).toISOString(),
+          measuredAt: evaluationTimestamp,
           scope: `${input.softwareName} (${catKey})`
         }
       ];
@@ -3906,15 +4034,25 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
     categoryDetails,
     groupedScores,
     separatedIndicators: {
-      technicalScore: isEligibleForScoring ? overallScore : null,
+      technicalScore: hasAnyAssessedCategory ? overallScore : null,
       scopeCoveragePercent,
+      measuredCoveragePercent,
       evidenceConfidence,
       qualityGateDecision: executiveDecision,
       veracityState: input.veracityClassification
     },
+    measuredCoveragePercent,
+    weightRenormalization: {
+      applied: weightRenorm.applied,
+      excludedCategories: weightRenorm.excludedCategories,
+      originalWeightSum: weightRenorm.totalEnabledWeightSum,
+      measuredWeightSum: weightRenorm.measuredWeightSum,
+      redistributedWeightPercent: weightRenorm.redistributedWeightPercent,
+      explanation: weightRenorm.explanation
+    },
     originalWeights,
     effectiveWeights,
-    classificationLabel: isEligibleForScoring ? classifyScoreScale(overallScore) : "Inconclusivo / Cobertura Insuficiente",
+    classificationLabel: hasAnyAssessedCategory ? classifyScoreScale(overallScore) : "Inconclusivo / Cobertura Insuficiente",
     penaltyCapsTriggered,
     advantages,
     deficiencies,
@@ -3984,13 +4122,13 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
       const sqaleRatio = Number(
         Math.min(100, m.technicalDebtMinutes / Math.max(1, loc * 30) * 100).toFixed(2)
       );
-      const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+      const nowIso = evaluationTimestamp;
       return {
         ...input.metricProvenance || {},
         smellsPerKloc: {
           metricKey: "staticMetrics.codeSmellsPerKloc",
           value: smellsPerKloc,
-          state: isEligibleForScoring ? "STATIC_DERIVED" : "NOT_MEASURED",
+          state: hasAnyAssessedCategory ? "STATIC_DERIVED" : "NOT_MEASURED",
           origin: "WinHood KLOC Normalizer (SQALE)",
           method: "codeSmells / max(0.1, LOC / 1000)",
           toolName: "WinHood Deterministic Scoring Engine",
@@ -4001,7 +4139,7 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
         bugsPerKloc: {
           metricKey: "staticMetrics.bugsPerKloc",
           value: bugsPerKloc,
-          state: isEligibleForScoring ? "STATIC_DERIVED" : "NOT_MEASURED",
+          state: hasAnyAssessedCategory ? "STATIC_DERIVED" : "NOT_MEASURED",
           origin: "WinHood KLOC Normalizer",
           method: "bugs / max(0.1, LOC / 1000)",
           toolName: "WinHood Deterministic Scoring Engine",
@@ -4012,7 +4150,7 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
         technicalDebtRatioPercent: {
           metricKey: "staticMetrics.technicalDebtRatioPercent",
           value: sqaleRatio,
-          state: isEligibleForScoring ? "STATIC_DERIVED" : "NOT_MEASURED",
+          state: hasAnyAssessedCategory ? "STATIC_DERIVED" : "NOT_MEASURED",
           origin: "MqrBridge SQALE Debt Ratio Formula",
           method: "(technicalDebtMinutes / (LOC * 30)) * 100",
           toolName: "WinHood Deterministic Scoring Engine",
@@ -4034,7 +4172,7 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
       note: "Resultados nativos do MqrBridge ainda n\xE3o sincronizados de uma inst\xE2ncia externa conectada."
     },
     winhoodCalculatedResults: {
-      compositeScore: isEligibleForScoring ? overallScore : null,
+      compositeScore: hasAnyAssessedCategory ? overallScore : null,
       algorithmVersion: ALGORITHM_VERSION,
       assessedCategoriesCount: assessedCategories.length,
       totalCategoriesCount: applicableCategoriesCount
@@ -8470,8 +8608,8 @@ var ReferenceRegistry = class {
     return record.isOfflineFallback ? "CACHED_VALID" : "FRESH";
   }
   verifyIntegrity(record) {
-    const { sha256: sha2562, freshnessStatus: _f, ...rest } = record;
-    if (!sha2562 || sha2562.length !== 64) return false;
+    const { sha256, freshnessStatus: _f, ...rest } = record;
+    if (!sha256 || sha256.length !== 64) return false;
     return typeof rest.sourceKey === "string" && rest.rulesIncluded.length > 0;
   }
   listSnapshots(internalRunsCount = 0) {
@@ -9786,7 +9924,7 @@ function buildTechnicalInventory(filesMap, isolatedStoragePath) {
     const language = LANGUAGE_BY_EXT[ext] || "Other";
     const sizeBytes = Buffer.byteLength(content, "utf8");
     const lines = content.split(/\r?\n/).filter((line) => line.trim().length > 0).length;
-    const sha2562 = computeSha256(content);
+    const sha256 = computeSha256(content);
     const eligibleForAnalysis = ELIGIBLE_EXTENSIONS.has(ext);
     if (!eligibleForAnalysis) {
       if (ext === ".md" || ext === ".yml" || ext === ".yaml" || ext === ".txt" || ext === ".info" || ext === ".xml" || ext === ".lock") {
@@ -9819,14 +9957,14 @@ function buildTechnicalInventory(filesMap, isolatedStoragePath) {
       language,
       sizeBytes,
       linesOfCode: lines,
-      sha256: sha2562,
+      sha256,
       eligibleForAnalysis
     });
     totalLinesOfCode += lines;
     totalSizeBytes += sizeBytes;
     if (eligibleForAnalysis) eligibleFiles += 1;
     languageBreakdown[language] = (languageBreakdown[language] || 0) + lines;
-    combinedHashes.push(`${relPath}:${sha2562}`);
+    combinedHashes.push(`${relPath}:${sha256}`);
   }
   return {
     packageSha256: computeSha256(combinedHashes.join("|")),
@@ -9882,20 +10020,21 @@ function executeRealStaticAnalysisOnSource(paramsOrSoftwareId, softwareNameArg, 
     commitHash,
     expectedPackageSha256,
     ingestionState,
-    isolatedStoragePath = `/isolated/${softwareId}`
+    isolatedStoragePath = `/isolated/${softwareId}`,
+    deterministicTimestamp
   } = normalizedParams;
   const analysisStartedMs = performance.now();
-  const startedAtIso = (/* @__PURE__ */ new Date()).toISOString();
+  const startedAtIso = deterministicTimestamp || (/* @__PURE__ */ new Date()).toISOString();
   const nowIso = startedAtIso;
   const findings = [];
   const uploadCheck = validateSourceUploadSecurity(filesMap);
   const safeFilesMap = {};
-  for (const [k, v] of Object.entries(filesMap)) {
+  for (const [k, v] of Object.entries(filesMap).sort(([a], [b]) => a.localeCompare(b))) {
     if (!uploadCheck.blockedFiles.some((b) => b.path === k)) {
       safeFilesMap[k] = v;
     }
   }
-  const entries = Object.entries(safeFilesMap);
+  const entries = Object.entries(safeFilesMap).sort(([a], [b]) => a.localeCompare(b));
   const inventorySnapshot = buildTechnicalInventory(safeFilesMap, isolatedStoragePath);
   const eligibleEntries = entries.filter(
     ([filePath]) => ELIGIBLE_EXTENSIONS.has(path7.extname(filePath).toLowerCase())
@@ -11088,19 +11227,21 @@ export function searchCredentialsController(userInput: string) {
   );
   const coveragePercent = eligibleEntries.length === 0 ? 0 : totalNonIgnoredDiscovered > 0 ? Math.round(Math.min(eligibleEntries.length, Math.max(0, eligibleEntries.length - parseErrorsCount)) / totalNonIgnoredDiscovered * 1e3) / 10 : 0;
   const analysisCompletedMs = performance.now();
-  const completedAtIso = (/* @__PURE__ */ new Date()).toISOString();
+  const completedAtIso = deterministicTimestamp || (/* @__PURE__ */ new Date()).toISOString();
   const realTotalDurationMs = Math.max(1, Math.round(analysisCompletedMs - analysisStartedMs));
+  findings.sort(compareFindingsCanonically);
   const adapterDefs = [
-    { id: "opengrep-sast", name: "WinHood Native SAST (Opengrep/Semgrep Ruleset)", version: "4.0.0", format: "SARIF_2_1_0" },
-    { id: "gitleaks-secrets", name: "WinHood Native Secret Scanner (Gitleaks Ruleset)", version: "4.0.0", format: "SARIF_2_1_0" },
-    { id: "mqr-bridge-quality", name: "WinHood Native Quality & Complexity Analyzer (Sonar MQR)", version: "4.0.0", format: "SARIF_2_1_0" },
-    { id: "syft-grype-sca", name: "WinHood Native SCA & Manifest Inspector", version: "4.0.0", format: "CYCLONEDX_1_5" },
-    { id: "archunit-cruiser", name: "WinHood Native Architecture Graph Analyzer", version: "4.0.0", format: "ARCH_GRAPH_JSON" },
-    { id: "sqlfluff-db", name: "WinHood Native SQL & Schema Auditor", version: "4.0.0", format: "SARIF_2_1_0" }
+    { id: "opengrep-sast", name: "WinHood Native SAST (Opengrep/Semgrep Ruleset)", version: "4.4.0", format: "SARIF_2_1_0" },
+    { id: "gitleaks-secrets", name: "WinHood Native Secret Scanner (Gitleaks Ruleset)", version: "4.4.0", format: "SARIF_2_1_0" },
+    { id: "mqr-bridge-quality", name: "WinHood Native Quality & Complexity Analyzer (Sonar MQR)", version: "4.4.0", format: "SARIF_2_1_0" },
+    { id: "syft-grype-sca", name: "WinHood Native SCA & Manifest Inspector", version: "4.4.0", format: "CYCLONEDX_1_5" },
+    { id: "archunit-cruiser", name: "WinHood Native Architecture Graph Analyzer", version: "4.4.0", format: "ARCH_GRAPH_JSON" },
+    { id: "sqlfluff-db", name: "WinHood Native SQL & Schema Auditor", version: "4.4.0", format: "SARIF_2_1_0" }
   ];
-  const configHash = computeSha256(JSON.stringify({ rulesVersion: "4.0.0", eligibleExtensions: Array.from(ELIGIBLE_EXTENSIONS) }));
+  const configHash = computeSha256(JSON.stringify({ rulesVersion: "4.4.0", eligibleExtensions: Array.from(ELIGIBLE_EXTENSIONS).sort() }));
   const toolExecutions = adapterDefs.map((ad, idx) => {
     const toolFindings = findings.filter((f) => f.toolId === ad.id);
+    const analyzedFilePaths = eligibleEntries.map(([f]) => f);
     const rawPayload = JSON.stringify({
       schema: ad.format,
       tool: ad.name,
@@ -11108,7 +11249,7 @@ export function searchCredentialsController(userInput: string) {
       version: ad.version,
       softwareId,
       sourceHash: inventorySnapshot.packageSha256,
-      analyzedFiles: eligibleEntries.map(([f]) => f),
+      analyzedFiles: analyzedFilePaths,
       findingsCount: toolFindings.length
     });
     const stdoutText = `[NATIVE_AST_ENGINE] ${ad.name} v${ad.version} | Arquivos=${eligibleEntries.length} | Achados=${toolFindings.length} | SHA256=${inventorySnapshot.packageSha256.slice(0, 12)}`;
@@ -11120,6 +11261,11 @@ export function searchCredentialsController(userInput: string) {
       toolName: ad.name,
       toolVersion: ad.version,
       executionMethod: eligibleEntries.length > 0 ? "NATIVE_AST_ENGINE" : "NOT_EXECUTED",
+      executionStatus: eligibleEntries.length > 0 ? "MEASURED" : "NOT_MEASURED",
+      commandExecuted: `winhood-native-ast --pass=${ad.id} --format=${ad.format}`,
+      scopeExecuted: `${eligibleEntries.length} arquivo(s) eleg\xEDveis em ${isolatedStoragePath}`,
+      inputArtifactsSha256: inventorySnapshot.packageSha256,
+      unavailableReason: eligibleEntries.length === 0 ? "Nenhum arquivo eleg\xEDvel encontrado no pacote de c\xF3digo-fonte." : null,
       configurationUsed: { ruleset: ad.id, mode: "NATIVE_AST_ENGINE" },
       configHash,
       sourceHash: inventorySnapshot.packageSha256,
@@ -11409,7 +11555,10 @@ export function searchCredentialsController(userInput: string) {
     version: softwareVersion,
     sourceFilesContent: safeFilesMap
   };
-  const sbomSummary = SbomGenerator.generateFromSoftware(softwareStub);
+  const sbomSummary = SbomGenerator.generateFromSoftware(
+    softwareStub,
+    deterministicTimestamp ? { deterministicTimestamp } : void 0
+  );
   const scaResult = ScaCorrelator.correlateSbom({
     software: softwareStub,
     sbom: sbomSummary,
@@ -13013,6 +13162,9 @@ function buildPreAnalysisSummary(paramsOrSoftware, enabledCategoriesArg, weights
 // src/engine/evidenceProvenanceEngine.ts
 import crypto9 from "crypto";
 var GENESIS_EVIDENCE_HASH = "0".repeat(64);
+function computeEvidenceChainHash(evidenceChain) {
+  return evidenceChain.length > 0 ? evidenceChain[evidenceChain.length - 1].sha256 : GENESIS_EVIDENCE_HASH;
+}
 function sha256Hex(payload) {
   return crypto9.createHash("sha256").update(payload, "utf8").digest("hex");
 }
@@ -13053,16 +13205,24 @@ function buildVerifiableEvidenceChain(params) {
     findings,
     toolExecutions,
     veracityResults,
-    responsibleActor = "winhood-audit-engine"
+    responsibleActor = "winhood-audit-engine",
+    deterministicTimestamp
   } = params;
   const softwareById = /* @__PURE__ */ new Map();
   for (const sw of softwares) {
     softwareById.set(sw.id, sw);
   }
+  const sortedVeracityResults = [...veracityResults].sort(
+    (a, b) => a.softwareId.localeCompare(b.softwareId)
+  );
+  const sortedToolExecutions = [...toolExecutions].sort(
+    (a, b) => a.softwareId.localeCompare(b.softwareId) || a.toolId.localeCompare(b.toolId) || a.id.localeCompare(b.id)
+  );
+  const sortedFindings = [...findings].sort(compareFindingsCanonically);
   const evidenceChain = [];
   let previousHash = GENESIS_EVIDENCE_HASH;
   let immutableIndex = 0;
-  for (const vr of veracityResults) {
+  for (const vr of sortedVeracityResults) {
     const sw = softwareById.get(vr.softwareId);
     const baseRecord = {
       id: `ev-veracity-${runId}-${vr.softwareId}-${immutableIndex}`,
@@ -13078,8 +13238,8 @@ function buildVerifiableEvidenceChain(params) {
       responsibleActor,
       category: "VERACITY_AUDIT",
       toolName: "WinHood Veracity & Provenance Auditor",
-      toolVersion: "4.2.0",
-      timestamp: vr.auditedAt,
+      toolVersion: "4.4.0",
+      timestamp: deterministicTimestamp || vr.auditedAt,
       resultSummary: `Classifica\xE7\xE3o=${vr.overallClassification} | Cobertura=${vr.overallCoveragePercent}% | Eleg\xEDvel=${vr.checks.eligibleForScoring}`,
       severity: vr.checks.eligibleForScoring ? "INFO" : "HIGH",
       fileOrComponent: "SOURCE_MANIFEST",
@@ -13101,8 +13261,9 @@ function buildVerifiableEvidenceChain(params) {
     previousHash = recordHash;
     immutableIndex += 1;
   }
-  for (const exec of toolExecutions) {
+  for (const exec of sortedToolExecutions) {
     const sw = softwareById.get(exec.softwareId);
+    const resolvedExecStatus = exec.executionStatus || (exec.exitCode === 0 ? "MEASURED" : exec.exitCode === null ? "NOT_MEASURED" : "FAILED");
     const baseRecord = {
       id: `ev-exec-${runId}-${exec.id}-${immutableIndex}`,
       runId,
@@ -13118,8 +13279,8 @@ function buildVerifiableEvidenceChain(params) {
       category: exec.canonicalFormat,
       toolName: exec.toolName,
       toolVersion: exec.toolVersion,
-      timestamp: exec.completedAt,
-      resultSummary: `Status=${exec.veracityStatus} | M\xE9todo=${exec.executionMethod || "NATIVE_AST_ENGINE"} | Arquivos=${exec.analyzedFilesCount}/${exec.eligibleFilesCount} | Exit=${exec.exitCode} | Dura\xE7\xE3o=${exec.durationMs}ms`,
+      timestamp: deterministicTimestamp || exec.completedAt,
+      resultSummary: `Status=${exec.veracityStatus} | ExecStatus=${resolvedExecStatus} | M\xE9todo=${exec.executionMethod || "NATIVE_AST_ENGINE"} | Arquivos=${exec.analyzedFilesCount}/${exec.eligibleFilesCount} | Exit=${exec.exitCode} | RawOutputSHA256=${(exec.rawOutputSha256 || "").slice(0, 16)}`,
       severity: exec.veracityStatus === "SUCCESS_VALIDATED" ? "INFO" : "LOW",
       fileOrComponent: exec.workingDirectory || sw?.inventory?.isolatedStoragePath || "workspace",
       validationStatus: exec.veracityStatus,
@@ -13135,7 +13296,7 @@ function buildVerifiableEvidenceChain(params) {
     previousHash = recordHash;
     immutableIndex += 1;
   }
-  for (const f of findings) {
+  for (const f of sortedFindings) {
     const sw = softwareById.get(f.softwareId);
     const baseRecord = {
       id: `ev-finding-${runId}-${f.id}-${immutableIndex}`,
@@ -13152,7 +13313,7 @@ function buildVerifiableEvidenceChain(params) {
       category: f.category,
       toolName: f.toolName,
       toolVersion: f.toolVersion,
-      timestamp: f.collectedAt,
+      timestamp: deterministicTimestamp || f.collectedAt,
       resultSummary: `[${f.severity}] ${f.originalRuleId}: ${f.title} (${f.filePath}:${f.lineNumber})`,
       severity: f.severity,
       fileOrComponent: `${f.filePath}:${f.lineNumber}`,
@@ -13336,17 +13497,17 @@ function verifyEvidenceChainAndManifest(evidenceChain, signedManifest, secret) {
         `Quebra de encadeamento no registro ${rec.id} (\xEDndice ${i}): previousRecordSha256 diverge do hash anterior.`
       );
     }
-    const { sha256: sha2562, ...rest } = rec;
+    const { sha256, ...rest } = rec;
     const recomputedHash = computeCanonicalEvidenceHash(rest, rec.previousRecordSha256);
-    if (recomputedHash !== sha2562) {
+    if (recomputedHash !== sha256) {
       tamperedRecordIds.push(rec.id);
       tamperedIndicesSet.add(i);
       tamperedIndicesSet.add(i + 1);
       details.push(
-        `Adultera\xE7\xE3o detectada no registro ${rec.id} (\xEDndice ${i}): SHA-256 recalculado (${recomputedHash.slice(0, 12)}...) difere do armazenado (${sha2562.slice(0, 12)}...).`
+        `Adultera\xE7\xE3o detectada no registro ${rec.id} (\xEDndice ${i}): SHA-256 recalculado (${recomputedHash.slice(0, 12)}...) difere do armazenado (${sha256.slice(0, 12)}...).`
       );
     }
-    expectedPrevHash = sha2562;
+    expectedPrevHash = sha256;
   }
   const actualRootHash = evidenceChain.length > 0 ? evidenceChain[evidenceChain.length - 1].sha256 : GENESIS_EVIDENCE_HASH;
   const chainIntegrityValid = tamperedRecordIds.length === 0 && brokenLinkIndices.length === 0;
@@ -15488,7 +15649,7 @@ function createInitialRunningBenchmark(params) {
 }
 function executeBenchmarkRunOrchestration(params) {
   const runId = params.runId || `run-${crypto14.randomUUID().slice(0, 8)}`;
-  const startedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const startedAt = params.deterministicTimestamp || (/* @__PURE__ */ new Date()).toISOString();
   const eqValidation = validateEquivalenceConditions(params.equivalenceEnvironment);
   const environmentEquivalent = eqValidation.equivalent;
   const specializedProfile = getProfileByIdOrDomain(params.profileId, params.functionalDomain);
@@ -15602,7 +15763,8 @@ function executeBenchmarkRunOrchestration(params) {
       commitHash: sw.commitHash,
       expectedPackageSha256: sw.packageSha256,
       ingestionState,
-      isolatedStoragePath: sw.inventory?.isolatedStoragePath || `/isolated/${sw.id}`
+      isolatedStoragePath: sw.inventory?.isolatedStoragePath || `/isolated/${sw.id}`,
+      deterministicTimestamp: params.deterministicTimestamp
     });
     const dynamicTestRes = params.testResultsBySoftware?.[sw.id] || (params.executeDynamicIsolatedTests && bundle.veracity.checks.eligibleForScoring ? ControlledTestAndPerfRunner.runIsolatedTestSuite({
       softwareName: sw.name,
@@ -15807,7 +15969,8 @@ function executeBenchmarkRunOrchestration(params) {
         staticMetrics: bundle.staticMetrics,
         metricProvenance: bundle.metricProvenance,
         sbomSummary: bundle.sbomSummary ?? null,
-        scaCorrelations: bundle.scaCorrelations || []
+        scaCorrelations: bundle.scaCorrelations || [],
+        deterministicTimestamp: params.deterministicTimestamp
       },
       normalizedWeights,
       params.enablePenaltyCaps
@@ -15905,12 +16068,18 @@ function executeBenchmarkRunOrchestration(params) {
   } catch {
     referenceSnapshotsUsed = [];
   }
+  findings.sort(compareFindingsCanonically);
+  toolExecutions.sort(
+    (a, b) => a.softwareId.localeCompare(b.softwareId) || a.toolId.localeCompare(b.toolId) || a.id.localeCompare(b.id)
+  );
+  veracityResults.sort((a, b) => a.softwareId.localeCompare(b.softwareId));
   const evidenceChain = buildVerifiableEvidenceChain({
     runId,
     softwares: params.softwares,
     findings,
     toolExecutions,
-    veracityResults
+    veracityResults,
+    deterministicTimestamp: params.deterministicTimestamp
   });
   const artifactHashes = {};
   for (const [swId, sbom] of Object.entries(sbomsBySoftware)) {
@@ -15933,6 +16102,7 @@ function executeBenchmarkRunOrchestration(params) {
     runId,
     algorithmVersion: ALGORITHM_VERSION,
     evidenceChain,
+    generatedAt: params.deterministicTimestamp,
     engineVersion: RULE_ENGINE_VERSION,
     rulePackVersions,
     ruleCatalogSha256: catalogSnapshot.catalogSha256,
@@ -15943,14 +16113,14 @@ function executeBenchmarkRunOrchestration(params) {
   });
   const eligibleCards = scoreCards.filter((sc) => sc.separatedIndicators?.technicalScore !== null);
   const sortedCards = [...eligibleCards].sort(
-    (a, b) => b.groupedScores.overallScore - a.groupedScores.overallScore
+    (a, b) => b.groupedScores.overallScore - a.groupedScores.overallScore || a.softwareId.localeCompare(b.softwareId)
   );
   const topCandidate = sortedCards[0] || null;
   const runnerUp = sortedCards[1] || null;
   const canHaveWinner = params.softwares.length === 1 ? Boolean(topCandidate) : comparabilityReport.canDeclareOfficialWinner && benchmarkMatchDecision.canDeclareOfficialWinner && benchmarkMatchDecision.comparabilityClassification !== "NOT_COMPARABLE" && Boolean(topCandidate);
   const winner = canHaveWinner ? topCandidate : null;
   const isPartialEvaluation = scoreCards.some((sc) => sc.isPartialEvaluation);
-  const completedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const completedAt = params.deterministicTimestamp || (/* @__PURE__ */ new Date()).toISOString();
   const executiveSummary = !topCandidate ? `Execu\xE7\xE3o inconclusiva sob ${ALGORITHM_VERSION}: nenhum software apresentou c\xF3digo-fonte \xEDntegro e eleg\xEDvel para pontua\xE7\xE3o num\xE9rica.` : mode === "INDIVIDUAL" && winner ? `Avalia\xE7\xE3o individual${isPartialEvaluation ? " parcial (dimens\xF5es din\xE2micas n\xE3o medidas)" : ""} conclu\xEDda sob o algoritmo determin\xEDstico ${ALGORITHM_VERSION}. O software "${winner.softwareName} (${winner.softwareVersion})" obteve pontua\xE7\xE3o t\xE9cnica ${winner.groupedScores.overallScore.toFixed(2)} / 5.00 (${winner.classificationLabel} | Cobertura de Escopo: ${winner.separatedIndicators?.scopeCoveragePercent ?? 0}% | Quality Gate: ${winner.separatedIndicators?.qualityGateDecision}). Foram geradas ${evidenceChain.length} evid\xEAncias encadeadas SHA-256 com manifesto assinado HMAC-SHA256.` : !canHaveWinner && params.softwares.length > 1 ? `Compara\xE7\xE3o t\xE9cnica conclu\xEDda sob ${ALGORITHM_VERSION}, por\xE9m a declara\xE7\xE3o de vencedor oficial foi BLOQUEADA pelo Motor de Imparcialidade (${[...comparabilityReport.blockingReasons, ...benchmarkMatchDecision.blockingReasons].join(" ")}). Pontua\xE7\xF5es individuais: ${scoreCards.map((s) => `${s.softwareName}: ${s.separatedIndicators?.technicalScore !== null ? s.groupedScores.overallScore.toFixed(2) : "N/A"}`).join(" vs ")}.` : winner && runnerUp ? `Benchmark comparativo A/B conclu\xEDdo sob o algoritmo determin\xEDstico ${ALGORITHM_VERSION}. O software "${winner.softwareName} (${winner.softwareVersion})" obteve a maior pontua\xE7\xE3o geral (${winner.groupedScores.overallScore.toFixed(2)} / 5.00 \u2014 ${winner.classificationLabel}), superando "${runnerUp.softwareName} (${runnerUp.softwareVersion})" (${runnerUp.groupedScores.overallScore.toFixed(2)} / 5.00 \u2014 ${runnerUp.classificationLabel}). Foram registradas ${evidenceChain.length} evid\xEAncias encadeadas SHA-256 e manifesto HMAC-SHA256.` : `Execu\xE7\xE3o conclu\xEDda com ${scoreCards.length} software(s) analisado(s).`;
   const finalResult = {
     id: runId,
@@ -17340,6 +17510,9 @@ var MarketCompetitorDiscoveryEngine = class {
         estimatedSimilarityPercent: sim.totalSimilarityPercent,
         similarityScore: sim.totalSimilarityPercent,
         computedMatchScore: sim.totalSimilarityPercent,
+        similarityOrigin: "HEURISTIC_METADATA_SIMILARITY",
+        isMeasuredBenchmark: false,
+        similarityDisclaimer: "Similaridade estimada exclusivamente por heur\xEDstica de metadados de cat\xE1logo (HEURISTIC_METADATA_SIMILARITY) \u2014 n\xE3o constitui benchmark t\xE9cnico medido.",
         similarityBreakdown: sim.breakdown,
         matchReasons: sim.matchReasons,
         matchReasonSummary: sim.matchReasonSummary,
@@ -17447,7 +17620,7 @@ function buildFull21SecurityAdaptersCatalog() {
       id: "syft-sbom",
       name: "Anchore Syft SBOM Generator",
       vendor: "Anchore / WinHood SBOM",
-      version: "1.18.0",
+      version: "4.4.0-native",
       category: "SECURITY_DEVSECOPS",
       analysisType: "Gera\xE7\xE3o de SBOM CycloneDX 1.5 / SPDX 2.3",
       executionMethod: "NATIVE_AST_ENGINE",
@@ -17458,7 +17631,7 @@ function buildFull21SecurityAdaptersCatalog() {
           detected: true,
           // Gerador nativo de lockfiles/manifests sempre operacional; syft CLI opcional
           configured: true,
-          detectedVersion: cli.detected ? cli.versionOutput : "WinHood SBOM Parser v4.1.0"
+          detectedVersion: cli.detected ? cli.versionOutput : "WinHood SBOM Parser v4.4.0"
         };
       },
       description: "Parser nativo CycloneDX 1.5 / SPDX 2.3 com suporte opcional ao bin\xE1rio Anchore Syft.",
@@ -17468,7 +17641,7 @@ function buildFull21SecurityAdaptersCatalog() {
       id: "grype-sca",
       name: "Anchore Grype / OSV.dev SCA",
       vendor: "Anchore / OSV.dev",
-      version: "0.121.0",
+      version: "4.4.0-native",
       category: "SECURITY_DEVSECOPS",
       analysisType: "SCA Vulnerability Scanner (CVE, GHSA, CVSS, EPSS, KEV)",
       executionMethod: "NATIVE_AST_ENGINE",
@@ -17479,7 +17652,7 @@ function buildFull21SecurityAdaptersCatalog() {
           detected: true,
           // Correlator SCA nativo via snapshots OSV/NVD/EPSS/KEV sempre operacional
           configured: true,
-          detectedVersion: cli.detected ? cli.versionOutput : "WinHood SCA Correlator v4.1.0"
+          detectedVersion: cli.detected ? cli.versionOutput : "WinHood SCA Correlator v4.4.0"
         };
       },
       description: "Correla\xE7\xE3o real de depend\xEAncias diretas e transitivas contra snapshots OSV.dev, NVD, EPSS e CISA KEV.",
@@ -17780,16 +17953,17 @@ function buildFull21SecurityAdaptersCatalog() {
       id: "sysinternals-sandbox",
       name: "Microsoft Sysinternals (ProcMon, Autoruns & T0/T1/T2 Snapshot)",
       vendor: "Microsoft Sysinternals",
-      version: "2026.11",
+      version: "UNAVAILABLE",
       category: "OS_INSTALL",
       analysisType: "Windows Security Assessment, Registro, Servi\xE7os e Snapshots T0/T1/T2",
       executionMethod: "SANDBOX_WORKER",
       canonicalFormat: "SNAPSHOT_DIFF",
       binaryOrEnvCheck: () => {
-        const procmon = isWindowsHost && ToolAvailabilityService.checkBinaryInPath("procmon").detected;
+        const procmon = isWindowsHost ? ToolAvailabilityService.checkBinaryInPath("procmon") : { detected: false, versionOutput: null };
         return {
-          detected: procmon,
-          configured: isWindowsHost
+          detected: procmon.detected,
+          configured: isWindowsHost && procmon.detected,
+          detectedVersion: procmon.detected ? procmon.versionOutput || `win32-${os5.release()}` : null
         };
       },
       description: "Execu\xE7\xE3o din\xE2mica de registro/servi\xE7os requer host Windows Sandbox; em Linux executa apenas inspe\xE7\xE3o est\xE1tica de manifestos.",
@@ -17802,24 +17976,29 @@ function buildFull21SecurityAdaptersCatalog() {
     const availabilityState = isNativeInProcess ? "AVAILABLE" : check.detected ? "AVAILABLE" : "UNAVAILABLE";
     const configurationState = isNativeInProcess ? "CONFIGURED" : check.configured ? "CONFIGURED" : "UNCONFIGURED";
     const readinessState = availabilityState === "AVAILABLE" && configurationState === "CONFIGURED" ? "READY" : configurationState === "CONFIGURED" ? "PARTIAL" : "NOT_READY";
-    const status = check.detected ? "OPERATIONAL" : check.configured ? "INTEGRA\xC7\xC3O CONFIGURADA" : "FERRAMENTA N\xC3O INSTALADA";
+    const status = check.detected || isNativeInProcess ? "OPERATIONAL" : check.configured ? "INTEGRA\xC7\xC3O CONFIGURADA" : "FERRAMENTA N\xC3O INSTALADA";
+    const resolvedVersion = isNativeInProcess ? check.detectedVersion || "4.4.0-native" : check.detected ? check.detectedVersion || "DETECTED_VERSION_UNKNOWN" : "UNAVAILABLE";
+    const executionStatus = isNativeInProcess || check.detected ? "NOT_MEASURED" : check.configured ? "NOT_MEASURED" : "NOT_INSTALLED";
+    const unavailableReason = !isNativeInProcess && !check.detected ? check.configured ? "Integra\xE7\xE3o configurada via ambiente, por\xE9m bin\xE1rio/daemon local n\xE3o detectado neste host." : "Bin\xE1rio CLI ou integra\xE7\xE3o externa n\xE3o instalada/configurada no host atual." : null;
     return {
       id: d.id,
       name: d.name,
       vendor: d.vendor,
-      version: check.detectedVersion || d.version,
+      version: resolvedVersion,
       category: d.category,
       analysisType: d.analysisType,
       executionMethod: d.executionMethod,
       canonicalFormat: d.canonicalFormat,
       status,
+      executionStatus,
+      unavailableReason,
       availabilityState,
       configurationState,
       readinessState,
       executionState: "NOT_EXECUTED",
       binaryDetected: check.detected,
       configured: check.configured,
-      signatureHash: check.detected ? computeSha256(`${d.id}:${check.detectedVersion || d.version}:detected`) : null,
+      signatureHash: check.detected || isNativeInProcess ? computeSha256(`${d.id}:${resolvedVersion}:detected`) : null,
       description: d.description,
       supportedLanguages: d.supportedLanguages,
       lastExecutionAt: null,
@@ -17842,7 +18021,7 @@ function isExposedEntryPointLine(line) {
 }
 function executeSecurityAssessmentSuite(params) {
   const suiteStart = performance.now();
-  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  const nowIso = params.deterministicTimestamp || (/* @__PURE__ */ new Date()).toISOString();
   const allowlist = params.scopeAllowlist?.length ? params.scopeAllowlist : ["sandbox://local-isolated-worker/*", "127.0.0.1:3000/isolated-bench/*"];
   const adaptersCatalog = buildFull21SecurityAdaptersCatalog();
   const externalToolsNotInstalledCount = adaptersCatalog.filter(
@@ -18221,6 +18400,8 @@ function executeSecurityAssessmentSuite(params) {
     }
   ];
   void suiteStart;
+  attackPaths.sort((a, b) => a.id.localeCompare(b.id));
+  executionRecords.sort((a, b) => a.id.localeCompare(b.id));
   return {
     runId: params.runId,
     evaluatedAt: nowIso,
@@ -23986,260 +24167,15 @@ function updateHardwareProfile(updates) {
   return activeHardwareProfile;
 }
 
-// src/security/AuthService.ts
-import { execFile } from "node:child_process";
+// src/security/OptionalTotpService.ts
 import crypto19 from "node:crypto";
 import fs13 from "node:fs";
 import path14 from "node:path";
-import { promisify } from "node:util";
-var execFileAsync = promisify(execFile);
-function isValidEmailAddress(rawEmail) {
-  if (!rawEmail || rawEmail.length > 320 || /\s/.test(rawEmail)) {
-    return false;
-  }
-  const atIndex = rawEmail.indexOf("@");
-  if (atIndex <= 0 || atIndex !== rawEmail.lastIndexOf("@")) {
-    return false;
-  }
-  const domain = rawEmail.slice(atIndex + 1);
-  if (domain.startsWith(".") || domain.endsWith(".")) {
-    return false;
-  }
-  const dotIndex = domain.indexOf(".");
-  return dotIndex > 0 && dotIndex < domain.length - 1;
-}
-var PERMISSIONS_MATRIX = {
-  ADMIN: /* @__PURE__ */ new Set([
-    "read:all",
-    "audit:read",
-    "reports:export",
-    "projects:write",
-    "runs:execute",
-    "tests:run",
-    "perf:run",
-    "findings:triage",
-    "security:ops",
-    "sonar:config",
-    "targets:manage",
-    "keys:rotate",
-    "users:manage",
-    "auth:switch_role",
-    "system:reset"
-  ]),
-  SECURITY_LEAD: /* @__PURE__ */ new Set([
-    "read:all",
-    "audit:read",
-    "reports:export",
-    "projects:write",
-    "runs:execute",
-    "tests:run",
-    "perf:run",
-    "findings:triage",
-    "security:ops",
-    "sonar:config",
-    "targets:manage",
-    "system:reset"
-  ]),
-  QA_ENGINEER: /* @__PURE__ */ new Set([
-    "read:all",
-    "audit:read",
-    "reports:export",
-    "projects:write",
-    "runs:execute",
-    "tests:run",
-    "perf:run",
-    "findings:triage"
-  ]),
-  AUDITOR: /* @__PURE__ */ new Set(["read:all", "audit:read", "reports:export"])
-};
-function validateQuickPin(rawPin) {
-  const clean = (rawPin || "").trim();
-  if (!/^\d{6,8}$/.test(clean)) {
-    throw new Error("INVALID_PIN: O PIN r\xE1pido deve conter entre 6 e 8 d\xEDgitos num\xE9ricos.");
-  }
-  if (/^(\d)\1+$/.test(clean)) {
-    throw new Error("WEAK_PIN: PIN com d\xEDgitos repetidos (ex.: 111111, 000000) n\xE3o \xE9 permitido.");
-  }
-  let isAscending = true;
-  let isDescending = true;
-  for (let i = 1; i < clean.length; i++) {
-    const prev = clean.charCodeAt(i - 1) - 48;
-    const curr = clean.charCodeAt(i) - 48;
-    if (curr - prev !== 1) isAscending = false;
-    if (prev - curr !== 1) isDescending = false;
-  }
-  if (isAscending || isDescending) {
-    throw new Error("WEAK_PIN: PIN em sequ\xEAncia simples (ex.: 123456, 654321) n\xE3o \xE9 permitido.");
-  }
-  return clean;
-}
-function decodeBase64OrBase64Url(input) {
-  const clean = (input || "").trim();
-  if (!clean) return Buffer.alloc(0);
-  const normalized = clean.replace(/-/g, "+").replace(/_/g, "/");
-  const padLen = (4 - normalized.length % 4) % 4;
-  return Buffer.from(normalized + "=".repeat(padLen), "base64");
-}
-function decodeCborItem(buf, offset = 0) {
-  if (offset >= buf.length) {
-    throw new Error("WEBAUTHN_CBOR_INVALID: Fim inesperado do buffer CBOR.");
-  }
-  const initialByte = buf[offset];
-  const majorType = initialByte >> 5;
-  const additionalInfo = initialByte & 31;
-  let ptr = offset + 1;
-  let lengthVal = 0;
-  if (additionalInfo < 24) {
-    lengthVal = additionalInfo;
-  } else if (additionalInfo === 24) {
-    if (ptr + 1 > buf.length) throw new Error("WEBAUTHN_CBOR_INVALID: Uint8 truncado.");
-    lengthVal = buf.readUInt8(ptr);
-    ptr += 1;
-  } else if (additionalInfo === 25) {
-    if (ptr + 2 > buf.length) throw new Error("WEBAUTHN_CBOR_INVALID: Uint16 truncado.");
-    lengthVal = buf.readUInt16BE(ptr);
-    ptr += 2;
-  } else if (additionalInfo === 26) {
-    if (ptr + 4 > buf.length) throw new Error("WEBAUTHN_CBOR_INVALID: Uint32 truncado.");
-    lengthVal = buf.readUInt32BE(ptr);
-    ptr += 4;
-  } else if (additionalInfo === 27) {
-    if (ptr + 8 > buf.length) throw new Error("WEBAUTHN_CBOR_INVALID: Uint64 truncado.");
-    lengthVal = Number(buf.readBigUInt64BE(ptr));
-    ptr += 8;
-  } else {
-    throw new Error("WEBAUTHN_CBOR_INVALID: Informa\xE7\xE3o adicional CBOR n\xE3o suportada.");
-  }
-  switch (majorType) {
-    case 0:
-      return { value: lengthVal, nextOffset: ptr };
-    case 1:
-      return { value: -1 - lengthVal, nextOffset: ptr };
-    case 2: {
-      if (ptr + lengthVal > buf.length) throw new Error("WEBAUTHN_CBOR_INVALID: ByteString truncada.");
-      return { value: buf.subarray(ptr, ptr + lengthVal), nextOffset: ptr + lengthVal };
-    }
-    case 3: {
-      if (ptr + lengthVal > buf.length) throw new Error("WEBAUTHN_CBOR_INVALID: TextString truncada.");
-      return {
-        value: buf.subarray(ptr, ptr + lengthVal).toString("utf8"),
-        nextOffset: ptr + lengthVal
-      };
-    }
-    case 4: {
-      const arr = [];
-      let cur = ptr;
-      for (let i = 0; i < lengthVal; i++) {
-        const decoded = decodeCborItem(buf, cur);
-        arr.push(decoded.value);
-        cur = decoded.nextOffset;
-      }
-      return { value: arr, nextOffset: cur };
-    }
-    case 5: {
-      const map = /* @__PURE__ */ new Map();
-      let cur = ptr;
-      for (let i = 0; i < lengthVal; i++) {
-        const k = decodeCborItem(buf, cur);
-        const v = decodeCborItem(buf, k.nextOffset);
-        map.set(k.value, v.value);
-        cur = v.nextOffset;
-      }
-      return { value: map, nextOffset: cur };
-    }
-    case 7: {
-      if (additionalInfo === 20) return { value: false, nextOffset: ptr };
-      if (additionalInfo === 21) return { value: true, nextOffset: ptr };
-      if (additionalInfo === 22) return { value: null, nextOffset: ptr };
-      return { value: lengthVal, nextOffset: ptr };
-    }
-    default:
-      throw new Error(`WEBAUTHN_CBOR_INVALID: Major type ${majorType} n\xE3o suportado.`);
-  }
-}
-function cosePublicKeyToSpkiBase64(coseBytes) {
-  const decoded = decodeCborItem(coseBytes, 0).value;
-  if (!(decoded instanceof Map)) {
-    throw new Error("WEBAUTHN_COSE_INVALID: Chave p\xFAblica COSE n\xE3o \xE9 um mapa CBOR v\xE1lido.");
-  }
-  const kty = decoded.get(1);
-  const alg = decoded.get(3);
-  if (alg === -7 && kty === 2) {
-    const crv = decoded.get(-1);
-    const xBuf = decoded.get(-2);
-    const yBuf = decoded.get(-3);
-    if (crv !== 1 || !Buffer.isBuffer(xBuf) || !Buffer.isBuffer(yBuf)) {
-      throw new Error("WEBAUTHN_COSE_INVALID: Coordenadas EC2 P-256 inv\xE1lidas na chave COSE.");
-    }
-    const keyObj = crypto19.createPublicKey({
-      key: {
-        kty: "EC",
-        crv: "P-256",
-        x: xBuf.toString("base64url"),
-        y: yBuf.toString("base64url")
-      },
-      format: "jwk"
-    });
-    const spkiDer = keyObj.export({ type: "spki", format: "der" });
-    return { publicKeySpkiBase64: spkiDer.toString("base64"), coseAlgorithm: -7 };
-  }
-  if (alg === -257 && kty === 3) {
-    const nBuf = decoded.get(-1);
-    const eBuf = decoded.get(-2);
-    if (!Buffer.isBuffer(nBuf) || !Buffer.isBuffer(eBuf)) {
-      throw new Error("WEBAUTHN_COSE_INVALID: Par\xE2metros RSA (n, e) inv\xE1lidos na chave COSE.");
-    }
-    const keyObj = crypto19.createPublicKey({
-      key: {
-        kty: "RSA",
-        n: nBuf.toString("base64url"),
-        e: eBuf.toString("base64url")
-      },
-      format: "jwk"
-    });
-    const spkiDer = keyObj.export({ type: "spki", format: "der" });
-    return { publicKeySpkiBase64: spkiDer.toString("base64"), coseAlgorithm: -257 };
-  }
-  throw new Error(
-    `WEBAUTHN_ALG_UNSUPPORTED: Algoritmo COSE ${String(alg)} n\xE3o suportado (use ES256 -7 ou RS256 -257).`
-  );
-}
-function normalizeWebAuthnRpId(rawRpId) {
-  const clean = (rawRpId || "").trim().toLowerCase();
-  if (!clean) return "localhost";
-  const withoutPort = clean.split(":")[0].trim();
-  if (!withoutPort || withoutPort === "127.0.0.1" || withoutPort === "[::1]") {
-    return "localhost";
-  }
-  return withoutPort;
-}
-function validateWebAuthnOrigin(originStr, expectedRpId) {
-  let parsed;
-  try {
-    parsed = new URL(originStr);
-  } catch {
-    throw new Error("WEBAUTHN_ORIGIN_INVALID: Origin malformado no clientDataJSON.");
-  }
-  const hostname = parsed.hostname.toLowerCase();
-  const isLoopback = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
-  if (isLoopback) {
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      throw new Error("WEBAUTHN_ORIGIN_INVALID: Protocolo de loopback inv\xE1lido.");
-    }
-    return { hostname };
-  }
-  if (parsed.protocol !== "https:") {
-    throw new Error("WEBAUTHN_ORIGIN_INVALID: WebAuthn fora de loopback exige HTTPS.");
-  }
-  const rpClean = expectedRpId.toLowerCase();
-  if (hostname !== rpClean && !hostname.endsWith(`.${rpClean}`)) {
-    throw new Error(
-      `WEBAUTHN_ORIGIN_MISMATCH: Origin "${hostname}" n\xE3o corresponde ao rpId "${rpClean}".`
-    );
-  }
-  return { hostname };
-}
 var BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+var TOTP_PERIOD_SECONDS = 30;
+var UNLOCK_SESSION_TTL_MS = 12 * 60 * 60 * 1e3;
+var MAX_FAILED_ATTEMPTS = 5;
+var RATE_LIMIT_WINDOW_MS = 6e4;
 function base32Encode(buf) {
   let bits = 0;
   let value = 0;
@@ -24283,16 +24219,16 @@ function computeHotp(secretBase32, counter) {
   const code = ((hmac[offset] & 127) << 24 | (hmac[offset + 1] & 255) << 16 | (hmac[offset + 2] & 255) << 8 | hmac[offset + 3] & 255) % 1e6;
   return String(code).padStart(6, "0");
 }
-function verifyTotpCodeWithStep(secretBase32, candidateCode, lastAcceptedStep, atMs = Date.now()) {
+function verifyTotpCodeWithReplayCheck(secretBase32, candidateCode, lastAcceptedStep, atMs = Date.now()) {
   const clean = (candidateCode || "").replace(/[\s-]/g, "").trim();
   if (!/^\d{6}$/.test(clean)) {
     return { valid: false, matchedStep: null, replayRejected: false };
   }
-  const currentStep = Math.floor(atMs / 1e3 / 30);
+  const currentStep = Math.floor(atMs / 1e3 / TOTP_PERIOD_SECONDS);
   for (const delta of [-1, 0, 1]) {
     const candidateStep = currentStep + delta;
     const expected = computeHotp(secretBase32, candidateStep);
-    if (crypto19.timingSafeEqual(Buffer.from(clean), Buffer.from(expected))) {
+    if (crypto19.timingSafeEqual(Buffer.from(clean, "utf8"), Buffer.from(expected, "utf8"))) {
       if (typeof lastAcceptedStep === "number" && candidateStep <= lastAcceptedStep) {
         return { valid: false, matchedStep: candidateStep, replayRejected: true };
       }
@@ -24301,140 +24237,85 @@ function verifyTotpCodeWithStep(secretBase32, candidateCode, lastAcceptedStep, a
   }
   return { valid: false, matchedStep: null, replayRejected: false };
 }
+function hashRecoveryCodeWithSalt(normalizedHex, saltHex) {
+  return crypto19.createHash("sha256").update(`winhood-totp-rc:v1:${saltHex}:${normalizedHex}`).digest("hex");
+}
 function generateRecoveryCodesSet(count = 8) {
   const plaintextCodes = [];
   const codeHashes = [];
   for (let i = 0; i < count; i++) {
     const rawHex = crypto19.randomBytes(4).toString("hex").toUpperCase();
     const formatted = `${rawHex.slice(0, 4)}-${rawHex.slice(4, 8)}`;
+    const saltHex = crypto19.randomBytes(16).toString("hex");
     plaintextCodes.push(formatted);
-    codeHashes.push(sha256(`winhood-rc:${rawHex}`));
+    codeHashes.push({
+      saltHex,
+      hashHex: hashRecoveryCodeWithSalt(rawHex, saltHex)
+    });
   }
   return { plaintextCodes, codeHashes };
 }
-var CURRENT_SCRYPT_PARAMS = {
-  N: 32768,
-  r: 8,
-  p: 1,
-  maxmem: 64 * 1024 * 1024
-};
-function parseScryptParamsSpec(spec) {
-  const parsed = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
-  for (const token of (spec || "").split(",")) {
-    const [k, v] = token.split("=");
-    const num = Number.parseInt(v || "", 10);
-    if (!Number.isFinite(num) || num <= 0) continue;
-    if (k === "N") parsed.N = num;
-    if (k === "r") parsed.r = num;
-    if (k === "p") parsed.p = num;
-  }
-  parsed.maxmem = Math.max(64 * 1024 * 1024, 256 * parsed.N * parsed.r);
-  return parsed;
+function sha256Hex2(value) {
+  return crypto19.createHash("sha256").update(value, "utf8").digest("hex");
 }
-function extractScryptParams(storedHash) {
-  const parts = (storedHash || "").split(":");
-  if (parts.length !== 4 || parts[0] !== "scrypt") return null;
-  return parseScryptParamsSpec(parts[1]);
+function defaultPersistedConfig() {
+  return {
+    version: 1,
+    enabled: false,
+    encryptedSecret: null,
+    encryptedPendingSecret: null,
+    recoveryCodeHashes: [],
+    pendingRecoveryCodeHashes: [],
+    lastAcceptedStep: null,
+    configuredAt: null,
+    updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
 }
-function assertNoKdfDowngrade(previousHash, candidateHash) {
-  const nextParams = extractScryptParams(candidateHash);
-  if (!nextParams) {
-    throw new Error("AUTH_KDF_DOWNGRADE_REJECTED: Formato de hash KDF candidato inv\xE1lido.");
+var OptionalTotpService = class {
+  constructor(dataDir) {
+    this.dataDir = dataDir;
+    this.unlockSessions = /* @__PURE__ */ new Map();
+    this.failedAttemptsByIp = /* @__PURE__ */ new Map();
+    fs13.mkdirSync(this.dataDir, { recursive: true });
+    this.configPath = path14.join(this.dataDir, "totp_config.json");
+    this.config = this.loadConfig();
   }
-  if (nextParams.N < CURRENT_SCRYPT_PARAMS.N || nextParams.r < CURRENT_SCRYPT_PARAMS.r || nextParams.p < CURRENT_SCRYPT_PARAMS.p) {
-    throw new Error(
-      `AUTH_KDF_DOWNGRADE_REJECTED: Par\xE2metros KDF (N=${nextParams.N},r=${nextParams.r},p=${nextParams.p}) inferiores ao padr\xE3o m\xEDnimo N=${CURRENT_SCRYPT_PARAMS.N}.`
-    );
+  static {
+    this.SESSION_TTL_MS = UNLOCK_SESSION_TTL_MS;
   }
-  if (previousHash) {
-    const prevParams = extractScryptParams(previousHash);
-    if (prevParams && (nextParams.N < prevParams.N || nextParams.r < prevParams.r || nextParams.p < prevParams.p)) {
-      throw new Error(
-        `AUTH_KDF_DOWNGRADE_REJECTED: Downgrade KDF bloqueado (${prevParams.N} -> ${nextParams.N}).`
-      );
+  loadConfig() {
+    if (!fs13.existsSync(this.configPath)) {
+      return defaultPersistedConfig();
+    }
+    try {
+      const raw = fs13.readFileSync(this.configPath, "utf8");
+      const parsed = JSON.parse(raw);
+      return {
+        version: 1,
+        enabled: Boolean(parsed.enabled && parsed.encryptedSecret),
+        encryptedSecret: typeof parsed.encryptedSecret === "string" ? parsed.encryptedSecret : null,
+        encryptedPendingSecret: typeof parsed.encryptedPendingSecret === "string" ? parsed.encryptedPendingSecret : null,
+        recoveryCodeHashes: Array.isArray(parsed.recoveryCodeHashes) ? parsed.recoveryCodeHashes : [],
+        pendingRecoveryCodeHashes: Array.isArray(parsed.pendingRecoveryCodeHashes) ? parsed.pendingRecoveryCodeHashes : [],
+        lastAcceptedStep: typeof parsed.lastAcceptedStep === "number" ? parsed.lastAcceptedStep : null,
+        configuredAt: typeof parsed.configuredAt === "string" ? parsed.configuredAt : null,
+        updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : (/* @__PURE__ */ new Date()).toISOString()
+      };
+    } catch {
+      return defaultPersistedConfig();
     }
   }
-}
-function hashPassword(credentialValue, costParams = CURRENT_SCRYPT_PARAMS) {
-  const N = costParams.N ?? CURRENT_SCRYPT_PARAMS.N;
-  const r = costParams.r ?? CURRENT_SCRYPT_PARAMS.r;
-  const p = costParams.p ?? CURRENT_SCRYPT_PARAMS.p;
-  const maxmem = Math.max(64 * 1024 * 1024, 256 * N * r);
-  const salt = crypto19.randomBytes(16).toString("hex");
-  const derived = crypto19.scryptSync(credentialValue, salt, 64, { N, r, p, maxmem }).toString("hex");
-  return `scrypt:N=${N},r=${r},p=${p}:${salt}:${derived}`;
-}
-function verifyPassword(credentialValue, storedHash) {
-  const parts = (storedHash || "").split(":");
-  if (parts.length !== 4 || parts[0] !== "scrypt") return false;
-  const params = parseScryptParamsSpec(parts[1]);
-  const salt = parts[2];
-  const expectedHex = parts[3];
-  const derived = crypto19.scryptSync(credentialValue, salt, 64, {
-    N: params.N,
-    r: params.r,
-    p: params.p,
-    maxmem: params.maxmem
-  });
-  const expectedBuf = Buffer.from(expectedHex, "hex");
-  if (derived.length !== expectedBuf.length) return false;
-  return crypto19.timingSafeEqual(derived, expectedBuf);
-}
-function needsPasswordRehash(storedHash) {
-  const parts = (storedHash || "").split(":");
-  if (parts.length !== 4 || parts[0] !== "scrypt") return true;
-  const params = parseScryptParamsSpec(parts[1]);
-  return params.N < CURRENT_SCRYPT_PARAMS.N || params.r < CURRENT_SCRYPT_PARAMS.r || params.p < CURRENT_SCRYPT_PARAMS.p;
-}
-function sha256(val) {
-  return crypto19.createHash("sha256").update(val, "utf8").digest("hex");
-}
-function atomicWriteSecretFile(filePath, content) {
-  const dir = path14.dirname(filePath);
-  if (!fs13.existsSync(dir)) {
-    fs13.mkdirSync(dir, { recursive: true });
-  }
-  const tmpPath = `${filePath}.tmp.${crypto19.randomBytes(4).toString("hex")}`;
-  fs13.writeFileSync(tmpPath, content, { encoding: "utf8", mode: 384 });
-  fs13.renameSync(tmpPath, filePath);
-  try {
-    fs13.chmodSync(filePath, 384);
-  } catch {
-  }
-}
-var AuthService = class _AuthService {
-  constructor(dataDir) {
-    this.ipRateLimits = /* @__PURE__ */ new Map();
-    this.webauthnChallenges = /* @__PURE__ */ new Map();
-    this.bootstrapInProgress = false;
-    this.registrationInProgress = /* @__PURE__ */ new Set();
-    const base = dataDir || path14.resolve(process.cwd(), ".winhood_data");
-    this.authStorePath = path14.join(base, "security", "auth_users.json");
-    this.bootstrapTokenFilePath = path14.join(base, "bootstrap_admin_token.txt");
-    this.recoveryDir = path14.join(base, "security");
-    this.keystorePath = path14.join(base, "keys", "keystore.json");
-    this.db = this.loadOrInit(base);
-  }
-  static {
-    this.SESSION_IDLE_MS = 30 * 60 * 1e3;
-  }
-  static {
-    this.SESSION_ABSOLUTE_MS = 8 * 60 * 60 * 1e3;
-  }
-  static {
-    this.SESSION_TRUSTED_DEVICE_MS = 30 * 24 * 60 * 60 * 1e3;
-  }
-  static {
-    this.PREAUTH_TTL_MS = 5 * 60 * 1e3;
-  }
-  static {
-    this.MAX_LOGIN_ATTEMPTS = 5;
-  }
-  static {
-    this.LOCKOUT_DURATION_MS = 5 * 60 * 1e3;
+  saveConfig() {
+    this.config.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    const tmpPath = `${this.configPath}.${crypto19.randomBytes(6).toString("hex")}.tmp`;
+    fs13.writeFileSync(tmpPath, JSON.stringify(this.config, null, 2), {
+      encoding: "utf8",
+      mode: 384
+    });
+    fs13.renameSync(tmpPath, this.configPath);
   }
   encryptSecretAtRest(plainSecret) {
-    const { keyId, keyBuffer } = KeyManagementService.getActiveVaultAesKey(this.keystorePath);
+    const { keyId, keyBuffer } = KeyManagementService.getActiveVaultAesKey();
     const iv = crypto19.randomBytes(12);
     const cipher = crypto19.createCipheriv("aes-256-gcm", keyBuffer, iv);
     const encrypted = Buffer.concat([cipher.update(plainSecret, "utf8"), cipher.final()]);
@@ -24444,2920 +24325,315 @@ var AuthService = class _AuthService {
   decryptSecretAtRest(stored) {
     if (!stored) return null;
     if (!stored.startsWith("whvault:v1:")) {
-      return stored;
+      throw new Error("TOTP_SECRET_CORRUPTED: Segredo TOTP fora do formato criptografado AES-256-GCM.");
     }
     const parts = stored.split(":");
     if (parts.length !== 6) {
-      throw new Error("TOTP_VAULT_CORRUPTED: Formato criptogr\xE1fico do segredo TOTP inv\xE1lido.");
+      throw new Error("TOTP_SECRET_CORRUPTED: Envelope AES-256-GCM inv\xE1lido.");
     }
-    const [, , keyId, ivHex, tagHex, cipherHex] = parts;
-    const keyBuf = KeyManagementService.getVaultKeyBufferByKeyId(keyId, this.keystorePath) || KeyManagementService.getActiveVaultAesKey(this.keystorePath).keyBuffer;
-    const decipher = crypto19.createDecipheriv("aes-256-gcm", keyBuf, Buffer.from(ivHex, "hex"));
+    const [, , keyId, ivHex, tagHex, dataHex] = parts;
+    const keyBuffer = KeyManagementService.getVaultKeyBufferByKeyId(keyId);
+    if (!keyBuffer) {
+      throw new Error(`TOTP_VAULT_KEY_MISSING: Chave "${keyId}" n\xE3o encontrada no KeyManagementService.`);
+    }
+    const decipher = crypto19.createDecipheriv("aes-256-gcm", keyBuffer, Buffer.from(ivHex, "hex"));
     decipher.setAuthTag(Buffer.from(tagHex, "hex"));
-    const plain = Buffer.concat([
-      decipher.update(Buffer.from(cipherHex, "hex")),
+    const decrypted = Buffer.concat([
+      decipher.update(Buffer.from(dataHex, "hex")),
       decipher.final()
     ]);
-    return plain.toString("utf8");
+    return decrypted.toString("utf8");
   }
   reencryptTotpSecrets(ctx) {
-    let updated = 0;
-    const reencryptWithCtx = (stored) => {
-      if (!stored) return stored;
-      let plain = null;
-      if (stored.startsWith(`whvault:v1:${ctx.oldKeyId}:`)) {
-        const parts = stored.split(":");
-        if (parts.length === 6) {
-          const decipher = crypto19.createDecipheriv(
-            "aes-256-gcm",
-            ctx.oldKeyBuffer,
-            Buffer.from(parts[3], "hex")
-          );
-          decipher.setAuthTag(Buffer.from(parts[4], "hex"));
-          plain = Buffer.concat([
-            decipher.update(Buffer.from(parts[5], "hex")),
-            decipher.final()
-          ]).toString("utf8");
-        }
-      } else if (!stored.startsWith("whvault:v1:")) {
-        plain = stored;
-      }
-      if (!plain) return stored;
+    let reencrypted = 0;
+    const reencryptOne = (stored) => {
+      if (!stored || !stored.startsWith("whvault:v1:")) return stored;
+      const parts = stored.split(":");
+      if (parts.length !== 6) return stored;
+      const [, , keyId, ivHex, tagHex, dataHex] = parts;
+      if (keyId !== ctx.oldKeyId) return stored;
+      const decipher = crypto19.createDecipheriv("aes-256-gcm", ctx.oldKeyBuffer, Buffer.from(ivHex, "hex"));
+      decipher.setAuthTag(Buffer.from(tagHex, "hex"));
+      const plain = Buffer.concat([
+        decipher.update(Buffer.from(dataHex, "hex")),
+        decipher.final()
+      ]).toString("utf8");
       const iv = crypto19.randomBytes(12);
       const cipher = crypto19.createCipheriv("aes-256-gcm", ctx.newKeyBuffer, iv);
-      const encrypted = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
+      const enc = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
       const tag = cipher.getAuthTag();
-      updated += 1;
-      return `whvault:v1:${ctx.newKeyId}:${iv.toString("hex")}:${tag.toString("hex")}:${encrypted.toString("hex")}`;
+      reencrypted += 1;
+      return `whvault:v1:${ctx.newKeyId}:${iv.toString("hex")}:${tag.toString("hex")}:${enc.toString("hex")}`;
     };
-    for (const user of this.db.users) {
-      if (user.totpSecretBase32) {
-        user.totpSecretBase32 = reencryptWithCtx(user.totpSecretBase32) || null;
+    this.config.encryptedSecret = reencryptOne(this.config.encryptedSecret);
+    this.config.encryptedPendingSecret = reencryptOne(this.config.encryptedPendingSecret);
+    if (reencrypted > 0) {
+      this.saveConfig();
+    }
+    return reencrypted;
+  }
+  assertNotRateLimited(ipKey, nowMs = Date.now()) {
+    const key = ipKey || "local";
+    const existing = (this.failedAttemptsByIp.get(key) || []).filter(
+      (ts) => nowMs - ts < RATE_LIMIT_WINDOW_MS
+    );
+    if (existing.length >= MAX_FAILED_ATTEMPTS) {
+      this.failedAttemptsByIp.set(key, existing);
+      throw new Error(
+        "TOTP_RATE_LIMITED: Muitas tentativas inv\xE1lidas em sequ\xEAncia. Aguarde 60 segundos e tente novamente."
+      );
+    }
+    this.failedAttemptsByIp.set(key, existing);
+  }
+  recordFailedAttempt(ipKey, nowMs = Date.now()) {
+    const key = ipKey || "local";
+    const existing = (this.failedAttemptsByIp.get(key) || []).filter(
+      (ts) => nowMs - ts < RATE_LIMIT_WINDOW_MS
+    );
+    existing.push(nowMs);
+    this.failedAttemptsByIp.set(key, existing);
+  }
+  clearFailedAttempts(ipKey) {
+    this.failedAttemptsByIp.delete(ipKey || "local");
+  }
+  pruneExpiredSessions(nowMs = Date.now()) {
+    for (const [key, sess] of this.unlockSessions.entries()) {
+      if (sess.expiresAtMs <= nowMs) {
+        this.unlockSessions.delete(key);
       }
-      if (user.pendingTotpSecretBase32) {
-        user.pendingTotpSecretBase32 = reencryptWithCtx(user.pendingTotpSecretBase32) || null;
-      }
     }
-    if (updated > 0) {
-      this.save();
-    }
-    return updated;
   }
-  createPreAuthToken(userId, email, trustDevice) {
-    const { keyId, secret } = KeyManagementService.getActiveEvidenceHmacKey(this.keystorePath);
-    const payload = {
-      keyId,
-      uid: userId,
-      email,
-      scope: "TOTP_CHALLENGE",
-      trustDevice: Boolean(trustDevice),
-      exp: Date.now() + _AuthService.PREAUTH_TTL_MS,
-      jti: crypto19.randomBytes(8).toString("hex")
-    };
-    const encodedPayload = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
-    const sig = crypto19.createHmac("sha256", secret).update(encodedPayload, "utf8").digest("base64url");
-    return `whpa1.${encodedPayload}.${sig}`;
-  }
-  verifyPreAuthToken(token) {
-    const parts = (token || "").trim().split(".");
-    if (parts.length !== 3 || parts[0] !== "whpa1") {
-      throw new Error("AUTH_PREAUTH_INVALID: Token tempor\xE1rio de desafio MFA malformado.");
-    }
-    let decoded;
-    try {
-      decoded = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
-    } catch {
-      throw new Error("AUTH_PREAUTH_INVALID: Payload do desafio MFA inv\xE1lido.");
-    }
-    if (decoded.scope !== "TOTP_CHALLENGE" || !decoded.uid || !decoded.keyId || !decoded.exp) {
-      throw new Error("AUTH_PREAUTH_INVALID: Escopo do token de desafio MFA inv\xE1lido.");
-    }
-    if (Date.now() > decoded.exp) {
-      throw new Error("AUTH_PREAUTH_EXPIRED: Desafio TOTP expirado (5 minutos). Fa\xE7a login novamente.");
-    }
-    const hmacSecret = KeyManagementService.getEvidenceSecretByKeyId(decoded.keyId, this.keystorePath);
-    if (!hmacSecret) {
-      throw new Error("AUTH_PREAUTH_INVALID: Chave de assinatura do desafio n\xE3o reconhecida.");
-    }
-    const expectedSig = crypto19.createHmac("sha256", hmacSecret).update(parts[1], "utf8").digest("base64url");
-    const a = Buffer.from(parts[2], "utf8");
-    const b = Buffer.from(expectedSig, "utf8");
-    if (a.length !== b.length || !crypto19.timingSafeEqual(a, b)) {
-      throw new Error("AUTH_PREAUTH_INVALID: Assinatura HMAC do token de desafio MFA inv\xE1lida.");
-    }
-    return {
-      uid: decoded.uid,
-      email: decoded.email || "",
-      trustDevice: Boolean(decoded.trustDevice)
-    };
-  }
-  tryConsumeRecoveryCode(user, rawCode) {
-    const clean = (rawCode || "").replace(/[\s-]/g, "").trim().toUpperCase();
-    if (!/^[A-F0-9]{8}$/.test(clean) || !Array.isArray(user.recoveryCodeHashes) || user.recoveryCodeHashes.length === 0) {
-      return false;
-    }
-    const candidateHashBuf = Buffer.from(sha256(`winhood-rc:${clean}`), "hex");
-    const matchIndex = user.recoveryCodeHashes.findIndex((storedHex) => {
-      const storedBuf = Buffer.from(storedHex, "hex");
-      return storedBuf.length === candidateHashBuf.length && crypto19.timingSafeEqual(storedBuf, candidateHashBuf);
+  createUnlockSession(nowMs = Date.now()) {
+    this.pruneExpiredSessions(nowMs);
+    const unlockToken = crypto19.randomBytes(32).toString("hex");
+    const csrfToken = crypto19.randomBytes(24).toString("hex");
+    const tokenHashHex = sha256Hex2(unlockToken);
+    this.unlockSessions.set(tokenHashHex, {
+      tokenHashHex,
+      csrfToken,
+      createdAtMs: nowMs,
+      expiresAtMs: nowMs + UNLOCK_SESSION_TTL_MS
     });
-    if (matchIndex === -1) return false;
-    user.recoveryCodeHashes.splice(matchIndex, 1);
-    return true;
+    return { unlockToken, csrfToken };
   }
-  loadOrInit(baseDir) {
-    fs13.mkdirSync(path14.join(baseDir, "security"), { recursive: true });
-    if (fs13.existsSync(this.authStorePath)) {
-      try {
-        const raw = fs13.readFileSync(this.authStorePath, "utf8");
-        const parsed = JSON.parse(raw);
-        if (parsed && Array.isArray(parsed.users) && Array.isArray(parsed.sessions)) {
-          if (parsed.users.length === 0 && !parsed.bootstrapTokenSha256) {
-            return this.issueFreshBootstrapToken(parsed);
-          }
-          return parsed;
+  findSession(unlockToken, nowMs = Date.now()) {
+    if (!unlockToken || unlockToken.length < 32) return null;
+    this.pruneExpiredSessions(nowMs);
+    const candidateHash = sha256Hex2(unlockToken);
+    const candidateBuf = Buffer.from(candidateHash, "hex");
+    for (const session of this.unlockSessions.values()) {
+      const storedBuf = Buffer.from(session.tokenHashHex, "hex");
+      if (storedBuf.length === candidateBuf.length && crypto19.timingSafeEqual(storedBuf, candidateBuf)) {
+        if (session.expiresAtMs > nowMs) {
+          return session;
         }
-      } catch {
-        const bak = `${this.authStorePath}.bak`;
-        if (fs13.existsSync(bak)) {
-          const parsedBak = JSON.parse(fs13.readFileSync(bak, "utf8"));
-          return parsedBak;
-        }
+        this.unlockSessions.delete(session.tokenHashHex);
+        return null;
       }
     }
-    const fresh = {
-      schemaVersion: 1,
-      bootstrapTokenSha256: null,
-      bootstrapTokenExpiresAt: null,
-      bootstrapCompletedAt: null,
-      users: [],
-      sessions: []
-    };
-    return this.issueFreshBootstrapToken(fresh);
+    return null;
   }
-  issueFreshBootstrapToken(state) {
-    const envToken = process.env.WINHOOD_BOOTSTRAP_TOKEN?.trim();
-    const rawToken = envToken && envToken.length >= 16 ? envToken : `wh-boot-${crypto19.randomBytes(24).toString("base64url")}`;
-    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1e3).toISOString();
-    state.bootstrapTokenSha256 = sha256(rawToken);
-    state.bootstrapTokenExpiresAt = expiresAt;
-    this.save(state);
-    atomicWriteSecretFile(
-      this.bootstrapTokenFilePath,
-      `# WinHood Initial Bootstrap Token (Single-Use \u2014 expira em ${expiresAt})
-${rawToken}
-`
-    );
-    if (process.env.NODE_ENV !== "test") {
-      console.log(
-        `[WINHOOD AUTH] Primeira inicializa\xE7\xE3o detectada: nenhum administrador cadastrado. Credencial tempor\xE1ria de bootstrap gravada em ${this.bootstrapTokenFilePath} (chmod 0600).`
-      );
-    }
-    return state;
+  isEnabled() {
+    return Boolean(this.config.enabled && this.config.encryptedSecret);
   }
-  save(state = this.db) {
-    if (fs13.existsSync(this.authStorePath)) {
-      try {
-        fs13.copyFileSync(this.authStorePath, `${this.authStorePath}.bak`);
-      } catch {
-      }
-    }
-    const serialized = JSON.stringify(state, null, 2);
-    atomicWriteSecretFile(this.authStorePath, serialized);
-    atomicWriteSecretFile(`${this.authStorePath}.sha256`, sha256(serialized));
+  isRequestUnlocked(unlockToken, nowMs = Date.now()) {
+    if (!this.isEnabled()) return true;
+    return this.findSession(unlockToken, nowMs) !== null;
   }
-  isBootstrapRequired() {
-    return this.db.users.length === 0;
+  getSessionCsrfToken(unlockToken) {
+    const sess = this.findSession(unlockToken);
+    return sess ? sess.csrfToken : null;
   }
-  getBootstrapMetadata() {
+  validateCsrfToken(unlockToken, providedCsrf) {
+    const sess = this.findSession(unlockToken);
+    if (!sess || !providedCsrf) return false;
+    const expectedBuf = Buffer.from(sess.csrfToken, "utf8");
+    const providedBuf = Buffer.from(providedCsrf.trim(), "utf8");
+    return expectedBuf.length === providedBuf.length && crypto19.timingSafeEqual(expectedBuf, providedBuf);
+  }
+  getStatus(unlockToken) {
+    const enabled = this.isEnabled();
+    const unlocked = enabled ? this.isRequestUnlocked(unlockToken) : true;
     return {
-      bootstrapRequired: this.isBootstrapRequired(),
-      bootstrapTokenFilePath: this.bootstrapTokenFilePath,
-      expiresAt: this.db.bootstrapTokenExpiresAt
-    };
-  }
-  bootstrapInitialAdmin(params) {
-    if (this.bootstrapInProgress) {
-      throw new Error("BOOTSTRAP_CONFLICT: Inicializa\xE7\xE3o administrativa j\xE1 est\xE1 em processamento.");
-    }
-    this.bootstrapInProgress = true;
-    try {
-      if (!this.isBootstrapRequired()) {
-        throw new Error("BOOTSTRAP_ALREADY_COMPLETED: Administrador inicial j\xE1 foi configurado.");
-      }
-      const provided = (params.bootstrapToken || "").trim();
-      if (!provided || !this.db.bootstrapTokenSha256) {
-        throw new Error("BOOTSTRAP_TOKEN_INVALID: Token de bootstrap obrigat\xF3rio.");
-      }
-      if (this.db.bootstrapTokenExpiresAt && Date.now() > Date.parse(this.db.bootstrapTokenExpiresAt)) {
-        this.issueFreshBootstrapToken(this.db);
-        throw new Error("BOOTSTRAP_TOKEN_EXPIRED: Token expirado; novo token gerado no canal seguro.");
-      }
-      const providedSha = Buffer.from(sha256(provided), "hex");
-      const storedSha = Buffer.from(this.db.bootstrapTokenSha256, "hex");
-      if (providedSha.length !== storedSha.length || !crypto19.timingSafeEqual(providedSha, storedSha)) {
-        throw new Error("BOOTSTRAP_TOKEN_INVALID: Token de bootstrap incorreto.");
-      }
-      const cleanName = (params.name || "").trim();
-      const cleanEmail = (params.email || "").trim().toLowerCase();
-      const cleanPassword = params.password || "";
-      if (cleanName.length < 2) {
-        throw new Error("Nome do administrador deve possuir pelo menos 2 caracteres.");
-      }
-      if (!isValidEmailAddress(cleanEmail)) {
-        throw new Error("E-mail inv\xE1lido.");
-      }
-      if (cleanPassword.length < 10) {
-        throw new Error("A senha deve possuir pelo menos 10 caracteres.");
-      }
-      const now = (/* @__PURE__ */ new Date()).toISOString();
-      const totpSecret = params.enableMfa ? base32Encode(crypto19.randomBytes(20)) : null;
-      const recoveryGen = totpSecret ? generateRecoveryCodesSet(8) : null;
-      const adminUser = {
-        id: `usr-${crypto19.randomUUID().slice(0, 8)}`,
-        name: cleanName,
-        email: cleanEmail,
-        role: "ADMIN",
-        passwordHash: hashPassword(cleanPassword),
-        mfaEnabled: Boolean(params.enableMfa),
-        totpSecretBase32: totpSecret ? this.encryptSecretAtRest(totpSecret) : null,
-        recoveryCodeHashes: recoveryGen ? recoveryGen.codeHashes : [],
-        lastAcceptedTotpStep: null,
-        disabled: false,
-        failedLoginAttempts: 0,
-        lockedUntil: null,
-        recoveryTokenSha256: null,
-        recoveryExpiresAt: null,
-        createdAt: now,
-        updatedAt: now
-      };
-      this.db.users.push(adminUser);
-      this.db.bootstrapTokenSha256 = null;
-      this.db.bootstrapTokenExpiresAt = null;
-      this.db.bootstrapCompletedAt = now;
-      try {
-        if (fs13.existsSync(this.bootstrapTokenFilePath)) {
-          fs13.unlinkSync(this.bootstrapTokenFilePath);
-        }
-      } catch {
-      }
-      const { sessionId, session } = this.createSessionRecord(
-        adminUser,
-        !adminUser.mfaEnabled,
-        params.ipAddress || "127.0.0.1",
-        params.userAgent || "unknown"
-      );
-      this.save();
-      return {
-        user: {
-          id: adminUser.id,
-          name: adminUser.name,
-          email: adminUser.email,
-          role: adminUser.role,
-          mfaEnabled: adminUser.mfaEnabled,
-          mfaVerified: session.mfaVerified
-        },
-        sessionId,
-        csrfToken: session.csrfToken,
-        ...totpSecret ? {
-          totpSetup: {
-            secretBase32: totpSecret,
-            secret: totpSecret,
-            otpauthUri: `otpauth://totp/WinHood:${encodeURIComponent(cleanEmail)}?secret=${totpSecret}&issuer=WinHood`,
-            otpauthUrl: `otpauth://totp/WinHood:${encodeURIComponent(cleanEmail)}?secret=${totpSecret}&issuer=WinHood`,
-            recoveryCodes: recoveryGen?.plaintextCodes || []
-          }
-        } : {}
-      };
-    } finally {
-      this.bootstrapInProgress = false;
-    }
-  }
-  checkIpRateLimit(ipAddress) {
-    const entry = this.ipRateLimits.get(ipAddress);
-    const now = Date.now();
-    if (!entry) return;
-    if (entry.blockedUntilMs > now) {
-      throw new Error("AUTH_RATE_LIMITED: Muitas tentativas de autentica\xE7\xE3o. Aguarde antes de tentar novamente.");
-    }
-    if (now - entry.windowStartMs > 15 * 60 * 1e3) {
-      this.ipRateLimits.delete(ipAddress);
-    }
-  }
-  recordIpFailure(ipAddress) {
-    const now = Date.now();
-    const entry = this.ipRateLimits.get(ipAddress);
-    if (!entry || now - entry.windowStartMs > 15 * 60 * 1e3) {
-      this.ipRateLimits.set(ipAddress, { count: 1, windowStartMs: now, blockedUntilMs: 0 });
-      return;
-    }
-    entry.count += 1;
-    if (entry.count >= _AuthService.MAX_LOGIN_ATTEMPTS * 2) {
-      entry.blockedUntilMs = now + _AuthService.LOCKOUT_DURATION_MS;
-    }
-  }
-  login(params) {
-    const ipAddress = params.ipAddress || "127.0.0.1";
-    this.checkIpRateLimit(ipAddress);
-    const email = (params.email || "").trim().toLowerCase();
-    const user = this.db.users.find((u) => u.email === email);
-    if (!user || user.disabled) {
-      this.recordIpFailure(ipAddress);
-      throw new Error("AUTH_INVALID_CREDENTIALS: Credenciais inv\xE1lidas.");
-    }
-    if (user.lockedUntil && Date.now() < Date.parse(user.lockedUntil)) {
-      throw new Error("AUTH_ACCOUNT_LOCKED: Conta temporariamente bloqueada ap\xF3s tentativas excessivas.");
-    }
-    if (!verifyPassword(params.password || "", user.passwordHash)) {
-      user.failedLoginAttempts += 1;
-      if (user.failedLoginAttempts >= _AuthService.MAX_LOGIN_ATTEMPTS) {
-        user.lockedUntil = new Date(Date.now() + _AuthService.LOCKOUT_DURATION_MS).toISOString();
-      }
-      this.recordIpFailure(ipAddress);
-      this.save();
-      throw new Error("AUTH_INVALID_CREDENTIALS: Credenciais inv\xE1lidas.");
-    }
-    const plainTotpSecret = this.decryptSecretAtRest(user.totpSecretBase32);
-    let mfaVerified = !user.mfaEnabled;
-    if (user.mfaEnabled && plainTotpSecret && params.totpCode) {
-      const check = verifyTotpCodeWithStep(
-        plainTotpSecret,
-        params.totpCode,
-        user.lastAcceptedTotpStep
-      );
-      if (check.replayRejected) {
-        user.failedLoginAttempts += 1;
-        this.save();
-        throw new Error(
-          "AUTH_TOTP_REPLAY: C\xF3digo TOTP j\xE1 utilizado nesta janela de 30s. Aguarde o pr\xF3ximo token."
-        );
-      }
-      if (!check.valid) {
-        user.failedLoginAttempts += 1;
-        this.save();
-        throw new Error("AUTH_INVALID_MFA: C\xF3digo TOTP MFA inv\xE1lido.");
-      }
-      user.lastAcceptedTotpStep = check.matchedStep;
-      mfaVerified = true;
-    }
-    const prevPasswordHash = user.passwordHash;
-    const prevTotpSecret = user.totpSecretBase32;
-    const prevUpdatedAt = user.updatedAt;
-    const prevSessionsSnapshot = [...this.db.sessions];
-    user.failedLoginAttempts = 0;
-    user.lockedUntil = null;
-    user.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    if (needsPasswordRehash(user.passwordHash)) {
-      const upgradedHash = hashPassword(params.password);
-      assertNoKdfDowngrade(user.passwordHash, upgradedHash);
-      user.passwordHash = upgradedHash;
-    }
-    if (user.totpSecretBase32 && !user.totpSecretBase32.startsWith("whvault:v1:")) {
-      user.totpSecretBase32 = this.encryptSecretAtRest(user.totpSecretBase32);
-    }
-    const trustDevice = Boolean(params.trustDevice);
-    const { sessionId, session } = this.createSessionRecord(
-      user,
-      mfaVerified,
-      ipAddress,
-      params.userAgent || "unknown",
-      { trustDevice }
-    );
-    try {
-      this.save();
-    } catch (persistErr) {
-      user.passwordHash = prevPasswordHash;
-      user.totpSecretBase32 = prevTotpSecret;
-      user.updatedAt = prevUpdatedAt;
-      this.db.sessions = prevSessionsSnapshot;
-      throw persistErr;
-    }
-    const mfaRequired = user.mfaEnabled && !mfaVerified;
-    return {
-      user: this.toPublicUserView(user, session.mfaVerified),
-      sessionId,
-      csrfToken: session.csrfToken,
-      mfaRequired,
-      requiresTotp: mfaRequired,
-      ...mfaRequired ? { preAuthToken: this.createPreAuthToken(user.id, user.email, trustDevice) } : {},
-      trustDevice,
+      enabled,
+      unlocked,
+      remainingRecoveryCodes: enabled ? this.config.recoveryCodeHashes.length : 0,
+      configuredAt: enabled ? this.config.configuredAt : null,
       serverTimeIso: (/* @__PURE__ */ new Date()).toISOString(),
-      totpPeriodSeconds: 30
+      totpPeriodSeconds: TOTP_PERIOD_SECONDS
     };
   }
-  loginWithPin(params) {
-    const ipAddress = params.ipAddress || "127.0.0.1";
-    this.checkIpRateLimit(ipAddress);
-    const email = (params.email || "").trim().toLowerCase();
-    let user;
-    if (email) {
-      user = this.db.users.find((u) => u.email === email);
-    } else {
-      const pinUsers = this.db.users.filter((u) => !u.disabled && u.pinEnabled && u.pinHash);
-      if (pinUsers.length === 1) {
-        user = pinUsers[0];
-      } else if (this.db.users.length === 1) {
-        user = this.db.users[0];
-      }
-    }
-    if (!user || user.disabled) {
-      this.recordIpFailure(ipAddress);
-      throw new Error("AUTH_INVALID_CREDENTIALS: E-mail ou PIN r\xE1pido inv\xE1lido.");
-    }
-    if (user.lockedUntil && Date.now() < Date.parse(user.lockedUntil)) {
-      throw new Error("AUTH_ACCOUNT_LOCKED: Conta temporariamente bloqueada ap\xF3s tentativas excessivas.");
-    }
-    const candidatePin = (params.pin || "").trim();
-    if (!user.pinEnabled || !user.pinHash || !/^\d{6,8}$/.test(candidatePin) || !verifyPassword(candidatePin, user.pinHash)) {
-      user.failedLoginAttempts += 1;
-      if (user.failedLoginAttempts >= _AuthService.MAX_LOGIN_ATTEMPTS) {
-        user.lockedUntil = new Date(Date.now() + _AuthService.LOCKOUT_DURATION_MS).toISOString();
-      }
-      this.recordIpFailure(ipAddress);
-      this.save();
-      throw new Error("AUTH_INVALID_CREDENTIALS: E-mail ou PIN r\xE1pido inv\xE1lido.");
-    }
-    const plainTotpSecret = this.decryptSecretAtRest(user.totpSecretBase32);
-    let mfaVerified = !user.mfaEnabled;
-    if (user.mfaEnabled && plainTotpSecret && params.totpCode) {
-      const check = verifyTotpCodeWithStep(
-        plainTotpSecret,
-        params.totpCode,
-        user.lastAcceptedTotpStep
-      );
-      if (check.replayRejected) {
-        user.failedLoginAttempts += 1;
-        this.save();
-        throw new Error(
-          "AUTH_TOTP_REPLAY: C\xF3digo TOTP j\xE1 utilizado nesta janela de 30s. Aguarde o pr\xF3ximo token."
-        );
-      }
-      if (!check.valid) {
-        user.failedLoginAttempts += 1;
-        this.save();
-        throw new Error("AUTH_INVALID_MFA: C\xF3digo TOTP MFA inv\xE1lido.");
-      }
-      user.lastAcceptedTotpStep = check.matchedStep;
-      mfaVerified = true;
-    }
-    const prevPinHash = user.pinHash;
-    const prevUpdatedAt = user.updatedAt;
-    const prevSessionsSnapshot = [...this.db.sessions];
-    user.failedLoginAttempts = 0;
-    user.lockedUntil = null;
-    user.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    if (user.pinHash && needsPasswordRehash(user.pinHash)) {
-      const upgradedPinHash = hashPassword(candidatePin);
-      assertNoKdfDowngrade(user.pinHash, upgradedPinHash);
-      user.pinHash = upgradedPinHash;
-    }
-    const trustDevice = Boolean(params.trustDevice);
-    const { sessionId, session } = this.createSessionRecord(
-      user,
-      mfaVerified,
-      ipAddress,
-      params.userAgent || "unknown",
-      { trustDevice }
-    );
-    try {
-      this.save();
-    } catch (persistErr) {
-      user.pinHash = prevPinHash;
-      user.updatedAt = prevUpdatedAt;
-      this.db.sessions = prevSessionsSnapshot;
-      throw persistErr;
-    }
-    const mfaRequired = user.mfaEnabled && !mfaVerified;
+  beginSetup() {
+    const secret = base32Encode(crypto19.randomBytes(20));
+    const recovery = generateRecoveryCodesSet(8);
+    this.config.encryptedPendingSecret = this.encryptSecretAtRest(secret);
+    this.config.pendingRecoveryCodeHashes = recovery.codeHashes;
+    this.saveConfig();
+    const otpauthUrl = `otpauth://totp/WinHood:LocalWorkspace?secret=${secret}&issuer=WinHood&algorithm=SHA1&digits=6&period=${TOTP_PERIOD_SECONDS}`;
     return {
-      user: this.toPublicUserView(user, session.mfaVerified),
-      sessionId,
-      csrfToken: session.csrfToken,
-      mfaRequired,
-      requiresTotp: mfaRequired,
-      ...mfaRequired ? { preAuthToken: this.createPreAuthToken(user.id, user.email, trustDevice) } : {},
-      trustDevice,
+      secret,
+      otpauthUrl,
+      recoveryCodes: recovery.plaintextCodes,
       serverTimeIso: (/* @__PURE__ */ new Date()).toISOString(),
-      totpPeriodSeconds: 30
+      totpPeriodSeconds: TOTP_PERIOD_SECONDS
     };
   }
-  setupPinForUser(userId, rawPin) {
-    const user = this.db.users.find((u) => u.id === userId);
-    if (!user || user.disabled) {
-      throw new Error("Usu\xE1rio n\xE3o encontrado.");
+  confirmSetup(totpCode, ipKey = "local", atMs = Date.now()) {
+    this.assertNotRateLimited(ipKey, atMs);
+    if (!this.config.encryptedPendingSecret) {
+      throw new Error(
+        "TOTP_SETUP_NOT_STARTED: Inicie a configura\xE7\xE3o TOTP (/api/totp/setup) antes de confirmar."
+      );
     }
-    const validPin = validateQuickPin(rawPin);
-    user.pinHash = hashPassword(validPin);
-    user.pinEnabled = true;
-    user.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    this.save();
-    return this.toPublicUserView(user, true);
+    const pendingSecret = this.decryptSecretAtRest(this.config.encryptedPendingSecret);
+    if (!pendingSecret) {
+      throw new Error("TOTP_SETUP_NOT_STARTED: Segredo pendente indispon\xEDvel.");
+    }
+    const check = verifyTotpCodeWithReplayCheck(pendingSecret, totpCode, null, atMs);
+    if (!check.valid || check.matchedStep === null) {
+      this.recordFailedAttempt(ipKey, atMs);
+      throw new Error("TOTP_CODE_INVALID: C\xF3digo TOTP de 6 d\xEDgitos inv\xE1lido. Verifique o rel\xF3gio do autenticador.");
+    }
+    this.clearFailedAttempts(ipKey);
+    this.config.enabled = true;
+    this.config.encryptedSecret = this.config.encryptedPendingSecret;
+    this.config.encryptedPendingSecret = null;
+    this.config.recoveryCodeHashes = this.config.pendingRecoveryCodeHashes;
+    this.config.pendingRecoveryCodeHashes = [];
+    this.config.lastAcceptedStep = check.matchedStep;
+    this.config.configuredAt = new Date(atMs).toISOString();
+    this.saveConfig();
+    this.unlockSessions.clear();
+    const { unlockToken, csrfToken } = this.createUnlockSession(atMs);
+    return {
+      ok: true,
+      enabled: true,
+      unlocked: true,
+      unlockToken,
+      csrfToken,
+      remainingRecoveryCodes: this.config.recoveryCodeHashes.length
+    };
   }
-  authenticateWithTotpPreAuth(params) {
-    const ipAddress = params.ipAddress || "127.0.0.1";
-    this.checkIpRateLimit(ipAddress);
-    const verifiedChallenge = this.verifyPreAuthToken(params.preAuthToken);
-    const user = this.db.users.find((u) => u.id === verifiedChallenge.uid);
-    if (!user || user.disabled || !user.mfaEnabled) {
-      throw new Error("AUTH_INVALID_MFA: Conta indispon\xEDvel ou MFA n\xE3o configurado.");
+  verifyActiveSecretOrRecoveryCode(params) {
+    const ipKey = params.ipKey || "local";
+    const atMs = params.atMs ?? Date.now();
+    this.assertNotRateLimited(ipKey, atMs);
+    if (!this.isEnabled() || !this.config.encryptedSecret) {
+      throw new Error("TOTP_NOT_ENABLED: A prote\xE7\xE3o TOTP 2FA n\xE3o est\xE1 ativa.");
     }
-    let usedRecoveryCode = false;
-    const candidateRecovery = (params.recoveryCode || "").trim();
-    const candidateTotp = (params.totpCode || "").trim();
-    if (candidateRecovery) {
-      if (!this.tryConsumeRecoveryCode(user, candidateRecovery)) {
-        user.failedLoginAttempts += 1;
-        this.recordIpFailure(ipAddress);
-        this.save();
-        throw new Error("AUTH_INVALID_RECOVERY_CODE: C\xF3digo de recupera\xE7\xE3o inv\xE1lido ou j\xE1 utilizado.");
-      }
-      usedRecoveryCode = true;
-    } else {
-      const plainTotpSecret = this.decryptSecretAtRest(user.totpSecretBase32);
-      if (!plainTotpSecret) {
-        throw new Error("AUTH_INVALID_MFA: Segredo TOTP n\xE3o localizado no cofre.");
-      }
-      const check = verifyTotpCodeWithStep(
-        plainTotpSecret,
-        candidateTotp,
-        user.lastAcceptedTotpStep
+    const activeSecret = this.decryptSecretAtRest(this.config.encryptedSecret);
+    if (!activeSecret) {
+      throw new Error("TOTP_SECRET_UNAVAILABLE: Segredo TOTP indispon\xEDvel.");
+    }
+    const rawCandidate = String(params.totpCode || params.code || "").trim();
+    const rawRecovery = String(params.recoveryCode || params.code || "").trim();
+    const digitsOnly = rawCandidate.replace(/[\s-]/g, "");
+    if (/^\d{6}$/.test(digitsOnly)) {
+      const check = verifyTotpCodeWithReplayCheck(
+        activeSecret,
+        digitsOnly,
+        this.config.lastAcceptedStep,
+        atMs
       );
       if (check.replayRejected) {
+        this.recordFailedAttempt(ipKey, atMs);
         throw new Error(
-          "AUTH_TOTP_REPLAY: C\xF3digo TOTP j\xE1 utilizado nesta janela de 30s. Aguarde o pr\xF3ximo token."
+          "TOTP_REPLAY_REJECTED: Este c\xF3digo TOTP j\xE1 foi utilizado nesta janela de 30s. Aguarde o pr\xF3ximo c\xF3digo."
         );
       }
-      if (!check.valid) {
-        user.failedLoginAttempts += 1;
-        this.recordIpFailure(ipAddress);
-        this.save();
-        throw new Error("AUTH_INVALID_MFA: C\xF3digo TOTP inv\xE1lido.");
-      }
-      user.lastAcceptedTotpStep = check.matchedStep;
-    }
-    user.failedLoginAttempts = 0;
-    user.lockedUntil = null;
-    user.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    const effectiveTrustDevice = typeof params.trustDevice === "boolean" ? params.trustDevice : verifiedChallenge.trustDevice;
-    const { sessionId, session } = this.createSessionRecord(
-      user,
-      true,
-      ipAddress,
-      params.userAgent || "unknown",
-      { trustDevice: effectiveTrustDevice }
-    );
-    this.save();
-    return {
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        mfaEnabled: user.mfaEnabled,
-        mfaVerified: true
-      },
-      sessionId,
-      csrfToken: session.csrfToken,
-      trustDevice: effectiveTrustDevice,
-      usedRecoveryCode,
-      remainingRecoveryCodesCount: user.recoveryCodeHashes?.length ?? 0
-    };
-  }
-  verifySessionMfa(sessionId, totpCode, opts) {
-    const verified = this.validateSession(sessionId, { allowPendingMfa: true });
-    if (!verified) {
-      throw new Error("AUTH_SESSION_INVALID: Sess\xE3o inv\xE1lida ou expirada.");
-    }
-    const user = this.db.users.find((u) => u.id === verified.user.id);
-    const plainSecret = this.decryptSecretAtRest(user?.totpSecretBase32);
-    if (!user || !user.mfaEnabled || !plainSecret) {
-      throw new Error("MFA n\xE3o habilitado para este usu\xE1rio.");
-    }
-    let usedRecoveryCode = false;
-    if (opts?.recoveryCode && opts.recoveryCode.trim().length > 0) {
-      if (!this.tryConsumeRecoveryCode(user, opts.recoveryCode)) {
-        throw new Error("AUTH_INVALID_RECOVERY_CODE: C\xF3digo de recupera\xE7\xE3o inv\xE1lido ou j\xE1 utilizado.");
-      }
-      usedRecoveryCode = true;
-    } else {
-      const check = verifyTotpCodeWithStep(
-        plainSecret,
-        totpCode,
-        user.lastAcceptedTotpStep
-      );
-      if (check.replayRejected) {
-        throw new Error(
-          "AUTH_TOTP_REPLAY: C\xF3digo TOTP j\xE1 utilizado nesta janela de 30s. Aguarde o pr\xF3ximo token."
-        );
-      }
-      if (!check.valid) {
-        throw new Error("AUTH_INVALID_MFA: C\xF3digo TOTP inv\xE1lido.");
-      }
-      user.lastAcceptedTotpStep = check.matchedStep;
-    }
-    if (user.totpSecretBase32 && !user.totpSecretBase32.startsWith("whvault:v1:")) {
-      user.totpSecretBase32 = this.encryptSecretAtRest(user.totpSecretBase32);
-    }
-    if (opts?.trustDevice) {
-      const nowMs = Date.now();
-      verified.session.trustDevice = true;
-      verified.session.idleTimeoutMs = _AuthService.SESSION_TRUSTED_DEVICE_MS;
-      verified.session.expiresAt = new Date(nowMs + _AuthService.SESSION_TRUSTED_DEVICE_MS).toISOString();
-    }
-    verified.session.mfaVerified = true;
-    verified.session.lastActivityAt = (/* @__PURE__ */ new Date()).toISOString();
-    this.save();
-    return {
-      ...verified.user,
-      mfaVerified: true,
-      usedRecoveryCode,
-      remainingRecoveryCodesCount: user.recoveryCodeHashes?.length ?? 0
-    };
-  }
-  setupMfaForUser(userId) {
-    const user = this.db.users.find((u) => u.id === userId);
-    if (!user) throw new Error("Usu\xE1rio n\xE3o encontrado.");
-    const secretBase32 = base32Encode(crypto19.randomBytes(20));
-    user.pendingTotpSecretBase32 = this.encryptSecretAtRest(secretBase32);
-    user.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    this.save();
-    const otpauthUri = `otpauth://totp/WinHood:${encodeURIComponent(user.email)}?secret=${secretBase32}&issuer=WinHood&algorithm=SHA1&digits=6&period=30`;
-    return {
-      secretBase32,
-      secret: secretBase32,
-      otpauthUri,
-      otpauthUrl: otpauthUri
-    };
-  }
-  confirmMfaEnrollment(userId, totpCode) {
-    const user = this.db.users.find((u) => u.id === userId);
-    if (!user) throw new Error("Usu\xE1rio n\xE3o encontrado.");
-    const pendingPlain = this.decryptSecretAtRest(user.pendingTotpSecretBase32);
-    if (!pendingPlain) {
-      throw new Error("Nenhum setup de MFA pendente encontrado. Solicite a configura\xE7\xE3o primeiro.");
-    }
-    const check = verifyTotpCodeWithStep(pendingPlain, totpCode, null);
-    if (!check.valid) {
-      throw new Error("AUTH_INVALID_MFA: C\xF3digo TOTP inv\xE1lido. O MFA n\xE3o foi ativado.");
-    }
-    const { plaintextCodes, codeHashes } = generateRecoveryCodesSet(8);
-    user.totpSecretBase32 = this.encryptSecretAtRest(pendingPlain);
-    user.mfaEnabled = true;
-    user.pendingTotpSecretBase32 = null;
-    user.lastAcceptedTotpStep = check.matchedStep;
-    user.recoveryCodeHashes = codeHashes;
-    user.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    this.save();
-    return {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      mfaEnabled: true,
-      mfaVerified: true,
-      recoveryCodes: plaintextCodes
-    };
-  }
-  disableMfaForUser(userId, verification, currentSessionId) {
-    const user = this.db.users.find((u) => u.id === userId);
-    if (!user || user.disabled) {
-      throw new Error("USER_NOT_FOUND: Usu\xE1rio n\xE3o encontrado.");
-    }
-    if (!user.mfaEnabled) {
-      throw new Error("AUTH_MFA_NOT_ENABLED: Autentica\xE7\xE3o TOTP j\xE1 est\xE1 desabilitada para esta conta.");
-    }
-    const rawTotp = (verification?.totpCode || "").trim();
-    const rawRecovery = (verification?.recoveryCode || "").trim();
-    const rawPassword = verification?.password || "";
-    let verified = false;
-    if (rawTotp) {
-      const plainSecret = this.decryptSecretAtRest(user.totpSecretBase32);
-      if (!plainSecret) {
-        throw new Error("AUTH_INVALID_MFA: Segredo TOTP n\xE3o encontrado no cofre.");
-      }
-      const check = verifyTotpCodeWithStep(plainSecret, rawTotp, user.lastAcceptedTotpStep);
-      if (check.replayRejected) {
-        throw new Error(
-          "AUTH_TOTP_REPLAY: C\xF3digo TOTP j\xE1 utilizado nesta janela de 30s. Aguarde o pr\xF3ximo token."
-        );
-      }
-      if (!check.valid) {
-        throw new Error("AUTH_INVALID_MFA: C\xF3digo TOTP inv\xE1lido.");
-      }
-      verified = true;
-    } else if (rawRecovery) {
-      if (!this.tryConsumeRecoveryCode(user, rawRecovery)) {
-        throw new Error("AUTH_INVALID_RECOVERY_CODE: C\xF3digo de recupera\xE7\xE3o inv\xE1lido ou j\xE1 utilizado.");
-      }
-      verified = true;
-    } else if (rawPassword) {
-      if (!verifyPassword(rawPassword, user.passwordHash)) {
-        throw new Error("AUTH_INVALID_CREDENTIALS: Senha de confirma\xE7\xE3o inv\xE1lida.");
-      }
-      verified = true;
-    }
-    if (!verified) {
-      throw new Error(
-        "AUTH_MFA_VERIFICATION_REQUIRED: Confirme a senha atual, c\xF3digo TOTP ou c\xF3digo de recupera\xE7\xE3o para remover o 2FA."
-      );
-    }
-    user.mfaEnabled = false;
-    user.totpSecretBase32 = null;
-    user.pendingTotpSecretBase32 = null;
-    user.recoveryCodeHashes = [];
-    user.lastAcceptedTotpStep = null;
-    user.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    if (currentSessionId) {
-      const targetHash = sha256(currentSessionId);
-      const sess = this.db.sessions.find((s) => s.sessionIdHash === targetHash);
-      if (sess && sess.userId === user.id) {
-        sess.mfaVerified = true;
+      if (check.valid && check.matchedStep !== null) {
+        this.clearFailedAttempts(ipKey);
+        this.config.lastAcceptedStep = check.matchedStep;
+        this.saveConfig();
+        return {
+          usedRecoveryCode: false,
+          remainingRecoveryCodes: this.config.recoveryCodeHashes.length
+        };
       }
     }
-    this.save();
-    return this.toPublicUserView(user, true);
-  }
-  createSessionRecord(user, mfaVerified, ipAddress, userAgent, opts) {
-    const sessionId = crypto19.randomBytes(32).toString("hex");
-    const nowMs = Date.now();
-    const trustDevice = Boolean(opts?.trustDevice);
-    const absoluteMs = trustDevice ? _AuthService.SESSION_TRUSTED_DEVICE_MS : _AuthService.SESSION_ABSOLUTE_MS;
-    const idleTimeoutMs = trustDevice ? _AuthService.SESSION_TRUSTED_DEVICE_MS : _AuthService.SESSION_IDLE_MS;
-    const session = {
-      sessionIdHash: sha256(sessionId),
-      userId: user.id,
-      role: user.role,
-      csrfToken: crypto19.randomBytes(24).toString("hex"),
-      mfaVerified,
-      trustDevice,
-      idleTimeoutMs,
-      createdAt: new Date(nowMs).toISOString(),
-      lastActivityAt: new Date(nowMs).toISOString(),
-      expiresAt: new Date(nowMs + absoluteMs).toISOString(),
-      revoked: false,
-      ipAddress,
-      userAgent
-    };
-    this.db.sessions = this.db.sessions.filter((s) => !s.revoked && Date.parse(s.expiresAt) > nowMs).slice(-99);
-    this.db.sessions.push(session);
-    return { sessionId, session };
-  }
-  validateSession(sessionId, opts) {
-    if (!sessionId || sessionId.length < 32) return null;
-    const targetHash = sha256(sessionId);
-    const session = this.db.sessions.find((s) => s.sessionIdHash === targetHash);
-    if (!session || session.revoked) return null;
-    const nowMs = Date.now();
-    if (nowMs > Date.parse(session.expiresAt)) {
-      session.revoked = true;
-      this.save();
-      return null;
-    }
-    const effectiveIdleMs = session.idleTimeoutMs || (session.trustDevice ? _AuthService.SESSION_TRUSTED_DEVICE_MS : _AuthService.SESSION_IDLE_MS);
-    if (nowMs - Date.parse(session.lastActivityAt) > effectiveIdleMs) {
-      session.revoked = true;
-      this.save();
-      return null;
-    }
-    const user = this.db.users.find((u) => u.id === session.userId);
-    if (!user || user.disabled) return null;
-    if (user.mfaEnabled && !session.mfaVerified && !opts?.allowPendingMfa) {
-      return null;
-    }
-    const effectiveRole = session.sessionRoleOverride || user.role;
-    session.lastActivityAt = new Date(nowMs).toISOString();
-    session.role = effectiveRole;
-    return {
-      user: {
-        ...this.toPublicUserView(user, session.mfaVerified),
-        role: effectiveRole
-      },
-      session
-    };
-  }
-  toPublicUserView(user, mfaVerified) {
-    return {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      mfaEnabled: user.mfaEnabled,
-      mfaVerified,
-      pinEnabled: Boolean(user.pinEnabled && user.pinHash),
-      webauthnEnabled: Boolean(user.webauthnCredentials && user.webauthnCredentials.length > 0),
-      githubLinked: Boolean(user.githubId || user.githubLogin),
-      githubLogin: user.githubLogin || null,
-      githubAvatarUrl: user.githubAvatarUrl || null,
-      authProviders: user.authProviders || []
-    };
-  }
-  hasAnyWebAuthnCredentials() {
-    return this.db.users.some(
-      (u) => !u.disabled && Array.isArray(u.webauthnCredentials) && u.webauthnCredentials.length > 0
-    );
-  }
-  completeBootstrapOnFirstAccount(nowIso) {
-    this.db.bootstrapTokenSha256 = null;
-    this.db.bootstrapTokenExpiresAt = null;
-    this.db.bootstrapCompletedAt = nowIso;
-    try {
-      if (fs13.existsSync(this.bootstrapTokenFilePath)) {
-        fs13.unlinkSync(this.bootstrapTokenFilePath);
-      }
-    } catch {
-    }
-  }
-  switchSessionPreviewRole(sessionId, newRole) {
-    const existing = this.validateSession(sessionId);
-    if (!existing) {
-      throw new Error("AUTH_SESSION_INVALID: Sess\xE3o inv\xE1lida ou expirada.");
-    }
-    const dbUser = this.db.users.find((u) => u.id === existing.user.id);
-    if (!dbUser || dbUser.role !== "ADMIN") {
-      throw new Error("ROLE_ELEVATION_BLOCKED: Apenas usu\xE1rios com conta ADMIN podem alternar o perfil de sess\xE3o.");
-    }
-    existing.session.sessionRoleOverride = newRole === "ADMIN" ? null : newRole;
-    existing.session.role = newRole;
-    this.save();
-    return {
-      id: dbUser.id,
-      name: dbUser.name,
-      email: dbUser.email,
-      role: newRole,
-      mfaEnabled: dbUser.mfaEnabled,
-      mfaVerified: existing.session.mfaVerified
-    };
-  }
-  renewSession(oldSessionId) {
-    const existing = this.validateSession(oldSessionId);
-    if (!existing) return null;
-    const user = this.db.users.find((u) => u.id === existing.user.id);
-    if (!user) return null;
-    existing.session.revoked = true;
-    const fresh = this.createSessionRecord(
-      user,
-      existing.session.mfaVerified,
-      existing.session.ipAddress,
-      existing.session.userAgent
-    );
-    this.save();
-    return { sessionId: fresh.sessionId, csrfToken: fresh.session.csrfToken };
-  }
-  revokeSession(sessionId) {
-    if (!sessionId) return false;
-    const targetHash = sha256(sessionId);
-    const session = this.db.sessions.find((s) => s.sessionIdHash === targetHash);
-    if (!session) return false;
-    session.revoked = true;
-    this.save();
-    return true;
-  }
-  createUser(params) {
-    const cleanEmail = (params.email || "").trim().toLowerCase();
-    if (!isValidEmailAddress(cleanEmail)) {
-      throw new Error("E-mail inv\xE1lido.");
-    }
-    if ((params.password || "").length < 10) {
-      throw new Error("A senha deve possuir pelo menos 10 caracteres.");
-    }
-    if (this.db.users.some((u) => u.email === cleanEmail)) {
-      throw new Error("E-mail j\xE1 cadastrado.");
-    }
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    const rawAdminCreatedTotp = params.enableMfa ? base32Encode(crypto19.randomBytes(20)) : null;
-    const user = {
-      id: `usr-${crypto19.randomUUID().slice(0, 8)}`,
-      name: params.name.trim(),
-      email: cleanEmail,
-      role: params.role,
-      passwordHash: hashPassword(params.password),
-      mfaEnabled: Boolean(params.enableMfa),
-      totpSecretBase32: rawAdminCreatedTotp ? this.encryptSecretAtRest(rawAdminCreatedTotp) : null,
-      recoveryCodeHashes: [],
-      lastAcceptedTotpStep: null,
-      disabled: false,
-      failedLoginAttempts: 0,
-      lockedUntil: null,
-      recoveryTokenSha256: null,
-      recoveryExpiresAt: null,
-      createdAt: now,
-      updatedAt: now
-    };
-    this.db.users.push(user);
-    this.save();
-    return {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      mfaEnabled: user.mfaEnabled,
-      mfaVerified: false
-    };
-  }
-  registerAccount(params) {
-    const ipAddress = params.ipAddress || "127.0.0.1";
-    this.checkIpRateLimit(ipAddress);
-    const cleanName = (params.name || "").trim();
-    const cleanEmail = (params.email || "").trim().toLowerCase();
-    const cleanPassword = params.password || "";
-    const rawPin = (params.pin || "").trim();
-    if (cleanName.length < 2) {
-      throw new Error("INVALID_NAME: O nome completo deve possuir pelo menos 2 caracteres.");
-    }
-    if (!isValidEmailAddress(cleanEmail)) {
-      throw new Error("INVALID_EMAIL: Informe um endere\xE7o de e-mail v\xE1lido.");
-    }
-    const validatedPin = rawPin ? validateQuickPin(rawPin) : null;
-    if (!validatedPin && cleanPassword.length < 10) {
-      throw new Error("WEAK_PASSWORD: A senha deve possuir pelo menos 10 caracteres.");
-    }
-    if (validatedPin && cleanPassword.length > 0 && cleanPassword.length < 10) {
-      throw new Error("WEAK_PASSWORD: A senha deve possuir pelo menos 10 caracteres.");
-    }
-    if (this.registrationInProgress.has(cleanEmail) || this.db.users.some((u) => u.email === cleanEmail)) {
-      this.recordIpFailure(ipAddress);
-      throw new Error("EMAIL_ALREADY_EXISTS: Este e-mail j\xE1 est\xE1 cadastrado na plataforma.");
-    }
-    const isFirstUser = this.db.users.length === 0;
-    let assignedRole = "ADMIN";
-    if (!isFirstUser) {
-      const requestedRole = params.role || "SECURITY_LEAD";
-      if (requestedRole === "ADMIN") {
-        throw new Error(
-          "ROLE_ELEVATION_BLOCKED: Cria\xE7\xE3o de perfil ADMIN exige privil\xE9gio administrativo ou bootstrap inicial."
-        );
-      }
-      const allowedSelfRoles = ["SECURITY_LEAD", "QA_ENGINEER", "AUDITOR"];
-      if (!allowedSelfRoles.includes(requestedRole)) {
-        throw new Error("INVALID_ROLE: Perfil de acesso selecionado \xE9 inv\xE1lido.");
-      }
-      assignedRole = requestedRole;
-    }
-    this.registrationInProgress.add(cleanEmail);
-    try {
-      const now = (/* @__PURE__ */ new Date()).toISOString();
-      const totpSecret = params.enableMfa ? base32Encode(crypto19.randomBytes(20)) : null;
-      const recoveryGen = totpSecret ? generateRecoveryCodesSet(8) : null;
-      const effectivePasswordToHash = cleanPassword.length >= 10 ? cleanPassword : `wh-pin-fallback-${crypto19.randomBytes(24).toString("base64url")}`;
-      const newUser = {
-        id: `usr-${crypto19.randomUUID().slice(0, 8)}`,
-        name: cleanName,
-        email: cleanEmail,
-        role: assignedRole,
-        passwordHash: hashPassword(effectivePasswordToHash),
-        pinHash: validatedPin ? hashPassword(validatedPin) : null,
-        pinEnabled: Boolean(validatedPin),
-        webauthnCredentials: [],
-        mfaEnabled: Boolean(params.enableMfa),
-        totpSecretBase32: totpSecret ? this.encryptSecretAtRest(totpSecret) : null,
-        recoveryCodeHashes: recoveryGen ? recoveryGen.codeHashes : [],
-        lastAcceptedTotpStep: null,
-        disabled: false,
-        failedLoginAttempts: 0,
-        lockedUntil: null,
-        recoveryTokenSha256: null,
-        recoveryExpiresAt: null,
-        createdAt: now,
-        updatedAt: now
-      };
-      this.db.users.push(newUser);
-      if (isFirstUser) {
-        this.completeBootstrapOnFirstAccount(now);
-      }
-      const { sessionId, session } = this.createSessionRecord(
-        newUser,
-        !newUser.mfaEnabled,
-        ipAddress,
-        params.userAgent || "unknown"
-      );
-      this.save();
-      return {
-        user: this.toPublicUserView(newUser, session.mfaVerified),
-        sessionId,
-        csrfToken: session.csrfToken,
-        ...totpSecret ? {
-          totpSetup: {
-            secretBase32: totpSecret,
-            secret: totpSecret,
-            otpauthUri: `otpauth://totp/WinHood:${encodeURIComponent(cleanEmail)}?secret=${totpSecret}&issuer=WinHood`,
-            otpauthUrl: `otpauth://totp/WinHood:${encodeURIComponent(cleanEmail)}?secret=${totpSecret}&issuer=WinHood`,
-            recoveryCodes: recoveryGen?.plaintextCodes || []
-          }
-        } : {}
-      };
-    } finally {
-      this.registrationInProgress.delete(cleanEmail);
-    }
-  }
-  pruneExpiredWebAuthnChallenges() {
-    const now = Date.now();
-    for (const [id, ch] of this.webauthnChallenges.entries()) {
-      if (now > ch.expiresAtMs) {
-        this.webauthnChallenges.delete(id);
-      }
-    }
-  }
-  beginWebAuthnAccountRegistration(params) {
-    return this.createWebAuthnRegistrationOptions(params);
-  }
-  createWebAuthnRegistrationOptions(params) {
-    const ipAddress = params.ipAddress || "127.0.0.1";
-    this.checkIpRateLimit(ipAddress);
-    this.pruneExpiredWebAuthnChallenges();
-    const cleanName = (params.name || "").trim();
-    const cleanEmail = (params.email || "").trim().toLowerCase();
-    if (cleanName.length < 2) {
-      throw new Error("INVALID_NAME: O nome completo deve possuir pelo menos 2 caracteres.");
-    }
-    if (!isValidEmailAddress(cleanEmail)) {
-      throw new Error("INVALID_EMAIL: Informe um endere\xE7o de e-mail v\xE1lido.");
-    }
-    if (this.db.users.some((u) => u.email === cleanEmail)) {
-      throw new Error("EMAIL_ALREADY_EXISTS: Este e-mail j\xE1 est\xE1 cadastrado na plataforma.");
-    }
-    if (this.db.users.length > 0 && params.role === "ADMIN") {
-      throw new Error(
-        "ROLE_ELEVATION_BLOCKED: Cria\xE7\xE3o de perfil ADMIN exige privil\xE9gio administrativo ou bootstrap inicial."
-      );
-    }
-    const rpId = normalizeWebAuthnRpId(params.rpId);
-    const challengeId = crypto19.randomUUID();
-    const challengeBase64Url = crypto19.randomBytes(32).toString("base64url");
-    const userHandle = crypto19.randomBytes(16).toString("base64url");
-    this.webauthnChallenges.set(challengeId, {
-      challengeId,
-      challengeBase64Url,
-      purpose: "REGISTER_ACCOUNT",
-      rpId,
-      expiresAtMs: Date.now() + _AuthService.PREAUTH_TTL_MS,
-      registrationMeta: {
-        name: cleanName,
-        email: cleanEmail,
-        role: params.role,
-        userHandle
-      }
-    });
-    return {
-      challengeId,
-      rp: {
-        name: "WinHood Benchmark Analyzer",
-        id: rpId
-      },
-      user: {
-        id: userHandle,
-        name: cleanEmail,
-        displayName: cleanName
-      },
-      challenge: challengeBase64Url,
-      pubKeyCredParams: [
-        { type: "public-key", alg: -7 },
-        { type: "public-key", alg: -257 }
-      ],
-      timeout: 6e4,
-      attestation: "none",
-      authenticatorSelection: {
-        authenticatorAttachment: "platform",
-        residentKey: "required",
-        requireResidentKey: true,
-        userVerification: "required"
-      }
-    };
-  }
-  verifyWebAuthnAccountRegistration(params) {
-    const ipAddress = params.ipAddress || "127.0.0.1";
-    this.checkIpRateLimit(ipAddress);
-    this.pruneExpiredWebAuthnChallenges();
-    const clientDataBuf = decodeBase64OrBase64Url(params.clientDataJSON);
-    let clientData;
-    try {
-      clientData = JSON.parse(clientDataBuf.toString("utf8"));
-    } catch {
-      throw new Error("WEBAUTHN_CLIENT_DATA_INVALID: clientDataJSON malformado.");
-    }
-    if (clientData.type !== "webauthn.create" || !clientData.challenge || !clientData.origin) {
-      throw new Error("WEBAUTHN_CLIENT_DATA_INVALID: Tipo ou campos de clientDataJSON inv\xE1lidos.");
-    }
-    let challengeRecord;
-    if (params.challengeId) {
-      challengeRecord = this.webauthnChallenges.get(params.challengeId);
-    } else {
-      for (const rec of this.webauthnChallenges.values()) {
-        if (rec.purpose === "REGISTER_ACCOUNT" && rec.challengeBase64Url === clientData.challenge) {
-          challengeRecord = rec;
-          break;
+    const normalizedRecovery = rawRecovery.toUpperCase().replace(/[^A-F0-9]/g, "");
+    if (/^[A-F0-9]{8}$/.test(normalizedRecovery)) {
+      let matchedIndex = -1;
+      for (let i = 0; i < this.config.recoveryCodeHashes.length; i++) {
+        const entry = this.config.recoveryCodeHashes[i];
+        const candidateHashHex = hashRecoveryCodeWithSalt(normalizedRecovery, entry.saltHex);
+        const a = Buffer.from(candidateHashHex, "hex");
+        const b = Buffer.from(entry.hashHex, "hex");
+        if (a.length === b.length && crypto19.timingSafeEqual(a, b)) {
+          matchedIndex = i;
         }
       }
-    }
-    if (!challengeRecord || challengeRecord.purpose !== "REGISTER_ACCOUNT") {
-      throw new Error("WEBAUTHN_CHALLENGE_INVALID: Desafio WebAuthn ausente, expirado ou j\xE1 utilizado.");
-    }
-    this.webauthnChallenges.delete(challengeRecord.challengeId);
-    if (Date.now() > challengeRecord.expiresAtMs) {
-      throw new Error("WEBAUTHN_CHALLENGE_EXPIRED: Desafio WebAuthn expirado (5 minutos).");
-    }
-    const expectedChallBuf = Buffer.from(challengeRecord.challengeBase64Url, "utf8");
-    const providedChallBuf = Buffer.from(clientData.challenge, "utf8");
-    if (expectedChallBuf.length !== providedChallBuf.length || !crypto19.timingSafeEqual(expectedChallBuf, providedChallBuf)) {
-      throw new Error("WEBAUTHN_CHALLENGE_MISMATCH: Desafio WebAuthn divergente.");
-    }
-    const { hostname: originHostname } = validateWebAuthnOrigin(
-      clientData.origin,
-      challengeRecord.rpId
-    );
-    let authDataBuf = null;
-    let publicKeySpkiBase64 = (params.publicKeySpkiBase64 || "").trim();
-    let coseAlgorithm = params.coseAlgorithm === -257 ? -257 : -7;
-    let extractedCredId = (params.credentialId || "").trim();
-    if (params.attestationObject) {
-      const attBuf = decodeBase64OrBase64Url(params.attestationObject);
-      const attMap = decodeCborItem(attBuf, 0).value;
-      if (attMap instanceof Map && Buffer.isBuffer(attMap.get("authData"))) {
-        authDataBuf = attMap.get("authData");
+      if (matchedIndex >= 0) {
+        this.clearFailedAttempts(ipKey);
+        this.config.recoveryCodeHashes.splice(matchedIndex, 1);
+        this.saveConfig();
+        return {
+          usedRecoveryCode: true,
+          remainingRecoveryCodes: this.config.recoveryCodeHashes.length
+        };
       }
     }
-    if (!authDataBuf && params.authenticatorData) {
-      authDataBuf = decodeBase64OrBase64Url(params.authenticatorData);
-    }
-    if (!authDataBuf || authDataBuf.length < 37) {
-      throw new Error("WEBAUTHN_AUTHDATA_INVALID: authenticatorData ausente ou truncado.");
-    }
-    const rpIdHash = authDataBuf.subarray(0, 32);
-    const expectedRpHash = crypto19.createHash("sha256").update(challengeRecord.rpId, "utf8").digest();
-    const originRpHash = crypto19.createHash("sha256").update(originHostname, "utf8").digest();
-    const rpMatches = crypto19.timingSafeEqual(rpIdHash, expectedRpHash) || crypto19.timingSafeEqual(rpIdHash, originRpHash);
-    if (!rpMatches) {
-      throw new Error("WEBAUTHN_RPID_MISMATCH: Hash do Relying Party (rpIdHash) inv\xE1lido.");
-    }
-    const flags = authDataBuf[32];
-    const userPresent = (flags & 1) !== 0;
-    const userVerified = (flags & 4) !== 0;
-    const attestedCredDataPresent = (flags & 64) !== 0;
-    if (!userPresent || !userVerified) {
-      throw new Error(
-        "WEBAUTHN_UV_REQUIRED: Presen\xE7a (UP) e verifica\xE7\xE3o biom\xE9trica/PIN do Windows Hello (UV) s\xE3o obrigat\xF3rias."
-      );
-    }
-    const signCount = authDataBuf.readUInt32BE(33);
-    if (attestedCredDataPresent && authDataBuf.length >= 55) {
-      const credIdLen = authDataBuf.readUInt16BE(53);
-      if (authDataBuf.length < 55 + credIdLen) {
-        throw new Error("WEBAUTHN_AUTHDATA_INVALID: attestedCredentialData truncado.");
-      }
-      const rawCredId = authDataBuf.subarray(55, 55 + credIdLen).toString("base64url");
-      if (!extractedCredId) {
-        extractedCredId = rawCredId;
-      }
-      const coseKeySlice = authDataBuf.subarray(55 + credIdLen);
-      if (coseKeySlice.length > 0 && !publicKeySpkiBase64) {
-        const parsedKey = cosePublicKeyToSpkiBase64(coseKeySlice);
-        publicKeySpkiBase64 = parsedKey.publicKeySpkiBase64;
-        coseAlgorithm = parsedKey.coseAlgorithm;
-      }
-    }
-    if (!extractedCredId || !publicKeySpkiBase64) {
-      throw new Error("WEBAUTHN_KEY_MISSING: Chave p\xFAblica ou identificador da credencial WebAuthn ausente.");
-    }
-    try {
-      const spkiBuf = decodeBase64OrBase64Url(publicKeySpkiBase64);
-      const keyObj = crypto19.createPublicKey({ key: spkiBuf, format: "der", type: "spki" });
-      publicKeySpkiBase64 = keyObj.export({ type: "spki", format: "der" }).toString("base64");
-    } catch {
-      throw new Error("WEBAUTHN_KEY_INVALID: Chave p\xFAblica SPKI inv\xE1lida.");
-    }
-    const regMeta = challengeRecord.registrationMeta;
-    if (this.db.users.some((u) => u.email === regMeta.email)) {
-      throw new Error("EMAIL_ALREADY_EXISTS: Este e-mail j\xE1 est\xE1 cadastrado na plataforma.");
-    }
-    const isFirstUser = this.db.users.length === 0;
-    let assignedRole = "ADMIN";
-    if (!isFirstUser) {
-      const requestedRole = regMeta.role || "SECURITY_LEAD";
-      if (requestedRole === "ADMIN") {
-        throw new Error("ROLE_ELEVATION_BLOCKED: Cria\xE7\xE3o de perfil ADMIN exige privil\xE9gio administrativo.");
-      }
-      assignedRole = requestedRole;
-    }
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    const newUser = {
-      id: `usr-${crypto19.randomUUID().slice(0, 8)}`,
-      name: regMeta.name,
-      email: regMeta.email,
-      role: assignedRole,
-      passwordHash: hashPassword(`wh-webauthn-${crypto19.randomBytes(24).toString("base64url")}`),
-      pinHash: null,
-      pinEnabled: false,
-      webauthnCredentials: [
-        {
-          credentialId: extractedCredId,
-          publicKeySpkiBase64,
-          coseAlgorithm,
-          signCount,
-          transports: params.transports || ["internal"],
-          createdAt: now,
-          lastUsedAt: now
-        }
-      ],
-      mfaEnabled: false,
-      totpSecretBase32: null,
-      recoveryCodeHashes: [],
-      lastAcceptedTotpStep: null,
-      disabled: false,
-      failedLoginAttempts: 0,
-      lockedUntil: null,
-      recoveryTokenSha256: null,
-      recoveryExpiresAt: null,
-      createdAt: now,
-      updatedAt: now
-    };
-    this.db.users.push(newUser);
-    if (isFirstUser) {
-      this.completeBootstrapOnFirstAccount(now);
-    }
-    const trustDevice = params.trustDevice !== false;
-    const { sessionId, session } = this.createSessionRecord(
-      newUser,
-      true,
-      ipAddress,
-      params.userAgent || "unknown",
-      { trustDevice }
-    );
-    this.save();
+    this.recordFailedAttempt(ipKey, atMs);
+    throw new Error("TOTP_CODE_INVALID: C\xF3digo TOTP ou c\xF3digo de recupera\xE7\xE3o inv\xE1lido.");
+  }
+  verifyUnlock(params) {
+    const atMs = params.atMs ?? Date.now();
+    const verified = this.verifyActiveSecretOrRecoveryCode({ ...params, atMs });
+    const { unlockToken, csrfToken } = this.createUnlockSession(atMs);
     return {
-      user: this.toPublicUserView(newUser, true),
-      sessionId,
-      csrfToken: session.csrfToken,
-      trustDevice
+      ok: true,
+      enabled: true,
+      unlocked: true,
+      usedRecoveryCode: verified.usedRecoveryCode,
+      remainingRecoveryCodes: verified.remainingRecoveryCodes,
+      unlockToken,
+      csrfToken
     };
   }
-  createWebAuthnLoginOptions(params) {
-    const ipAddress = params?.ipAddress || "127.0.0.1";
-    this.checkIpRateLimit(ipAddress);
-    this.pruneExpiredWebAuthnChallenges();
-    const cleanEmail = (params?.email || "").trim().toLowerCase();
-    const rpId = normalizeWebAuthnRpId(params?.rpId);
-    const challengeId = crypto19.randomUUID();
-    const challengeBase64Url = crypto19.randomBytes(32).toString("base64url");
-    const allowCredentials = [];
-    const candidateUsers = cleanEmail ? this.db.users.filter((u) => !u.disabled && u.email === cleanEmail) : this.db.users.filter((u) => !u.disabled);
-    for (const u of candidateUsers) {
-      for (const cred of u.webauthnCredentials || []) {
-        allowCredentials.push({
-          type: "public-key",
-          id: cred.credentialId,
-          transports: cred.transports || ["internal"]
-        });
-      }
+  disable(params) {
+    if (!this.isEnabled()) {
+      this.config.encryptedPendingSecret = null;
+      this.config.pendingRecoveryCodeHashes = [];
+      this.saveConfig();
+      return { ok: true, enabled: false, unlocked: true };
     }
-    this.webauthnChallenges.set(challengeId, {
-      challengeId,
-      challengeBase64Url,
-      purpose: "LOGIN",
-      rpId,
-      expiresAtMs: Date.now() + _AuthService.PREAUTH_TTL_MS,
-      email: cleanEmail || void 0
-    });
-    return {
-      challengeId,
-      challenge: challengeBase64Url,
-      rpId,
-      timeout: 6e4,
-      userVerification: "required",
-      authenticatorAttachment: "platform",
-      allowCredentials
-    };
+    this.verifyActiveSecretOrRecoveryCode(params);
+    this.config = defaultPersistedConfig();
+    this.unlockSessions.clear();
+    this.saveConfig();
+    return { ok: true, enabled: false, unlocked: true };
   }
-  verifyWebAuthnLogin(params) {
-    const ipAddress = params.ipAddress || "127.0.0.1";
-    this.checkIpRateLimit(ipAddress);
-    this.pruneExpiredWebAuthnChallenges();
-    const clientDataBuf = decodeBase64OrBase64Url(params.clientDataJSON);
-    let clientData;
-    try {
-      clientData = JSON.parse(clientDataBuf.toString("utf8"));
-    } catch {
-      throw new Error("WEBAUTHN_CLIENT_DATA_INVALID: clientDataJSON malformado.");
+  lock(unlockToken) {
+    if (!this.isEnabled()) {
+      return { ok: true, enabled: false, unlocked: true };
     }
-    if (clientData.type !== "webauthn.get" || !clientData.challenge || !clientData.origin) {
-      throw new Error("WEBAUTHN_CLIENT_DATA_INVALID: Tipo ou campos de clientDataJSON inv\xE1lidos.");
-    }
-    let challengeRecord;
-    if (params.challengeId) {
-      challengeRecord = this.webauthnChallenges.get(params.challengeId);
-    } else {
-      for (const rec of this.webauthnChallenges.values()) {
-        if (rec.purpose === "LOGIN" && rec.challengeBase64Url === clientData.challenge) {
-          challengeRecord = rec;
-          break;
-        }
-      }
-    }
-    if (!challengeRecord || challengeRecord.purpose !== "LOGIN") {
-      throw new Error("WEBAUTHN_CHALLENGE_INVALID: Desafio de login WebAuthn ausente, expirado ou j\xE1 utilizado.");
-    }
-    this.webauthnChallenges.delete(challengeRecord.challengeId);
-    if (Date.now() > challengeRecord.expiresAtMs) {
-      throw new Error("WEBAUTHN_CHALLENGE_EXPIRED: Desafio de login WebAuthn expirado.");
-    }
-    const expectedChallBuf = Buffer.from(challengeRecord.challengeBase64Url, "utf8");
-    const providedChallBuf = Buffer.from(clientData.challenge, "utf8");
-    if (expectedChallBuf.length !== providedChallBuf.length || !crypto19.timingSafeEqual(expectedChallBuf, providedChallBuf)) {
-      throw new Error("WEBAUTHN_CHALLENGE_MISMATCH: Desafio de login WebAuthn divergente.");
-    }
-    const { hostname: originHostname } = validateWebAuthnOrigin(
-      clientData.origin,
-      challengeRecord.rpId
-    );
-    const credId = (params.credentialId || "").trim();
-    const targetEmail = (params.email || challengeRecord.email || "").trim().toLowerCase();
-    let matchedUser;
-    let matchedCred;
-    for (const u of this.db.users) {
-      if (u.disabled) continue;
-      if (targetEmail && u.email !== targetEmail) continue;
-      const found = (u.webauthnCredentials || []).find((c) => c.credentialId === credId);
+    if (unlockToken) {
+      const found = this.findSession(unlockToken);
       if (found) {
-        matchedUser = u;
-        matchedCred = found;
-        break;
+        this.unlockSessions.delete(found.tokenHashHex);
       }
     }
-    if (!matchedUser || !matchedCred) {
-      this.recordIpFailure(ipAddress);
-      throw new Error("WEBAUTHN_CREDENTIAL_NOT_FOUND: Credencial Windows Hello n\xE3o localizada.");
-    }
-    if (matchedUser.lockedUntil && Date.now() < Date.parse(matchedUser.lockedUntil)) {
-      throw new Error("AUTH_ACCOUNT_LOCKED: Conta temporariamente bloqueada ap\xF3s tentativas excessivas.");
-    }
-    const authDataBuf = decodeBase64OrBase64Url(params.authenticatorData);
-    if (authDataBuf.length < 37) {
-      throw new Error("WEBAUTHN_AUTHDATA_INVALID: authenticatorData inv\xE1lido.");
-    }
-    const rpIdHash = authDataBuf.subarray(0, 32);
-    const expectedRpHash = crypto19.createHash("sha256").update(challengeRecord.rpId, "utf8").digest();
-    const originRpHash = crypto19.createHash("sha256").update(originHostname, "utf8").digest();
-    if (!crypto19.timingSafeEqual(rpIdHash, expectedRpHash) && !crypto19.timingSafeEqual(rpIdHash, originRpHash)) {
-      throw new Error("WEBAUTHN_RPID_MISMATCH: Hash do Relying Party (rpIdHash) inv\xE1lido.");
-    }
-    const flags = authDataBuf[32];
-    if ((flags & 1) === 0 || (flags & 4) === 0) {
-      throw new Error(
-        "WEBAUTHN_UV_REQUIRED: Presen\xE7a (UP) e verifica\xE7\xE3o do usu\xE1rio (UV) s\xE3o obrigat\xF3rias no Windows Hello."
-      );
-    }
-    const signCount = authDataBuf.readUInt32BE(33);
-    const clientDataHash = crypto19.createHash("sha256").update(clientDataBuf).digest();
-    const signedPayload = Buffer.concat([authDataBuf, clientDataHash]);
-    const signatureBuf = decodeBase64OrBase64Url(params.signature);
-    const pubKeyObj = crypto19.createPublicKey({
-      key: Buffer.from(matchedCred.publicKeySpkiBase64, "base64"),
-      format: "der",
-      type: "spki"
-    });
-    const isSigValid = crypto19.verify("sha256", signedPayload, pubKeyObj, signatureBuf);
-    if (!isSigValid) {
-      matchedUser.failedLoginAttempts += 1;
-      if (matchedUser.failedLoginAttempts >= _AuthService.MAX_LOGIN_ATTEMPTS) {
-        matchedUser.lockedUntil = new Date(Date.now() + _AuthService.LOCKOUT_DURATION_MS).toISOString();
-      }
-      this.recordIpFailure(ipAddress);
-      this.save();
-      throw new Error("WEBAUTHN_SIGNATURE_INVALID: Assinatura criptogr\xE1fica WebAuthn inv\xE1lida.");
-    }
-    if (matchedCred.signCount > 0 && signCount <= matchedCred.signCount) {
-      this.recordIpFailure(ipAddress);
-      throw new Error(
-        "WEBAUTHN_REPLAY_DETECTED: Contador anti-replay WebAuthn regressivo ou repetido."
-      );
-    }
-    matchedCred.signCount = signCount;
-    matchedCred.lastUsedAt = (/* @__PURE__ */ new Date()).toISOString();
-    matchedUser.failedLoginAttempts = 0;
-    matchedUser.lockedUntil = null;
-    matchedUser.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    const mfaVerified = !matchedUser.mfaEnabled;
-    const trustDevice = params.trustDevice !== false;
-    const { sessionId, session } = this.createSessionRecord(
-      matchedUser,
-      mfaVerified,
-      ipAddress,
-      params.userAgent || "unknown",
-      { trustDevice }
-    );
-    this.save();
-    const mfaRequired = matchedUser.mfaEnabled && !mfaVerified;
-    return {
-      user: this.toPublicUserView(matchedUser, session.mfaVerified),
-      sessionId,
-      csrfToken: session.csrfToken,
-      mfaRequired,
-      requiresTotp: mfaRequired,
-      ...mfaRequired ? { preAuthToken: this.createPreAuthToken(matchedUser.id, matchedUser.email, trustDevice) } : {},
-      trustDevice,
-      serverTimeIso: (/* @__PURE__ */ new Date()).toISOString(),
-      totpPeriodSeconds: 30
-    };
-  }
-  createWebAuthnLinkOptions(params) {
-    const ipAddress = params.ipAddress || "127.0.0.1";
-    this.checkIpRateLimit(ipAddress);
-    this.pruneExpiredWebAuthnChallenges();
-    const user = this.db.users.find((u) => u.id === params.userId && !u.disabled);
-    if (!user) {
-      throw new Error("USER_NOT_FOUND: Usu\xE1rio n\xE3o encontrado.");
-    }
-    const rpId = normalizeWebAuthnRpId(params.rpId);
-    const challengeId = crypto19.randomUUID();
-    const challengeBase64Url = crypto19.randomBytes(32).toString("base64url");
-    const excludeCredentials = (user.webauthnCredentials || []).map((c) => ({
-      type: "public-key",
-      id: c.credentialId,
-      transports: c.transports || ["internal"]
-    }));
-    this.webauthnChallenges.set(challengeId, {
-      challengeId,
-      challengeBase64Url,
-      purpose: "LINK_CREDENTIAL",
-      rpId,
-      expiresAtMs: Date.now() + _AuthService.PREAUTH_TTL_MS,
-      userId: user.id,
-      email: user.email
-    });
-    return {
-      challengeId,
-      rp: { name: "WinHood Benchmark Analyzer", id: rpId },
-      user: {
-        id: Buffer.from(user.id, "utf8").toString("base64url"),
-        name: user.email,
-        displayName: user.name
-      },
-      challenge: challengeBase64Url,
-      pubKeyCredParams: [
-        { type: "public-key", alg: -7 },
-        { type: "public-key", alg: -257 }
-      ],
-      timeout: 6e4,
-      attestation: "none",
-      excludeCredentials,
-      authenticatorSelection: {
-        authenticatorAttachment: "platform",
-        residentKey: "required",
-        requireResidentKey: true,
-        userVerification: "required"
-      }
-    };
-  }
-  verifyWebAuthnLinkCredential(params) {
-    const ipAddress = params.ipAddress || "127.0.0.1";
-    this.checkIpRateLimit(ipAddress);
-    this.pruneExpiredWebAuthnChallenges();
-    const clientDataBuf = decodeBase64OrBase64Url(params.clientDataJSON);
-    let clientData;
-    try {
-      clientData = JSON.parse(clientDataBuf.toString("utf8"));
-    } catch {
-      throw new Error("WEBAUTHN_CLIENT_DATA_INVALID: clientDataJSON malformado.");
-    }
-    if (clientData.type !== "webauthn.create" || !clientData.challenge || !clientData.origin) {
-      throw new Error("WEBAUTHN_CLIENT_DATA_INVALID: Tipo ou campos de clientDataJSON inv\xE1lidos.");
-    }
-    let challengeRecord;
-    if (params.challengeId) {
-      challengeRecord = this.webauthnChallenges.get(params.challengeId);
-    }
-    if (!challengeRecord || challengeRecord.purpose !== "LINK_CREDENTIAL" || challengeRecord.userId !== params.userId) {
-      throw new Error("WEBAUTHN_CHALLENGE_INVALID: Desafio de v\xEDnculo WebAuthn inv\xE1lido ou expirado.");
-    }
-    this.webauthnChallenges.delete(challengeRecord.challengeId);
-    if (Date.now() > challengeRecord.expiresAtMs) {
-      throw new Error("WEBAUTHN_CHALLENGE_EXPIRED: Desafio WebAuthn expirado.");
-    }
-    const expectedChallBuf = Buffer.from(challengeRecord.challengeBase64Url, "utf8");
-    const providedChallBuf = Buffer.from(clientData.challenge, "utf8");
-    if (expectedChallBuf.length !== providedChallBuf.length || !crypto19.timingSafeEqual(expectedChallBuf, providedChallBuf)) {
-      throw new Error("WEBAUTHN_CHALLENGE_MISMATCH: Desafio WebAuthn divergente.");
-    }
-    const { hostname: originHostname } = validateWebAuthnOrigin(
-      clientData.origin,
-      challengeRecord.rpId
-    );
-    let authDataBuf = null;
-    let publicKeySpkiBase64 = (params.publicKeySpkiBase64 || "").trim();
-    let coseAlgorithm = params.coseAlgorithm === -257 ? -257 : -7;
-    let extractedCredId = (params.credentialId || "").trim();
-    if (params.attestationObject) {
-      const attBuf = decodeBase64OrBase64Url(params.attestationObject);
-      const attMap = decodeCborItem(attBuf, 0).value;
-      if (attMap instanceof Map && Buffer.isBuffer(attMap.get("authData"))) {
-        authDataBuf = attMap.get("authData");
-      }
-    }
-    if (!authDataBuf && params.authenticatorData) {
-      authDataBuf = decodeBase64OrBase64Url(params.authenticatorData);
-    }
-    if (!authDataBuf || authDataBuf.length < 37) {
-      throw new Error("WEBAUTHN_AUTHDATA_INVALID: authenticatorData ausente ou truncado.");
-    }
-    const rpIdHash = authDataBuf.subarray(0, 32);
-    const expectedRpHash = crypto19.createHash("sha256").update(challengeRecord.rpId, "utf8").digest();
-    const originRpHash = crypto19.createHash("sha256").update(originHostname, "utf8").digest();
-    if (!crypto19.timingSafeEqual(rpIdHash, expectedRpHash) && !crypto19.timingSafeEqual(rpIdHash, originRpHash)) {
-      throw new Error("WEBAUTHN_RPID_MISMATCH: Hash do Relying Party (rpIdHash) inv\xE1lido.");
-    }
-    const flags = authDataBuf[32];
-    if ((flags & 1) === 0 || (flags & 4) === 0) {
-      throw new Error(
-        "WEBAUTHN_UV_REQUIRED: Presen\xE7a (UP) e verifica\xE7\xE3o do usu\xE1rio (UV) s\xE3o obrigat\xF3rias."
-      );
-    }
-    const signCount = authDataBuf.readUInt32BE(33);
-    if ((flags & 64) !== 0 && authDataBuf.length >= 55) {
-      const credIdLen = authDataBuf.readUInt16BE(53);
-      if (authDataBuf.length >= 55 + credIdLen) {
-        if (!extractedCredId) {
-          extractedCredId = authDataBuf.subarray(55, 55 + credIdLen).toString("base64url");
-        }
-        const coseKeySlice = authDataBuf.subarray(55 + credIdLen);
-        if (coseKeySlice.length > 0 && !publicKeySpkiBase64) {
-          const parsedKey = cosePublicKeyToSpkiBase64(coseKeySlice);
-          publicKeySpkiBase64 = parsedKey.publicKeySpkiBase64;
-          coseAlgorithm = parsedKey.coseAlgorithm;
-        }
-      }
-    }
-    if (!extractedCredId || !publicKeySpkiBase64) {
-      throw new Error("WEBAUTHN_KEY_MISSING: Chave p\xFAblica ou identificador da credencial ausente.");
-    }
-    const spkiBuf = decodeBase64OrBase64Url(publicKeySpkiBase64);
-    const keyObj = crypto19.createPublicKey({ key: spkiBuf, format: "der", type: "spki" });
-    publicKeySpkiBase64 = keyObj.export({ type: "spki", format: "der" }).toString("base64");
-    const user = this.db.users.find((u) => u.id === params.userId && !u.disabled);
-    if (!user) {
-      throw new Error("USER_NOT_FOUND: Usu\xE1rio n\xE3o encontrado.");
-    }
-    user.webauthnCredentials = user.webauthnCredentials || [];
-    if (user.webauthnCredentials.some((c) => c.credentialId === extractedCredId)) {
-      throw new Error("WEBAUTHN_CREDENTIAL_EXISTS: Esta Passkey j\xE1 est\xE1 vinculada \xE0 conta.");
-    }
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    user.webauthnCredentials.push({
-      credentialId: extractedCredId,
-      publicKeySpkiBase64,
-      coseAlgorithm,
-      signCount,
-      transports: params.transports || ["internal"],
-      label: (params.label || "Windows Hello / Passkey").trim().slice(0, 60),
-      createdAt: now,
-      lastUsedAt: now
-    });
-    const providers = new Set(user.authProviders || []);
-    providers.add("webauthn");
-    user.authProviders = Array.from(providers);
-    user.updatedAt = now;
-    this.save();
-    return {
-      user: this.toPublicUserView(user, true),
-      credentialId: extractedCredId
-    };
-  }
-  static buildWindowsHelloPowerShellScript() {
-    return [
-      '$ErrorActionPreference = "Stop"',
-      "Add-Type -AssemblyName System.Runtime.WindowsRuntime",
-      '$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq "AsTask" -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq "IAsyncOperation`1" })[0]',
-      "function Await-WinRtTask($WinRtTask, $ResultType) {",
-      "  $asTask = $asTaskGeneric.MakeGenericMethod($ResultType)",
-      "  $netTask = $asTask.Invoke($null, @($WinRtTask))",
-      "  $netTask.Wait(-1) | Out-Null",
-      "  return $netTask.Result",
-      "}",
-      "[Windows.Security.Credentials.UI.UserConsentVerifier,Windows.Security.Credentials.UI,ContentType=WindowsRuntime] | Out-Null",
-      "$avail = Await-WinRtTask ([Windows.Security.Credentials.UI.UserConsentVerifier]::CheckAvailabilityAsync()) ([Windows.Security.Credentials.UI.UserConsentVerifierAvailability])",
-      "if ([int]$avail -ne 0) {",
-      '  Write-Output ("UNAVAILABLE:" + [int]$avail + ":" + $avail.ToString())',
-      "  exit 2",
-      "}",
-      "$prompt = $env:WINHOOD_HELLO_PROMPT",
-      'if ([string]::IsNullOrWhiteSpace($prompt)) { $prompt = "WinHood Benchmark Analyzer - Windows Hello" }',
-      "$res = Await-WinRtTask ([Windows.Security.Credentials.UI.UserConsentVerifier]::RequestVerificationAsync($prompt)) ([Windows.Security.Credentials.UI.UserConsentVerificationResult])",
-      "if ([int]$res -eq 0) {",
-      '  Write-Output "VERIFIED:0"',
-      "  exit 0",
-      "}",
-      'Write-Output ("FAILED:" + [int]$res + ":" + $res.ToString())',
-      "exit 1"
-    ].join("\n");
-  }
-  async verifyWindowsOsHelloPrompt(promptMessage) {
-    if (process.platform !== "win32") {
-      throw new Error(
-        `WINDOWS_HELLO_OS_UNSUPPORTED: Verifica\xE7\xE3o nativa do sistema operacional Windows Hello requer Windows (plataforma atual: ${process.platform}).`
-      );
-    }
-    const sanitizedPrompt = (promptMessage || "WinHood Benchmark Analyzer \u2014 Windows Hello").replace(/[\r\n\0]/g, " ").trim().slice(0, 160);
-    const script = _AuthService.buildWindowsHelloPowerShellScript();
-    const encodedCommand = Buffer.from(script, "utf16le").toString("base64");
-    try {
-      const winSysRoot = process.env.SystemRoot || "C:\\Windows";
-      const powerShellAbsPath = path14.win32.join(
-        winSysRoot,
-        "System32",
-        "WindowsPowerShell",
-        "v1.0",
-        "powershell.exe"
-      );
-      const { stdout } = await execFileAsync(
-        powerShellAbsPath,
-        ["-NoProfile", "-NonInteractive", "-STA", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodedCommand],
-        {
-          timeout: 65e3,
-          windowsHide: true,
-          env: {
-            ...process.env,
-            WINHOOD_HELLO_PROMPT: sanitizedPrompt
-          }
-        }
-      );
-      const line = String(stdout || "").trim().split(/\r?\n/).pop() || "";
-      if (line.startsWith("VERIFIED:0")) {
-        return { verified: true, statusCode: 0, statusName: "Verified" };
-      }
-      throw new Error(`WINDOWS_HELLO_CANCELLED: Verifica\xE7\xE3o do Windows Hello n\xE3o confirmada (${line || "Unknown"}).`);
-    } catch (err) {
-      const stdout = String(err?.stdout || "").trim();
-      const stderr = String(err?.stderr || "").trim();
-      const combined = `${stdout} ${stderr} ${err?.message || ""}`;
-      if (stdout.startsWith("UNAVAILABLE:")) {
-        throw new Error(
-          `WINDOWS_HELLO_UNAVAILABLE: Windows Hello n\xE3o est\xE1 configurado ou dispon\xEDvel neste dispositivo Windows (${stdout}).`
-        );
-      }
-      if (stdout.startsWith("FAILED:")) {
-        throw new Error(
-          `WINDOWS_HELLO_CANCELLED: Verifica\xE7\xE3o do Windows Hello cancelada ou recusada na janela Seguran\xE7a do Windows (${stdout}).`
-        );
-      }
-      if (combined.startsWith("WINDOWS_HELLO_")) {
-        throw err;
-      }
-      throw new Error(
-        `WINDOWS_HELLO_EXECUTION_FAILED: N\xE3o foi poss\xEDvel acionar o prompt nativo do Windows Hello (${err?.message || "Erro PowerShell"}).`
-      );
-    }
-  }
-  deriveNativeHelloSealKey(keyBuffer) {
-    return crypto19.createHash("sha256").update(keyBuffer).update(":winhello-native-ecdsa-v1").digest();
-  }
-  sealNativeHelloPrivateKey(pkcs8Der) {
-    const { keyId, keyBuffer } = KeyManagementService.getActiveVaultAesKey(this.keystorePath);
-    const derivedKey = this.deriveNativeHelloSealKey(keyBuffer);
-    const iv = crypto19.randomBytes(12);
-    const cipher = crypto19.createCipheriv("aes-256-gcm", derivedKey, iv);
-    const encrypted = Buffer.concat([cipher.update(pkcs8Der), cipher.final()]);
-    const tag = cipher.getAuthTag();
-    return `wh-hello-key-v1:${keyId}:${iv.toString("base64url")}:${tag.toString("base64url")}:${encrypted.toString("base64url")}`;
-  }
-  unsealNativeHelloPrivateKey(sealed) {
-    const parts = (sealed || "").split(":");
-    if (parts.length !== 5 || parts[0] !== "wh-hello-key-v1") {
-      throw new Error("WINDOWS_HELLO_KEY_CORRUPTED: Formato inv\xE1lido da chave privada selada do Windows Hello.");
-    }
-    const [, keyId, ivB64, tagB64, cipherB64] = parts;
-    const keyBuf = KeyManagementService.getVaultKeyBufferByKeyId(keyId, this.keystorePath) || KeyManagementService.getActiveVaultAesKey(this.keystorePath).keyBuffer;
-    const derivedKey = this.deriveNativeHelloSealKey(keyBuf);
-    try {
-      const iv = Buffer.from(ivB64, "base64url");
-      const tag = Buffer.from(tagB64, "base64url");
-      const ciphertext = Buffer.from(cipherB64, "base64url");
-      const decipher = crypto19.createDecipheriv("aes-256-gcm", derivedKey, iv);
-      decipher.setAuthTag(tag);
-      const pkcs8Der = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-      return crypto19.createPrivateKey({ key: pkcs8Der, format: "der", type: "pkcs8" });
-    } catch {
-      throw new Error("WINDOWS_HELLO_KEY_CORRUPTED: Chave criptogr\xE1fica do Windows Hello inv\xE1lida ou adulterada.");
-    }
-  }
-  async registerNativeWindowsHelloAccount(params) {
-    const ipAddress = params.ipAddress || "127.0.0.1";
-    this.checkIpRateLimit(ipAddress);
-    const cleanName = (params.name || "").trim();
-    const cleanEmail = (params.email || "").trim().toLowerCase();
-    if (cleanName.length < 2) {
-      throw new Error("INVALID_NAME: O nome completo deve possuir pelo menos 2 caracteres.");
-    }
-    if (!isValidEmailAddress(cleanEmail)) {
-      throw new Error("INVALID_EMAIL: Informe um endere\xE7o de e-mail v\xE1lido.");
-    }
-    if (this.registrationInProgress.has(cleanEmail) || this.db.users.some((u) => u.email === cleanEmail)) {
-      throw new Error("EMAIL_ALREADY_EXISTS: Este e-mail j\xE1 est\xE1 cadastrado na plataforma.");
-    }
-    const isFirstUser = this.db.users.length === 0;
-    let assignedRole = "ADMIN";
-    if (!isFirstUser) {
-      const requestedRole = params.role || "SECURITY_LEAD";
-      if (requestedRole === "ADMIN") {
-        throw new Error(
-          "ROLE_ELEVATION_BLOCKED: Cria\xE7\xE3o de perfil ADMIN exige privil\xE9gio administrativo ou bootstrap inicial."
-        );
-      }
-      const allowedSelfRoles = ["SECURITY_LEAD", "QA_ENGINEER", "AUDITOR"];
-      if (!allowedSelfRoles.includes(requestedRole)) {
-        throw new Error("INVALID_ROLE: Perfil de acesso selecionado \xE9 inv\xE1lido.");
-      }
-      assignedRole = requestedRole;
-    }
-    this.registrationInProgress.add(cleanEmail);
-    try {
-      const promptMsg = `WinHood Benchmark Analyzer: Confirmar cadastro com Windows Hello para ${cleanEmail}`;
-      if (params.promptVerifier) {
-        await params.promptVerifier(promptMsg);
-      } else {
-        await this.verifyWindowsOsHelloPrompt(promptMsg);
-      }
-      if (this.db.users.some((u) => u.email === cleanEmail)) {
-        throw new Error("EMAIL_ALREADY_EXISTS: Este e-mail j\xE1 est\xE1 cadastrado na plataforma.");
-      }
-      const { publicKey, privateKey } = crypto19.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
-      const spkiBase64 = publicKey.export({ type: "spki", format: "der" }).toString("base64");
-      const pkcs8Der = privateKey.export({ type: "pkcs8", format: "der" });
-      const nativePrivateKeySealed = this.sealNativeHelloPrivateKey(pkcs8Der);
-      const credentialId = `winhello-os-${crypto19.randomBytes(16).toString("base64url")}`;
-      const now = (/* @__PURE__ */ new Date()).toISOString();
-      const newUser = {
-        id: `usr-${crypto19.randomUUID().slice(0, 8)}`,
-        name: cleanName,
-        email: cleanEmail,
-        role: assignedRole,
-        passwordHash: hashPassword(`wh-winhello-${crypto19.randomBytes(24).toString("base64url")}`),
-        pinHash: null,
-        pinEnabled: false,
-        webauthnCredentials: [
-          {
-            credentialId,
-            publicKeySpkiBase64: spkiBase64,
-            coseAlgorithm: -7,
-            signCount: 1,
-            transports: ["internal"],
-            label: "Windows Hello Nativo (OS)",
-            nativePrivateKeySealed,
-            createdAt: now,
-            lastUsedAt: now
-          }
-        ],
-        authProviders: ["windows-hello-native"],
-        mfaEnabled: false,
-        totpSecretBase32: null,
-        recoveryCodeHashes: [],
-        lastAcceptedTotpStep: null,
-        disabled: false,
-        failedLoginAttempts: 0,
-        lockedUntil: null,
-        recoveryTokenSha256: null,
-        recoveryExpiresAt: null,
-        createdAt: now,
-        updatedAt: now
-      };
-      this.db.users.push(newUser);
-      if (isFirstUser) {
-        this.completeBootstrapOnFirstAccount(now);
-      }
-      const trustDevice = params.trustDevice !== false;
-      const { sessionId, session } = this.createSessionRecord(
-        newUser,
-        true,
-        ipAddress,
-        params.userAgent || "unknown",
-        { trustDevice }
-      );
-      this.save();
-      return {
-        user: this.toPublicUserView(newUser, true),
-        sessionId,
-        csrfToken: session.csrfToken,
-        trustDevice,
-        credentialId,
-        keyAlgorithm: "ES256"
-      };
-    } finally {
-      this.registrationInProgress.delete(cleanEmail);
-    }
-  }
-  async loginNativeWindowsHelloAccount(params) {
-    const ipAddress = params?.ipAddress || "127.0.0.1";
-    this.checkIpRateLimit(ipAddress);
-    if (!params?.promptVerifier && process.platform !== "win32") {
-      throw new Error(
-        `WINDOWS_HELLO_OS_UNSUPPORTED: Verifica\xE7\xE3o nativa do sistema operacional Windows Hello requer Windows (plataforma atual: ${process.platform}).`
-      );
-    }
-    const cleanEmail = (params?.email || "").trim().toLowerCase();
-    let matchedUser;
-    if (cleanEmail) {
-      matchedUser = this.db.users.find(
-        (u) => !u.disabled && u.email === cleanEmail && Boolean(u.webauthnCredentials?.length)
-      );
-    } else {
-      const helloUsers = this.db.users.filter(
-        (u) => !u.disabled && Boolean(u.webauthnCredentials?.length)
-      );
-      if (helloUsers.length === 1) {
-        matchedUser = helloUsers[0];
-      }
-    }
-    if (!matchedUser) {
-      this.recordIpFailure(ipAddress);
-      throw new Error(
-        cleanEmail ? "WEBAUTHN_CREDENTIAL_NOT_FOUND: Nenhuma credencial Windows Hello cadastrada para este e-mail." : "WEBAUTHN_CREDENTIAL_NOT_FOUND: Informe o e-mail da conta Windows Hello (ou cadastre uma credencial primeiro)."
-      );
-    }
-    if (matchedUser.lockedUntil && Date.now() < Date.parse(matchedUser.lockedUntil)) {
-      throw new Error("AUTH_ACCOUNT_LOCKED: Conta temporariamente bloqueada ap\xF3s tentativas excessivas.");
-    }
-    const promptMsg = `WinHood Benchmark Analyzer: Autenticar acesso de ${matchedUser.email} com Windows Hello`;
-    if (params?.promptVerifier) {
-      await params.promptVerifier(promptMsg);
-    } else {
-      await this.verifyWindowsOsHelloPrompt(promptMsg);
-    }
-    const targetCred = matchedUser.webauthnCredentials?.find((c) => Boolean(c.nativePrivateKeySealed)) || matchedUser.webauthnCredentials?.[0];
-    if (targetCred?.nativePrivateKeySealed) {
-      const challenge = crypto19.randomBytes(32);
-      const privKey = this.unsealNativeHelloPrivateKey(targetCred.nativePrivateKeySealed);
-      const signature = crypto19.sign("sha256", challenge, privKey);
-      const pubKey = crypto19.createPublicKey({
-        key: Buffer.from(targetCred.publicKeySpkiBase64, "base64"),
-        format: "der",
-        type: "spki"
-      });
-      const verified = crypto19.verify("sha256", challenge, pubKey, signature);
-      if (!verified) {
-        this.recordIpFailure(ipAddress);
-        throw new Error(
-          "WINDOWS_HELLO_SIGNATURE_INVALID: Verifica\xE7\xE3o criptogr\xE1fica ES256 da credencial Windows Hello falhou."
-        );
-      }
-    }
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    if (targetCred) {
-      targetCred.signCount = (targetCred.signCount || 0) + 1;
-      targetCred.lastUsedAt = now;
-    }
-    matchedUser.failedLoginAttempts = 0;
-    matchedUser.lockedUntil = null;
-    matchedUser.updatedAt = now;
-    const mfaVerified = !matchedUser.mfaEnabled;
-    const trustDevice = params?.trustDevice !== false;
-    const { sessionId, session } = this.createSessionRecord(
-      matchedUser,
-      mfaVerified,
-      ipAddress,
-      params?.userAgent || "unknown",
-      { trustDevice }
-    );
-    this.save();
-    const mfaRequired = matchedUser.mfaEnabled && !mfaVerified;
-    return {
-      user: this.toPublicUserView(matchedUser, session.mfaVerified),
-      sessionId,
-      csrfToken: session.csrfToken,
-      mfaRequired,
-      requiresTotp: mfaRequired,
-      ...mfaRequired ? { preAuthToken: this.createPreAuthToken(matchedUser.id, matchedUser.email, trustDevice) } : {},
-      trustDevice,
-      serverTimeIso: (/* @__PURE__ */ new Date()).toISOString(),
-      totpPeriodSeconds: 30
-    };
-  }
-  listUsers() {
-    return this.db.users.map((u) => ({
-      id: u.id,
-      name: u.name,
-      email: u.email,
-      role: u.role,
-      mfaEnabled: u.mfaEnabled,
-      pinEnabled: Boolean(u.pinEnabled && u.pinHash),
-      webauthnEnabled: Boolean(u.webauthnCredentials && u.webauthnCredentials.length > 0),
-      createdAt: u.createdAt,
-      disabled: u.disabled
-    }));
-  }
-  updateUserRole(userId, role) {
-    const user = this.db.users.find((u) => u.id === userId);
-    if (!user) throw new Error("Usu\xE1rio n\xE3o encontrado.");
-    user.role = role;
-    user.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    for (const s of this.db.sessions) {
-      if (s.userId === userId) s.role = role;
-    }
-    this.save();
-    return {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      mfaEnabled: user.mfaEnabled,
-      mfaVerified: false
-    };
-  }
-  requestPasswordRecovery(email) {
-    const user = this.db.users.find((u) => u.email === email.trim().toLowerCase());
-    if (!user) {
-      return { recoveryFilePath: null };
-    }
-    const token = `wh-rec-${crypto19.randomBytes(20).toString("base64url")}`;
-    const expiresAt = new Date(Date.now() + 15 * 60 * 1e3).toISOString();
-    user.recoveryTokenSha256 = sha256(token);
-    user.recoveryExpiresAt = expiresAt;
-    user.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    this.save();
-    const recPath = path14.join(this.recoveryDir, `recovery_${user.id}.txt`);
-    atomicWriteSecretFile(recPath, `# Recovery Token (expira em ${expiresAt})
-${token}
-`);
-    return { recoveryFilePath: recPath };
-  }
-  confirmPasswordRecovery(params) {
-    const user = this.db.users.find((u) => u.email === params.email.trim().toLowerCase());
-    if (!user || !user.recoveryTokenSha256 || !user.recoveryExpiresAt) {
-      throw new Error("Token de recupera\xE7\xE3o inv\xE1lido ou inexistente.");
-    }
-    if (Date.now() > Date.parse(user.recoveryExpiresAt)) {
-      throw new Error("Token de recupera\xE7\xE3o expirado.");
-    }
-    const provided = Buffer.from(sha256((params.recoveryToken || "").trim()), "hex");
-    const stored = Buffer.from(user.recoveryTokenSha256, "hex");
-    if (provided.length !== stored.length || !crypto19.timingSafeEqual(provided, stored)) {
-      throw new Error("Token de recupera\xE7\xE3o inv\xE1lido.");
-    }
-    if ((params.newPassword || "").length < 10) {
-      throw new Error("Nova senha deve possuir pelo menos 10 caracteres.");
-    }
-    const nextHash = hashPassword(params.newPassword);
-    assertNoKdfDowngrade(null, nextHash);
-    user.passwordHash = nextHash;
-    user.recoveryTokenSha256 = null;
-    user.recoveryExpiresAt = null;
-    user.failedLoginAttempts = 0;
-    user.lockedUntil = null;
-    user.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    for (const s of this.db.sessions) {
-      if (s.userId === user.id) s.revoked = true;
-    }
-    this.save();
-  }
-  deleteOwnAccount(userId, verification) {
-    const userIndex = this.db.users.findIndex((u) => u.id === userId);
-    if (userIndex === -1) {
-      throw new Error("USER_NOT_FOUND: Conta de usu\xE1rio n\xE3o encontrada.");
-    }
-    const user = this.db.users[userIndex];
-    const rawPassword = (verification?.password || "").trim();
-    const rawPin = (verification?.pin || "").trim();
-    const hasPin = Boolean(user.pinEnabled && user.pinHash);
-    const hasWebAuthn = Boolean(user.webauthnCredentials && user.webauthnCredentials.length > 0);
-    if (rawPin) {
-      if (!hasPin || !user.pinHash || !verifyPassword(rawPin, user.pinHash)) {
-        throw new Error("AUTH_INVALID_CREDENTIALS: PIN de confirma\xE7\xE3o inv\xE1lido.");
-      }
-    } else if (rawPassword) {
-      if (!verifyPassword(rawPassword, user.passwordHash)) {
-        throw new Error("AUTH_INVALID_CREDENTIALS: Senha de confirma\xE7\xE3o inv\xE1lida.");
-      }
-    } else if (!hasWebAuthn) {
-      throw new Error(
-        "VERIFICATION_REQUIRED: Confirme sua senha ou PIN atual para excluir permanentemente sua conta."
-      );
-    }
-    let revokedSessionsCount = 0;
-    for (const s of this.db.sessions) {
-      if (s.userId === userId && !s.revoked) {
-        s.revoked = true;
-        revokedSessionsCount += 1;
-      }
-    }
-    this.db.sessions = this.db.sessions.filter((s) => s.userId !== userId);
-    this.db.users.splice(userIndex, 1);
-    try {
-      const recPath = path14.join(this.recoveryDir, `recovery_${user.id}.txt`);
-      if (fs13.existsSync(recPath)) {
-        fs13.unlinkSync(recPath);
-      }
-    } catch {
-    }
-    this.save();
-    return {
-      deletedUserId: user.id,
-      email: user.email,
-      revokedSessionsCount
-    };
-  }
-  issueSoloLocalDesktopSession(params) {
-    const localEmail = "solo-local@winhood.local";
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    let user = this.db.users.find((u) => u.email === localEmail);
-    if (!user) {
-      const isFirstUser = this.db.users.length === 0;
-      const cleanName = (params?.operatorName || process.env.USERNAME || process.env.USER || "Operador Local").replace(/[\r\n\0]/g, " ").trim().slice(0, 80) || "Operador Local";
-      user = {
-        id: `usr-local-${crypto19.randomUUID().slice(0, 8)}`,
-        name: cleanName,
-        email: localEmail,
-        role: "ADMIN",
-        passwordHash: hashPassword(`wh-solo-local-${crypto19.randomBytes(24).toString("base64url")}`),
-        pinHash: null,
-        pinEnabled: false,
-        webauthnCredentials: [],
-        mfaEnabled: false,
-        totpSecretBase32: null,
-        recoveryCodeHashes: [],
-        lastAcceptedTotpStep: null,
-        disabled: false,
-        failedLoginAttempts: 0,
-        lockedUntil: null,
-        recoveryTokenSha256: null,
-        recoveryExpiresAt: null,
-        createdAt: now,
-        updatedAt: now
-      };
-      this.db.users.push(user);
-      if (isFirstUser) {
-        this.completeBootstrapOnFirstAccount(now);
-      }
-    } else if (user.disabled) {
-      throw new Error("AUTH_ACCOUNT_DISABLED: Conta local desabilitada pelo administrador.");
-    }
-    const { sessionId, session } = this.createSessionRecord(
-      user,
-      true,
-      params?.ipAddress || "127.0.0.1",
-      params?.userAgent || "WinHood-Electron-Desktop",
-      { trustDevice: true }
-    );
-    this.save();
-    return {
-      user: this.toPublicUserView(user, true),
-      sessionId,
-      csrfToken: session.csrfToken,
-      trustDevice: true
-    };
-  }
-  issueGitHubOAuthSession(params) {
-    const cleanLogin = (params.githubLogin || "").trim().replace(/[^a-zA-Z0-9._-]/g, "");
-    if (!cleanLogin) {
-      throw new Error("GITHUB_PROFILE_INVALID: Login GitHub ausente na resposta OAuth.");
-    }
-    const fallbackNoreply = typeof params.githubId === "number" ? `${params.githubId}+${cleanLogin}@users.noreply.github.com` : `${cleanLogin}@users.noreply.github.com`;
-    const candidateEmail = (params.email || fallbackNoreply).trim().toLowerCase();
-    const resolvedEmail = isValidEmailAddress(candidateEmail) ? candidateEmail : fallbackNoreply;
-    const isSyntheticNoreply = resolvedEmail === fallbackNoreply;
-    const emailVerified = typeof params.emailVerified === "boolean" ? params.emailVerified : isSyntheticNoreply;
-    const cleanName = (params.name || cleanLogin).replace(/[\r\n\0]/g, " ").trim().slice(0, 80) || cleanLogin;
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    let user = typeof params.githubId === "number" ? this.db.users.find((u) => u.githubId === params.githubId) : void 0;
-    if (!user) {
-      const loginMatch = this.db.users.find(
-        (u) => u.githubLogin?.toLowerCase() === cleanLogin.toLowerCase()
-      );
-      if (loginMatch) {
-        if (typeof params.githubId === "number" && typeof loginMatch.githubId === "number" && loginMatch.githubId !== params.githubId) {
-          throw new Error(
-            "GITHUB_ALREADY_LINKED: O login GitHub informado pertence a outra identidade j\xE1 vinculada."
-          );
-        }
-        user = loginMatch;
-      }
-    }
-    if (!user) {
-      const emailMatch = this.db.users.find((u) => u.email === resolvedEmail);
-      if (emailMatch) {
-        if (typeof params.githubId === "number" && typeof emailMatch.githubId === "number" && emailMatch.githubId !== params.githubId) {
-          throw new Error(
-            "GITHUB_ALREADY_LINKED: Este endere\xE7o de e-mail j\xE1 est\xE1 vinculado a outra conta GitHub."
-          );
-        }
-        if (!emailVerified) {
-          throw new Error(
-            "AUTH_EMAIL_VERIFICATION_REQUIRED: N\xE3o \xE9 permitido vincular automaticamente uma conta existente usando e-mail GitHub n\xE3o verificado."
-          );
-        }
-        user = emailMatch;
-      }
-    }
-    if (user && typeof params.githubId === "number") {
-      const duplicateOwner = this.db.users.find(
-        (u) => u.id !== user.id && u.githubId === params.githubId
-      );
-      if (duplicateOwner) {
-        throw new Error(
-          "GITHUB_ALREADY_LINKED: Esta conta GitHub j\xE1 est\xE1 associada a outro usu\xE1rio."
-        );
-      }
-    }
-    let isNewAccount = false;
-    if (!user) {
-      if (params.allowSignup === false) {
-        throw new Error(
-          "AUTH_SIGNUP_DISABLED: O cadastro autom\xE1tico de novos usu\xE1rios via GitHub est\xE1 desabilitado pelo administrador."
-        );
-      }
-      isNewAccount = true;
-      let grantedAdminViaBootstrap = false;
-      if (params.bootstrapAdminToken && this.db.bootstrapTokenSha256) {
-        const provided = params.bootstrapAdminToken.trim();
-        const notExpired = !this.db.bootstrapTokenExpiresAt || Date.now() <= Date.parse(this.db.bootstrapTokenExpiresAt);
-        if (provided && notExpired) {
-          const providedSha = Buffer.from(sha256(provided), "hex");
-          const storedSha = Buffer.from(this.db.bootstrapTokenSha256, "hex");
-          if (providedSha.length === storedSha.length && crypto19.timingSafeEqual(providedSha, storedSha)) {
-            grantedAdminViaBootstrap = true;
-          }
-        }
-      }
-      const canGrantFirstLocalAdmin = this.db.users.length === 0 && params.isInternetExposed !== true && params.allowFirstUserAdmin === true;
-      const assignedRole = grantedAdminViaBootstrap || canGrantFirstLocalAdmin ? "ADMIN" : "SECURITY_LEAD";
-      user = {
-        id: `usr-gh-${crypto19.randomUUID().slice(0, 8)}`,
-        name: cleanName,
-        email: resolvedEmail,
-        role: assignedRole,
-        passwordHash: hashPassword(`wh-gh-oauth-${crypto19.randomBytes(24).toString("base64url")}`),
-        pinHash: null,
-        pinEnabled: false,
-        webauthnCredentials: [],
-        githubId: typeof params.githubId === "number" ? params.githubId : null,
-        githubLogin: cleanLogin,
-        githubAvatarUrl: params.avatarUrl || null,
-        authProviders: ["github"],
-        mfaEnabled: false,
-        totpSecretBase32: null,
-        recoveryCodeHashes: [],
-        lastAcceptedTotpStep: null,
-        disabled: false,
-        failedLoginAttempts: 0,
-        lockedUntil: null,
-        recoveryTokenSha256: null,
-        recoveryExpiresAt: null,
-        createdAt: now,
-        updatedAt: now
-      };
-      this.db.users.push(user);
-      if (assignedRole === "ADMIN") {
-        this.completeBootstrapOnFirstAccount(now);
-      }
-    } else if (user.disabled) {
-      throw new Error("AUTH_ACCOUNT_DISABLED: Conta desabilitada pelo administrador.");
-    } else {
-      if (typeof params.githubId === "number") {
-        user.githubId = params.githubId;
-      }
-      user.githubLogin = cleanLogin;
-      if (params.avatarUrl) {
-        user.githubAvatarUrl = params.avatarUrl;
-      }
-      const providers = new Set(user.authProviders || []);
-      providers.add("github");
-      user.authProviders = Array.from(providers);
-      user.updatedAt = now;
-    }
-    const mfaVerified = !user.mfaEnabled;
-    const { sessionId, session } = this.createSessionRecord(
-      user,
-      mfaVerified,
-      params.ipAddress || "127.0.0.1",
-      params.userAgent || "WinHood-GitHub-OAuth",
-      { trustDevice: true }
-    );
-    this.save();
-    return {
-      user: this.toPublicUserView(user, mfaVerified),
-      sessionId,
-      csrfToken: session.csrfToken,
-      trustDevice: true,
-      isNewAccount,
-      mfaRequired: user.mfaEnabled
-    };
-  }
-  /**
-   * Fluxo explícito, seguro e de uso único para promoção administrativa inicial via token de bootstrap.
-   * Impede escalonamento automático de privilégios para o primeiro usuário GitHub em instalações expostas.
-   */
-  claimAdminWithBootstrapToken(userId, bootstrapToken) {
-    const user = this.db.users.find((u) => u.id === userId && !u.disabled);
-    if (!user) {
-      throw new Error("USER_NOT_FOUND: Usu\xE1rio n\xE3o encontrado.");
-    }
-    const existingAdmin = this.db.users.find((u) => u.role === "ADMIN" && !u.disabled);
-    if (existingAdmin) {
-      throw new Error(
-        "BOOTSTRAP_ALREADY_COMPLETED: Esta instala\xE7\xE3o j\xE1 possui um administrador ativo."
-      );
-    }
-    const provided = (bootstrapToken || "").trim();
-    if (!provided || !this.db.bootstrapTokenSha256) {
-      throw new Error(
-        "BOOTSTRAP_TOKEN_INVALID: Token de bootstrap administrativo ausente ou j\xE1 consumido."
-      );
-    }
-    if (this.db.bootstrapTokenExpiresAt && Date.now() > Date.parse(this.db.bootstrapTokenExpiresAt)) {
-      throw new Error("BOOTSTRAP_TOKEN_EXPIRED: Token de bootstrap administrativo expirado.");
-    }
-    const providedSha = Buffer.from(sha256(provided), "hex");
-    const storedSha = Buffer.from(this.db.bootstrapTokenSha256, "hex");
-    if (providedSha.length !== storedSha.length || !crypto19.timingSafeEqual(providedSha, storedSha)) {
-      throw new Error("BOOTSTRAP_TOKEN_INVALID: Token de bootstrap administrativo inv\xE1lido.");
-    }
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    user.role = "ADMIN";
-    user.updatedAt = now;
-    this.completeBootstrapOnFirstAccount(now);
-    this.save();
-    return this.toPublicUserView(user, true);
-  }
-  linkGitHubAccountToUser(userId, params) {
-    const user = this.db.users.find((u) => u.id === userId && !u.disabled);
-    if (!user) {
-      throw new Error("USER_NOT_FOUND: Usu\xE1rio n\xE3o encontrado.");
-    }
-    const cleanLogin = (params.githubLogin || "").trim().replace(/[^a-zA-Z0-9._-]/g, "");
-    if (!cleanLogin) {
-      throw new Error("GITHUB_PROFILE_INVALID: Login GitHub inv\xE1lido.");
-    }
-    const conflictingUser = this.db.users.find(
-      (u) => u.id !== userId && (u.githubId === params.githubId || u.githubLogin?.toLowerCase() === cleanLogin.toLowerCase())
-    );
-    if (conflictingUser) {
-      throw new Error("GITHUB_ALREADY_LINKED: Esta conta GitHub j\xE1 est\xE1 vinculada a outro usu\xE1rio.");
-    }
-    user.githubId = params.githubId;
-    user.githubLogin = cleanLogin;
-    if (params.avatarUrl) {
-      user.githubAvatarUrl = params.avatarUrl;
-    }
-    const providers = new Set(user.authProviders || []);
-    providers.add("github");
-    user.authProviders = Array.from(providers);
-    user.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    this.save();
-    return this.toPublicUserView(user, true);
-  }
-  static hasPermission(role, permission) {
-    return PERMISSIONS_MATRIX[role]?.has(permission) ?? false;
-  }
-};
-
-// src/security/ZeroFrictionAuthConfig.ts
-import crypto20 from "node:crypto";
-function evaluateSoloLocalAutoSession(params) {
-  if (params.teamServerMode) {
-    return {
-      allowed: false,
-      mode: "TEAM_SERVER",
-      reason: "Modo Servidor de Equipe ativo: autentica\xE7\xE3o expl\xEDcita e RBAC s\xE3o obrigat\xF3rios."
-    };
-  }
-  if (params.vaultLockEnabled) {
-    return {
-      allowed: false,
-      mode: "LOCKED_VAULT",
-      reason: "Bloqueio de cofre ativado pelo usu\xE1rio: desbloqueie com Windows Hello, Passkey ou PIN."
-    };
-  }
-  const isElectron = params.runtimeEnv === "ELECTRON_DESKTOP";
-  const ip = (params.remoteAddress || "").replace(/^::ffff:/, "").trim().toLowerCase();
-  const host = (params.hostHeader || "").split(":")[0].trim().toLowerCase();
-  const isLoopbackIp = ip === "127.0.0.1" || ip === "::1" || ip === "localhost";
-  const isLoopbackHost = host === "localhost" || host === "127.0.0.1" || host === "::1";
-  const isDevOrPreview = params.isHostedPreview === true || process.env.WINHOOD_ALLOW_PREVIEW_SOLO === "true" || (params.nodeEnv || process.env.NODE_ENV) !== "production";
-  if (isElectron && (isLoopbackIp || isLoopbackHost)) {
-    return {
-      allowed: true,
-      mode: "SOLO_LOCAL_DESKTOP",
-      reason: "Sess\xE3o local autorizada via conta do sistema operacional (loopback Electron)."
-    };
-  }
-  if (isLoopbackIp || isLoopbackHost) {
-    return {
-      allowed: true,
-      mode: "SOLO_LOCAL_DESKTOP",
-      reason: "Sess\xE3o local autorizada em loopback (127.0.0.1 / localhost)."
-    };
-  }
-  if (isDevOrPreview) {
-    return {
-      allowed: true,
-      mode: "SOLO_LOCAL_DESKTOP",
-      reason: "Sess\xE3o local autorizada em ambiente de desenvolvimento/preview."
-    };
-  }
-  return {
-    allowed: false,
-    mode: "TEAM_SERVER",
-    reason: "Acesso remoto em produ\xE7\xE3o exige autentica\xE7\xE3o expl\xEDcita (GitHub, Passkey ou Credenciais)."
-  };
-}
-async function startGitHubDeviceAuth(clientId, scope = "read:user user:email repo") {
-  if (!clientId || clientId.trim().length < 8) {
-    throw new Error("GITHUB_CLIENT_ID_MISSING: Configure WINHOOD_GITHUB_OAUTH_CLIENT_ID.");
-  }
-  const res = await fetch("https://github.com/login/device/code", {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/x-www-form-urlencoded"
-    },
-    body: new URLSearchParams({ client_id: clientId.trim(), scope })
-  });
-  if (!res.ok) {
-    throw new Error(`GITHUB_DEVICE_FLOW_HTTP_${res.status}`);
-  }
-  return await res.json();
-}
-async function pollGitHubDeviceToken(clientId, deviceCode) {
-  if (!clientId || clientId.trim().length < 8) {
-    throw new Error("GITHUB_CLIENT_ID_MISSING: Configure WINHOOD_GITHUB_OAUTH_CLIENT_ID.");
-  }
-  if (!deviceCode || deviceCode.trim().length < 8) {
-    throw new Error("GITHUB_DEVICE_CODE_INVALID: C\xF3digo de dispositivo ausente ou inv\xE1lido.");
-  }
-  const res = await fetch("https://github.com/login/oauth/access_token", {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/x-www-form-urlencoded"
-    },
-    body: new URLSearchParams({
-      client_id: clientId.trim(),
-      device_code: deviceCode.trim(),
-      grant_type: "urn:ietf:params:oauth:grant-type:device_code"
-    })
-  });
-  if (!res.ok) {
-    throw new Error(`GITHUB_DEVICE_POLL_HTTP_${res.status}`);
-  }
-  const data = await res.json();
-  if (data.access_token) {
-    return {
-      status: "AUTHORIZED",
-      accessToken: data.access_token,
-      tokenType: data.token_type || "bearer",
-      scope: data.scope || ""
-    };
-  }
-  switch (data.error) {
-    case "authorization_pending":
-      return { status: "PENDING", errorDescription: data.error_description };
-    case "slow_down":
-      return { status: "SLOW_DOWN", errorDescription: data.error_description };
-    case "expired_token":
-      return { status: "EXPIRED", errorDescription: data.error_description };
-    case "access_denied":
-      return { status: "ACCESS_DENIED", errorDescription: data.error_description };
-    default:
-      return {
-        status: "ERROR",
-        errorDescription: data.error_description || data.error || "Erro desconhecido no OAuth Device Flow."
-      };
-  }
-}
-function generateGitHubOAuthPkce() {
-  const state = crypto20.randomBytes(32).toString("base64url");
-  const codeVerifier = crypto20.randomBytes(48).toString("base64url");
-  const codeChallenge = crypto20.createHash("sha256").update(codeVerifier, "ascii").digest("base64url");
-  return {
-    state,
-    codeVerifier,
-    codeChallenge,
-    codeChallengeMethod: "S256"
-  };
-}
-function buildGitHubOAuthAuthorizeUrl(params) {
-  const qs = new URLSearchParams({
-    client_id: params.clientId.trim(),
-    redirect_uri: params.redirectUri,
-    scope: params.scope || "read:user user:email",
-    state: params.state,
-    code_challenge: params.codeChallenge,
-    code_challenge_method: "S256",
-    allow_signup: params.allowSignup === false ? "false" : "true"
-  });
-  return `https://github.com/login/oauth/authorize?${qs.toString()}`;
-}
-async function exchangeGitHubOAuthCode(params) {
-  const cleanClientId = params.clientId.trim();
-  const cleanClientSecret = params.clientSecret.trim();
-  if (!cleanClientId || !cleanClientSecret) {
-    throw new Error(
-      "GITHUB_OAUTH_CONFIG_MISSING: Configure WINHOOD_GITHUB_OAUTH_CLIENT_ID e WINHOOD_GITHUB_OAUTH_CLIENT_SECRET."
-    );
-  }
-  const res = await fetch("https://github.com/login/oauth/access_token", {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/x-www-form-urlencoded"
-    },
-    body: new URLSearchParams({
-      client_id: cleanClientId,
-      client_secret: cleanClientSecret,
-      code: params.code.trim(),
-      redirect_uri: params.redirectUri,
-      code_verifier: params.codeVerifier
-    })
-  });
-  if (!res.ok) {
-    throw new Error(`GITHUB_OAUTH_EXCHANGE_HTTP_${res.status}`);
-  }
-  const data = await res.json();
-  if (!data.access_token) {
-    const rawDetail = String(data.error_description || data.error || "Token ausente.");
-    const safeDetail = rawDetail.split(cleanClientSecret).join("[REDACTED]").slice(0, 200);
-    throw new Error(`GITHUB_OAUTH_EXCHANGE_FAILED: ${safeDetail}`);
-  }
-  return {
-    accessToken: data.access_token,
-    tokenType: data.token_type || "bearer",
-    scope: data.scope || ""
-  };
-}
-async function fetchGitHubAuthenticatedProfile(accessToken) {
-  const headers = {
-    Accept: "application/vnd.github+json",
-    Authorization: `Bearer ${accessToken.trim()}`,
-    "User-Agent": "WinHood-Benchmarking/4.4.0"
-  };
-  const userRes = await fetch("https://api.github.com/user", { headers });
-  if (userRes.status === 401 || userRes.status === 403) {
-    throw new Error(
-      "GITHUB_TOKEN_UNAUTHORIZED: Token GitHub rejeitado pela API oficial (HTTP 401/403)."
-    );
-  }
-  if (!userRes.ok) {
-    throw new Error(`GITHUB_PROFILE_FETCH_FAILED: HTTP ${userRes.status}`);
-  }
-  const userJson = await userRes.json();
-  if (!userJson.login || typeof userJson.id !== "number") {
-    throw new Error("GITHUB_PROFILE_INCOMPLETE: API do GitHub n\xE3o retornou id/login.");
-  }
-  let resolvedEmail = "";
-  let emailVerified = false;
-  const publicEmail = (userJson.email || "").trim().toLowerCase();
-  try {
-    const emailsRes = await fetch("https://api.github.com/user/emails", { headers });
-    if (emailsRes.ok) {
-      const emails = await emailsRes.json();
-      if (Array.isArray(emails)) {
-        const primaryVerified = emails.find((e) => e.primary && e.verified && e.email);
-        const anyVerified = emails.find((e) => e.verified && e.email);
-        const primaryAny = emails.find((e) => e.primary && e.email);
-        if (primaryVerified?.email) {
-          resolvedEmail = String(primaryVerified.email).trim().toLowerCase();
-          emailVerified = true;
-        } else if (anyVerified?.email) {
-          resolvedEmail = String(anyVerified.email).trim().toLowerCase();
-          emailVerified = true;
-        } else if (publicEmail) {
-          resolvedEmail = publicEmail;
-          emailVerified = emails.some(
-            (e) => e.verified && String(e.email || "").trim().toLowerCase() === publicEmail
-          );
-        } else if (primaryAny?.email) {
-          resolvedEmail = String(primaryAny.email).trim().toLowerCase();
-          emailVerified = false;
-        }
-      }
-    }
-  } catch {
-  }
-  if (!resolvedEmail && publicEmail) {
-    resolvedEmail = publicEmail;
-    emailVerified = false;
-  }
-  if (!resolvedEmail) {
-    resolvedEmail = `${userJson.id}+${userJson.login}@users.noreply.github.com`;
-    emailVerified = true;
-  }
-  return {
-    id: userJson.id,
-    login: userJson.login,
-    name: (userJson.name || userJson.login).trim(),
-    email: resolvedEmail,
-    emailVerified,
-    avatarUrl: userJson.avatar_url || null
-  };
-}
-var GITHUB_OAUTH_APP_DOCS_URL = "https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app";
-var GITHUB_OAUTH_DEVELOPER_SETTINGS_URL = "https://github.com/settings/developers";
-function maskOAuthClientIdPreview(rawClientId) {
-  const clean = rawClientId.trim();
-  if (clean.length < 8) return null;
-  return `${clean.slice(0, 4)}\u2022\u2022\u2022\u2022${clean.slice(-4)}`;
-}
-function validateOAuthCredentialInput(raw, fieldLabel) {
-  const trimmed = raw.trim();
-  if (trimmed.length < 8 || trimmed.length > 256) {
-    return {
-      valid: false,
-      error: `${fieldLabel} deve possuir entre 8 e 256 caracteres.`
-    };
-  }
-  if (/[\s\r\n\0]/.test(trimmed)) {
-    return {
-      valid: false,
-      error: `${fieldLabel} n\xE3o pode conter espa\xE7os ou caracteres de controle.`
-    };
-  }
-  return { valid: true, value: trimmed };
-}
-function inspectGitHubOAuthServerStatus(params) {
-  const env = params?.env || process.env;
-  const overrideClientId = (params?.overrideCredentials?.clientId || "").trim();
-  const overrideClientSecret = (params?.overrideCredentials?.clientSecret || "").trim();
-  const envClientId = (env.WINHOOD_GITHUB_OAUTH_CLIENT_ID || "").trim();
-  const envClientSecret = (env.WINHOOD_GITHUB_OAUTH_CLIENT_SECRET || "").trim();
-  const rawCallbackOverride = (env.WINHOOD_GITHUB_OAUTH_CALLBACK_URL || "").trim();
-  const rawClientId = overrideClientId || envClientId;
-  const rawClientSecret = overrideClientSecret || envClientSecret;
-  const clientIdConfigured = rawClientId.length >= 8;
-  const clientSecretConfigured = rawClientSecret.length >= 8;
-  const oauthDirectReady = clientIdConfigured && clientSecretConfigured;
-  const deviceFlowReady = clientIdConfigured;
-  const vaultOverrideConfigured = overrideClientId.length >= 8 || overrideClientSecret.length >= 8;
-  let configSource = "NONE";
-  if (vaultOverrideConfigured) {
-    configSource = "ADMIN_VAULT";
-  } else if (envClientId.length >= 8 || envClientSecret.length >= 8) {
-    configSource = "ENVIRONMENT";
-  }
-  let connectionStatus = "NOT_CONFIGURED";
-  if (oauthDirectReady) {
-    connectionStatus = "ACTIVE";
-  } else if (clientIdConfigured || clientSecretConfigured) {
-    connectionStatus = "PARTIAL";
-  }
-  return {
-    connectionStatus,
-    configSource,
-    vaultOverrideConfigured,
-    oauthDirectReady,
-    deviceFlowReady,
-    clientIdConfigured,
-    clientSecretConfigured,
-    callbackUrlOverrideConfigured: rawCallbackOverride.length > 0,
-    clientIdPreview: maskOAuthClientIdPreview(rawClientId),
-    callbackUrlEffective: params?.callbackUrl || rawCallbackOverride || "http://localhost:3000/api/auth/github/oauth/callback",
-    requiredScopes: ["read:user", "user:email"],
-    pkceMethod: "S256",
-    docsUrl: GITHUB_OAUTH_APP_DOCS_URL,
-    githubDeveloperSettingsUrl: GITHUB_OAUTH_DEVELOPER_SETTINGS_URL,
-    updatedAt: vaultOverrideConfigured ? params?.overrideCredentials?.updatedAt || null : null,
-    checkedAt: (/* @__PURE__ */ new Date()).toISOString()
-  };
-}
-async function verifyGitHubOAuthConnection(params) {
-  const endpointTested = "https://github.com/login/oauth/access_token";
-  const checkedAt = (/* @__PURE__ */ new Date()).toISOString();
-  const cleanClientId = (params.clientId || "").trim();
-  const cleanClientSecret = (params.clientSecret || "").trim();
-  if (cleanClientId.length < 8 || cleanClientSecret.length < 8) {
-    const missing = [];
-    if (cleanClientId.length < 8) missing.push("WINHOOD_GITHUB_OAUTH_CLIENT_ID");
-    if (cleanClientSecret.length < 8) missing.push("WINHOOD_GITHUB_OAUTH_CLIENT_SECRET");
-    return {
-      verified: false,
-      status: "NOT_CONFIGURED",
-      httpStatus: null,
-      githubErrorCode: "CREDENTIALS_MISSING",
-      latencyMs: 0,
-      endpointTested,
-      pkceAuthorizeReady: false,
-      clientIdPreview: maskOAuthClientIdPreview(cleanClientId),
-      message: `Configura\xE7\xE3o incompleta: informe ${missing.join(" e ")} antes de verificar a conex\xE3o.`,
-      checkedAt
-    };
-  }
-  const pkce = generateGitHubOAuthPkce();
-  const authorizeUrl = buildGitHubOAuthAuthorizeUrl({
-    clientId: cleanClientId,
-    redirectUri: params.redirectUri,
-    state: pkce.state,
-    codeChallenge: pkce.codeChallenge
-  });
-  const pkceAuthorizeReady = authorizeUrl.startsWith("https://github.com/login/oauth/authorize?");
-  const startedAt = Date.now();
-  const fetcher = params.fetchImpl || fetch;
-  try {
-    const res = await fetcher(endpointTested, {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": "WinHood-Benchmarking/4.4.0"
-      },
-      body: new URLSearchParams({
-        client_id: cleanClientId,
-        client_secret: cleanClientSecret,
-        code: "winhood_oauth_probe_0000000000",
-        redirect_uri: params.redirectUri
-      }),
-      signal: typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(1e4) : void 0
-    });
-    const latencyMs = Math.max(1, Date.now() - startedAt);
-    const data = await res.json().catch(() => ({}));
-    const errorCode = typeof data.error === "string" ? data.error : null;
-    if (res.ok && errorCode === "bad_verification_code") {
-      return {
-        verified: true,
-        status: "VERIFIED",
-        httpStatus: res.status,
-        githubErrorCode: errorCode,
-        latencyMs,
-        endpointTested,
-        pkceAuthorizeReady,
-        clientIdPreview: maskOAuthClientIdPreview(cleanClientId),
-        message: "Conex\xE3o verificada com o GitHub: Client ID e Client Secret foram autenticados pelo endpoint oficial OAuth 2.0 (PKCE S256 pronto).",
-        checkedAt: (/* @__PURE__ */ new Date()).toISOString()
-      };
-    }
-    if (errorCode === "incorrect_client_credentials" || errorCode === "application_suspended" || res.status === 401 || res.status === 403 || res.status === 404) {
-      const detailMessage = res.status === 404 ? "OAuth App n\xE3o encontrado no GitHub (HTTP 404). Verifique se WINHOOD_GITHUB_OAUTH_CLIENT_ID corresponde a um OAuth App v\xE1lido e ativo." : `Credenciais rejeitadas pelo GitHub (${errorCode || `HTTP ${res.status}`}). Revise WINHOOD_GITHUB_OAUTH_CLIENT_ID e WINHOOD_GITHUB_OAUTH_CLIENT_SECRET.`;
-      return {
-        verified: false,
-        status: "INVALID_CREDENTIALS",
-        httpStatus: res.status,
-        githubErrorCode: errorCode || `HTTP_${res.status}`,
-        latencyMs,
-        endpointTested,
-        pkceAuthorizeReady,
-        clientIdPreview: maskOAuthClientIdPreview(cleanClientId),
-        message: detailMessage,
-        checkedAt: (/* @__PURE__ */ new Date()).toISOString()
-      };
-    }
-    return {
-      verified: false,
-      status: "API_ERROR",
-      httpStatus: res.status,
-      githubErrorCode: errorCode || `HTTP_${res.status}`,
-      latencyMs,
-      endpointTested,
-      pkceAuthorizeReady,
-      clientIdPreview: maskOAuthClientIdPreview(cleanClientId),
-      message: `Resposta inesperada do GitHub OAuth (HTTP ${res.status}${errorCode ? ` \xB7 ${errorCode}` : ""}).`,
-      checkedAt: (/* @__PURE__ */ new Date()).toISOString()
-    };
-  } catch (err) {
-    const latencyMs = Math.max(1, Date.now() - startedAt);
-    const errMsg = err instanceof Error ? err.message : "Erro de rede ao contatar github.com.";
-    return {
-      verified: false,
-      status: "NETWORK_UNREACHABLE",
-      httpStatus: null,
-      githubErrorCode: "NETWORK_ERROR",
-      latencyMs,
-      endpointTested,
-      pkceAuthorizeReady,
-      clientIdPreview: maskOAuthClientIdPreview(cleanClientId),
-      message: `N\xE3o foi poss\xEDvel alcan\xE7ar o endpoint oficial do GitHub (${errMsg}).`,
-      checkedAt: (/* @__PURE__ */ new Date()).toISOString()
-    };
-  }
-}
-
-// src/security/GitHubOAuthTransactionStore.ts
-import crypto21 from "node:crypto";
-import fs14 from "node:fs";
-import path15 from "node:path";
-var DEFAULT_CODE_REPLAY_TTL_MS = 15 * 60 * 1e3;
-function sha256Hex2(raw) {
-  return crypto21.createHash("sha256").update(raw, "utf8").digest("hex");
-}
-var GitHubOAuthTransactionStore = class {
-  constructor(dataDir) {
-    this.storeFilePath = path15.join(dataDir, "security", "github_oauth_transactions.json");
-    this.keystorePath = path15.join(dataDir, "keys", "keystore.json");
-  }
-  encryptValue(plain) {
-    const { keyId, keyBuffer } = KeyManagementService.getActiveVaultAesKey(this.keystorePath);
-    const iv = crypto21.randomBytes(12);
-    const cipher = crypto21.createCipheriv("aes-256-gcm", keyBuffer, iv);
-    const encrypted = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
-    const tag = cipher.getAuthTag();
-    return `whoauth:v1:${keyId}:${iv.toString("hex")}:${tag.toString("hex")}:${encrypted.toString("hex")}`;
-  }
-  decryptValue(stored) {
-    if (!stored) return void 0;
-    if (!stored.startsWith("whoauth:v1:")) return stored;
-    const parts = stored.split(":");
-    if (parts.length !== 6) return void 0;
-    const [, , keyId, ivHex, tagHex, cipherHex] = parts;
-    const keyBuf = KeyManagementService.getVaultKeyBufferByKeyId(keyId, this.keystorePath) || KeyManagementService.getActiveVaultAesKey(this.keystorePath).keyBuffer;
-    const decipher = crypto21.createDecipheriv("aes-256-gcm", keyBuf, Buffer.from(ivHex, "hex"));
-    decipher.setAuthTag(Buffer.from(tagHex, "hex"));
-    const plain = Buffer.concat([
-      decipher.update(Buffer.from(cipherHex, "hex")),
-      decipher.final()
-    ]);
-    return plain.toString("utf8");
-  }
-  readStore() {
-    const empty = {
-      schemaVersion: 1,
-      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      transactions: {},
-      consumedCodeHashes: {}
-    };
-    try {
-      if (!fs14.existsSync(this.storeFilePath)) return empty;
-      const raw = fs14.readFileSync(this.storeFilePath, "utf8");
-      const parsed = JSON.parse(raw);
-      return {
-        schemaVersion: 1,
-        updatedAt: parsed.updatedAt || (/* @__PURE__ */ new Date()).toISOString(),
-        transactions: parsed.transactions && typeof parsed.transactions === "object" ? parsed.transactions : {},
-        consumedCodeHashes: parsed.consumedCodeHashes && typeof parsed.consumedCodeHashes === "object" ? parsed.consumedCodeHashes : {}
-      };
-    } catch {
-      return empty;
-    }
-  }
-  writeStoreAtomic(data) {
-    const dir = path15.dirname(this.storeFilePath);
-    if (!fs14.existsSync(dir)) {
-      fs14.mkdirSync(dir, { recursive: true });
-    }
-    data.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    const tmpPath = `${this.storeFilePath}.tmp.${process.pid}.${crypto21.randomBytes(4).toString("hex")}`;
-    fs14.writeFileSync(tmpPath, JSON.stringify(data, null, 2), { encoding: "utf8", mode: 384 });
-    fs14.renameSync(tmpPath, this.storeFilePath);
-    try {
-      fs14.chmodSync(this.storeFilePath, 384);
-    } catch {
-    }
-  }
-  pruneInPlace(store, nowMs = Date.now()) {
-    let changed = false;
-    for (const [key, tx] of Object.entries(store.transactions)) {
-      if (!tx || typeof tx.expiresAtMs !== "number" || nowMs > tx.expiresAtMs) {
-        delete store.transactions[key];
-        changed = true;
-      }
-    }
-    for (const [codeHash, expMs] of Object.entries(store.consumedCodeHashes)) {
-      if (typeof expMs !== "number" || nowMs > expMs) {
-        delete store.consumedCodeHashes[codeHash];
-        changed = true;
-      }
-    }
-    return changed;
-  }
-  toRuntimeTx(stored) {
-    try {
-      const codeVerifier = this.decryptValue(stored.codeVerifierEnc);
-      if (!codeVerifier) return void 0;
-      return {
-        state: stored.state,
-        codeVerifier,
-        redirectUri: stored.redirectUri,
-        mode: stored.mode,
-        originHint: stored.originHint,
-        expiresAtMs: stored.expiresAtMs,
-        status: stored.status,
-        consumed: stored.consumed,
-        stateCookieRequired: stored.stateCookieRequired,
-        errorMessage: stored.errorMessage,
-        sessionId: this.decryptValue(stored.sessionIdEnc),
-        csrfToken: this.decryptValue(stored.csrfTokenEnc),
-        user: stored.user,
-        isNewAccount: stored.isNewAccount
-      };
-    } catch {
-      return void 0;
-    }
-  }
-  toStoredTx(tx) {
-    return {
-      state: tx.state,
-      codeVerifierEnc: this.encryptValue(tx.codeVerifier),
-      redirectUri: tx.redirectUri,
-      mode: tx.mode,
-      originHint: tx.originHint,
-      expiresAtMs: tx.expiresAtMs,
-      status: tx.status,
-      consumed: tx.consumed,
-      stateCookieRequired: tx.stateCookieRequired,
-      errorMessage: tx.errorMessage,
-      sessionIdEnc: tx.sessionId ? this.encryptValue(tx.sessionId) : void 0,
-      csrfTokenEnc: tx.csrfToken ? this.encryptValue(tx.csrfToken) : void 0,
-      user: tx.user,
-      isNewAccount: tx.isNewAccount
-    };
-  }
-  findMatchingKeyTimingSafe(store, rawState) {
-    const providedBuf = Buffer.from(rawState, "utf8");
-    if (providedBuf.length === 0) return void 0;
-    for (const key of Object.keys(store.transactions)) {
-      const expectedBuf = Buffer.from(key, "utf8");
-      if (expectedBuf.length === providedBuf.length && crypto21.timingSafeEqual(expectedBuf, providedBuf)) {
-        return key;
-      }
-    }
-    return void 0;
-  }
-  pruneExpired() {
-    const store = this.readStore();
-    if (this.pruneInPlace(store)) {
-      this.writeStoreAtomic(store);
-    }
-  }
-  saveTransaction(tx) {
-    const store = this.readStore();
-    this.pruneInPlace(store);
-    store.transactions[tx.state] = this.toStoredTx(tx);
-    this.writeStoreAtomic(store);
-  }
-  getTransactionByState(rawState) {
-    const store = this.readStore();
-    const pruned = this.pruneInPlace(store);
-    const matchedKey = this.findMatchingKeyTimingSafe(store, rawState);
-    if (pruned) {
-      this.writeStoreAtomic(store);
-    }
-    if (!matchedKey) return void 0;
-    const stored = store.transactions[matchedKey];
-    return stored ? this.toRuntimeTx(stored) : void 0;
-  }
-  /**
-   * Consome de forma atômica e síncrona o par (state, code) antes de qualquer I/O externo.
-   * Bloqueia replay de state ou authorization code mesmo após reinicialização do processo.
-   */
-  consumeTransactionAtomically(rawState, rawCode, codeReplayTtlMs = DEFAULT_CODE_REPLAY_TTL_MS) {
-    const store = this.readStore();
-    const now = Date.now();
-    this.pruneInPlace(store, now);
-    const matchedKey = this.findMatchingKeyTimingSafe(store, rawState);
-    if (!matchedKey) {
-      this.writeStoreAtomic(store);
-      return { ok: false, reason: "INVALID_STATE" };
-    }
-    const stored = store.transactions[matchedKey];
-    if (!stored || now > stored.expiresAtMs) {
-      delete store.transactions[matchedKey];
-      this.writeStoreAtomic(store);
-      return { ok: false, reason: "INVALID_STATE" };
-    }
-    const codeHash = sha256Hex2(rawCode);
-    const runtimeTx = this.toRuntimeTx(stored);
-    if (!runtimeTx) {
-      delete store.transactions[matchedKey];
-      this.writeStoreAtomic(store);
-      return { ok: false, reason: "INVALID_STATE" };
-    }
-    if (stored.consumed || Boolean(store.consumedCodeHashes[codeHash])) {
-      delete store.transactions[matchedKey];
-      this.writeStoreAtomic(store);
-      return { ok: false, reason: "REPLAYED_CODE", tx: runtimeTx };
-    }
-    stored.consumed = true;
-    store.consumedCodeHashes[codeHash] = now + codeReplayTtlMs;
-    this.writeStoreAtomic(store);
-    runtimeTx.consumed = true;
-    return { ok: true, tx: runtimeTx };
-  }
-  updateTransaction(rawState, patch) {
-    const store = this.readStore();
-    const matchedKey = this.findMatchingKeyTimingSafe(store, rawState);
-    if (!matchedKey) return;
-    const existing = store.transactions[matchedKey];
-    if (!existing) return;
-    const runtime = this.toRuntimeTx(existing);
-    if (!runtime) return;
-    const merged = { ...runtime, ...patch };
-    store.transactions[matchedKey] = this.toStoredTx(merged);
-    this.writeStoreAtomic(store);
-  }
-  deleteTransaction(rawState) {
-    const store = this.readStore();
-    const matchedKey = this.findMatchingKeyTimingSafe(store, rawState);
-    if (!matchedKey) return;
-    delete store.transactions[matchedKey];
-    this.writeStoreAtomic(store);
+    this.unlockSessions.clear();
+    return { ok: true, enabled: true, unlocked: false };
   }
 };
 
 // src/storage/PersistentDatabaseManager.ts
-import crypto22 from "node:crypto";
-import fs15 from "node:fs";
-import path16 from "node:path";
+import crypto20 from "node:crypto";
+import fs14 from "node:fs";
+import path15 from "node:path";
 import zlib from "node:zlib";
 function sha256Hex3(raw) {
-  return crypto22.createHash("sha256").update(raw, "utf8").digest("hex");
+  return crypto20.createHash("sha256").update(raw, "utf8").digest("hex");
 }
 function fsyncAndRename(tmpPath, targetPath) {
-  const fd = fs15.openSync(tmpPath, "r+");
+  const fd = fs14.openSync(tmpPath, "r+");
   try {
-    fs15.fsyncSync(fd);
+    fs14.fsyncSync(fd);
   } finally {
-    fs15.closeSync(fd);
+    fs14.closeSync(fd);
   }
-  fs15.renameSync(tmpPath, targetPath);
+  fs14.renameSync(tmpPath, targetPath);
 }
 var PersistentDatabaseManager = class _PersistentDatabaseManager {
   constructor() {
@@ -27381,8 +24657,8 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
     const rawJson = JSON.stringify(safeMap);
     const compressed = zlib.deflateSync(Buffer.from(rawJson, "utf8"));
     const { keyId, keyBuffer } = KeyManagementService.getActiveVaultAesKey();
-    const iv = crypto22.randomBytes(12);
-    const cipher = crypto22.createCipheriv("aes-256-gcm", keyBuffer, iv);
+    const iv = crypto20.randomBytes(12);
+    const cipher = crypto20.createCipheriv("aes-256-gcm", keyBuffer, iv);
     const encrypted = Buffer.concat([cipher.update(compressed), cipher.final()]);
     const authTag = cipher.getAuthTag();
     return `${_PersistentDatabaseManager.ENVELOPE_PREFIX}${keyId}:${iv.toString("hex")}:${authTag.toString("hex")}:${encrypted.toString("base64")}`;
@@ -27431,7 +24707,7 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
       }
       let compressed;
       try {
-        const decipher = crypto22.createDecipheriv("aes-256-gcm", keyBuffer, iv);
+        const decipher = crypto20.createDecipheriv("aes-256-gcm", keyBuffer, iv);
         decipher.setAuthTag(authTag);
         compressed = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
       } catch (err) {
@@ -27533,28 +24809,28 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
     return parsed;
   }
   writeAtomicChecksummed(targetPath, data) {
-    const dir = path16.dirname(targetPath);
-    if (!fs15.existsSync(dir)) {
-      fs15.mkdirSync(dir, { recursive: true });
+    const dir = path15.dirname(targetPath);
+    if (!fs14.existsSync(dir)) {
+      fs14.mkdirSync(dir, { recursive: true });
     }
     const wrapped = _PersistentDatabaseManager.preparePayloadForDisk(data);
     const serialized = JSON.stringify(wrapped, null, 2);
     const checksum = sha256Hex3(serialized);
     const checksumPath = `${targetPath}.sha256`;
     const backupPath = `${targetPath}.bak`;
-    if (fs15.existsSync(targetPath)) {
+    if (fs14.existsSync(targetPath)) {
       try {
-        const currentRaw = fs15.readFileSync(targetPath, "utf8");
+        const currentRaw = fs14.readFileSync(targetPath, "utf8");
         JSON.parse(currentRaw);
-        fs15.copyFileSync(targetPath, backupPath);
+        fs14.copyFileSync(targetPath, backupPath);
       } catch {
       }
     }
-    const tmpFile = `${targetPath}.${process.pid}.${crypto22.randomBytes(4).toString("hex")}.tmp`;
-    fs15.writeFileSync(tmpFile, serialized, { encoding: "utf8", mode: 384 });
+    const tmpFile = `${targetPath}.${process.pid}.${crypto20.randomBytes(4).toString("hex")}.tmp`;
+    fs14.writeFileSync(tmpFile, serialized, { encoding: "utf8", mode: 384 });
     fsyncAndRename(tmpFile, targetPath);
-    const tmpSha = `${checksumPath}.${process.pid}.${crypto22.randomBytes(4).toString("hex")}.tmp`;
-    fs15.writeFileSync(tmpSha, `${checksum}
+    const tmpSha = `${checksumPath}.${process.pid}.${crypto20.randomBytes(4).toString("hex")}.tmp`;
+    fs14.writeFileSync(tmpSha, `${checksum}
 `, { encoding: "utf8", mode: 384 });
     fsyncAndRename(tmpSha, checksumPath);
     return { sha256: checksum };
@@ -27572,18 +24848,18 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
     const checksumPath = `${targetPath}.sha256`;
     const backupPath = `${targetPath}.bak`;
     const tryReadPrimary = () => {
-      if (!fs15.existsSync(targetPath)) return null;
-      const raw = fs15.readFileSync(targetPath, "utf8");
-      if (fs15.existsSync(checksumPath)) {
-        const expected = fs15.readFileSync(checksumPath, "utf8").trim();
+      if (!fs14.existsSync(targetPath)) return null;
+      const raw = fs14.readFileSync(targetPath, "utf8");
+      if (fs14.existsSync(checksumPath)) {
+        const expected = fs14.readFileSync(checksumPath, "utf8").trim();
         const actual = sha256Hex3(raw);
         if (expected.length === 64 && actual !== expected) {
-          throw new Error(`Checksum SHA-256 divergente em ${path16.basename(targetPath)}`);
+          throw new Error(`Checksum SHA-256 divergente em ${path15.basename(targetPath)}`);
         }
       }
       return _PersistentDatabaseManager.hydratePayloadFromDisk(JSON.parse(raw));
     };
-    if (!fs15.existsSync(targetPath) && !fs15.existsSync(backupPath)) {
+    if (!fs14.existsSync(targetPath) && !fs14.existsSync(backupPath)) {
       return {
         data: null,
         recoveredFromBackup: false,
@@ -27602,9 +24878,9 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
         };
       }
     } catch (primaryErr) {
-      if (fs15.existsSync(backupPath)) {
+      if (fs14.existsSync(backupPath)) {
         try {
-          const bakRaw = fs15.readFileSync(backupPath, "utf8");
+          const bakRaw = fs14.readFileSync(backupPath, "utf8");
           const bakParsed = _PersistentDatabaseManager.hydratePayloadFromDisk(
             JSON.parse(bakRaw)
           );
@@ -27646,7 +24922,7 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
     const kmsStatus = KeyManagementService.getStatus();
     const storageMode = kmsStatus.dpapiSupported ? "WINDOWS_DPAPI_KEYSTORE" : kmsStatus.keyOrigin;
     const checksumPath = `${targetPath}.sha256`;
-    if (!fs15.existsSync(targetPath)) {
+    if (!fs14.existsSync(targetPath)) {
       return {
         encryptedAtRest: true,
         algorithm: "AES-256-GCM + ZLIB-DEFLATE",
@@ -27662,9 +24938,9 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
       };
     }
     try {
-      const raw = fs15.readFileSync(targetPath, "utf8");
+      const raw = fs14.readFileSync(targetPath, "utf8");
       const actualSha = sha256Hex3(raw);
-      const expectedSha = fs15.existsSync(checksumPath) ? fs15.readFileSync(checksumPath, "utf8").trim() : "";
+      const expectedSha = fs14.existsSync(checksumPath) ? fs14.readFileSync(checksumPath, "utf8").trim() : "";
       const parsed = JSON.parse(raw);
       const softwares = Array.isArray(parsed.softwares) ? parsed.softwares : [];
       let encryptedCount = 0;
@@ -27709,21 +24985,21 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
 };
 
 // src/services/backup/ProjectBackupService.ts
-import fs16 from "node:fs";
-import path17 from "node:path";
-import crypto23 from "node:crypto";
+import fs15 from "node:fs";
+import path16 from "node:path";
+import crypto21 from "node:crypto";
 var BACKUP_ID_ALLOWLIST = /^bkp-\d+-[a-f0-9]{8}$/i;
 var MAX_BACKUP_ID_LENGTH = 128;
 var ProjectBackupService = class {
   constructor(dataDir) {
     const root = dataDir || resolveWinHoodDataRoot();
-    this.backupsRootDir = path17.resolve(root, "backups", "projects");
-    if (!fs16.existsSync(this.backupsRootDir)) {
-      fs16.mkdirSync(this.backupsRootDir, { recursive: true, mode: 448 });
+    this.backupsRootDir = path16.resolve(root, "backups", "projects");
+    if (!fs15.existsSync(this.backupsRootDir)) {
+      fs15.mkdirSync(this.backupsRootDir, { recursive: true, mode: 448 });
     }
   }
   computeSha256(buf) {
-    return crypto23.createHash("sha256").update(buf).digest("hex");
+    return crypto21.createHash("sha256").update(buf).digest("hex");
   }
   assertSafeBackupId(backupId) {
     if (typeof backupId !== "string") {
@@ -27738,10 +25014,10 @@ var ProjectBackupService = class {
         `INVALID_BACKUP_ID: Formato de backupId n\xE3o autorizado (${trimmed.slice(0, 32)}).`
       );
     }
-    const rootResolved = path17.resolve(this.backupsRootDir);
-    const resolvedTarget = path17.resolve(rootResolved, trimmed);
-    const expectedPrefix = rootResolved.endsWith(path17.sep) ? rootResolved : `${rootResolved}${path17.sep}`;
-    if (!resolvedTarget.startsWith(expectedPrefix) || path17.dirname(resolvedTarget) !== rootResolved) {
+    const rootResolved = path16.resolve(this.backupsRootDir);
+    const resolvedTarget = path16.resolve(rootResolved, trimmed);
+    const expectedPrefix = rootResolved.endsWith(path16.sep) ? rootResolved : `${rootResolved}${path16.sep}`;
+    if (!resolvedTarget.startsWith(expectedPrefix) || path16.dirname(resolvedTarget) !== rootResolved) {
       throw new Error(
         "PATH_TRAVERSAL_BLOCKED: Caminho do backup fora do diret\xF3rio isolado autorizado."
       );
@@ -27750,10 +25026,10 @@ var ProjectBackupService = class {
   }
   resolveBackupDirectory(backupId) {
     const safeId = this.assertSafeBackupId(backupId);
-    const rootResolved = path17.resolve(this.backupsRootDir);
-    const targetDir = path17.resolve(rootResolved, safeId);
-    const expectedPrefix = rootResolved.endsWith(path17.sep) ? rootResolved : `${rootResolved}${path17.sep}`;
-    if (!targetDir.startsWith(expectedPrefix) || path17.dirname(targetDir) !== rootResolved) {
+    const rootResolved = path16.resolve(this.backupsRootDir);
+    const targetDir = path16.resolve(rootResolved, safeId);
+    const expectedPrefix = rootResolved.endsWith(path16.sep) ? rootResolved : `${rootResolved}${path16.sep}`;
+    if (!targetDir.startsWith(expectedPrefix) || path16.dirname(targetDir) !== rootResolved) {
       throw new Error(
         "PATH_TRAVERSAL_BLOCKED: Resolu\xE7\xE3o de diret\xF3rio fora do boundary de backups."
       );
@@ -27771,9 +25047,9 @@ var ProjectBackupService = class {
         `PATH_TRAVERSAL_BLOCKED: Segmento de caminho proibido no pacote (${rawRelativePath}).`
       );
     }
-    const rootResolved = path17.resolve(baseDir);
-    const absPath = path17.resolve(rootResolved, ...segments);
-    const expectedPrefix = rootResolved.endsWith(path17.sep) ? rootResolved : `${rootResolved}${path17.sep}`;
+    const rootResolved = path16.resolve(baseDir);
+    const absPath = path16.resolve(rootResolved, ...segments);
+    const expectedPrefix = rootResolved.endsWith(path16.sep) ? rootResolved : `${rootResolved}${path16.sep}`;
     if (!absPath.startsWith(expectedPrefix)) {
       throw new Error(
         `PATH_TRAVERSAL_BLOCKED: Tentativa de acesso fora do diret\xF3rio isolado (${rawRelativePath}).`
@@ -27785,9 +25061,9 @@ var ProjectBackupService = class {
     };
   }
   createBackup(project, softwares, sourceFilesMap) {
-    const backupId = `bkp-${Date.now()}-${crypto23.randomBytes(4).toString("hex")}`;
+    const backupId = `bkp-${Date.now()}-${crypto21.randomBytes(4).toString("hex")}`;
     const backupDir = this.resolveBackupDirectory(backupId);
-    fs16.mkdirSync(backupDir, { recursive: true, mode: 448 });
+    fs15.mkdirSync(backupDir, { recursive: true, mode: 448 });
     const filesSha256 = {};
     let totalSizeBytes = 0;
     let filesCount = 0;
@@ -27795,18 +25071,18 @@ var ProjectBackupService = class {
     const metaBuf = Buffer.from(metaPayload, "utf8");
     const metaRelPath = "metadata.json";
     const metaAbsPath = this.resolveSafeChildPath(backupDir, metaRelPath).absPath;
-    fs16.writeFileSync(metaAbsPath, metaBuf);
+    fs15.writeFileSync(metaAbsPath, metaBuf);
     filesSha256[metaRelPath] = this.computeSha256(metaBuf);
     totalSizeBytes += metaBuf.length;
     filesCount += 1;
     if (sourceFilesMap && typeof sourceFilesMap === "object") {
       const srcDir = this.resolveSafeChildPath(backupDir, "source_files").absPath;
-      fs16.mkdirSync(srcDir, { recursive: true, mode: 448 });
+      fs15.mkdirSync(srcDir, { recursive: true, mode: 448 });
       for (const [filePath, content] of Object.entries(sourceFilesMap)) {
         const { absPath, relPathNormalized } = this.resolveSafeChildPath(srcDir, filePath);
-        fs16.mkdirSync(path17.dirname(absPath), { recursive: true, mode: 448 });
+        fs15.mkdirSync(path16.dirname(absPath), { recursive: true, mode: 448 });
         const fileBuf = Buffer.from(String(content || ""), "utf8");
-        fs16.writeFileSync(absPath, fileBuf);
+        fs15.writeFileSync(absPath, fileBuf);
         const relKey = `source_files/${relPathNormalized}`;
         filesSha256[relKey] = this.computeSha256(fileBuf);
         totalSizeBytes += fileBuf.length;
@@ -27829,12 +25105,12 @@ var ProjectBackupService = class {
     const manifestBuf = Buffer.from(JSON.stringify(manifest, null, 2), "utf8");
     manifest.manifestSha256 = this.computeSha256(manifestBuf);
     const manifestAbsPath = this.resolveSafeChildPath(backupDir, "manifest.json").absPath;
-    fs16.writeFileSync(manifestAbsPath, JSON.stringify(manifest, null, 2), "utf8");
+    fs15.writeFileSync(manifestAbsPath, JSON.stringify(manifest, null, 2), "utf8");
     return manifest;
   }
   listBackups() {
-    if (!fs16.existsSync(this.backupsRootDir)) return [];
-    const entries = fs16.readdirSync(this.backupsRootDir, { withFileTypes: true });
+    if (!fs15.existsSync(this.backupsRootDir)) return [];
+    const entries = fs15.readdirSync(this.backupsRootDir, { withFileTypes: true });
     const summaries = [];
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
@@ -27844,10 +25120,10 @@ var ProjectBackupService = class {
       } catch {
         continue;
       }
-      const manifestPath = path17.join(backupDir, "manifest.json");
-      if (!fs16.existsSync(manifestPath)) continue;
+      const manifestPath = path16.join(backupDir, "manifest.json");
+      if (!fs15.existsSync(manifestPath)) continue;
       try {
-        const raw = fs16.readFileSync(manifestPath, "utf8");
+        const raw = fs15.readFileSync(manifestPath, "utf8");
         const m = JSON.parse(raw);
         summaries.push({
           backupId: m.backupId || entry.name,
@@ -27867,9 +25143,9 @@ var ProjectBackupService = class {
   verifyBackup(backupId) {
     this.assertSafeBackupId(backupId);
     const backupDir = this.resolveBackupDirectory(backupId);
-    const manifestPath = path17.join(backupDir, "manifest.json");
+    const manifestPath = path16.join(backupDir, "manifest.json");
     const errors = [];
-    if (!fs16.existsSync(manifestPath)) {
+    if (!fs15.existsSync(manifestPath)) {
       return {
         valid: false,
         manifest: null,
@@ -27878,7 +25154,7 @@ var ProjectBackupService = class {
     }
     let manifest;
     try {
-      manifest = JSON.parse(fs16.readFileSync(manifestPath, "utf8"));
+      manifest = JSON.parse(fs15.readFileSync(manifestPath, "utf8"));
     } catch {
       return {
         valid: false,
@@ -27898,14 +25174,14 @@ var ProjectBackupService = class {
         errors.push(err?.message || `PATH_TRAVERSAL_BLOCKED: ${relPath}`);
         continue;
       }
-      if (!fs16.existsSync(targetPath)) {
+      if (!fs15.existsSync(targetPath)) {
         errors.push(
           `FILE_MISSING: Arquivo documentado no manifesto n\xE3o foi encontrado: ${relPath}`
         );
         continue;
       }
       try {
-        const fileBuf = fs16.readFileSync(targetPath);
+        const fileBuf = fs15.readFileSync(targetPath);
         const actualHash = this.computeSha256(fileBuf);
         if (actualHash !== expectedHash) {
           errors.push(
@@ -27929,13 +25205,13 @@ var ProjectBackupService = class {
     }
     const backupDir = this.resolveBackupDirectory(backupId);
     const metaPath = this.resolveSafeChildPath(backupDir, "metadata.json").absPath;
-    if (!fs16.existsSync(metaPath)) {
+    if (!fs15.existsSync(metaPath)) {
       throw new Error("METADATA_NOT_FOUND: metadata.json ausente no backup.");
     }
-    const metaRaw = JSON.parse(fs16.readFileSync(metaPath, "utf8"));
+    const metaRaw = JSON.parse(fs15.readFileSync(metaPath, "utf8"));
     const oldProj = metaRaw.project;
     const oldSoftwares = metaRaw.softwares || [];
-    const newProjId = `proj-restored-${crypto23.randomUUID().slice(0, 8)}`;
+    const newProjId = `proj-restored-${crypto21.randomUUID().slice(0, 8)}`;
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const restoredProject = {
       ...oldProj,
@@ -27946,16 +25222,16 @@ var ProjectBackupService = class {
     };
     const restoredSoftwares = oldSoftwares.map((sw) => ({
       ...sw,
-      id: `sw-restored-${crypto23.randomUUID().slice(0, 8)}`,
+      id: `sw-restored-${crypto21.randomUUID().slice(0, 8)}`,
       projectId: newProjId,
       createdAt: now,
       updatedAt: now
     }));
     const sourceFilesMap = {};
     const srcDir = this.resolveSafeChildPath(backupDir, "source_files").absPath;
-    if (fs16.existsSync(srcDir)) {
+    if (fs15.existsSync(srcDir)) {
       const walk = (dir, baseRel = "") => {
-        const items = fs16.readdirSync(dir, { withFileTypes: true });
+        const items = fs15.readdirSync(dir, { withFileTypes: true });
         for (const item of items) {
           if (item.isSymbolicLink()) continue;
           const rel = baseRel ? `${baseRel}/${item.name}` : item.name;
@@ -27964,7 +25240,7 @@ var ProjectBackupService = class {
             walk(full, rel);
           } else if (item.isFile()) {
             try {
-              sourceFilesMap[rel] = fs16.readFileSync(full, "utf8");
+              sourceFilesMap[rel] = fs15.readFileSync(full, "utf8");
             } catch {
             }
           }
@@ -27977,14 +25253,14 @@ var ProjectBackupService = class {
   deleteBackup(backupId) {
     this.assertSafeBackupId(backupId);
     const backupDir = this.resolveBackupDirectory(backupId);
-    if (!fs16.existsSync(backupDir)) return false;
-    fs16.rmSync(backupDir, { recursive: true, force: true });
+    if (!fs15.existsSync(backupDir)) return false;
+    fs15.rmSync(backupDir, { recursive: true, force: true });
     return true;
   }
 };
 
 // src/intelligence/synchronization/ReferenceSynchronizer.ts
-import crypto24 from "node:crypto";
+import crypto22 from "node:crypto";
 function stripTrailingSlashes2(rawUrl) {
   let end = rawUrl.length;
   while (end > 0 && rawUrl.charCodeAt(end - 1) === 47) {
@@ -28092,8 +25368,8 @@ var ReferenceSynchronizer = class {
               indexedKevCveIdsCount: advisoryCache.kevCveIds.length
             }
           };
-          const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
-          this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
+          const sha256 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          this.registry.saveSnapshot({ ...updatedBase, sha256 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "OSV_DEV") {
           const queryTargets = (params?.sbomPackages || []).map((pkg) => ({
@@ -28170,8 +25446,8 @@ var ReferenceSynchronizer = class {
               usedProjectSbom: queryTargets.length > 0
             }
           };
-          const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
-          this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
+          const sha256 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          this.registry.saveSnapshot({ ...updatedBase, sha256 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "NVD_NIST") {
           const targetCves = Array.from(discoveredCves).slice(0, 5);
@@ -28219,8 +25495,8 @@ var ReferenceSynchronizer = class {
               cachedCvesCount: Object.keys(advisoryCache.nvdByCve).length
             }
           };
-          const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
-          this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
+          const sha256 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          this.registry.saveSnapshot({ ...updatedBase, sha256 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "FIRST_EPSS") {
           const queryCves = discoveredCves.size > 0 ? Array.from(discoveredCves).slice(0, 20) : ["CVE-2021-23337", "CVE-2022-23529", "CVE-2021-44228"];
@@ -28255,8 +25531,8 @@ var ReferenceSynchronizer = class {
               sampleScores: rows.slice(0, 5)
             }
           };
-          const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
-          this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
+          const sha256 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          this.registry.saveSnapshot({ ...updatedBase, sha256 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "MQR_BRIDGE_CLOUD") {
           const { json: scData, etag } = await fetchJsonWithHeaders(
@@ -28279,8 +25555,8 @@ var ReferenceSynchronizer = class {
               totalTypeScriptRules: scData?.total ?? null
             }
           };
-          const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
-          this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
+          const sha256 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          this.registry.saveSnapshot({ ...updatedBase, sha256 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "MQR_BRIDGE_SERVER") {
           const baseServer = stripTrailingSlashes2(params?.sonarServerUrl || "http://127.0.0.1:9000");
@@ -28308,8 +25584,8 @@ var ReferenceSynchronizer = class {
               serverStatus: statusData?.status || "UP"
             }
           };
-          const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
-          this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
+          const sha256 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          this.registry.saveSnapshot({ ...updatedBase, sha256 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "INTERNAL_HISTORY") {
           const updatedBase = {
@@ -28320,8 +25596,8 @@ var ReferenceSynchronizer = class {
             isOfflineFallback: false,
             lastError: null
           };
-          const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
-          this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
+          const sha256 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          this.registry.saveSnapshot({ ...updatedBase, sha256 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === "OWASP_BENCHMARK") {
           try {
@@ -28344,8 +25620,8 @@ var ReferenceSynchronizer = class {
                 publishedAt: owaspData?.published_at || nowIso
               }
             };
-            const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
-            this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
+            const sha256 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+            this.registry.saveSnapshot({ ...updatedBase, sha256 });
             liveFetchedSources.push(sourceKey);
           } catch {
             const updatedBase = {
@@ -28355,8 +25631,8 @@ var ReferenceSynchronizer = class {
               isOfflineFallback: true,
               lastError: null
             };
-            const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
-            this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
+            const sha256 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+            this.registry.saveSnapshot({ ...updatedBase, sha256 });
             cachedFallbackSources.push(sourceKey);
           }
         } else if (sourceKey === "MITRE_CWE") {
@@ -28380,8 +25656,8 @@ var ReferenceSynchronizer = class {
                 totalWeaknesses: cweData?.total_weaknesses || existing.recordsCount
               }
             };
-            const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
-            this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
+            const sha256 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+            this.registry.saveSnapshot({ ...updatedBase, sha256 });
             liveFetchedSources.push(sourceKey);
           } catch {
             const updatedBase = {
@@ -28391,8 +25667,8 @@ var ReferenceSynchronizer = class {
               isOfflineFallback: true,
               lastError: null
             };
-            const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
-            this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
+            const sha256 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+            this.registry.saveSnapshot({ ...updatedBase, sha256 });
             cachedFallbackSources.push(sourceKey);
           }
         } else if (sourceKey === "PUBLIC_REPOS_VERSIONED") {
@@ -28416,8 +25692,8 @@ var ReferenceSynchronizer = class {
                 starsCount: repoData?.stargazers_count ?? null
               }
             };
-            const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
-            this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
+            const sha256 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+            this.registry.saveSnapshot({ ...updatedBase, sha256 });
             liveFetchedSources.push(sourceKey);
           } catch {
             const updatedBase = {
@@ -28427,8 +25703,8 @@ var ReferenceSynchronizer = class {
               isOfflineFallback: true,
               lastError: null
             };
-            const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
-            this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
+            const sha256 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+            this.registry.saveSnapshot({ ...updatedBase, sha256 });
             cachedFallbackSources.push(sourceKey);
           }
         } else {
@@ -28439,8 +25715,8 @@ var ReferenceSynchronizer = class {
             isOfflineFallback: true,
             lastError: null
           };
-          const sha2562 = crypto24.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
-          this.registry.saveSnapshot({ ...updatedBase, sha256: sha2562 });
+          const sha256 = crypto22.createHash("sha256").update(JSON.stringify(updatedBase), "utf8").digest("hex");
+          this.registry.saveSnapshot({ ...updatedBase, sha256 });
           cachedFallbackSources.push(sourceKey);
         }
       } catch (err) {
@@ -28461,19 +25737,19 @@ var ReferenceSynchronizer = class {
 };
 
 // src/validation/GoldenDatasetRunner.ts
-import crypto30 from "node:crypto";
+import crypto28 from "node:crypto";
 
 // src/analyzers/AnalyzerRegistry.ts
-import crypto28 from "node:crypto";
-import fs17 from "node:fs";
+import crypto26 from "node:crypto";
+import fs16 from "node:fs";
 import os10 from "node:os";
-import path18 from "node:path";
+import path17 from "node:path";
 
 // src/analyzers/FindingNormalizer.ts
-import crypto25 from "node:crypto";
+import crypto23 from "node:crypto";
 var EvidenceCollector = class {
   static computeCanonicalHash(payload) {
-    return crypto25.createHash("sha256").update(JSON.stringify(payload), "utf8").digest("hex");
+    return crypto23.createHash("sha256").update(JSON.stringify(payload), "utf8").digest("hex");
   }
   static extractContextLines(fileContent, lineNumber, radius = 2) {
     const lines = fileContent.split(/\r?\n/);
@@ -28546,7 +25822,7 @@ var FindingNormalizer = class {
 };
 
 // src/analyzers/SecretsCatalog.ts
-import crypto26 from "node:crypto";
+import crypto24 from "node:crypto";
 var SECRETS_CATALOG_VERSION = "2026.11.0";
 var SECRETS_PATTERN_CATALOG = [
   {
@@ -28664,7 +25940,7 @@ function maskDetectedSecret(raw) {
 }
 var SecretScanner = class {
   static getCatalogMetadata() {
-    const checksumSha256 = crypto26.createHash("sha256").update(JSON.stringify(SECRETS_PATTERN_CATALOG)).digest("hex");
+    const checksumSha256 = crypto24.createHash("sha256").update(JSON.stringify(SECRETS_PATTERN_CATALOG)).digest("hex");
     return {
       version: SECRETS_CATALOG_VERSION,
       patternsCount: SECRETS_PATTERN_CATALOG.length,
@@ -29063,7 +26339,7 @@ var AnalyzerPluginManager = class _AnalyzerPluginManager {
 };
 
 // src/analyzers/SarifCodec.ts
-import crypto27 from "node:crypto";
+import crypto25 from "node:crypto";
 function severityToSarifLevel(sev) {
   if (sev === "BLOCKER" || sev === "CRITICAL" || sev === "HIGH") return "error";
   if (sev === "MEDIUM") return "warning";
@@ -29376,7 +26652,7 @@ var SarifCodec = class {
         const validationStatus = isSuppressed ? "ACCEPTED_RISK" : "UNVERIFIED";
         findings.push(
           enrichLegacyOrExternalFinding({
-            id: `sarif-imp-${scope.runId}-${rIdx}-${idx}-${crypto27.createHash("sha256").update(`${toolName}:${ruleId}:${filePath}:${startLine}:${columnStart ?? 0}`).digest("hex").slice(0, 8)}`,
+            id: `sarif-imp-${scope.runId}-${rIdx}-${idx}-${crypto25.createHash("sha256").update(`${toolName}:${ruleId}:${filePath}:${startLine}:${columnStart ?? 0}`).digest("hex").slice(0, 8)}`,
             runId: scope.runId,
             softwareId: scope.softwareId,
             softwareName: scope.softwareName,
@@ -29422,7 +26698,7 @@ var SarifCodec = class {
         payloadSha256: ""
       };
     }
-    const payloadSha256 = crypto27.createHash("sha256").update(JSON.stringify(doc)).digest("hex");
+    const payloadSha256 = crypto25.createHash("sha256").update(JSON.stringify(doc)).digest("hex");
     return {
       valid: true,
       errors: [],
@@ -29447,7 +26723,7 @@ function detectCodeQlLanguage(filesMap) {
     ruby: 0
   };
   for (const filePath of Object.keys(filesMap || {})) {
-    const ext = path18.extname(filePath).toLowerCase();
+    const ext = path17.extname(filePath).toLowerCase();
     if ([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"].includes(ext)) counts["javascript-typescript"] += 1;
     else if (ext === ".py") counts.python += 1;
     else if (ext === ".java" || ext === ".kt") counts["java-kotlin"] += 1;
@@ -29545,7 +26821,7 @@ var EXTERNAL_STATIC_ENGINES = [
       dir,
       "--no-restore",
       "/p:TreatWarningsAsErrors=false",
-      `/p:ErrorLog=${path18.join(dir, "roslyn-analysis.sarif")},version=2.1`
+      `/p:ErrorLog=${path17.join(dir, "roslyn-analysis.sarif")},version=2.1`
     ],
     outputFormat: "SARIF"
   },
@@ -29648,7 +26924,7 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
       ruleCatalogSha256: catalogSnapshot.catalogSha256,
       files: filesEntries.map(([filePath, content]) => ({
         filePath,
-        sha256: crypto28.createHash("sha256").update(content, "utf8").digest("hex")
+        sha256: crypto26.createHash("sha256").update(content, "utf8").digest("hex")
       })),
       findings: findings.map((f) => ({
         ruleId: f.originalRuleId,
@@ -29660,7 +26936,7 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
         flowSteps: (f.executionFlows || []).length
       }))
     };
-    const deterministicDigestSha256 = crypto28.createHash("sha256").update(JSON.stringify(canonicalFingerprintPayload), "utf8").digest("hex");
+    const deterministicDigestSha256 = crypto26.createHash("sha256").update(JSON.stringify(canonicalFingerprintPayload), "utf8").digest("hex");
     const execution = {
       analyzerId: "winhood-native-ast-taint",
       analyzerName: "WinHood Native Compiler AST, Taint, Secrets & IaC Engine",
@@ -29738,7 +27014,7 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
           filesProcessed: 0,
           filesFailed: 0,
           measurementState: "NOT_MEASURED",
-          rawOutputSha256: crypto28.createHash("sha256").update(`${item.id}:EMPTY_SCOPE`).digest("hex")
+          rawOutputSha256: crypto26.createHash("sha256").update(`${item.id}:EMPTY_SCOPE`).digest("hex")
         },
         findings: [],
         limitations: ["Escopo vazio para an\xE1lise externa."]
@@ -29761,7 +27037,7 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
             filesProcessed: 0,
             filesFailed: 0,
             measurementState: "NOT_MEASURED",
-            rawOutputSha256: crypto28.createHash("sha256").update(`${item.id}:NOT_INSTALLED`).digest("hex")
+            rawOutputSha256: crypto26.createHash("sha256").update(`${item.id}:NOT_INSTALLED`).digest("hex")
           },
           findings: [],
           limitations: [`Bin\xE1rio ${item.name} n\xE3o instalado no host.`]
@@ -29790,7 +27066,7 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
             filesProcessed: 0,
             filesFailed: 0,
             measurementState: "NOT_MEASURED",
-            rawOutputSha256: crypto28.createHash("sha256").update(`${item.id}:NO_DOTNET_PROJECT`).digest("hex")
+            rawOutputSha256: crypto26.createHash("sha256").update(`${item.id}:NO_DOTNET_PROJECT`).digest("hex")
           },
           findings: [],
           limitations: ["Nenhum projeto .NET (.csproj/.sln/.cs) encontrado no escopo para Roslyn."]
@@ -29881,15 +27157,15 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
           filesProcessed: 0,
           filesFailed: 0,
           measurementState: "NOT_MEASURED",
-          rawOutputSha256: crypto28.createHash("sha256").update(`${desc.id}:UNSUPPORTED_LANGUAGE`).digest("hex")
+          rawOutputSha256: crypto26.createHash("sha256").update(`${desc.id}:UNSUPPORTED_LANGUAGE`).digest("hex")
         },
         findings: [],
         limitations: ["Nenhuma linguagem suportada pelo CodeQL CLI detectada no escopo."]
       };
     }
-    const workDir = fs17.mkdtempSync(path18.join(os10.tmpdir(), "winhood-codeql-"));
-    const dbDir = path18.join(workDir, "codeql-db");
-    const sarifPath = path18.join(workDir, "codeql-results.sarif");
+    const workDir = fs16.mkdtempSync(path17.join(os10.tmpdir(), "winhood-codeql-"));
+    const dbDir = path17.join(workDir, "codeql-db");
+    const sarifPath = path17.join(workDir, "codeql-results.sarif");
     try {
       const createRes = SandboxExecutor.runSandboxedCliBinary({
         executablePath,
@@ -29920,7 +27196,7 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
           limitations: createRes.limitations.length > 0 ? createRes.limitations : [createRes.stderr]
         };
       }
-      if (createRes.exitCode !== 0 || !fs17.existsSync(dbDir)) {
+      if (createRes.exitCode !== 0 || !fs16.existsSync(dbDir)) {
         return {
           execution: {
             analyzerId: desc.id,
@@ -29949,7 +27225,7 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
         filesMap: scope.filesMap,
         timeoutMs
       });
-      const sarifContent = fs17.existsSync(sarifPath) ? fs17.readFileSync(sarifPath, "utf8") : analyzeRes.stdout;
+      const sarifContent = fs16.existsSync(sarifPath) ? fs16.readFileSync(sarifPath, "utf8") : analyzeRes.stdout;
       const parsedOut = _AnalyzerRegistry.parseExternalJsonOutputWithValidation(
         desc,
         sarifContent,
@@ -29973,14 +27249,14 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
           measurementState,
           stdout: sarifContent.slice(0, 4e3),
           stderr: analyzeRes.stderr.slice(0, 2e3),
-          rawOutputSha256: crypto28.createHash("sha256").update(sarifContent || "").digest("hex")
+          rawOutputSha256: crypto26.createHash("sha256").update(sarifContent || "").digest("hex")
         },
         findings: parsedOut.findings,
         limitations: parsedOut.validSchema ? [...analyzeRes.limitations, ...parsedOut.warnings] : [...parsedOut.errors, `CodeQL analyze n\xE3o produziu SARIF 2.1.0 v\xE1lido (exitCode=${analyzeRes.exitCode}).`]
       };
     } finally {
       try {
-        fs17.rmSync(workDir, { recursive: true, force: true });
+        fs16.rmSync(workDir, { recursive: true, force: true });
       } catch {
       }
     }
@@ -30316,7 +27592,7 @@ var AnalyzerRegistry = class _AnalyzerRegistry {
 };
 
 // src/intelligence/datasets/GoldenDatasetCorpus.ts
-import crypto29 from "node:crypto";
+import crypto27 from "node:crypto";
 var DECLARED_BENCHMARK_LANGUAGES = [
   "TypeScript",
   "JavaScript",
@@ -30329,7 +27605,7 @@ var DECLARED_BENCHMARK_LANGUAGES = [
 ];
 function computeGoldenCaseContentSha256(filesMap) {
   const orderedEntries = Object.keys(filesMap).sort().map((k) => [k, filesMap[k]]);
-  return crypto29.createHash("sha256").update(JSON.stringify(orderedEntries), "utf8").digest("hex");
+  return crypto27.createHash("sha256").update(JSON.stringify(orderedEntries), "utf8").digest("hex");
 }
 function hydrateCorpus(rawCases, datasetVersion, datasetRole) {
   return rawCases.map((item) => ({
@@ -31388,7 +28664,7 @@ var GoldenDatasetRunner = class _GoldenDatasetRunner {
     const primaryCorpus = options?.customCorpus ?? (datasetMode === "INTERNAL_HOLDOUT" ? INTERNAL_HOLDOUT_CORPUS : datasetMode === "DEVELOPMENT" ? DEVELOPMENT_DATASET_CORPUS : GOLDEN_DATASET_CORPUS);
     const primaryVersion = options?.customVersion ?? (datasetMode === "INTERNAL_HOLDOUT" ? INTERNAL_HOLDOUT_VERSION : datasetMode === "DEVELOPMENT" ? DEVELOPMENT_DATASET_VERSION : GOLDEN_DATASET_VERSION);
     const primaryOriginLabel = options?.customOriginLabel ?? (datasetMode === "INTERNAL_HOLDOUT" ? INTERNAL_HOLDOUT_ORIGIN_LABEL : datasetMode === "DEVELOPMENT" ? DEVELOPMENT_DATASET_ORIGIN_LABEL : GOLDEN_DATASET_ORIGIN_LABEL);
-    const datasetSha256 = crypto30.createHash("sha256").update(JSON.stringify(primaryCorpus), "utf8").digest("hex");
+    const datasetSha256 = crypto28.createHash("sha256").update(JSON.stringify(primaryCorpus), "utf8").digest("hex");
     const {
       cases,
       tp,
@@ -31540,7 +28816,7 @@ var GoldenDatasetRunner = class _GoldenDatasetRunner {
       byCategory,
       cases
     };
-    const reportSha256 = crypto30.createHash("sha256").update(JSON.stringify(reportBody), "utf8").digest("hex");
+    const reportSha256 = crypto28.createHash("sha256").update(JSON.stringify(reportBody), "utf8").digest("hex");
     return {
       ...reportBody,
       reportSha256
@@ -31831,16 +29107,48 @@ var PortfolioEngine = class {
 };
 
 // src/reports/PdfReportGenerator.ts
-import crypto31 from "node:crypto";
+import crypto29 from "node:crypto";
+var REPORT_CATEGORY_LABELS = {
+  functionality: "Funcionalidade",
+  code_quality: "Qualidade de C\xF3digo",
+  security: "Seguran\xE7a",
+  performance: "Desempenho",
+  architecture: "Arquitetura",
+  database: "Banco de Dados",
+  reliability: "Confiabilidade",
+  compatibility: "Compatibilidade",
+  usability: "Usabilidade & UX",
+  installation: "Instala\xE7\xE3o & SO",
+  privacy: "Privacidade & LGPD",
+  documentation: "Documenta\xE7\xE3o"
+};
+var WINHOOD_PLATFORM_VERSION = "4.4.0";
 var DEFAULT_REPORT_HMAC_KEY = process.env.WINHOOD_REPORT_HMAC_KEY || "winhood-deterministic-audit-report-hmac-key-v4";
 function sha256Hex4(input) {
-  return crypto31.createHash("sha256").update(input).digest("hex");
+  return crypto29.createHash("sha256").update(input).digest("hex");
 }
 function computeHmacSha256(payload, secret = DEFAULT_REPORT_HMAC_KEY) {
-  return crypto31.createHmac("sha256", secret).update(payload).digest("hex");
+  return crypto29.createHmac("sha256", secret).update(payload).digest("hex");
+}
+function timingSafeHexEqual(aHex, bHex) {
+  if (!aHex || !bHex || aHex.length !== bHex.length) return false;
+  try {
+    const a = Buffer.from(aHex, "hex");
+    const b = Buffer.from(bHex, "hex");
+    return a.length === b.length && a.length > 0 && crypto29.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
 }
 function escapeHtml(raw) {
   return raw.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function escapeCsvCell(value) {
+  const str = String(value ?? "");
+  if (/[",\r\n]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
 }
 function toPdfAscii(text) {
   const normalized = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^\x20-\x7e]/g, " ");
@@ -31860,10 +29168,197 @@ function wrapText(line, maxChars = 88) {
   return out;
 }
 var PdfReportGenerator = class {
+  static buildVeracityReportBlock(run) {
+    const generatedAtUtc = run.completedAt || run.startedAt || "2026-11-14T00:00:00.000Z";
+    const evidenceChain = run.evidenceChain || [];
+    const evidenceChainHash = run.signedManifest?.rootChainSha256 || run.signedManifest?.merkleOrChainRootSha256 || computeEvidenceChainHash(evidenceChain);
+    const liveVerification = evidenceChain.length > 0 || run.signedManifest ? verifyEvidenceChainAndManifest(evidenceChain, run.signedManifest) : null;
+    const evidenceChainVerified = typeof run.evidenceVerification?.valid === "boolean" ? run.evidenceVerification.valid : Boolean(liveVerification?.valid);
+    const evidenceVerificationState = run.evidenceVerification?.verificationState || liveVerification?.verificationState || run.signedManifest?.verificationState || "UNVERIFIABLE";
+    const analyzedFilesSha256 = {};
+    for (const vr of run.veracityResults || []) {
+      const hashFromExec = (run.toolExecutions || []).find(
+        (te) => te.softwareId === vr.softwareId && (te.inputArtifactsSha256 || te.sourceHash)
+      );
+      const hashFromChain = evidenceChain.find(
+        (ev) => ev.softwareId === vr.softwareId && ev.sourceHash && ev.sourceHash !== "UNVERIFIED"
+      );
+      const resolvedHash = hashFromExec?.inputArtifactsSha256 || hashFromExec?.sourceHash || hashFromChain?.sourceHash || "UNAVAILABLE";
+      analyzedFilesSha256[`${vr.softwareName} (${vr.softwareId})`] = resolvedHash;
+    }
+    if (Object.keys(analyzedFilesSha256).length === 0 && run.signedManifest?.sourceHashes?.length) {
+      run.signedManifest.sourceHashes.forEach((h, idx) => {
+        analyzedFilesSha256[`sourceArtifact_${idx + 1}`] = h;
+      });
+    }
+    const adaptersExecuted = [];
+    const adaptersUnavailable = [];
+    const seenToolKeys = /* @__PURE__ */ new Set();
+    for (const te of run.toolExecutions || []) {
+      const dedupeKey = `${te.softwareId}:${te.toolId}`;
+      if (seenToolKeys.has(dedupeKey)) continue;
+      seenToolKeys.add(dedupeKey);
+      const execStatus = te.executionStatus || (te.exitCode === 0 && te.veracityStatus !== "EMPTY_ERROR" ? "MEASURED" : te.exitCode !== null && te.exitCode !== 0 ? "FAILED" : "NOT_MEASURED");
+      const summary = {
+        toolId: te.toolId,
+        toolName: te.toolName,
+        toolVersion: te.toolVersion || "UNAVAILABLE",
+        executionStatus: execStatus,
+        scopeExecuted: te.scopeExecuted || `${te.analyzedFilesCount}/${te.eligibleFilesCount} arquivos (${te.workingDirectory || "workspace"})`,
+        durationMs: te.durationMs ?? null,
+        rawOutputSha256: te.rawOutputSha256 || null,
+        reason: te.unavailableReason || (te.failureReasons && te.failureReasons.length > 0 ? te.failureReasons.join("; ") : null)
+      };
+      if (execStatus === "MEASURED") {
+        adaptersExecuted.push(summary);
+      } else {
+        adaptersUnavailable.push(summary);
+      }
+    }
+    for (const ue of run.unifiedExecutions || []) {
+      if (ue.state === "MEASURED") {
+        adaptersExecuted.push({
+          toolId: ue.kind,
+          toolName: `WinHood Dynamic Runner (${ue.kind})`,
+          toolVersion: WINHOOD_PLATFORM_VERSION,
+          executionStatus: "MEASURED",
+          scopeExecuted: ue.summary,
+          durationMs: null,
+          rawOutputSha256: ue.evidenceHash || null,
+          reason: null
+        });
+      } else {
+        adaptersUnavailable.push({
+          toolId: ue.kind,
+          toolName: `WinHood Dynamic Runner (${ue.kind})`,
+          toolVersion: "UNAVAILABLE",
+          executionStatus: ue.state === "FAILED" ? "FAILED" : "NOT_MEASURED",
+          scopeExecuted: null,
+          durationMs: null,
+          rawOutputSha256: ue.evidenceHash || null,
+          reason: ue.summary || "Execu\xE7\xE3o din\xE2mica n\xE3o realizada neste ciclo."
+        });
+      }
+    }
+    const scoreCards = run.scoreCards || [];
+    const measuredCoverageBySoftware = scoreCards.map((sc) => {
+      const assessedCount = sc.categoryDetails ? Object.values(sc.categoryDetails).filter((cd) => cd.status === "ASSESSED").length : Object.values(sc.categoryScores || {}).filter((v) => v !== null && v !== void 0).length;
+      const enabledCount = Math.max(
+        1,
+        run.enabledCategories && run.enabledCategories.length || (sc.categoryDetails ? Object.keys(sc.categoryDetails).length : 12)
+      );
+      const fallbackCoverage = Number((assessedCount / enabledCount * 100).toFixed(1));
+      const measuredCov = typeof sc.measuredCoveragePercent === "number" ? sc.measuredCoveragePercent : typeof sc.separatedIndicators?.measuredCoveragePercent === "number" ? sc.separatedIndicators.measuredCoveragePercent : fallbackCoverage;
+      const excludedCategories = sc.weightRenormalization?.excludedCategories || (sc.categoryDetails ? Object.values(sc.categoryDetails).filter((cd) => cd.status === "NOT_ASSESSED").map((cd) => cd.category) : []);
+      const weightRenormalizationApplied = Boolean(
+        sc.weightRenormalization?.applied ?? excludedCategories.length > 0
+      );
+      const renormalizationExplanation = sc.weightRenormalization?.explanation || (weightRenormalizationApplied ? `Categorias n\xE3o medidas (${excludedCategories.join(", ")}) exclu\xEDdas da m\xE9dia ponderada com renormaliza\xE7\xE3o proporcional dos pesos restantes.` : "Todas as categorias habilitadas foram medidas com evid\xEAncia direta.");
+      return {
+        softwareId: sc.softwareId,
+        softwareName: sc.softwareName,
+        measuredCoveragePercent: measuredCov,
+        weightRenormalizationApplied,
+        excludedCategories,
+        renormalizationExplanation
+      };
+    });
+    const measuredCoveragePercent = measuredCoverageBySoftware.length > 0 ? Number(
+      (measuredCoverageBySoftware.reduce((acc, s) => acc + s.measuredCoveragePercent, 0) / measuredCoverageBySoftware.length).toFixed(1)
+    ) : 0;
+    const measuredEvidenceFacts = [];
+    const inferencesAndHeuristics = [];
+    const unmeasuredDimensions = [];
+    measuredEvidenceFacts.push(
+      `Total de achados est\xE1ticos/AST registrados com evid\xEAncia verific\xE1vel: ${(run.findings || []).length}.`
+    );
+    measuredEvidenceFacts.push(
+      `Adaptadores executados com sa\xEDda validada: ${adaptersExecuted.length} | Cadeia de evid\xEAncias SHA-256: ${evidenceChain.length} registros (Root=${evidenceChainHash.slice(0, 16)}...).`
+    );
+    for (const sc of scoreCards) {
+      const techScore = sc.separatedIndicators?.technicalScore !== null && sc.separatedIndicators?.technicalScore !== void 0 ? `${sc.separatedIndicators.technicalScore.toFixed(2)} / 5.00` : "NOT_MEASURED";
+      measuredEvidenceFacts.push(
+        `${sc.softwareName} (v${sc.softwareVersion}): Nota T\xE9cnica=${techScore} | Bugs=${sc.metricsSummary?.bugs ?? 0} | Vulnerabilidades=${sc.metricsSummary?.vulnerabilities ?? 0} | Segredos=${sc.metricsSummary?.secretsExposed ?? 0} | Cobertura Efetiva=${measuredCoverageBySoftware.find((m) => m.softwareId === sc.softwareId)?.measuredCoveragePercent ?? measuredCoveragePercent}%.`
+      );
+      if (sc.runtimeMetrics?.status === "MEASURED") {
+        measuredEvidenceFacts.push(
+          `${sc.softwareName}: Desempenho Runtime MEDIDO (P95=${Number(sc.metricsSummary?.p95LatencyMs ?? 0).toFixed(1)} ms, Throughput=${Number(sc.metricsSummary?.throughputRps ?? 0)} RPS).`
+        );
+      } else {
+        unmeasuredDimensions.push(
+          `${sc.softwareName} \u2014 Desempenho em Runtime (P50/P95/P99/RPS): NOT_MEASURED (${sc.runtimeMetrics?.reason || "Requer carga controlada via ControlledTestAndPerfRunner"}).`
+        );
+      }
+      if (sc.staticMetrics?.testCoveragePercent !== null && sc.staticMetrics?.testCoveragePercent !== void 0) {
+        measuredEvidenceFacts.push(
+          `${sc.softwareName}: Cobertura de Testes importada de relat\xF3rio real=${sc.staticMetrics.testCoveragePercent.toFixed(1)}%.`
+        );
+      } else {
+        unmeasuredDimensions.push(
+          `${sc.softwareName} \u2014 Cobertura de Testes (LCOV/JaCoCo/Cobertura): NOT_MEASURED (nenhum relat\xF3rio real de cobertura encontrado no snapshot).`
+        );
+      }
+      if (sc.categoryDetails) {
+        for (const cd of Object.values(sc.categoryDetails)) {
+          const catLabel = REPORT_CATEGORY_LABELS[cd.category] || cd.category;
+          if (cd.status === "NOT_ASSESSED" || cd.finalScore === null) {
+            unmeasuredDimensions.push(
+              `${sc.softwareName} \u2014 Categoria ${catLabel} (${cd.category}): ${cd.measurementState || "NOT_MEASURED"} (exclu\xEDda da m\xE9dia ponderada; peso original ${cd.originalWeight ?? cd.weight}% renormalizado).`
+            );
+          } else if (cd.measurementState === "INFERRED") {
+            inferencesAndHeuristics.push(
+              `${sc.softwareName} \u2014 Categoria ${catLabel} (${cd.category}): inferida estaticamente (${cd.measurementState}) com nota ${cd.finalScore.toFixed(2)} / 5.00 e peso efetivo ${cd.effectiveWeight ?? cd.weight}%.`
+            );
+          }
+        }
+      }
+      if (sc.weightRenormalization?.applied) {
+        inferencesAndHeuristics.push(
+          `${sc.softwareName} \u2014 Renormaliza\xE7\xE3o de Pesos: ${sc.weightRenormalization.explanation}`
+        );
+      }
+    }
+    if (adaptersUnavailable.length > 0) {
+      for (const ad of adaptersUnavailable) {
+        unmeasuredDimensions.push(
+          `Adaptador ${ad.toolName} (${ad.toolId}): ${ad.executionStatus} \u2014 ${ad.reason || "N\xE3o executado ou indispon\xEDvel no host."}`
+        );
+      }
+    }
+    if (inferencesAndHeuristics.length === 0) {
+      inferencesAndHeuristics.push(
+        "Nenhuma heur\xEDstica auxiliar adicional aplicada al\xE9m das regras determin\xEDsticas AST/MQR."
+      );
+    }
+    if (unmeasuredDimensions.length === 0) {
+      unmeasuredDimensions.push("Todas as dimens\xF5es habilitadas no perfil foram medidas com evid\xEAncia direta.");
+    }
+    const scopeLimitationsDisclaimer = "ESCOPO E LIMITA\xC7\xD5ES (POL\xCDTICA ANTI-MOCK): Este relat\xF3rio reflete exclusivamente evid\xEAncias efetivamente medidas no snapshot analisado. Dimens\xF5es sem execu\xE7\xE3o din\xE2mica ou ferramentas externas ausentes no host s\xE3o marcadas explicitamente como NOT_MEASURED ou UNAVAILABLE, exclu\xEDdas da m\xE9dia ponderada com renormaliza\xE7\xE3o documentada dos pesos restantes. Este laudo t\xE9cnico n\xE3o constitui certifica\xE7\xE3o regulat\xF3ria formal (ISO/SOC2/PCI-DSS).";
+    return {
+      winhoodVersion: WINHOOD_PLATFORM_VERSION,
+      generatedAtUtc,
+      evidenceChainHash,
+      evidenceChainRecordsCount: evidenceChain.length,
+      evidenceChainVerified,
+      evidenceVerificationState,
+      analyzedFilesSha256,
+      adaptersExecuted,
+      adaptersUnavailable,
+      measuredCoveragePercent,
+      measuredCoverageBySoftware,
+      epistemicSeparation: {
+        measuredEvidenceFacts,
+        inferencesAndHeuristics,
+        unmeasuredDimensions
+      },
+      scopeLimitationsDisclaimer
+    };
+  }
   static buildProvenanceFooter(run, hmacSecret = DEFAULT_REPORT_HMAC_KEY) {
     const gateEval = QualityGateEngine.evaluateFromRun(run);
     const catalogSnapshot = RuleRegistry.getCatalogSnapshot();
     const sm = run.signedManifest;
+    const veracityBlock = this.buildVeracityReportBlock(run);
     const engineVersion = sm?.engineVersion || run.algorithmVersion || RULE_ENGINE_VERSION;
     const ruleCatalogVersion = sm?.rulePackVersions?.core || catalogSnapshot.engineVersion || RULE_ENGINE_VERSION;
     const ruleCatalogSha256 = sm?.ruleCatalogSha256 || catalogSnapshot.catalogSha256;
@@ -31881,16 +29376,20 @@ var PdfReportGenerator = class {
     const artifactHashes = {
       findingsDigestSha256: findingsDigest,
       gateDecisionSha256: gateEval.gateHash,
+      evidenceChainSha256: veracityBlock.evidenceChainHash,
       ...sm?.artifactHashes || {}
     };
-    const generatedAt = run.completedAt || run.startedAt || "2026-11-14T00:00:00.000Z";
+    const generatedAt = veracityBlock.generatedAtUtc;
     const canonicalPayload = JSON.stringify({
+      winhoodVersion: WINHOOD_PLATFORM_VERSION,
       runId: run.id,
       projectName: run.projectName,
       engineVersion,
       ruleCatalogVersion,
       ruleCatalogSha256,
       codeHashSha256,
+      evidenceChainHash: veracityBlock.evidenceChainHash,
+      measuredCoveragePercent: veracityBlock.measuredCoveragePercent,
       artifactHashes,
       appliedGateId: gateEval.gateId,
       appliedGateVersion: gateEval.gateVersion,
@@ -31905,10 +29404,13 @@ var PdfReportGenerator = class {
       hmacSecret
     );
     return {
+      winhoodVersion: WINHOOD_PLATFORM_VERSION,
       engineVersion,
       ruleCatalogVersion,
       ruleCatalogSha256,
       codeHashSha256,
+      evidenceChainHash: veracityBlock.evidenceChainHash,
+      measuredCoveragePercent: veracityBlock.measuredCoveragePercent,
       artifactHashes,
       appliedGateId: gateEval.gateId,
       appliedGateVersion: gateEval.gateVersion,
@@ -31916,12 +29418,13 @@ var PdfReportGenerator = class {
       reportContentSha256,
       hmacAlgorithm: "HMAC-SHA256",
       hmacSignature,
-      generatedAt
+      generatedAt,
+      veracityBlock
     };
   }
   /**
    * Verifies the cryptographic integrity (Report SHA-256 and HMAC-SHA256 signature)
-   * embedded inside a generated PDF buffer.
+   * embedded inside a generated PDF buffer using constant-time comparison.
    */
   static verifyPdfIntegrity(pdfBuffer, hmacSecret = DEFAULT_REPORT_HMAC_KEY) {
     const raw = pdfBuffer.toString("latin1");
@@ -31936,6 +29439,8 @@ var PdfReportGenerator = class {
     const ruleCatalogSha256 = extract("Provenance-RuleCatalog-SHA256");
     const codeHashSha256 = extract("Provenance-Code-SHA256");
     const appliedGateHashSha256 = extract("Provenance-Gate-SHA256");
+    const evidenceChainHash = extract("Provenance-EvidenceChain-SHA256");
+    const winhoodVersion = extract("Provenance-WinHood-Version");
     if (!reportContentSha256 || !hmacSignature || !engineVersion || !ruleCatalogSha256 || !codeHashSha256 || !appliedGateHashSha256) {
       return {
         valid: false,
@@ -31944,33 +29449,64 @@ var PdfReportGenerator = class {
         engineVersion,
         ruleCatalogSha256,
         codeHashSha256,
-        appliedGateHashSha256
+        appliedGateHashSha256,
+        evidenceChainHash,
+        winhoodVersion
       };
     }
     const expectedHmac = computeHmacSha256(
       `${reportContentSha256}:${engineVersion}:${ruleCatalogSha256}:${codeHashSha256}:${appliedGateHashSha256}`,
       hmacSecret
     );
+    const hmacMatched = timingSafeHexEqual(expectedHmac, hmacSignature);
     return {
-      valid: raw.startsWith("%PDF-1.4") && expectedHmac === hmacSignature && reportContentSha256.length === 64,
+      valid: raw.startsWith("%PDF-1.4") && hmacMatched && reportContentSha256.length === 64,
       reportContentSha256,
       hmacSignature,
       engineVersion,
       ruleCatalogSha256,
       codeHashSha256,
-      appliedGateHashSha256
+      appliedGateHashSha256,
+      evidenceChainHash,
+      winhoodVersion
     };
   }
   /**
    * Generates a self-contained HTML5 report (100% inline CSS, zero external requests)
-   * with executive summary, findings table, quality gate state, evidence chain, and provenance footer.
+   * with full parity against PDF/JSON/CSV/SARIF: executive summary, scorecards without
+   * fabricated zeroes, 3-way epistemic separation, adapters executed vs unavailable,
+   * findings table, evidence chain, and cryptographic provenance footer.
    */
   static generateSelfContainedHtml(run, hmacSecret = DEFAULT_REPORT_HMAC_KEY) {
     const gateEval = QualityGateEngine.evaluateFromRun(run);
     const provenance = this.buildProvenanceFooter(run, hmacSecret);
+    const vb = provenance.veracityBlock;
     const findings = run.findings || [];
     const chain = run.evidenceChain || [];
     const decisionColor = gateEval.decision === "APPROVED" ? "#10b981" : gateEval.decision === "APPROVED_WITH_RESERVATIONS" ? "#f59e0b" : gateEval.decision === "INCONCLUSIVE" ? "#94a3b8" : "#ef4444";
+    const scoreCardRows = (run.scoreCards || []).map((sc) => {
+      const covInfo = vb.measuredCoverageBySoftware.find((m) => m.softwareId === sc.softwareId);
+      const scoreLabel = sc.separatedIndicators?.technicalScore !== null && sc.separatedIndicators?.technicalScore !== void 0 ? `${sc.separatedIndicators.technicalScore.toFixed(2)} / 5.00` : "NOT_MEASURED";
+      const perfLabel = sc.runtimeMetrics?.status === "MEASURED" ? `P95 ${Number(sc.metricsSummary?.p95LatencyMs ?? 0).toFixed(1)} ms (${Number(sc.metricsSummary?.throughputRps ?? 0)} RPS)` : "NOT_MEASURED (An\xE1lise Est\xE1tica)";
+      const catBreakdown = sc.categoryDetails ? Object.values(sc.categoryDetails).map((cd) => {
+        const scoreStr = cd.status === "ASSESSED" && cd.finalScore !== null ? `${cd.finalScore.toFixed(2)} / 5.00` : cd.measurementState || "NOT_MEASURED";
+        return `<li><code>${escapeHtml(cd.category)}</code> [${escapeHtml(cd.status)}]: <strong>${escapeHtml(scoreStr)}</strong> (Peso Original: ${cd.originalWeight ?? cd.weight}% \u2192 Efetivo: ${cd.effectiveWeight ?? cd.weight}%)</li>`;
+      }).join("\n") : "<li>Sem detalhamento categ\xF3rico dispon\xEDvel.</li>";
+      return `<div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px;">
+            <h3 style="margin:0;color:#f8fafc;">${escapeHtml(sc.softwareName)} (v${escapeHtml(sc.softwareVersion)})</h3>
+            <strong style="color:#38bdf8;font-size:16px;">${escapeHtml(scoreLabel)}</strong>
+          </div>
+          <div style="font-size:12px;color:#94a3b8;margin:6px 0 10px 0;">
+            Classifica\xE7\xE3o: <strong>${escapeHtml(sc.classificationLabel)}</strong> |
+            Quality Gate: <strong>${escapeHtml(sc.separatedIndicators?.qualityGateDecision || sc.qualityGate?.status || "INCONCLUSIVE")}</strong> |
+            Cobertura de Medi\xE7\xE3o Efetiva: <strong>${covInfo?.measuredCoveragePercent ?? vb.measuredCoveragePercent}%</strong> |
+            Desempenho Runtime: <strong>${escapeHtml(perfLabel)}</strong>
+          </div>
+          ${covInfo?.weightRenormalizationApplied ? `<div style="font-size:12px;color:#fbbf24;margin-bottom:8px;">Renormaliza\xE7\xE3o de Pesos Aplicada: ${escapeHtml(covInfo.renormalizationExplanation)}</div>` : ""}
+          <ul style="margin:6px 0 0 18px;font-size:12px;">${catBreakdown}</ul>
+        </div>`;
+    }).join("\n");
     const findingsRows = findings.length === 0 ? '<tr><td colspan="6" style="text-align:center;color:#94a3b8;">Nenhum apontamento detectado no escopo analisado.</td></tr>' : findings.slice(0, 100).map(
       (f) => `<tr>
           <td><span class="sev sev-${escapeHtml(f.severity.toLowerCase())}">${escapeHtml(f.severity)}</span></td>
@@ -31985,10 +29521,20 @@ var PdfReportGenerator = class {
       (b, idx) => `<tr>
           <td>#${idx + 1}</td>
           <td>${escapeHtml(b.title || b.toolName || "STEP")}</td>
-          <td><code>${escapeHtml((b.previousHash || "GENESIS").slice(0, 20))}...</code></td>
+          <td><code>${escapeHtml((b.previousRecordSha256 || "GENESIS").slice(0, 20))}...</code></td>
           <td><code>${escapeHtml((b.sha256 || "").slice(0, 32))}...</code></td>
         </tr>`
     ).join("\n");
+    const adaptersTableRows = [...vb.adaptersExecuted, ...vb.adaptersUnavailable].map(
+      (ad) => `<tr>
+        <td><code>${escapeHtml(ad.toolId)}</code></td>
+        <td>${escapeHtml(ad.toolName)}</td>
+        <td><code>${escapeHtml(ad.toolVersion)}</code></td>
+        <td><strong>${escapeHtml(ad.executionStatus)}</strong></td>
+        <td>${escapeHtml(ad.scopeExecuted || ad.reason || "N/A")}</td>
+      </tr>`
+    ).join("\n");
+    const analyzedFilesRows = Object.entries(vb.analyzedFilesSha256).map(([k, v]) => `<li><strong>${escapeHtml(k)}:</strong> <code>${escapeHtml(v)}</code></li>`).join("\n");
     const artifactRows = Object.entries(provenance.artifactHashes).map(
       ([k, v]) => `<li><strong>${escapeHtml(k)}:</strong> <code>${escapeHtml(v)}</code></li>`
     ).join("\n");
@@ -31997,7 +29543,7 @@ var PdfReportGenerator = class {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>WinHood Audit Report \u2014 ${escapeHtml(run.projectName)} (${escapeHtml(run.id)})</title>
+  <title>WinHood Audit Report v${escapeHtml(vb.winhoodVersion)} \u2014 ${escapeHtml(run.projectName)} (${escapeHtml(run.id)})</title>
   <style>
     :root { color-scheme: dark; }
     * { box-sizing: border-box; }
@@ -32047,6 +29593,22 @@ var PdfReportGenerator = class {
       padding: 18px;
       margin-bottom: 16px;
     }
+    .epistemic-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 16px;
+    }
+    .epistemic-box {
+      background: #0b1220;
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+      padding: 14px;
+      font-size: 12px;
+    }
+    .epistemic-box h3 { margin: 0 0 8px 0; font-size: 13px; }
+    .ep-fact h3 { color: #10b981; }
+    .ep-heur h3 { color: #f59e0b; }
+    .ep-unm h3 { color: #f87171; }
     table {
       width: 100%;
       border-collapse: collapse;
@@ -32096,9 +29658,9 @@ var PdfReportGenerator = class {
   <div class="container">
     <header>
       <div>
-        <h1>WINHOOD BENCHMARKING \u2014 RELAT\xD3RIO DE AUDITORIA INDEPENDENTE (MODO MQR)</h1>
-        <div>Execu\xE7\xE3o: <code>${escapeHtml(run.id)}</code> | Projeto: <strong>${escapeHtml(run.projectName)}</strong></div>
-        <div>In\xEDcio: ${escapeHtml(run.startedAt)} | Conclus\xE3o: ${escapeHtml(run.completedAt || provenance.generatedAt)}</div>
+        <h1>WINHOOD BENCHMARKING v${escapeHtml(vb.winhoodVersion)} \u2014 RELAT\xD3RIO DE AUDITORIA INDEPENDENTE (MODO MQR)</h1>
+        <div>Execu\xE7\xE3o: <code>${escapeHtml(run.id)}</code> | Projeto: <strong>${escapeHtml(run.projectName)}</strong> | Cobertura Efetiva: <strong>${vb.measuredCoveragePercent}%</strong></div>
+        <div>Timestamp UTC: <code>${escapeHtml(vb.generatedAtUtc)}</code> | Evidence Chain Hash: <code>${escapeHtml(vb.evidenceChainHash)}</code></div>
       </div>
       <div>
         <div class="gate-badge">QUALITY GATE: ${escapeHtml(gateEval.decision)} (Exit Code ${gateEval.cliExitCode})</div>
@@ -32106,14 +29668,33 @@ var PdfReportGenerator = class {
     </header>
 
     <section>
-      <h2>1. Sum\xE1rio Executivo</h2>
+      <h2>1. Sum\xE1rio Executivo &amp; ScoreCards</h2>
       <div class="card">
         <p>${escapeHtml(run.executiveSummary || "Auditoria est\xE1tica, fluxo de dados (Taint Analysis), segredos, IaC e composi\xE7\xE3o de software (SCA/SBOM) conclu\xEDda de forma determin\xEDstica.")}</p>
+      </div>
+      ${scoreCardRows}
+    </section>
+
+    <section>
+      <h2>2. Separa\xE7\xE3o Epist\xEAmica (Evid\xEAncia Medida vs. Heur\xEDstica vs. N\xE3o Medido)</h2>
+      <div class="epistemic-grid">
+        <div class="epistemic-box ep-fact">
+          <h3>Evid\xEAncia Medida (Fato)</h3>
+          <ul>${vb.epistemicSeparation.measuredEvidenceFacts.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+        </div>
+        <div class="epistemic-box ep-heur">
+          <h3>Infer\xEAncia / Heur\xEDstica</h3>
+          <ul>${vb.epistemicSeparation.inferencesAndHeuristics.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+        </div>
+        <div class="epistemic-box ep-unm">
+          <h3>N\xE3o Medido (NOT_MEASURED / UNAVAILABLE)</h3>
+          <ul>${vb.epistemicSeparation.unmeasuredDimensions.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+        </div>
       </div>
     </section>
 
     <section>
-      <h2>2. Estado do Quality Gate (${escapeHtml(gateEval.gateName)} \u2014 v${escapeHtml(gateEval.gateVersion)})</h2>
+      <h2>3. Estado do Quality Gate (${escapeHtml(gateEval.gateName)} \u2014 v${escapeHtml(gateEval.gateVersion)})</h2>
       <table>
         <thead>
           <tr>
@@ -32137,7 +29718,25 @@ var PdfReportGenerator = class {
     </section>
 
     <section>
-      <h2>3. Tabela de Achados (${findings.length} total)</h2>
+      <h2>4. Adaptadores Executados vs. Indispon\xEDveis (${vb.adaptersExecuted.length} executados / ${vb.adaptersUnavailable.length} indispon\xEDveis)</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Adapter ID</th>
+            <th>Ferramenta</th>
+            <th>Vers\xE3o Real</th>
+            <th>Status</th>
+            <th>Escopo / Motivo</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${adaptersTableRows || '<tr><td colspan="5" style="text-align:center;color:#94a3b8;">Nenhum adaptador registrado nesta execu\xE7\xE3o.</td></tr>'}
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>5. Tabela de Achados (${findings.length} total)</h2>
       <table>
         <thead>
           <tr>
@@ -32156,7 +29755,7 @@ var PdfReportGenerator = class {
     </section>
 
     <section>
-      <h2>4. Trilha Criptogr\xE1fica de Evid\xEAncia</h2>
+      <h2>6. Trilha Criptogr\xE1fica de Evid\xEAncia</h2>
       <table>
         <thead>
           <tr>
@@ -32173,15 +29772,20 @@ var PdfReportGenerator = class {
     </section>
 
     <footer class="provenance-footer" id="winhood-provenance-footer">
-      <strong>RODAP\xC9 DE PROVENI\xCANCIA CRIPTOGR\xC1FICA E ASSINATURA DO RELAT\xD3RIO</strong>
+      <strong>BLOCO DE PROVENI\xCANCIA, VERACIDADE E ASSINATURA CRIPTOGR\xC1FICA DO RELAT\xD3RIO</strong>
+      <p>${escapeHtml(vb.scopeLimitationsDisclaimer)}</p>
       <ul>
+        <li><strong>Vers\xE3o do WinHood:</strong> <code>${escapeHtml(provenance.winhoodVersion)}</code> | <strong>Timestamp UTC:</strong> <code>${escapeHtml(provenance.generatedAt)}</code></li>
         <li><strong>Vers\xE3o do Motor (Engine Version):</strong> <code>${escapeHtml(provenance.engineVersion)}</code></li>
+        <li><strong>Cobertura de Medi\xE7\xE3o Efetiva (measuredCoveragePercent):</strong> <code>${provenance.measuredCoveragePercent}%</code></li>
+        <li><strong>Hash da Cadeia de Evid\xEAncias (evidenceChainHash):</strong> <code>${escapeHtml(provenance.evidenceChainHash)}</code> (Estado: <code>${escapeHtml(vb.evidenceVerificationState)}</code> | Verificado: <code>${String(vb.evidenceChainVerified)}</code>)</li>
         <li><strong>Vers\xE3o do Cat\xE1logo de Regras:</strong> <code>${escapeHtml(provenance.ruleCatalogVersion)}</code> (SHA-256: <code>${escapeHtml(provenance.ruleCatalogSha256)}</code>)</li>
         <li><strong>Hash do C\xF3digo Analisado (Code SHA-256):</strong> <code>${escapeHtml(provenance.codeHashSha256)}</code></li>
         <li><strong>Vers\xE3o do Quality Gate Aplicado:</strong> <code>${escapeHtml(provenance.appliedGateId)} v${escapeHtml(provenance.appliedGateVersion)}</code> (Gate SHA-256: <code>${escapeHtml(provenance.appliedGateHashSha256)}</code>)</li>
         <li><strong>Hash Can\xF4nico do Relat\xF3rio (Report SHA-256):</strong> <code>${escapeHtml(provenance.reportContentSha256)}</code></li>
         <li><strong>Assinatura Criptogr\xE1fica (${escapeHtml(provenance.hmacAlgorithm)}):</strong> <code>${escapeHtml(provenance.hmacSignature)}</code></li>
       </ul>
+      ${analyzedFilesRows ? `<div><strong>SHA-256 dos Pacotes/Arquivos Analisados:</strong></div><ul>${analyzedFilesRows}</ul>` : ""}
       <div><strong>Hashes dos Artefatos Vinculados:</strong></div>
       <ul>
         ${artifactRows}
@@ -32193,12 +29797,13 @@ var PdfReportGenerator = class {
   }
   /**
    * Generates a deterministic, audit-grade binary PDF 1.4 document (%PDF-1.4)
-   * with valid byte-accurate xref offsets, multi-page pagination, provenance footer,
-   * embedded Report SHA-256, and HMAC-SHA256 signature.
+   * with valid byte-accurate xref offsets, multi-page pagination, Veracity & Provenance
+   * Block, 3-way epistemic separation, embedded Report SHA-256, and HMAC-SHA256 signature.
    */
   static generateFromRun(run, hmacSecret = DEFAULT_REPORT_HMAC_KEY) {
     const gateEval = QualityGateEngine.evaluateFromRun(run);
     const provenance = this.buildProvenanceFooter(run, hmacSecret);
+    const vb = provenance.veracityBlock;
     const compliance = ComplianceMapper.buildTraceabilityMatrix({
       runId: run.id,
       findings: run.findings || [],
@@ -32215,9 +29820,10 @@ var PdfReportGenerator = class {
         rawLines.push({ text: w, bold, size });
       }
     };
-    pushLine("WINHOOD INDEPENDENT SOFTWARE AUDIT & BENCHMARKING REPORT (MQR MODE)", true, 14);
+    pushLine(`WINHOOD INDEPENDENT SOFTWARE AUDIT & BENCHMARKING REPORT (MQR MODE) v${vb.winhoodVersion}`, true, 13);
     pushLine(`Run ID: ${run.id} | Project: ${run.projectName} | Algorithm: ${run.algorithmVersion}`);
-    pushLine(`Started: ${run.startedAt} | Completed: ${run.completedAt || provenance.generatedAt}`);
+    pushLine(`Timestamp UTC: ${vb.generatedAtUtc} | Measured Coverage: ${vb.measuredCoveragePercent}%`);
+    pushLine(`Evidence Chain Hash: ${vb.evidenceChainHash}`);
     pushSection("1. QUALITY GATE DECISION & VERSIONING");
     pushLine(`Gate: ${gateEval.gateName} (${gateEval.gateId} v${gateEval.gateVersion})`, true);
     pushLine(`Decision: ${gateEval.decision} | CLI Exit Code: ${gateEval.cliExitCode}`);
@@ -32230,39 +29836,62 @@ var PdfReportGenerator = class {
     pushSection("2. EXECUTIVE SUMMARY & SCORECARDS");
     pushLine(run.executiveSummary || "No executive summary provided.");
     for (const sc of run.scoreCards || []) {
+      const covInfo = vb.measuredCoverageBySoftware.find((m) => m.softwareId === sc.softwareId);
       const scoreStr = sc.separatedIndicators?.technicalScore !== null && sc.separatedIndicators?.technicalScore !== void 0 ? `${sc.separatedIndicators.technicalScore.toFixed(2)} / 5.00` : "NOT_MEASURED";
       pushLine(
-        `- ${sc.softwareName} (${sc.softwareVersion}): Score=${scoreStr} | ScopeCov=${sc.separatedIndicators?.scopeCoveragePercent ?? 0}% | Confidence=${sc.separatedIndicators?.evidenceConfidence ?? "LOW"} | Vulns=${sc.metricsSummary?.vulnerabilities ?? 0} | Secrets=${sc.metricsSummary?.secretsExposed ?? 0}`
+        `- ${sc.softwareName} (${sc.softwareVersion}): Score=${scoreStr} | MeasuredCov=${covInfo?.measuredCoveragePercent ?? vb.measuredCoveragePercent}% | ScopeCov=${sc.separatedIndicators?.scopeCoveragePercent ?? 0}% | Confidence=${sc.separatedIndicators?.evidenceConfidence ?? "LOW"} | Vulns=${sc.metricsSummary?.vulnerabilities ?? 0} | Secrets=${sc.metricsSummary?.secretsExposed ?? 0}`
       );
+      if (covInfo?.weightRenormalizationApplied) {
+        pushLine(`  Weight Renormalization: ${covInfo.renormalizationExplanation}`);
+      }
     }
-    pushSection("3. SIGNED EVIDENCE PROVENANCE & ARTIFACT HASHES");
+    pushSection("3. EPISTEMIC SEPARATION (MEASURED FACT vs HEURISTIC vs NOT_MEASURED)");
+    pushLine("3.1 Evidencia Medida (Fato):", true);
+    for (const fact of vb.epistemicSeparation.measuredEvidenceFacts.slice(0, 12)) {
+      pushLine(`  [FACT] ${fact}`);
+    }
+    pushLine("3.2 Inferencia / Heuristica:", true);
+    for (const heur of vb.epistemicSeparation.inferencesAndHeuristics.slice(0, 12)) {
+      pushLine(`  [HEURISTIC] ${heur}`);
+    }
+    pushLine("3.3 Nao Medido (NOT_MEASURED / UNAVAILABLE):", true);
+    for (const unm of vb.epistemicSeparation.unmeasuredDimensions.slice(0, 14)) {
+      pushLine(`  [NOT_MEASURED] ${unm}`);
+    }
+    pushSection("4. ADAPTERS EXECUTED VS UNAVAILABLE & ANALYZED ARTIFACTS SHA-256");
+    pushLine(
+      `Executed Adapters: ${vb.adaptersExecuted.length} | Unavailable/Not Measured Adapters: ${vb.adaptersUnavailable.length}`,
+      true
+    );
+    for (const ad of vb.adaptersExecuted.slice(0, 15)) {
+      pushLine(`  [EXECUTED:${ad.executionStatus}] ${ad.toolId} (${ad.toolName} v${ad.toolVersion})`);
+    }
+    for (const ad of vb.adaptersUnavailable.slice(0, 15)) {
+      pushLine(`  [${ad.executionStatus}] ${ad.toolId} (${ad.toolName}): ${ad.reason || "UNAVAILABLE"}`);
+    }
+    for (const [k, v] of Object.entries(vb.analyzedFilesSha256)) {
+      pushLine(`  Analyzed Artifact [${k}]: ${v}`);
+    }
+    pushSection("5. SIGNED EVIDENCE PROVENANCE & COMPLIANCE TRACEABILITY");
+    pushLine(`Scope & Limitations: ${vb.scopeLimitationsDisclaimer}`);
     if (run.signedManifest) {
       const sm = run.signedManifest;
       pushLine(`Manifest ID: ${sm.manifestId} | Signature Algorithm: ${sm.signatureAlgorithm || "HMAC-SHA256"}`);
-      pushLine(`Verification State: ${run.evidenceVerification?.verificationState || sm.verificationState} | Valid: ${Boolean(run.evidenceVerification?.valid)}`);
-      pushLine(`Engine Version: ${sm.engineVersion || run.algorithmVersion} | Rule Catalog SHA-256: ${sm.ruleCatalogSha256 || provenance.ruleCatalogSha256}`);
+      pushLine(`Verification State: ${vb.evidenceVerificationState} | Valid: ${vb.evidenceChainVerified}`);
       pushLine(`Root Chain SHA-256: ${sm.merkleOrChainRootSha256}`);
       pushLine(`Manifest Payload SHA-256: ${sm.manifestPayloadSha256}`);
-      if (sm.artifactHashes) {
-        for (const [k, v] of Object.entries(sm.artifactHashes)) {
-          pushLine(`  Artifact [${k}]: ${v}`);
-        }
-      }
-    } else {
-      pushLine("Signed provenance computed directly from deterministic run state.");
     }
-    pushSection("4. COMPLIANCE TRACEABILITY MATRIX (NON-CERTIFICATION)");
     pushLine(compliance.disclaimer);
     for (const [fw, entries] of Object.entries(compliance.byFramework)) {
       const detected = entries.filter((e) => e.findingsCount > 0);
       pushLine(`Framework ${fw}: ${detected.length}/${entries.length} controls with findings in analyzed scope`, true);
-      for (const e of detected.slice(0, 8)) {
+      for (const e of detected.slice(0, 6)) {
         pushLine(
           `  - ${e.controlId} (${e.controlTitle}): ${e.findingsCount} finding(s), CWEs=[${e.matchedCwes.join(", ")}]`
         );
       }
     }
-    pushSection("5. FINDINGS SUMMARY (TOP 30 BY SEVERITY)");
+    pushSection("6. FINDINGS SUMMARY (TOP 30 BY SEVERITY)");
     const sevOrder = {
       BLOCKER: 0,
       CRITICAL: 1,
@@ -32281,8 +29910,11 @@ var PdfReportGenerator = class {
         );
       }
     }
-    pushSection("6. PROVENANCE FOOTER & CRYPTOGRAPHIC REPORT SIGNATURE");
+    pushSection("7. PROVENANCE FOOTER & CRYPTOGRAPHIC REPORT SIGNATURE");
+    rawLines.push({ text: `Provenance-WinHood-Version: ${provenance.winhoodVersion}`, bold: true, size: 10 });
     rawLines.push({ text: `Provenance-Engine-Version: ${provenance.engineVersion}`, bold: true, size: 10 });
+    rawLines.push({ text: `Provenance-Measured-Coverage-Percent: ${provenance.measuredCoveragePercent}`, size: 10 });
+    rawLines.push({ text: `Provenance-EvidenceChain-SHA256: ${provenance.evidenceChainHash}`, bold: true, size: 10 });
     rawLines.push({ text: `Provenance-RuleCatalog-Version: ${provenance.ruleCatalogVersion}`, size: 10 });
     rawLines.push({ text: `Provenance-RuleCatalog-SHA256: ${provenance.ruleCatalogSha256}`, size: 10 });
     rawLines.push({ text: `Provenance-Code-SHA256: ${provenance.codeHashSha256}`, size: 10 });
@@ -32324,7 +29956,7 @@ var PdfReportGenerator = class {
         if (currentY < 45) break;
       }
       streamLines.push(
-        `(${toPdfAscii(`WinHood Signed Audit Report - Page ${p + 1}/${pages.length} | SHA256:${provenance.reportContentSha256.slice(0, 16)}`)}) Tj`
+        `(${toPdfAscii(`WinHood v${WINHOOD_PLATFORM_VERSION} Signed Audit Report - Page ${p + 1}/${pages.length} | SHA256:${provenance.reportContentSha256.slice(0, 16)}`)}) Tj`
       );
       streamLines.push("ET");
       const streamContent = streamLines.join("\n");
@@ -32383,8 +30015,142 @@ ${xrefOffset}
     chunks.push(xrefLines.join(""), trailer);
     return Buffer.from(chunks.join(""), "latin1");
   }
+  static generateCsvReport(run, hmacSecret = DEFAULT_REPORT_HMAC_KEY) {
+    const provenance = this.buildProvenanceFooter(run, hmacSecret);
+    const vb = provenance.veracityBlock;
+    const lines = [
+      `# WinHoodVersion=${vb.winhoodVersion},RunId=${run.id},GeneratedAtUTC=${vb.generatedAtUtc},MeasuredCoveragePercent=${vb.measuredCoveragePercent},EvidenceChainHash=${vb.evidenceChainHash},EvidenceVerified=${vb.evidenceChainVerified},ReportSHA256=${provenance.reportContentSha256},ReportHMAC=${provenance.hmacSignature}`,
+      `# AdaptersExecuted=${vb.adaptersExecuted.map((a) => `${a.toolId}@${a.toolVersion}`).join(";") || "NONE"},AdaptersUnavailable=${vb.adaptersUnavailable.map((a) => `${a.toolId}:${a.executionStatus}`).join(";") || "NONE"}`,
+      `# ScopeDisclaimer=${vb.scopeLimitationsDisclaimer}`
+    ];
+    const headers = [
+      "RecordType",
+      "EpistemicClass",
+      "FindingID",
+      "Software",
+      "Version",
+      "Category",
+      "Severity",
+      "ValidationStatus",
+      "Tool",
+      "RuleID",
+      "File",
+      "Line",
+      "CWE",
+      "CVE",
+      "CVSS",
+      "MeasuredCoveragePercent",
+      "EvidenceSHA256",
+      "Title",
+      "Details"
+    ];
+    lines.push(headers.join(","));
+    for (const sc of run.scoreCards || []) {
+      const covInfo = vb.measuredCoverageBySoftware.find((m) => m.softwareId === sc.softwareId);
+      const scoreVal = sc.separatedIndicators?.technicalScore !== null && sc.separatedIndicators?.technicalScore !== void 0 ? sc.separatedIndicators.technicalScore.toFixed(2) : "NOT_MEASURED";
+      lines.push(
+        [
+          "SCORECARD",
+          "MEASURED_FACT",
+          `score-${sc.softwareId}`,
+          sc.softwareName,
+          sc.softwareVersion,
+          "OVERALL",
+          "INFO",
+          sc.separatedIndicators?.qualityGateDecision || sc.qualityGate?.status || "INCONCLUSIVE",
+          "WinHood Scoring Engine",
+          run.algorithmVersion,
+          "SCORECARD",
+          0,
+          "",
+          "",
+          scoreVal,
+          covInfo?.measuredCoveragePercent ?? vb.measuredCoveragePercent,
+          vb.evidenceChainHash,
+          `OverallScore=${scoreVal}/5.00 (${sc.classificationLabel})`,
+          covInfo?.renormalizationExplanation || ""
+        ].map(escapeCsvCell).join(",")
+      );
+    }
+    for (const f of run.findings || []) {
+      lines.push(
+        [
+          "FINDING",
+          "MEASURED_FACT",
+          f.id,
+          f.softwareName,
+          f.softwareVersion,
+          f.category,
+          f.severity,
+          f.validationStatus,
+          f.toolName,
+          f.originalRuleId,
+          f.filePath,
+          f.lineNumber,
+          f.cwe || "",
+          f.cve || "",
+          f.cvss ?? "",
+          vb.measuredCoveragePercent,
+          f.evidenceSha256,
+          f.title,
+          f.whyItIsAnIssue || f.description || ""
+        ].map(escapeCsvCell).join(",")
+      );
+    }
+    for (const heur of vb.epistemicSeparation.inferencesAndHeuristics) {
+      lines.push(
+        [
+          "EPISTEMIC_NOTE",
+          "INFERENCE_HEURISTIC",
+          "",
+          run.projectName,
+          vb.winhoodVersion,
+          "HEURISTIC",
+          "INFO",
+          "DOCUMENTED",
+          "WinHood Veracity Engine",
+          "EPISTEMIC_HEURISTIC",
+          "",
+          0,
+          "",
+          "",
+          "",
+          vb.measuredCoveragePercent,
+          vb.evidenceChainHash,
+          "Infer\xEAncia / Heur\xEDstica",
+          heur
+        ].map(escapeCsvCell).join(",")
+      );
+    }
+    for (const unm of vb.epistemicSeparation.unmeasuredDimensions) {
+      lines.push(
+        [
+          "EPISTEMIC_NOTE",
+          "NOT_MEASURED_OR_UNAVAILABLE",
+          "",
+          run.projectName,
+          vb.winhoodVersion,
+          "UNMEASURED",
+          "INFO",
+          "NOT_MEASURED",
+          "WinHood Veracity Engine",
+          "EPISTEMIC_UNMEASURED",
+          "",
+          0,
+          "",
+          "",
+          "",
+          vb.measuredCoveragePercent,
+          vb.evidenceChainHash,
+          "N\xE3o Medido (NOT_MEASURED / UNAVAILABLE)",
+          unm
+        ].map(escapeCsvCell).join(",")
+      );
+    }
+    return lines.join("\n");
+  }
   /**
-   * Unified multi-format ReportExporter supporting pdf, html, sarif, and json.
+   * Unified multi-format ReportExporter supporting pdf, html, sarif, json, and csv.
    */
   static exportReport(run, format, hmacSecret = DEFAULT_REPORT_HMAC_KEY) {
     const provenance = this.buildProvenanceFooter(run, hmacSecret);
@@ -32401,6 +30167,14 @@ ${xrefOffset}
         provenance
       };
     }
+    if (format === "csv") {
+      const csv = this.generateCsvReport(run, hmacSecret);
+      return {
+        contentType: "text/csv; charset=utf-8",
+        buffer: Buffer.from(csv, "utf8"),
+        provenance
+      };
+    }
     if (format === "sarif") {
       const sarif = SarifCodec.exportSarif210(run.findings || [], {
         toolVersion: provenance.engineVersion
@@ -32409,8 +30183,12 @@ ${xrefOffset}
       if (runs[0]) {
         runs[0].properties = {
           ...runs[0].properties || {},
+          winhoodVersion: WINHOOD_PLATFORM_VERSION,
           gateDecision: gateEval.decision,
           gateVersion: gateEval.gateVersion,
+          evidenceChainHash: provenance.evidenceChainHash,
+          measuredCoveragePercent: provenance.measuredCoveragePercent,
+          veracityBlock: provenance.veracityBlock,
           provenanceFooter: provenance
         };
       }
@@ -32422,17 +30200,22 @@ ${xrefOffset}
     }
     const jsonReport = {
       schemaVersion: "winhood-audit-report/v4.4.0",
+      winhoodVersion: WINHOOD_PLATFORM_VERSION,
       runId: run.id,
       projectName: run.projectName,
       startedAt: run.startedAt,
       completedAt: run.completedAt || provenance.generatedAt,
       executiveSummary: run.executiveSummary,
+      measuredCoveragePercent: provenance.measuredCoveragePercent,
+      evidenceChainHash: provenance.evidenceChainHash,
       qualityGate: gateEval,
       scoreCards: run.scoreCards,
       findingsCount: (run.findings || []).length,
       findings: run.findings || [],
       evidenceVerification: run.evidenceVerification,
       signedManifest: run.signedManifest,
+      veracityBlock: provenance.veracityBlock,
+      epistemicSeparation: provenance.veracityBlock.epistemicSeparation,
       provenanceFooter: provenance
     };
     return {
@@ -32468,6 +30251,42 @@ function buildOpenApiSpec(serverOrigin = "http://localhost:3000") {
         get: {
           summary: "OpenAPI 3.0.3 machine-readable API contract",
           responses: { "200": { description: "OpenAPI JSON document" } }
+        }
+      },
+      "/api/totp/status": {
+        get: {
+          summary: "Inspect optional TOTP 2FA status (enabled/unlocked); unrestricted local access when disabled",
+          responses: { "200": { description: "Optional TOTP status payload" } }
+        }
+      },
+      "/api/totp/setup": {
+        post: {
+          summary: "Generate RFC-6238 TOTP secret, otpauth URI, QR Code data URL, and 8 single-use recovery codes",
+          responses: { "200": { description: "Pending TOTP setup bundle" } }
+        }
+      },
+      "/api/totp/confirm": {
+        post: {
+          summary: "Confirm first 6-digit TOTP code to enable optional 2FA protection",
+          responses: { "200": { description: "Optional TOTP enabled and current session unlocked" } }
+        }
+      },
+      "/api/totp/verify": {
+        post: {
+          summary: "Unlock local workspace using a 6-digit TOTP code or single-use recovery code",
+          responses: { "200": { description: "Session unlocked" }, "401": { description: "Invalid or replayed code" } }
+        }
+      },
+      "/api/totp/disable": {
+        post: {
+          summary: "Disable optional TOTP 2FA protection after verifying a valid TOTP or recovery code",
+          responses: { "200": { description: "Optional TOTP disabled; unrestricted local access restored" } }
+        }
+      },
+      "/api/totp/lock": {
+        post: {
+          summary: "Manually lock the current local session when optional TOTP 2FA is active",
+          responses: { "200": { description: "Session locked" } }
         }
       },
       "/api/rules/catalog": {
@@ -32650,8 +30469,8 @@ var PrDecorationAdapter = class {
 var PORT = Number(process.env.PORT || 3e3);
 var DEFAULT_DATA_DIR = resolveWinHoodDataRoot();
 var DATA_DIR = DEFAULT_DATA_DIR;
-var ISOLATED_ARTIFACTS_DIR = path19.join(DEFAULT_DATA_DIR, "isolated_artifacts");
-var STORE_FILE = path19.join(DEFAULT_DATA_DIR, "winhood_persistent_db.json");
+var ISOLATED_ARTIFACTS_DIR = path18.join(DEFAULT_DATA_DIR, "isolated_artifacts");
+var STORE_FILE = path18.join(DEFAULT_DATA_DIR, "winhood_persistent_db.json");
 function isTestRuntimeEnvironment() {
   return process.env.NODE_ENV === "test" || process.env.WINHOOD_TEST_MODE === "1";
 }
@@ -32916,37 +30735,37 @@ function createInMemoryRateLimiter(opts) {
   };
 }
 function ensureDirectories(dataDir = DATA_DIR, artifactsDir = ISOLATED_ARTIFACTS_DIR) {
-  if (!fs18.existsSync(dataDir)) {
-    fs18.mkdirSync(dataDir, { recursive: true });
+  if (!fs17.existsSync(dataDir)) {
+    fs17.mkdirSync(dataDir, { recursive: true });
   }
-  if (!fs18.existsSync(artifactsDir)) {
-    fs18.mkdirSync(artifactsDir, { recursive: true });
+  if (!fs17.existsSync(artifactsDir)) {
+    fs17.mkdirSync(artifactsDir, { recursive: true });
   }
 }
 function writeIsolatedArtifactsToDisk(softwareSlug, filesMap, artifactsDir = ISOLATED_ARTIFACTS_DIR) {
-  ensureDirectories(path19.dirname(artifactsDir), artifactsDir);
+  ensureDirectories(path18.dirname(artifactsDir), artifactsDir);
   const safeSlug = softwareSlug.replace(/[^a-zA-Z0-9_-]/g, "_");
-  const targetDir = path19.resolve(artifactsDir, safeSlug);
-  const rootCanonical = path19.resolve(artifactsDir);
-  if (!targetDir.startsWith(rootCanonical + path19.sep) && targetDir !== rootCanonical) {
+  const targetDir = path18.resolve(artifactsDir, safeSlug);
+  const rootCanonical = path18.resolve(artifactsDir);
+  if (!targetDir.startsWith(rootCanonical + path18.sep) && targetDir !== rootCanonical) {
     throw new Error("Tentativa de Directory Traversal no softwareSlug bloqueada.");
   }
-  if (!fs18.existsSync(targetDir)) {
-    fs18.mkdirSync(targetDir, { recursive: true });
+  if (!fs17.existsSync(targetDir)) {
+    fs17.mkdirSync(targetDir, { recursive: true });
   }
   for (const [relPath, content] of Object.entries(filesMap)) {
     const normalizedRel = relPath.replace(/\\/g, "/").replace(/^\/+/, "");
     if (!normalizedRel) continue;
-    const canonicalTarget = path19.resolve(targetDir, normalizedRel);
-    if (!canonicalTarget.startsWith(targetDir + path19.sep)) {
+    const canonicalTarget = path18.resolve(targetDir, normalizedRel);
+    if (!canonicalTarget.startsWith(targetDir + path18.sep)) {
       throw new Error(`Tentativa de Path Traversal bloqueada no arquivo: ${relPath}`);
     }
     try {
-      const parent = path19.dirname(canonicalTarget);
-      if (!fs18.existsSync(parent)) {
-        fs18.mkdirSync(parent, { recursive: true });
+      const parent = path18.dirname(canonicalTarget);
+      if (!fs17.existsSync(parent)) {
+        fs17.mkdirSync(parent, { recursive: true });
       }
-      fs18.writeFileSync(canonicalTarget, content, "utf8");
+      fs17.writeFileSync(canonicalTarget, content, "utf8");
     } catch (writeErr) {
       if (writeErr?.code !== "EBUSY" && writeErr?.code !== "EPERM") {
         throw writeErr;
@@ -32955,8 +30774,8 @@ function writeIsolatedArtifactsToDisk(softwareSlug, filesMap, artifactsDir = ISO
   }
   try {
     const encryptedEnvelope = PersistentDatabaseManager.encryptSourceFilesMap(filesMap);
-    const bundlePath = path19.resolve(targetDir, "vault_bundle.whenc");
-    fs18.writeFileSync(bundlePath, encryptedEnvelope, { encoding: "utf8", mode: 384 });
+    const bundlePath = path18.resolve(targetDir, "vault_bundle.whenc");
+    fs17.writeFileSync(bundlePath, encryptedEnvelope, { encoding: "utf8", mode: 384 });
   } catch {
   }
   return targetDir;
@@ -33166,8 +30985,8 @@ function buildRepresentativeCompetitorFiles(candidate) {
   };
 }
 function createInitialRealWorkspaceState(dataDir = DATA_DIR, dbManager = new PersistentDatabaseManager()) {
-  const artifactsDir = path19.join(dataDir, "isolated_artifacts");
-  const storeFile = path19.join(dataDir, "winhood_persistent_db.json");
+  const artifactsDir = path18.join(dataDir, "isolated_artifacts");
+  const storeFile = path18.join(dataDir, "winhood_persistent_db.json");
   ensureDirectories(dataDir, artifactsDir);
   const nowIso = (/* @__PURE__ */ new Date()).toISOString();
   const projectId = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -33285,7 +31104,7 @@ function createInitialRealWorkspaceState(dataDir = DATA_DIR, dbManager = new Per
   });
   const auditLogs = [
     {
-      id: `aud-${crypto32.randomUUID().slice(0, 8)}`,
+      id: `aud-${crypto30.randomUUID().slice(0, 8)}`,
       timestamp: nowIso,
       actor: "Arquiteto Chefe (admin@winhood.sec)",
       role: "ADMIN",
@@ -33296,7 +31115,7 @@ function createInitialRealWorkspaceState(dataDir = DATA_DIR, dbManager = new Per
       integrityHash: computeSha256(`AUDIT|1|${projectId}|${nowIso}`)
     },
     {
-      id: `aud-${crypto32.randomUUID().slice(0, 8)}`,
+      id: `aud-${crypto30.randomUUID().slice(0, 8)}`,
       timestamp: nowIso,
       actor: "Orquestrador de An\xE1lises WinHood",
       role: "SECURITY_LEAD",
@@ -33332,8 +31151,8 @@ function createInitialRealWorkspaceState(dataDir = DATA_DIR, dbManager = new Per
   return state;
 }
 function createInitialCleanWorkspaceState(dataDir = DATA_DIR, dbManager = new PersistentDatabaseManager()) {
-  const artifactsDir = path19.join(dataDir, "isolated_artifacts");
-  const storeFile = path19.join(dataDir, "winhood_persistent_db.json");
+  const artifactsDir = path18.join(dataDir, "isolated_artifacts");
+  const storeFile = path18.join(dataDir, "winhood_persistent_db.json");
   ensureDirectories(dataDir, artifactsDir);
   const nowIso = (/* @__PURE__ */ new Date()).toISOString();
   const state = {
@@ -33347,7 +31166,7 @@ function createInitialCleanWorkspaceState(dataDir = DATA_DIR, dbManager = new Pe
     adapters: buildFull21SecurityAdaptersCatalog(),
     auditLogs: [
       {
-        id: `aud-${crypto32.randomUUID().slice(0, 8)}`,
+        id: `aud-${crypto30.randomUUID().slice(0, 8)}`,
         timestamp: nowIso,
         actor: "Sistema WinHood Analyzer",
         role: "SYSTEM",
@@ -33373,8 +31192,8 @@ function createInitialCleanWorkspaceState(dataDir = DATA_DIR, dbManager = new Pe
   return state;
 }
 function loadDatabase(dataDir = DATA_DIR, dbManager = new PersistentDatabaseManager()) {
-  const artifactsDir = path19.join(dataDir, "isolated_artifacts");
-  const storeFile = path19.join(dataDir, "winhood_persistent_db.json");
+  const artifactsDir = path18.join(dataDir, "isolated_artifacts");
+  const storeFile = path18.join(dataDir, "winhood_persistent_db.json");
   ensureDirectories(dataDir, artifactsDir);
   const readOutcome = dbManager.readWithChecksumRecovery(storeFile);
   if (readOutcome.data) {
@@ -33520,13 +31339,19 @@ function loadDatabase(dataDir = DATA_DIR, dbManager = new PersistentDatabaseMana
     recoveredFromBackup: false
   };
 }
+var DEFAULT_LOCAL_OPERATOR = {
+  id: "local-workspace",
+  name: "Operador Local",
+  email: "local@winhood.local",
+  role: "LOCAL_OPERATOR"
+};
 function appendAuditLog(state, action, entityType, entityId, details, actorUser) {
   const nowIso = (/* @__PURE__ */ new Date()).toISOString();
   const prevHash = state.auditLogs[0]?.integrityHash || "GENESIS";
   const actorName = actorUser?.name || "Sistema WinHood";
   const actorRole = actorUser?.role || "SYSTEM";
   const entry = {
-    id: `aud-${crypto32.randomUUID().slice(0, 8)}`,
+    id: `aud-${crypto30.randomUUID().slice(0, 8)}`,
     timestamp: nowIso,
     actor: `${actorName} (${actorRole})`,
     role: actorRole,
@@ -33541,10 +31366,10 @@ function appendAuditLog(state, action, entityType, entityId, details, actorUser)
 async function createWinHoodApp(options) {
   const dataDir = resolveWinHoodDataRoot(options?.dataDir);
   ensureWinHoodDirectories(dataDir);
-  const isolatedArtifactsDir = path19.join(dataDir, "isolated_artifacts");
-  const storeFile = path19.join(dataDir, "winhood_persistent_db.json");
+  const isolatedArtifactsDir = path18.join(dataDir, "isolated_artifacts");
+  const storeFile = path18.join(dataDir, "winhood_persistent_db.json");
   const dbManager = new PersistentDatabaseManager();
-  const authService = new AuthService(dataDir);
+  const totpService = new OptionalTotpService(dataDir);
   const app = express();
   app.set("trust proxy", 1);
   const backupService = new ProjectBackupService(dataDir);
@@ -33563,11 +31388,6 @@ async function createWinHoodApp(options) {
     bucketName: "backup",
     windowMs: rateLimitWindowMs,
     maxRequests: options?.rateLimits?.backupMax ?? 30
-  });
-  const oauthRateLimiter = createInMemoryRateLimiter({
-    bucketName: "oauth",
-    windowMs: rateLimitWindowMs,
-    maxRequests: options?.rateLimits?.oauthMax ?? 60
   });
   app.disable("x-powered-by");
   const heavyUploadJsonParser = express.json({ limit: "50mb" });
@@ -33685,19 +31505,7 @@ async function createWinHoodApp(options) {
     const { sourceFilesContent: _omit, ...lightweight } = s;
     return lightweight;
   };
-  const getRequestActor = (req, res) => {
-    const reqObj = req || res?.req;
-    const attached = reqObj?.authUser;
-    if (attached) return attached;
-    return {
-      id: "usr-anonymous",
-      name: "Operador N\xE3o Autenticado",
-      email: "anonymous@winhood.local",
-      role: "AUDITOR",
-      mfaEnabled: false,
-      mfaVerified: false
-    };
-  };
+  const getRequestActor = (_req, _res) => DEFAULT_LOCAL_OPERATOR;
   const isHostedPreviewRequest = (reqObj) => {
     if (!reqObj) return false;
     const forwardedHost = String(
@@ -33713,7 +31521,7 @@ async function createWinHoodApp(options) {
     }
     return Boolean(process.env.NG_ALLOWED_HOSTS) || reqObj.headers["sec-fetch-site"] === "cross-site" || reqObj.headers["sec-fetch-dest"] === "iframe";
   };
-  const resolveCookieSecurityContext = (res, opts) => {
+  const resolveCookieSecurityContext = (res) => {
     const reqObj = res.req;
     const hostHeader = String(reqObj?.headers?.host || "");
     const isHostedPreview = isHostedPreviewRequest(reqObj);
@@ -33721,37 +31529,33 @@ async function createWinHoodApp(options) {
     const isProductionNonLoopback = process.env.NODE_ENV === "production" && !isLoopbackHttp;
     const isHttps = !isLoopbackHttp && (isProductionNonLoopback || Boolean(reqObj?.secure) || reqObj?.headers["x-forwarded-proto"] === "https" || Boolean(reqObj?.headers?.referer?.startsWith("https://")) || isHostedPreview);
     const isCrossSiteIframe = isHttps && isHostedPreview;
-    const sameSitePolicy = opts?.forOAuthRedirect ? "Lax" : "Strict";
-    const sameSiteAttr = isCrossSiteIframe ? "SameSite=None; Secure; Partitioned" : `SameSite=${sameSitePolicy}${isHttps ? "; Secure" : ""}`;
+    const sameSiteAttr = isCrossSiteIframe ? "SameSite=None; Secure; Partitioned" : `SameSite=Strict${isHttps ? "; Secure" : ""}`;
     return { sameSiteAttr, isCrossSiteIframe, isHttps };
   };
-  const setSessionCookies = (res, sessionId, csrfToken, opts) => {
-    const { sameSiteAttr, isCrossSiteIframe } = resolveCookieSecurityContext(res, {
-      forOAuthRedirect: opts?.forOAuthRedirect
-    });
-    const maxAgeSec = opts?.trustDevice ? Math.floor(AuthService.SESSION_TRUSTED_DEVICE_MS / 1e3) : Math.floor(AuthService.SESSION_ABSOLUTE_MS / 1e3);
+  const setTotpUnlockCookies = (res, unlockToken, csrfToken) => {
+    const { sameSiteAttr, isCrossSiteIframe } = resolveCookieSecurityContext(res);
+    const maxAgeSec = Math.floor(OptionalTotpService.SESSION_TTL_MS / 1e3);
     res.setHeader("Set-Cookie", [
-      `winhood_session=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; ${sameSiteAttr}; Max-Age=${maxAgeSec}`,
+      `winhood_totp_unlock=${encodeURIComponent(unlockToken)}; Path=/; HttpOnly; ${sameSiteAttr}; Max-Age=${maxAgeSec}`,
       `winhood_csrf=${encodeURIComponent(csrfToken)}; Path=/; ${sameSiteAttr}; Max-Age=${maxAgeSec}`
     ]);
     res.setHeader("X-WinHood-CSRF-Token", csrfToken);
     if (isCrossSiteIframe) {
-      res.setHeader("X-WinHood-Session-Token", sessionId);
+      res.setHeader("X-WinHood-Session-Token", unlockToken);
     }
+    return { isCrossSiteIframe };
   };
-  const clearSessionCookies = (res) => {
-    const { sameSiteAttr, isCrossSiteIframe, isHttps } = resolveCookieSecurityContext(res);
-    const oauthStateAttr = isCrossSiteIframe ? "SameSite=None; Secure; Partitioned" : `SameSite=Lax${isHttps ? "; Secure" : ""}`;
+  const clearTotpUnlockCookies = (res) => {
+    const { sameSiteAttr } = resolveCookieSecurityContext(res);
     res.setHeader("Set-Cookie", [
-      `winhood_session=; Path=/; HttpOnly; ${sameSiteAttr}; Max-Age=0`,
-      `winhood_csrf=; Path=/; ${sameSiteAttr}; Max-Age=0`,
-      `winhood_oauth_state=; Path=/api/auth/github/oauth; HttpOnly; ${oauthStateAttr}; Max-Age=0`
+      `winhood_totp_unlock=; Path=/; HttpOnly; ${sameSiteAttr}; Max-Age=0`,
+      `winhood_csrf=; Path=/; ${sameSiteAttr}; Max-Age=0`
     ]);
   };
-  const extractSessionTokenFromRequest = (req) => {
+  const extractTotpUnlockTokenFromRequest = (req) => {
     const cookies = parseCookies(req.headers.cookie);
-    if (cookies.winhood_session && cookies.winhood_session.length >= 32) {
-      return { token: cookies.winhood_session, source: "COOKIE" };
+    if (cookies.winhood_totp_unlock && cookies.winhood_totp_unlock.length >= 32) {
+      return { token: cookies.winhood_totp_unlock, source: "COOKIE" };
     }
     const headerSession = typeof req.headers["x-winhood-session"] === "string" ? req.headers["x-winhood-session"].trim() : "";
     if (headerSession.length >= 32) {
@@ -33794,10 +31598,6 @@ async function createWinHoodApp(options) {
       res.setHeader("X-Frame-Options", "SAMEORIGIN");
     }
     res.setHeader("Referrer-Policy", "no-referrer");
-    res.setHeader(
-      "Permissions-Policy",
-      "publickey-credentials-create=*, publickey-credentials-get=*"
-    );
     const frameAncestorsDirective = isHostedPreviewIframe ? "frame-ancestors 'self' https://*.google.com https://*.googleusercontent.com" : "frame-ancestors 'self'";
     const scriptSrcDirective = isDevViteMode ? "script-src 'self' 'unsafe-inline' 'unsafe-eval'" : "script-src 'self'";
     res.setHeader(
@@ -33814,7 +31614,7 @@ async function createWinHoodApp(options) {
       res.setHeader("Access-Control-Allow-Credentials", "true");
       res.setHeader(
         "Access-Control-Allow-Headers",
-        "Content-Type, Authorization, x-csrf-token, x-winhood-session, x-winhood-role"
+        "Content-Type, Authorization, x-csrf-token, x-winhood-session"
       );
       res.setHeader(
         "Access-Control-Expose-Headers",
@@ -33838,106 +31638,53 @@ async function createWinHoodApp(options) {
         db.telemetry.failedRequests += 1;
       }
     });
-    const extracted = extractSessionTokenFromRequest(req);
-    if (extracted.token) {
-      const validated = authService.validateSession(extracted.token);
-      if (validated) {
-        req.authUser = validated.user;
-        req.authSession = validated.session;
-        req.authMethod = extracted.source;
-      }
-    }
-    const testHeaderAllowed = !options?.enforceProductionAuth && isTestRuntimeEnvironment();
-    const headerRoleRaw = req.headers["x-winhood-role"];
-    const headerRole = typeof headerRoleRaw === "string" ? headerRoleRaw.trim() : "";
-    if (!req.authUser && testHeaderAllowed && ["ADMIN", "SECURITY_LEAD", "QA_ENGINEER", "AUDITOR"].includes(headerRole)) {
-      req.authUser = {
-        id: "usr-test-header",
-        name: `Test Actor (${headerRole})`,
-        email: "test-actor@winhood.local",
-        role: headerRole,
-        mfaEnabled: false,
-        mfaVerified: true
-      };
-      req.authMethod = "TEST_HEADER";
+    if (!totpService.isEnabled()) {
+      return next();
     }
     const reqPath = req.path;
-    const publicApiPaths = /* @__PURE__ */ new Set([
+    const publicWhenTotpEnabled = /* @__PURE__ */ new Set([
       "/health",
       "/openapi.json",
-      "/auth/access-mode",
-      "/auth/solo-local",
-      "/auth/github/oauth/start",
-      "/auth/github/oauth/callback",
-      "/auth/github/oauth/callback/",
-      "/auth/github/oauth/status",
-      "/auth/github/device/start",
-      "/auth/github/device/poll",
-      "/auth/github/token",
-      "/auth/windows-hello/status",
-      "/auth/bootstrap-status",
-      "/auth/bootstrap-admin",
-      "/auth/register",
-      "/auth/login",
-      "/auth/login-pin",
-      "/auth/webauthn/register-account/options",
-      "/auth/webauthn/register-account/verify",
-      "/auth/webauthn/login/options",
-      "/auth/webauthn/login/verify",
-      "/auth/windows-hello/native-register",
-      "/auth/windows-hello/native-login",
-      "/auth/logout",
-      "/auth/session",
-      "/auth/mfa/verify",
-      "/auth/totp/authenticate",
-      "/auth/recovery/request",
-      "/auth/recovery/confirm"
+      "/totp/status",
+      "/totp/verify",
+      "/security/totp/status",
+      "/security/totp/verify"
     ]);
-    const isPublicRequest = publicApiPaths.has(reqPath) || reqPath === "/auth/me" && req.method.toUpperCase() === "GET";
-    if (!isPublicRequest) {
-      if (!req.authUser) {
-        return res.status(401).json({
-          error: "AUTH_REQUIRED",
-          code: "SESSION_INVALID",
-          bootstrapRequired: authService.isBootstrapRequired(),
-          message: authService.isBootstrapRequired() ? "Administrador inicial ainda n\xE3o configurado. Execute o bootstrap inicial antes de operar a plataforma." : "Sess\xE3o autenticada obrigat\xF3ria. Fa\xE7a login para acessar a API do WinHood."
+    if (publicWhenTotpEnabled.has(reqPath)) {
+      return next();
+    }
+    const extracted = extractTotpUnlockTokenFromRequest(req);
+    if (!totpService.isRequestUnlocked(extracted.token)) {
+      return res.status(401).json({
+        error: "TOTP_LOCKED",
+        code: "TOTP_LOCKED",
+        totpEnabled: true,
+        unlocked: false,
+        message: "Sess\xE3o bloqueada pela prote\xE7\xE3o opcional 2FA (TOTP). Informe o c\xF3digo de 6 d\xEDgitos ou c\xF3digo de recupera\xE7\xE3o para desbloquear."
+      });
+    }
+    if (extracted.source === "COOKIE" && ["POST", "PUT", "PATCH", "DELETE"].includes(req.method.toUpperCase())) {
+      const providedCsrf = String(
+        req.headers["x-csrf-token"] || req.headers["x-winhood-csrf"] || ""
+      ).trim();
+      if (!totpService.validateCsrfToken(extracted.token, providedCsrf)) {
+        return res.status(403).json({
+          error: "CSRF_INVALID",
+          code: "CSRF_INVALID",
+          message: "Token CSRF ausente ou inv\xE1lido na requisi\xE7\xE3o mut\xE1vel com TOTP ativo."
         });
-      }
-      if (req.authMethod === "COOKIE" && ["POST", "PUT", "PATCH", "DELETE"].includes(req.method.toUpperCase())) {
-        const expectedCsrf = String(req.authSession?.csrfToken || "");
-        const providedCsrf = String(req.headers["x-csrf-token"] || req.headers["x-winhood-csrf"] || "").trim();
-        const expBuf = Buffer.from(expectedCsrf, "utf8");
-        const provBuf = Buffer.from(providedCsrf, "utf8");
-        if (!expectedCsrf || expBuf.length !== provBuf.length || !crypto32.timingSafeEqual(expBuf, provBuf)) {
-          return res.status(403).json({
-            error: "CSRF_INVALID",
-            code: "CSRF_INVALID",
-            message: "Token CSRF ausente ou inv\xE1lido na requisi\xE7\xE3o mut\xE1vel."
-          });
-        }
       }
     }
     return next();
   });
-  const requireWritePermission = (res, req, permission = "projects:write") => {
-    const requestObj = req || res.req;
-    const actor = getRequestActor(requestObj, res);
-    if (!AuthService.hasPermission(actor.role, permission)) {
-      res.status(403).json({
-        error: "ACESSO N\xC3O AUTORIZADO",
-        requiredPermission: permission,
-        currentRole: actor.role,
-        message: `ACESSO N\xC3O AUTORIZADO: O perfil ${actor.role} n\xE3o possui permiss\xE3o '${permission}'.`
-      });
-      return false;
-    }
-    return true;
-  };
+  const requireWritePermission = (_res, _req, _scope) => true;
   app.get("/api/health", (_req, res) => {
     res.json({
       status: "ONLINE",
       healthStatus: "HEALTHY",
       ready: true,
+      accessMode: "UNRESTRICTED_LOCAL",
+      totpEnabled: totpService.isEnabled(),
       pid: process.pid,
       service: "WinHood Software Benchmark & Quality Analyzer API",
       timestamp: (/* @__PURE__ */ new Date()).toISOString(),
@@ -33945,8 +31692,7 @@ async function createWinHoodApp(options) {
       storageEngine: PersistentDatabaseManager.STORAGE_KIND,
       schemaVersion: PersistentDatabaseManager.SCHEMA_VERSION,
       storageIntegrity: loaded.integrityStatus,
-      authBootstrapRequired: authService.isBootstrapRequired(),
-      storeFileExists: fs18.existsSync(storeFile),
+      storeFileExists: fs17.existsSync(storeFile),
       projectsCount: db.projects.length,
       softwaresCount: db.softwares.length,
       runsCount: db.runs.length
@@ -33959,1681 +31705,136 @@ async function createWinHoodApp(options) {
       isolatedSandboxPath: isolatedArtifactsDir,
       storageEngine: PersistentDatabaseManager.STORAGE_KIND,
       schemaVersion: PersistentDatabaseManager.SCHEMA_VERSION,
-      databaseSizeBytes: fs18.existsSync(storeFile) ? fs18.statSync(storeFile).size : 0,
+      databaseSizeBytes: fs17.existsSync(storeFile) ? fs17.statSync(storeFile).size : 0,
       evidenceRecordsCount: db.runs.reduce((acc, r) => acc + r.evidenceChain.length, 0),
       auditLogsCount: db.auditLogs.length
     });
   });
-  app.get("/api/auth/bootstrap-status", (_req, res) => {
-    const meta = authService.getBootstrapMetadata();
-    res.json({
-      bootstrapRequired: meta.bootstrapRequired,
-      bootstrapTokenFileHint: path19.relative(process.cwd(), meta.bootstrapTokenFilePath),
-      expiresAt: meta.expiresAt
-    });
+  app.get(["/api/totp/status", "/api/security/totp/status"], (req, res) => {
+    const extracted = extractTotpUnlockTokenFromRequest(req);
+    return res.json(totpService.getStatus(extracted.token));
   });
-  const resolveStoredGitHubOAuthOverride = () => {
-    const cfg = db.githubOAuthConfig;
-    if (!cfg) {
-      return { clientId: "", clientSecret: "", updatedAt: null };
-    }
-    const clientId = cfg.encryptedClientId ? (MqrBridgeConnection.decryptToken(cfg.encryptedClientId) || "").trim() : "";
-    const clientSecret = cfg.encryptedClientSecret ? (MqrBridgeConnection.decryptToken(cfg.encryptedClientSecret) || "").trim() : "";
-    return {
-      clientId,
-      clientSecret,
-      updatedAt: cfg.updatedAt || null
-    };
-  };
-  const resolveEffectiveGitHubOAuthCredentials = () => {
-    const override = resolveStoredGitHubOAuthOverride();
-    const clientId = override.clientId || (process.env.WINHOOD_GITHUB_OAUTH_CLIENT_ID || "").trim();
-    const clientSecret = override.clientSecret || (process.env.WINHOOD_GITHUB_OAUTH_CLIENT_SECRET || "").trim();
-    return { clientId, clientSecret, override };
-  };
-  app.get("/api/auth/access-mode", (req, res) => {
-    const policy = evaluateSoloLocalAutoSession({
-      runtimeEnv: process.env.WINHOOD_RUNTIME_ENV,
-      remoteAddress: req.socket.remoteAddress || req.ip,
-      hostHeader: String(req.headers["x-forwarded-host"] || req.headers.host || ""),
-      isHostedPreview: isHostedPreviewRequest(req),
-      nodeEnv: process.env.NODE_ENV,
-      vaultLockEnabled: process.env.WINHOOD_VAULT_LOCK === "true",
-      teamServerMode: process.env.WINHOOD_TEAM_SERVER === "true"
-    });
-    const { clientId: githubClientId, clientSecret: githubClientSecret } = resolveEffectiveGitHubOAuthCredentials();
-    const githubOAuthDirectConfigured = githubClientId.length >= 8 && githubClientSecret.length >= 8;
-    res.setHeader("Cache-Control", "no-store");
-    res.json({
-      mode: policy.mode,
-      soloLocalAllowed: policy.allowed,
-      reason: policy.reason,
-      vaultLockEnabled: process.env.WINHOOD_VAULT_LOCK === "true",
-      teamServerMode: process.env.WINHOOD_TEAM_SERVER === "true",
-      githubDeviceFlowConfigured: githubClientId.length >= 8,
-      githubOAuthDirectConfigured,
-      githubOAuthStatus: githubOAuthDirectConfigured ? "CONFIGURED" : "NOT_CONFIGURED",
-      githubSignupAllowed: process.env.WINHOOD_GITHUB_ALLOW_SIGNUP !== "false",
-      githubPatSupported: true,
-      windowsHelloNativeSupported: process.platform === "win32",
-      hasRegisteredWebAuthnCredentials: authService.hasAnyWebAuthnCredentials(),
-      runtimeEnv: process.env.WINHOOD_RUNTIME_ENV || "WEB"
-    });
-  });
-  app.post("/api/auth/solo-local", (req, res) => {
-    const policy = evaluateSoloLocalAutoSession({
-      runtimeEnv: process.env.WINHOOD_RUNTIME_ENV,
-      remoteAddress: req.socket.remoteAddress || req.ip,
-      hostHeader: String(req.headers["x-forwarded-host"] || req.headers.host || ""),
-      isHostedPreview: isHostedPreviewRequest(req),
-      nodeEnv: process.env.NODE_ENV,
-      vaultLockEnabled: process.env.WINHOOD_VAULT_LOCK === "true",
-      teamServerMode: process.env.WINHOOD_TEAM_SERVER === "true"
-    });
-    if (!policy.allowed) {
-      return res.status(403).json({
-        error: policy.reason,
-        code: "SOLO_LOCAL_DENIED",
-        mode: policy.mode
-      });
-    }
+  app.post(["/api/totp/setup", "/api/security/totp/setup"], async (_req, res) => {
     try {
-      const outcome = authService.issueSoloLocalDesktopSession({
-        ipAddress: req.socket.remoteAddress || req.ip || "127.0.0.1",
-        userAgent: String(req.headers["user-agent"] || "WinHood-Local-Workspace")
+      const setup = totpService.beginSetup();
+      const qrDataUrl = await QRCode.toDataURL(setup.otpauthUrl, {
+        width: 220,
+        margin: 2
       });
-      const { isCrossSiteIframe } = resolveCookieSecurityContext(res);
-      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
-        trustDevice: outcome.trustDevice
-      });
-      appendAuditLog(
-        db,
-        "AUTH_SOLO_LOCAL_DESKTOP",
-        "AUTH",
-        outcome.user.id,
-        `Sess\xE3o Solo Local emitida (${policy.mode}).`,
-        outcome.user
-      );
-      saveDatabase(db);
-      return res.json({
-        authenticated: true,
-        mode: policy.mode,
-        user: outcome.user,
-        csrfToken: outcome.csrfToken,
-        ...isCrossSiteIframe ? { sessionId: outcome.sessionId } : {}
-      });
-    } catch (err) {
-      return res.status(403).json({
-        error: err?.message || "Falha ao iniciar sess\xE3o local.",
-        code: "SOLO_LOCAL_FAILED"
-      });
-    }
-  });
-  const oauthTxStore = new GitHubOAuthTransactionStore(dataDir);
-  const isValidGitHubCallbackRedirectUri = (candidate) => {
-    if (!candidate) return false;
-    try {
-      const parsed = new URL(candidate);
-      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-        return false;
-      }
-      if (parsed.username || parsed.password || parsed.search || parsed.hash) {
-        return false;
-      }
-      const normalizedPath = parsed.pathname.replace(/\/+$/, "");
-      return normalizedPath === "/api/auth/github/oauth/callback";
-    } catch {
-      return false;
-    }
-  };
-  const isLoopbackRequestHost = (req) => {
-    const remoteIp = (req.socket.remoteAddress || req.ip || "").replace(/^::ffff:/, "").toLowerCase();
-    const rawHost = String(req.headers.host || "").split(":")[0].trim().toLowerCase();
-    return (remoteIp === "127.0.0.1" || remoteIp === "::1" || remoteIp === "localhost") && (rawHost === "127.0.0.1" || rawHost === "localhost" || rawHost === "::1" || rawHost === "");
-  };
-  const resolveGitHubCallbackUrl = (req) => {
-    const explicitCallback = (process.env.WINHOOD_GITHUB_OAUTH_CALLBACK_URL || process.env.WINHOOD_GITHUB_OAUTH_REDIRECT_URI || "").trim();
-    if (explicitCallback && isValidGitHubCallbackRedirectUri(explicitCallback)) {
-      return explicitCallback;
-    }
-    const appUrlEnv = (process.env.APP_URL || "").trim();
-    if (appUrlEnv && (isHostedPreviewRequest(req) || !isLoopbackRequestHost(req))) {
-      try {
-        const parsedAppUrl = new URL(appUrlEnv);
-        if (parsedAppUrl.protocol === "http:" || parsedAppUrl.protocol === "https:") {
-          return `${parsedAppUrl.origin}/api/auth/github/oauth/callback`;
-        }
-      } catch {
-      }
-    }
-    const trustProxyHeaders = process.env.WINHOOD_TRUST_PROXY === "true" || isHostedPreviewRequest(req);
-    const rawProto = trustProxyHeaders ? String(req.headers["x-forwarded-proto"] || (req.secure ? "https" : "http")) : req.secure ? "https" : "http";
-    const proto = rawProto.split(",")[0].trim().toLowerCase() === "https" ? "https" : "http";
-    const rawHost = (trustProxyHeaders ? String(req.headers["x-forwarded-host"] || req.headers.host || "localhost:3000") : String(req.headers.host || "localhost:3000")).split(",")[0].replace(/[\r\n\s]/g, "").trim();
-    const safeHost = /^[a-zA-Z0-9.:-]+$/.test(rawHost) ? rawHost : "localhost:3000";
-    return `${proto}://${safeHost}/api/auth/github/oauth/callback`;
-  };
-  const buildOAuthStateCookieAttr = (res) => {
-    const { isCrossSiteIframe, isHttps: contextIsHttps } = resolveCookieSecurityContext(res, {
-      forOAuthRedirect: true
-    });
-    if (isCrossSiteIframe) {
-      return "SameSite=None; Secure; Partitioned";
-    }
-    const reqObj = res.req;
-    const isHttps = contextIsHttps || Boolean(reqObj?.secure) || (process.env.WINHOOD_TRUST_PROXY === "true" || (reqObj ? isHostedPreviewRequest(reqObj) : false)) && reqObj?.headers["x-forwarded-proto"] === "https";
-    return `SameSite=Lax${isHttps ? "; Secure" : ""}`;
-  };
-  const buildOAuthStateClearCookie = (res) => {
-    const attr = buildOAuthStateCookieAttr(res);
-    return `winhood_oauth_state=; Path=/api/auth/github/oauth; HttpOnly; ${attr}; Max-Age=0`;
-  };
-  const setOAuthStateCookie = (res, state) => {
-    const attr = buildOAuthStateCookieAttr(res);
-    res.setHeader(
-      "Set-Cookie",
-      `winhood_oauth_state=${encodeURIComponent(state)}; Path=/api/auth/github/oauth; HttpOnly; ${attr}; Max-Age=600`
-    );
-  };
-  const escapeHtmlForOAuth = (raw) => raw.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-  const renderOAuthCallbackHtml = (res, statusCode, title, message, inlineScript) => {
-    res.setHeader("Cache-Control", "no-store");
-    if (inlineScript) {
-      const scriptHash = crypto32.createHash("sha256").update(inlineScript, "utf8").digest("base64");
-      res.setHeader(
-        "Content-Security-Policy",
-        `default-src 'self'; script-src 'self' 'sha256-${scriptHash}'; style-src 'self' 'unsafe-inline'; base-uri 'self'; object-src 'none'`
-      );
-    }
-    const html = [
-      "<!doctype html>",
-      '<html lang="pt-BR">',
-      "<head>",
-      '<meta charset="utf-8">',
-      `<title>${escapeHtmlForOAuth(title)}</title>`,
-      "<style>body{font-family:system-ui,-apple-system,sans-serif;background:#080b10;color:#f8fafc;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px;}main{max-width:440px;padding:24px;border:1px solid #1e293b;border-radius:12px;background:#0c1017;}h1{font-size:18px;margin:0 0 10px;}p{font-size:14px;line-height:1.5;color:#cbd5e1;margin:0;}</style>",
-      "</head>",
-      "<body>",
-      "<main>",
-      `<h1>${escapeHtmlForOAuth(title)}</h1>`,
-      `<p>${escapeHtmlForOAuth(message)}</p>`,
-      "</main>",
-      inlineScript ? `<script>${inlineScript}</script>` : "",
-      "</body>",
-      "</html>"
-    ].join("");
-    return res.status(statusCode).type("html").send(html);
-  };
-  app.get("/api/auth/github/oauth/start", oauthRateLimiter, (req, res) => {
-    oauthTxStore.pruneExpired();
-    res.setHeader("Cache-Control", "no-store");
-    const rawMode = typeof req.query.mode === "string" ? req.query.mode.trim().toLowerCase() : "";
-    const acceptHeader = String(req.headers.accept || "").toLowerCase();
-    const wantsBrowserRedirect = rawMode === "redirect" || !rawMode && acceptHeader.includes("text/html");
-    const { clientId, clientSecret } = resolveEffectiveGitHubOAuthCredentials();
-    if (clientId.length < 8 || clientSecret.length < 8) {
-      if (wantsBrowserRedirect) {
-        return res.redirect(302, "/?github_oauth_error=not_configured");
-      }
-      return res.status(400).json({
-        error: "GITHUB_OAUTH_NOT_CONFIGURED: O administrador ainda n\xE3o configurou WINHOOD_GITHUB_OAUTH_CLIENT_ID e WINHOOD_GITHUB_OAUTH_CLIENT_SECRET nesta instala\xE7\xE3o.",
-        code: "GITHUB_OAUTH_NOT_CONFIGURED",
-        patLoginEndpoint: "/api/auth/github/token",
-        deviceFlowEndpoint: "/api/auth/github/device/start"
-      });
-    }
-    const mode = wantsBrowserRedirect ? "redirect" : rawMode === "desktop" ? "desktop" : "popup";
-    const redirectUri = resolveGitHubCallbackUrl(req);
-    if (!isValidGitHubCallbackRedirectUri(redirectUri)) {
-      if (wantsBrowserRedirect) {
-        return res.redirect(302, "/?github_oauth_error=invalid_redirect");
-      }
-      return res.status(400).json({
-        error: "GITHUB_OAUTH_REDIRECT_INVALID: Callback URL inv\xE1lida configurada no servidor.",
-        code: "GITHUB_OAUTH_REDIRECT_INVALID"
-      });
-    }
-    const pkce = generateGitHubOAuthPkce();
-    let originHint = "";
-    try {
-      originHint = new URL(redirectUri).origin;
-    } catch {
-      originHint = "";
-    }
-    const rawOrigin = typeof req.headers.origin === "string" ? req.headers.origin.trim() : "";
-    if (rawOrigin) {
-      try {
-        const parsedOrigin = new URL(rawOrigin);
-        if ((parsedOrigin.protocol === "http:" || parsedOrigin.protocol === "https:") && (!originHint || parsedOrigin.origin === originHint)) {
-          originHint = parsedOrigin.origin;
-        }
-      } catch {
-      }
-    }
-    oauthTxStore.saveTransaction({
-      state: pkce.state,
-      codeVerifier: pkce.codeVerifier,
-      redirectUri,
-      mode,
-      originHint,
-      expiresAtMs: Date.now() + 10 * 60 * 1e3,
-      status: "PENDING",
-      consumed: false,
-      stateCookieRequired: mode === "redirect"
-    });
-    const authorizeUrl = buildGitHubOAuthAuthorizeUrl({
-      clientId,
-      redirectUri,
-      state: pkce.state,
-      codeChallenge: pkce.codeChallenge,
-      allowSignup: process.env.WINHOOD_GITHUB_ALLOW_SIGNUP !== "false"
-    });
-    if (mode === "redirect") {
-      setOAuthStateCookie(res, pkce.state);
-      return res.redirect(302, authorizeUrl);
-    }
-    return res.json({
-      authorizeUrl,
-      state: pkce.state,
-      mode,
-      redirectUri,
-      codeChallengeMethod: pkce.codeChallengeMethod
-    });
-  });
-  const handleGitHubOAuthCallback = async (req, res) => {
-    oauthTxStore.pruneExpired();
-    const rawState = typeof req.query.state === "string" ? req.query.state : "";
-    const rawCode = typeof req.query.code === "string" ? req.query.code : "";
-    const oauthError = typeof req.query.error === "string" ? req.query.error : "";
-    const oauthErrorDesc = typeof req.query.error_description === "string" ? req.query.error_description : "";
-    const cookies = parseCookies(req.headers.cookie);
-    const hasStateCookie = Boolean(cookies.winhood_oauth_state);
-    const tx = rawState ? oauthTxStore.getTransactionByState(rawState) : void 0;
-    const isRedirectFlow = tx ? tx.mode === "redirect" : hasStateCookie;
-    const respondWithOAuthError = (statusCode, errorCode, title, message) => {
-      res.setHeader("Cache-Control", "no-store");
-      if (isRedirectFlow) {
-        res.setHeader("Set-Cookie", buildOAuthStateClearCookie(res));
-        return res.redirect(302, `/?github_oauth_error=${encodeURIComponent(errorCode)}`);
-      }
-      const scriptPayload = JSON.stringify({
-        type: "winhood-github-oauth-result",
-        ok: false,
-        errorCode,
-        error: message
-      }).replace(/</g, "\\u003c");
-      const targetOrigin = JSON.stringify(tx?.originHint || new URL(resolveGitHubCallbackUrl(req)).origin);
-      const script = tx?.mode === "popup" ? `if(window.opener){window.opener.postMessage(${scriptPayload},${targetOrigin});}window.close();` : void 0;
-      return renderOAuthCallbackHtml(res, statusCode, title, message, script);
-    };
-    if (oauthError) {
-      const normalizedErr = oauthError.trim().toLowerCase();
-      const safeErrorCode = normalizedErr === "access_denied" ? "access_denied" : "oauth_error";
-      const safeMsg = safeErrorCode === "access_denied" ? "Autoriza\xE7\xE3o cancelada no GitHub. Voc\xEA pode tentar novamente quando desejar." : oauthErrorDesc ? oauthErrorDesc.slice(0, 180) : "Autoriza\xE7\xE3o recusada no GitHub.";
-      if (tx) {
-        if (tx.mode === "redirect") {
-          oauthTxStore.deleteTransaction(tx.state);
-        } else {
-          oauthTxStore.updateTransaction(tx.state, {
-            consumed: true,
-            status: "ERROR",
-            errorMessage: safeMsg
-          });
-        }
-      }
-      return respondWithOAuthError(400, safeErrorCode, "Autoriza\xE7\xE3o GitHub n\xE3o conclu\xEDda", safeMsg);
-    }
-    if (!rawCode || !rawState || !tx || Date.now() > tx.expiresAtMs) {
-      if (tx) oauthTxStore.deleteTransaction(tx.state);
-      return respondWithOAuthError(
-        400,
-        "invalid_state",
-        "Estado OAuth inv\xE1lido ou expirado",
-        "A solicita\xE7\xE3o de autentica\xE7\xE3o GitHub expirou ou o par\xE2metro state n\xE3o corresponde. Tente iniciar o login novamente."
-      );
-    }
-    if (tx.stateCookieRequired) {
-      const cookieState = cookies.winhood_oauth_state || "";
-      const cookieBuf = Buffer.from(cookieState, "utf8");
-      const expectedBuf = Buffer.from(tx.state, "utf8");
-      if (!cookieState || cookieBuf.length !== expectedBuf.length || !crypto32.timingSafeEqual(cookieBuf, expectedBuf)) {
-        oauthTxStore.deleteTransaction(tx.state);
-        return respondWithOAuthError(
-          400,
-          "invalid_state",
-          "Valida\xE7\xE3o de sess\xE3o OAuth falhou",
-          "N\xE3o foi poss\xEDvel validar o v\xEDnculo de seguran\xE7a (state) da sess\xE3o OAuth. Tente novamente."
-        );
-      }
-    }
-    if (!isValidGitHubCallbackRedirectUri(tx.redirectUri)) {
-      oauthTxStore.deleteTransaction(tx.state);
-      return respondWithOAuthError(
-        400,
-        "invalid_redirect",
-        "Redirect URI inv\xE1lida",
-        "A URL de retorno OAuth configurada n\xE3o \xE9 permitida."
-      );
-    }
-    const consumedOutcome = oauthTxStore.consumeTransactionAtomically(rawState, rawCode);
-    if (!consumedOutcome.ok) {
-      if ("reason" in consumedOutcome && consumedOutcome.reason === "REPLAYED_CODE") {
-        return respondWithOAuthError(
-          400,
-          "replayed_code",
-          "C\xF3digo de autoriza\xE7\xE3o j\xE1 utilizado",
-          "Este c\xF3digo de autoriza\xE7\xE3o do GitHub j\xE1 foi utilizado. Inicie um novo login."
-        );
-      }
-      return respondWithOAuthError(
-        400,
-        "invalid_state",
-        "Estado OAuth inv\xE1lido ou expirado",
-        "A solicita\xE7\xE3o de autentica\xE7\xE3o GitHub expirou ou o par\xE2metro state n\xE3o corresponde. Tente iniciar o login novamente."
-      );
-    }
-    const { clientId, clientSecret } = resolveEffectiveGitHubOAuthCredentials();
-    if (clientId.length < 8 || clientSecret.length < 8) {
-      oauthTxStore.deleteTransaction(tx.state);
-      return respondWithOAuthError(
-        400,
-        "not_configured",
-        "Login com GitHub indispon\xEDvel",
-        "O administrador ainda n\xE3o configurou a autentica\xE7\xE3o GitHub para esta instala\xE7\xE3o."
-      );
-    }
-    const exchangeCodeFn = options?.githubOAuthHooks?.exchangeCode || exchangeGitHubOAuthCode;
-    const fetchProfileFn = options?.githubOAuthHooks?.fetchProfile || fetchGitHubAuthenticatedProfile;
-    try {
-      const tokenRes = await exchangeCodeFn({
-        clientId,
-        clientSecret,
-        code: rawCode,
-        redirectUri: tx.redirectUri,
-        codeVerifier: tx.codeVerifier
-      });
-      const profile = await fetchProfileFn(tokenRes.accessToken);
-      const existingSession = extractSessionTokenFromRequest(req);
-      if (existingSession.token) {
-        authService.revokeSession(existingSession.token);
-      }
-      const allowSignup = process.env.WINHOOD_GITHUB_ALLOW_SIGNUP !== "false";
-      const isInternetExposed = !isLoopbackRequestHost(req) || isHostedPreviewRequest(req) || process.env.WINHOOD_TEAM_SERVER === "true";
-      const outcome = authService.issueGitHubOAuthSession({
-        githubId: profile.id,
-        githubLogin: profile.login,
-        name: profile.name,
-        email: profile.email,
-        emailVerified: profile.emailVerified !== false,
-        avatarUrl: profile.avatarUrl,
-        ipAddress: req.ip || "127.0.0.1",
-        userAgent: String(req.headers["user-agent"] || "WinHood-GitHub-OAuth-PKCE"),
-        allowSignup,
-        isInternetExposed,
-        allowFirstUserAdmin: false
-      });
-      appendAuditLog(
-        db,
-        outcome.isNewAccount ? "AUTH_GITHUB_OAUTH_REGISTERED" : "AUTH_GITHUB_OAUTH_LOGIN",
-        "AUTH",
-        outcome.user.id,
-        `Autentica\xE7\xE3o GitHub OAuth PKCE conclu\xEDda para @${profile.login} (${outcome.isNewAccount ? "nova conta" : "conta existente"}).`,
-        outcome.user
-      );
-      saveDatabase(db);
-      if (tx.mode === "redirect") {
-        oauthTxStore.deleteTransaction(tx.state);
-        const { sameSiteAttr, isCrossSiteIframe } = resolveCookieSecurityContext(res, {
-          forOAuthRedirect: true
-        });
-        const maxAgeSec = outcome.trustDevice ? Math.floor(AuthService.SESSION_TRUSTED_DEVICE_MS / 1e3) : Math.floor(AuthService.SESSION_ABSOLUTE_MS / 1e3);
-        res.setHeader("Cache-Control", "no-store");
-        res.setHeader("Set-Cookie", [
-          buildOAuthStateClearCookie(res),
-          `winhood_session=${encodeURIComponent(outcome.sessionId)}; Path=/; HttpOnly; ${sameSiteAttr}; Max-Age=${maxAgeSec}`,
-          `winhood_csrf=${encodeURIComponent(outcome.csrfToken)}; Path=/; ${sameSiteAttr}; Max-Age=${maxAgeSec}`
-        ]);
-        res.setHeader("X-WinHood-CSRF-Token", outcome.csrfToken);
-        if (isCrossSiteIframe) {
-          res.setHeader("X-WinHood-Session-Token", outcome.sessionId);
-        }
-        return res.redirect(302, "/");
-      }
-      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
-        trustDevice: outcome.trustDevice
-      });
-      oauthTxStore.updateTransaction(tx.state, {
-        status: "AUTHORIZED",
-        sessionId: outcome.sessionId,
-        csrfToken: outcome.csrfToken,
-        user: outcome.user,
-        isNewAccount: outcome.isNewAccount,
-        expiresAtMs: Date.now() + 2 * 60 * 1e3
-      });
-      if (tx.mode === "desktop") {
-        return renderOAuthCallbackHtml(
-          res,
-          200,
-          "WinHood Desktop autenticado com GitHub",
-          `Conta @${profile.login} autenticada com sucesso. Voc\xEA pode fechar esta aba do navegador e retornar ao aplicativo WinHood.`
-        );
-      }
-      const scriptPayload = JSON.stringify({
-        type: "winhood-github-oauth-result",
-        ok: true,
-        state: tx.state,
-        isNewAccount: outcome.isNewAccount,
-        user: outcome.user,
-        csrfToken: outcome.csrfToken
-      }).replace(/</g, "\\u003c");
-      const targetOrigin = JSON.stringify(tx.originHint || new URL(tx.redirectUri).origin);
-      const script = `if(window.opener){window.opener.postMessage(${scriptPayload},${targetOrigin});setTimeout(function(){window.close();},150);}`;
-      return renderOAuthCallbackHtml(
-        res,
-        200,
-        "Conta GitHub conectada ao WinHood",
-        `Autentica\xE7\xE3o conclu\xEDda para @${profile.login}. Esta janela fechar\xE1 automaticamente.`,
-        script
-      );
-    } catch (err) {
-      const rawMsg = String(err?.message || "");
-      let errorCode = "exchange_failed";
-      let safeMsg = "N\xE3o foi poss\xEDvel concluir a autentica\xE7\xE3o com o GitHub. Tente novamente.";
-      let statusCode = 502;
-      if (rawMsg.startsWith("AUTH_SIGNUP_DISABLED")) {
-        errorCode = "signup_disabled";
-        safeMsg = "O cadastro de novos usu\xE1rios via GitHub est\xE1 desabilitado pelo administrador desta instala\xE7\xE3o.";
-        statusCode = 403;
-      } else if (rawMsg.startsWith("AUTH_ACCOUNT_DISABLED")) {
-        errorCode = "account_disabled";
-        safeMsg = "Esta conta foi desabilitada pelo administrador.";
-        statusCode = 403;
-      } else if (rawMsg.startsWith("AUTH_EMAIL_VERIFICATION_REQUIRED")) {
-        errorCode = "email_unverified";
-        safeMsg = "N\xE3o foi poss\xEDvel vincular automaticamente sua conta GitHub porque o endere\xE7o de e-mail n\xE3o est\xE1 verificado no GitHub.";
-        statusCode = 403;
-      } else if (rawMsg.startsWith("GITHUB_ALREADY_LINKED")) {
-        errorCode = "github_already_linked";
-        safeMsg = "Esta conta GitHub j\xE1 est\xE1 associada a outro usu\xE1rio nesta instala\xE7\xE3o.";
-        statusCode = 409;
-      } else if (rawMsg.startsWith("GITHUB_PROFILE") || rawMsg.startsWith("GITHUB_TOKEN_UNAUTHORIZED")) {
-        errorCode = "profile_failed";
-        safeMsg = "N\xE3o foi poss\xEDvel consultar o perfil autenticado na API do GitHub.";
-        statusCode = 502;
-      }
-      if (tx.mode === "redirect") {
-        oauthTxStore.deleteTransaction(tx.state);
-      } else {
-        oauthTxStore.updateTransaction(tx.state, {
-          status: "ERROR",
-          errorMessage: safeMsg
-        });
-      }
-      return respondWithOAuthError(statusCode, errorCode, "Falha na autentica\xE7\xE3o GitHub", safeMsg);
-    }
-  };
-  app.get(
-    ["/api/auth/github/oauth/callback", "/api/auth/github/oauth/callback/"],
-    oauthRateLimiter,
-    handleGitHubOAuthCallback
-  );
-  app.get("/api/auth/github/oauth/status", oauthRateLimiter, (req, res) => {
-    oauthTxStore.pruneExpired();
-    res.setHeader("Cache-Control", "no-store");
-    const rawState = typeof req.query.state === "string" ? req.query.state : "";
-    if (!rawState) {
-      return res.status(400).json({ error: "Par\xE2metro state obrigat\xF3rio.", code: "STATE_REQUIRED" });
-    }
-    const tx = oauthTxStore.getTransactionByState(rawState);
-    if (!tx) {
-      return res.status(404).json({
-        status: "EXPIRED",
-        error: "Transa\xE7\xE3o OAuth n\xE3o encontrada ou expirada.",
-        code: "GITHUB_OAUTH_TX_NOT_FOUND"
-      });
-    }
-    if (tx.status === "PENDING") {
-      return res.json({ status: "PENDING", authorized: false });
-    }
-    if (tx.status === "ERROR") {
-      oauthTxStore.deleteTransaction(tx.state);
-      return res.status(400).json({
-        status: "ERROR",
-        authorized: false,
-        error: tx.errorMessage || "Autoriza\xE7\xE3o GitHub recusada."
-      });
-    }
-    const sessionId = tx.sessionId;
-    const csrfToken = tx.csrfToken;
-    const user = tx.user;
-    const isNewAccount = Boolean(tx.isNewAccount);
-    oauthTxStore.deleteTransaction(tx.state);
-    const { isCrossSiteIframe } = resolveCookieSecurityContext(res);
-    setSessionCookies(res, sessionId, csrfToken, { trustDevice: true });
-    return res.json({
-      status: "AUTHORIZED",
-      authorized: true,
-      authenticated: true,
-      isNewAccount,
-      user,
-      csrfToken,
-      ...isCrossSiteIframe ? { sessionId } : {}
-    });
-  });
-  app.post("/api/auth/bootstrap-admin/claim", (req, res) => {
-    const authCtx = res.locals.authContext;
-    if (!authCtx?.user) {
-      return res.status(401).json({ error: "Autentica\xE7\xE3o necess\xE1ria para reivindicar bootstrap administrativo." });
-    }
-    const { bootstrapToken } = req.body || {};
-    if (!bootstrapToken || typeof bootstrapToken !== "string") {
-      return res.status(400).json({ error: "Informe o token \xFAnico de bootstrap administrativo." });
-    }
-    try {
-      const promoted = authService.claimAdminWithBootstrapToken(authCtx.user.id, bootstrapToken);
-      appendAuditLog(
-        db,
-        "AUTH_ADMIN_BOOTSTRAP_CLAIMED",
-        "AUTH",
-        promoted.id,
-        `Usu\xE1rio ${promoted.email} assumiu papel ADMIN mediante token \xFAnico de bootstrap.`,
-        promoted
-      );
-      saveDatabase(db);
-      return res.json({ ok: true, user: promoted });
-    } catch (err) {
-      const msg = String(err?.message || "Falha ao validar token de bootstrap.");
-      const status = msg.startsWith("BOOTSTRAP_ALREADY_COMPLETED") ? 409 : 403;
-      return res.status(status).json({ error: msg });
-    }
-  });
-  app.post("/api/auth/github/device/start", oauthRateLimiter, async (req, res) => {
-    res.setHeader("Cache-Control", "no-store");
-    const bodyClientId = typeof req.body?.clientId === "string" ? req.body.clientId.trim() : "";
-    const { clientId: configuredClientId } = resolveEffectiveGitHubOAuthCredentials();
-    const clientId = (configuredClientId || bodyClientId).trim();
-    if (clientId.length < 8) {
-      return res.status(400).json({
-        error: "Informe seu GitHub OAuth Client ID ou utilize um Personal Access Token (PAT) do GitHub para entrar imediatamente.",
-        code: "GITHUB_CLIENT_ID_MISSING",
-        patLoginEndpoint: "/api/auth/github/token"
-      });
-    }
-    try {
-      const deviceResp = await startGitHubDeviceAuth(clientId);
-      return res.json(deviceResp);
-    } catch (err) {
-      return res.status(502).json({
-        error: err?.message || "Falha ao iniciar GitHub OAuth Device Flow.",
-        code: "GITHUB_DEVICE_FLOW_FAILED"
-      });
-    }
-  });
-  app.post("/api/auth/github/device/poll", oauthRateLimiter, async (req, res) => {
-    res.setHeader("Cache-Control", "no-store");
-    const { deviceCode, clientId: bodyClientId } = req.body || {};
-    const { clientId: configuredClientId } = resolveEffectiveGitHubOAuthCredentials();
-    const clientId = (configuredClientId || (typeof bodyClientId === "string" ? bodyClientId.trim() : "")).trim();
-    if (clientId.length < 8) {
-      return res.status(400).json({
-        error: "GITHUB_CLIENT_ID_MISSING: Informe um GitHub OAuth Client ID v\xE1lido.",
-        code: "GITHUB_CLIENT_ID_MISSING"
-      });
-    }
-    if (!deviceCode || typeof deviceCode !== "string") {
-      return res.status(400).json({ error: "deviceCode obrigat\xF3rio.", code: "INVALID_REQUEST" });
-    }
-    try {
-      const pollResult = await pollGitHubDeviceToken(clientId, deviceCode);
-      if (pollResult.status !== "AUTHORIZED" || !pollResult.accessToken) {
-        return res.json({
-          authorized: false,
-          status: pollResult.status,
-          errorDescription: pollResult.errorDescription
-        });
-      }
-      const profile = await fetchGitHubAuthenticatedProfile(pollResult.accessToken);
-      const existingSession = extractSessionTokenFromRequest(req);
-      if (existingSession.token) {
-        authService.revokeSession(existingSession.token);
-      }
-      const allowSignup = process.env.WINHOOD_GITHUB_ALLOW_SIGNUP !== "false";
-      const isInternetExposed = !isLoopbackRequestHost(req) || isHostedPreviewRequest(req) || process.env.WINHOOD_TEAM_SERVER === "true";
-      const outcome = authService.issueGitHubOAuthSession({
-        githubId: profile.id,
-        githubLogin: profile.login,
-        name: profile.name,
-        email: profile.email,
-        emailVerified: profile.emailVerified !== false,
-        avatarUrl: profile.avatarUrl,
-        ipAddress: req.ip || "127.0.0.1",
-        userAgent: String(req.headers["user-agent"] || "WinHood-GitHub-OAuth"),
-        allowSignup,
-        isInternetExposed,
-        allowFirstUserAdmin: false
-      });
-      const { isCrossSiteIframe } = resolveCookieSecurityContext(res);
-      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
-        trustDevice: outcome.trustDevice
-      });
-      appendAuditLog(
-        db,
-        "AUTH_GITHUB_DEVICE_FLOW_SUCCESS",
-        "AUTH",
-        outcome.user.id,
-        `Login via GitHub OAuth Device Flow conclu\xEDdo para @${profile.login} (${outcome.user.email}).`,
-        outcome.user
-      );
-      saveDatabase(db);
-      return res.json({
-        authorized: true,
-        status: "AUTHORIZED",
-        authenticated: true,
-        isNewAccount: outcome.isNewAccount,
-        user: outcome.user,
-        csrfToken: outcome.csrfToken,
-        ...isCrossSiteIframe ? { sessionId: outcome.sessionId } : {}
-      });
-    } catch (err) {
-      const msg = String(err?.message || "Erro ao consultar autoriza\xE7\xE3o do GitHub Device Flow.");
-      if (msg.startsWith("AUTH_SIGNUP_DISABLED") || msg.startsWith("AUTH_ACCOUNT_DISABLED") || msg.startsWith("AUTH_EMAIL_VERIFICATION_REQUIRED")) {
-        return res.status(403).json({ error: msg, code: msg.split(":")[0].trim() });
-      }
-      if (msg.startsWith("GITHUB_ALREADY_LINKED")) {
-        return res.status(409).json({ error: msg, code: "GITHUB_ALREADY_LINKED" });
-      }
-      const status = msg.startsWith("GITHUB_TOKEN_UNAUTHORIZED") ? 401 : 502;
-      return res.status(status).json({
-        error: msg,
-        code: "GITHUB_DEVICE_POLL_FAILED"
-      });
-    }
-  });
-  app.post("/api/auth/github/token", oauthRateLimiter, async (req, res) => {
-    res.setHeader("Cache-Control", "no-store");
-    const { token, trustDevice } = req.body || {};
-    const cleanToken = typeof token === "string" ? token.trim() : "";
-    if (cleanToken.length < 10) {
-      return res.status(400).json({
-        error: "Informe um GitHub Personal Access Token (PAT) v\xE1lido (ghp_... ou github_pat_...).",
-        code: "GITHUB_TOKEN_INVALID"
-      });
-    }
-    try {
-      const profile = await fetchGitHubAuthenticatedProfile(cleanToken);
-      const existingSession = extractSessionTokenFromRequest(req);
-      if (existingSession.token) {
-        authService.revokeSession(existingSession.token);
-      }
-      const allowSignup = process.env.WINHOOD_GITHUB_ALLOW_SIGNUP !== "false";
-      const isInternetExposed = !isLoopbackRequestHost(req) || isHostedPreviewRequest(req) || process.env.WINHOOD_TEAM_SERVER === "true";
-      const outcome = authService.issueGitHubOAuthSession({
-        githubId: profile.id,
-        githubLogin: profile.login,
-        name: profile.name,
-        email: profile.email,
-        emailVerified: profile.emailVerified !== false,
-        avatarUrl: profile.avatarUrl,
-        ipAddress: req.ip || "127.0.0.1",
-        userAgent: String(req.headers["user-agent"] || "WinHood-GitHub-PAT"),
-        allowSignup,
-        isInternetExposed,
-        allowFirstUserAdmin: false
-      });
-      const { isCrossSiteIframe } = resolveCookieSecurityContext(res);
-      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
-        trustDevice: trustDevice !== false
-      });
-      appendAuditLog(
-        db,
-        "AUTH_GITHUB_PAT_LOGIN_SUCCESS",
-        "AUTH",
-        outcome.user.id,
-        `Login via GitHub Personal Access Token validado na API oficial para @${profile.login}.`,
-        outcome.user
-      );
-      saveDatabase(db);
-      return res.json({
-        authenticated: true,
-        provider: "github-pat",
-        isNewAccount: outcome.isNewAccount,
-        user: outcome.user,
-        csrfToken: outcome.csrfToken,
-        ...isCrossSiteIframe ? { sessionId: outcome.sessionId } : {}
-      });
-    } catch (err) {
-      const msg = String(err?.message || "Erro de rede ao validar token na API oficial do GitHub.");
-      if (msg.startsWith("GITHUB_TOKEN_UNAUTHORIZED")) {
-        return res.status(401).json({
-          error: "Token GitHub rejeitado pela API oficial (HTTP 401/403). Verifique se o PAT est\xE1 ativo e possui escopo read:user.",
-          code: "GITHUB_TOKEN_UNAUTHORIZED"
-        });
-      }
-      if (msg.startsWith("AUTH_SIGNUP_DISABLED") || msg.startsWith("AUTH_ACCOUNT_DISABLED") || msg.startsWith("AUTH_EMAIL_VERIFICATION_REQUIRED")) {
-        return res.status(403).json({ error: msg, code: msg.split(":")[0].trim() });
-      }
-      if (msg.startsWith("GITHUB_ALREADY_LINKED")) {
-        return res.status(409).json({ error: msg, code: "GITHUB_ALREADY_LINKED" });
-      }
-      const code = msg.includes(":") ? msg.split(":")[0].trim() : "GITHUB_TOKEN_NETWORK_ERROR";
-      return res.status(502).json({
-        error: msg,
-        code
-      });
-    }
-  });
-  app.post("/api/auth/bootstrap-admin", (req, res) => {
-    try {
-      const { bootstrapToken, name, email, password, enableMfa } = req.body || {};
-      const result = authService.bootstrapInitialAdmin({
-        bootstrapToken: bootstrapToken || "",
-        name: name || "",
-        email: email || "",
-        password: password || "",
-        enableMfa: Boolean(enableMfa),
-        ipAddress: req.ip || "127.0.0.1",
-        userAgent: String(req.headers["user-agent"] || "unknown")
-      });
-      setSessionCookies(res, result.sessionId, result.csrfToken);
-      appendAuditLog(
-        db,
-        "ADMIN_BOOTSTRAP_COMPLETED",
-        "AUTH",
-        result.user.id,
-        `Administrador inicial "${result.user.email}" provisionado com token single-use.`,
-        result.user
-      );
-      saveDatabase(db, true);
-      return res.status(201).json({
-        authenticated: !result.totpSetup,
-        mfaRequired: Boolean(result.totpSetup),
-        user: result.user,
-        sessionId: result.sessionId,
-        csrfToken: result.csrfToken,
-        totpSetup: result.totpSetup
-      });
-    } catch (err) {
-      const msg = err?.message || "Falha no bootstrap inicial.";
-      const status = msg.startsWith("BOOTSTRAP_ALREADY_COMPLETED") || msg.startsWith("BOOTSTRAP_CONFLICT") ? 409 : 400;
-      const code = msg.includes(":") ? msg.split(":")[0].trim() : "BOOTSTRAP_FAILED";
-      return res.status(status).json({ error: msg, code });
-    }
-  });
-  app.post("/api/auth/register", (req, res) => {
-    try {
-      const { name, email, password, pin, role, enableMfa } = req.body || {};
-      const result = authService.registerAccount({
-        name: name || "",
-        email: email || "",
-        password: password || "",
-        pin: pin || void 0,
-        role,
-        enableMfa: Boolean(enableMfa),
-        ipAddress: req.ip || "127.0.0.1",
-        userAgent: String(req.headers["user-agent"] || "unknown")
-      });
-      setSessionCookies(res, result.sessionId, result.csrfToken);
-      appendAuditLog(
-        db,
-        "USER_SELF_REGISTERED",
-        "AUTH",
-        result.user.id,
-        `Novo usu\xE1rio "${result.user.email}" cadastrado com perfil ${result.user.role} (MFA=${result.user.mfaEnabled}, PIN=${Boolean(result.user.pinEnabled)}).`,
-        result.user
-      );
-      saveDatabase(db);
-      return res.status(201).json({
-        authenticated: !result.totpSetup,
-        mfaRequired: Boolean(result.totpSetup),
-        user: result.user,
-        sessionId: result.sessionId,
-        csrfToken: result.csrfToken,
-        totpSetup: result.totpSetup
-      });
-    } catch (err) {
-      const msg = err?.message || "Falha ao realizar cadastro.";
-      const status = msg.startsWith("EMAIL_ALREADY_EXISTS") ? 409 : msg.startsWith("ROLE_ELEVATION_BLOCKED") || msg.startsWith("BOOTSTRAP_REQUIRED") ? 403 : msg.startsWith("AUTH_RATE_LIMITED") ? 429 : 400;
-      const code = msg.startsWith("EMAIL_ALREADY_EXISTS") ? "ACCOUNT_ALREADY_EXISTS" : msg.startsWith("BOOTSTRAP_REQUIRED") ? "BOOTSTRAP_REQUIRED" : msg.startsWith("ROLE_ELEVATION_BLOCKED") ? "ROLE_ELEVATION_BLOCKED" : msg.startsWith("AUTH_RATE_LIMITED") ? "RATE_LIMITED" : msg.startsWith("WEAK_PIN") ? "WEAK_PIN" : msg.startsWith("INVALID_PIN") ? "INVALID_PIN" : "VALIDATION_ERROR";
-      appendAuditLog(db, "AUTH_REGISTER_FAILED", "AUTH", String(req.body?.email || "unknown"), msg);
-      saveDatabase(db);
-      return res.status(status).json({ error: msg, code });
-    }
-  });
-  app.post("/api/auth/login", (req, res) => {
-    try {
-      const { email, password, totpCode, trustDevice } = req.body || {};
-      const outcome = authService.login({
-        email: email || "",
-        password: password || "",
-        totpCode,
-        trustDevice: Boolean(trustDevice),
-        ipAddress: req.ip || "127.0.0.1",
-        userAgent: String(req.headers["user-agent"] || "unknown")
-      });
-      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
-        trustDevice: outcome.trustDevice
-      });
-      appendAuditLog(
-        db,
-        outcome.mfaRequired ? "AUTH_LOGIN_PENDING_MFA" : "AUTH_LOGIN_SUCCESS",
-        "AUTH",
-        outcome.user.id,
-        `Login efetuado para ${outcome.user.email} (MFA=${outcome.user.mfaEnabled}, verified=${outcome.user.mfaVerified}, trustDevice=${outcome.trustDevice}).`,
-        outcome.user
-      );
-      saveDatabase(db);
-      return res.json({
-        authenticated: !outcome.mfaRequired,
-        mfaRequired: outcome.mfaRequired,
-        requiresTotp: outcome.requiresTotp,
-        preAuthToken: outcome.preAuthToken,
-        trustDevice: outcome.trustDevice,
-        serverTimeIso: outcome.serverTimeIso,
-        totpPeriodSeconds: outcome.totpPeriodSeconds,
-        user: outcome.user,
-        sessionId: outcome.sessionId,
-        csrfToken: outcome.csrfToken
-      });
-    } catch (err) {
-      const msg = err?.message || "Falha na autentica\xE7\xE3o.";
-      const status = msg.startsWith("AUTH_RATE_LIMITED") || msg.startsWith("AUTH_ACCOUNT_LOCKED") ? 429 : msg.startsWith("AUTH_ACCOUNT_DISABLED") ? 403 : 401;
-      const code = msg.startsWith("AUTH_RATE_LIMITED") || msg.startsWith("AUTH_ACCOUNT_LOCKED") ? "RATE_LIMITED" : msg.startsWith("AUTH_ACCOUNT_DISABLED") ? "ACCOUNT_DISABLED" : msg.startsWith("AUTH_MFA_REQUIRED") ? "TOTP_REQUIRED" : msg.startsWith("AUTH_MFA_INVALID") ? "INVALID_TOTP" : "INVALID_CREDENTIALS";
-      appendAuditLog(db, "AUTH_LOGIN_FAILED", "AUTH", String(req.body?.email || "unknown"), msg);
-      saveDatabase(db);
-      return res.status(status).json({ error: msg, code });
-    }
-  });
-  app.post("/api/auth/login-pin", (req, res) => {
-    try {
-      const { email, pin, totpCode, trustDevice } = req.body || {};
-      const outcome = authService.loginWithPin({
-        email: email || "",
-        pin: pin || "",
-        totpCode,
-        trustDevice: Boolean(trustDevice),
-        ipAddress: req.ip || "127.0.0.1",
-        userAgent: String(req.headers["user-agent"] || "unknown")
-      });
-      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
-        trustDevice: outcome.trustDevice
-      });
-      appendAuditLog(
-        db,
-        outcome.mfaRequired ? "AUTH_LOGIN_PIN_PENDING_MFA" : "AUTH_LOGIN_PIN_SUCCESS",
-        "AUTH",
-        outcome.user.id,
-        `Login por PIN R\xE1pido efetuado para ${outcome.user.email} (MFA=${outcome.user.mfaEnabled}, verified=${outcome.user.mfaVerified}).`,
-        outcome.user
-      );
-      saveDatabase(db);
-      return res.json({
-        authenticated: !outcome.mfaRequired,
-        mfaRequired: outcome.mfaRequired,
-        requiresTotp: outcome.requiresTotp,
-        preAuthToken: outcome.preAuthToken,
-        trustDevice: outcome.trustDevice,
-        serverTimeIso: outcome.serverTimeIso,
-        totpPeriodSeconds: outcome.totpPeriodSeconds,
-        user: outcome.user,
-        sessionId: outcome.sessionId,
-        csrfToken: outcome.csrfToken
-      });
-    } catch (err) {
-      const msg = err?.message || "Falha na autentica\xE7\xE3o com PIN.";
-      const status = msg.startsWith("AUTH_RATE_LIMITED") || msg.startsWith("AUTH_ACCOUNT_LOCKED") ? 429 : 401;
-      const code = msg.startsWith("AUTH_RATE_LIMITED") || msg.startsWith("AUTH_ACCOUNT_LOCKED") ? "RATE_LIMITED" : "INVALID_CREDENTIALS";
-      appendAuditLog(db, "AUTH_LOGIN_PIN_FAILED", "AUTH", String(req.body?.email || "unknown"), msg);
-      saveDatabase(db);
-      return res.status(status).json({ error: msg, code });
-    }
-  });
-  app.post("/api/auth/pin/setup", (req, res) => {
-    const actor = getRequestActor(req, res);
-    if (actor.id === "usr-anonymous") {
-      return res.status(401).json({ error: "AUTH_REQUIRED" });
-    }
-    const { pin } = req.body || {};
-    try {
-      const updatedUser = authService.setupPinForUser(actor.id, pin || "");
-      appendAuditLog(
-        db,
-        "AUTH_PIN_CONFIGURED",
-        "AUTH",
-        updatedUser.id,
-        `PIN R\xE1pido (6-8 d\xEDgitos) configurado para ${updatedUser.email}.`,
-        updatedUser
-      );
-      saveDatabase(db);
-      return res.json({ ok: true, user: updatedUser });
-    } catch (err) {
-      const msg = err?.message || "Falha ao configurar PIN.";
-      return res.status(400).json({ error: msg, code: "INVALID_PIN" });
-    }
-  });
-  const resolveWebAuthnRpId = (req) => {
-    const sanitizeHost = (raw) => {
-      const cleaned = raw.trim().toLowerCase().replace(/^https?:\/\//, "").split("/")[0] || "";
-      const hostOnly = cleaned.startsWith("[") ? cleaned.slice(0, cleaned.indexOf("]") + 1) : cleaned.split(":")[0] || "";
-      if (/^[a-z0-9.-]+$/.test(hostOnly) || hostOnly === "[::1]") {
-        return hostOnly;
-      }
-      return "";
-    };
-    const bodyRpId = typeof req.body?.rpId === "string" ? sanitizeHost(req.body.rpId) : "";
-    if (bodyRpId) return bodyRpId;
-    const originHeader = typeof req.headers.origin === "string" ? req.headers.origin.trim() : "";
-    if (originHeader) {
-      try {
-        const originHost = sanitizeHost(new URL(originHeader).hostname);
-        if (originHost) return originHost;
-      } catch {
-      }
-    }
-    const hostHeader = typeof req.headers.host === "string" ? sanitizeHost(req.headers.host) : "";
-    return hostHeader || "localhost";
-  };
-  app.post("/api/auth/webauthn/register-account/options", (req, res) => {
-    try {
-      const { name, email, role } = req.body || {};
-      const resolvedRpId = resolveWebAuthnRpId(req);
-      const options2 = authService.createWebAuthnRegistrationOptions({
-        name: name || "",
-        email: email || "",
-        role,
-        rpId: resolvedRpId,
-        ipAddress: req.ip || "127.0.0.1"
-      });
-      return res.json({ ...options2, publicKey: options2 });
-    } catch (err) {
-      const msg = err?.message || "Falha ao gerar op\xE7\xF5es WebAuthn de cadastro.";
-      const status = msg.startsWith("EMAIL_ALREADY_EXISTS") ? 409 : msg.startsWith("ROLE_ELEVATION_BLOCKED") ? 403 : msg.startsWith("AUTH_RATE_LIMITED") ? 429 : 400;
-      return res.status(status).json({ error: msg });
-    }
-  });
-  app.post("/api/auth/webauthn/register-account/verify", (req, res) => {
-    try {
-      const {
-        challengeId,
-        credentialId,
-        clientDataJSON,
-        attestationObject,
-        authenticatorData,
-        publicKeySpkiBase64,
-        coseAlgorithm,
-        transports,
-        trustDevice,
-        credential
-      } = req.body || {};
-      const result = authService.verifyWebAuthnAccountRegistration({
-        challengeId,
-        credentialId: credentialId || credential?.id || credential?.rawId || "",
-        clientDataJSON: clientDataJSON || credential?.response?.clientDataJSON || "",
-        attestationObject: attestationObject || credential?.response?.attestationObject,
-        authenticatorData: authenticatorData || credential?.response?.authenticatorData,
-        publicKeySpkiBase64: publicKeySpkiBase64 || credential?.response?.publicKey,
-        coseAlgorithm: coseAlgorithm ?? credential?.response?.publicKeyAlgorithm,
-        transports: transports || credential?.response?.transports,
-        trustDevice: trustDevice !== false,
-        ipAddress: req.ip || "127.0.0.1",
-        userAgent: String(req.headers["user-agent"] || "unknown")
-      });
-      setSessionCookies(res, result.sessionId, result.csrfToken, {
-        trustDevice: result.trustDevice
-      });
-      appendAuditLog(
-        db,
-        "USER_WEBAUTHN_REGISTERED",
-        "AUTH",
-        result.user.id,
-        `Conta "${result.user.email}" cadastrada via Windows Hello / WebAuthn FIDO2 com perfil ${result.user.role}.`,
-        result.user
-      );
-      saveDatabase(db);
-      return res.status(201).json({
-        authenticated: true,
-        mfaRequired: false,
-        user: result.user,
-        sessionId: result.sessionId,
-        csrfToken: result.csrfToken
-      });
-    } catch (err) {
-      const msg = err?.message || "Falha na verifica\xE7\xE3o WebAuthn de cadastro.";
-      const status = msg.startsWith("ROLE_ELEVATION_BLOCKED") ? 403 : msg.startsWith("EMAIL_ALREADY_EXISTS") ? 409 : 400;
-      return res.status(status).json({ error: msg });
-    }
-  });
-  app.post("/api/auth/webauthn/login/options", (req, res) => {
-    try {
-      const { email } = req.body || {};
-      const resolvedRpId = resolveWebAuthnRpId(req);
-      const options2 = authService.createWebAuthnLoginOptions({
-        email,
-        rpId: resolvedRpId,
-        ipAddress: req.ip || "127.0.0.1"
-      });
-      return res.json({ ...options2, publicKey: options2 });
-    } catch (err) {
-      const msg = err?.message || "Falha ao gerar desafio de login WebAuthn.";
-      return res.status(400).json({ error: msg });
-    }
-  });
-  app.post("/api/auth/webauthn/login/verify", (req, res) => {
-    try {
-      const {
-        challengeId,
-        credentialId,
-        clientDataJSON,
-        authenticatorData,
-        signature,
-        email,
-        trustDevice,
-        credential
-      } = req.body || {};
-      const outcome = authService.verifyWebAuthnLogin({
-        challengeId,
-        credentialId: credentialId || credential?.id || credential?.rawId || "",
-        clientDataJSON: clientDataJSON || credential?.response?.clientDataJSON || "",
-        authenticatorData: authenticatorData || credential?.response?.authenticatorData || "",
-        signature: signature || credential?.response?.signature || "",
-        email,
-        trustDevice: trustDevice !== false,
-        ipAddress: req.ip || "127.0.0.1",
-        userAgent: String(req.headers["user-agent"] || "unknown")
-      });
-      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
-        trustDevice: outcome.trustDevice
-      });
-      appendAuditLog(
-        db,
-        "AUTH_WEBAUTHN_LOGIN_SUCCESS",
-        "AUTH",
-        outcome.user.id,
-        `Login via Windows Hello / WebAuthn FIDO2 efetuado para ${outcome.user.email}.`,
-        outcome.user
-      );
-      saveDatabase(db);
-      return res.json({
-        authenticated: !outcome.mfaRequired,
-        mfaRequired: outcome.mfaRequired,
-        requiresTotp: outcome.requiresTotp,
-        preAuthToken: outcome.preAuthToken,
-        trustDevice: outcome.trustDevice,
-        serverTimeIso: outcome.serverTimeIso,
-        totpPeriodSeconds: outcome.totpPeriodSeconds,
-        user: outcome.user,
-        sessionId: outcome.sessionId,
-        csrfToken: outcome.csrfToken
-      });
-    } catch (err) {
-      const msg = err?.message || "Falha na autentica\xE7\xE3o Windows Hello / WebAuthn.";
-      const status = msg.startsWith("AUTH_RATE_LIMITED") || msg.startsWith("AUTH_ACCOUNT_LOCKED") ? 429 : 401;
-      appendAuditLog(db, "AUTH_WEBAUTHN_LOGIN_FAILED", "AUTH", String(req.body?.email || "unknown"), msg);
-      saveDatabase(db);
-      return res.status(status).json({ error: msg });
-    }
-  });
-  app.post("/api/auth/windows-hello/native-register", async (req, res) => {
-    try {
-      const { name, email, role, trustDevice } = req.body || {};
-      const result = await authService.registerNativeWindowsHelloAccount({
-        name: name || "",
-        email: email || "",
-        role,
-        trustDevice: trustDevice !== false,
-        ipAddress: req.ip || "127.0.0.1",
-        userAgent: String(req.headers["user-agent"] || "unknown")
-      });
-      setSessionCookies(res, result.sessionId, result.csrfToken, {
-        trustDevice: result.trustDevice
-      });
-      appendAuditLog(
-        db,
-        "USER_WINHELLO_NATIVE_REGISTERED",
-        "AUTH",
-        result.user.id,
-        `Conta "${result.user.email}" cadastrada via Windows Hello Nativo (UserConsentVerifier + ES256 P-256) com perfil ${result.user.role}.`,
-        result.user
-      );
-      saveDatabase(db);
-      return res.status(201).json({
-        authenticated: true,
-        mfaRequired: false,
-        nativeWindowsHello: true,
-        keyAlgorithm: result.keyAlgorithm,
-        credentialId: result.credentialId,
-        user: result.user,
-        sessionId: result.sessionId,
-        csrfToken: result.csrfToken
-      });
-    } catch (err) {
-      const msg = err?.message || "Falha ao cadastrar com Windows Hello nativo.";
-      const code = msg.includes(":") ? msg.split(":")[0].trim() : "WINDOWS_HELLO_NATIVE_FAILED";
-      const status = code === "WINDOWS_HELLO_OS_UNSUPPORTED" ? 501 : code === "EMAIL_ALREADY_EXISTS" ? 409 : code === "ROLE_ELEVATION_BLOCKED" ? 403 : code === "AUTH_RATE_LIMITED" ? 429 : code === "WINDOWS_HELLO_CANCELLED" ? 401 : 400;
-      appendAuditLog(
-        db,
-        "AUTH_WINHELLO_NATIVE_REGISTER_FAILED",
-        "AUTH",
-        String(req.body?.email || "unknown"),
-        msg
-      );
-      saveDatabase(db);
-      return res.status(status).json({ error: msg, code, platform: process.platform });
-    }
-  });
-  app.post("/api/auth/windows-hello/native-login", async (req, res) => {
-    try {
-      const { email, trustDevice } = req.body || {};
-      const outcome = await authService.loginNativeWindowsHelloAccount({
-        email,
-        trustDevice: trustDevice !== false,
-        ipAddress: req.ip || "127.0.0.1",
-        userAgent: String(req.headers["user-agent"] || "unknown")
-      });
-      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
-        trustDevice: outcome.trustDevice
-      });
-      appendAuditLog(
-        db,
-        "AUTH_WINHELLO_NATIVE_LOGIN_SUCCESS",
-        "AUTH",
-        outcome.user.id,
-        `Login via Windows Hello Nativo (UserConsentVerifier) efetuado para ${outcome.user.email}.`,
-        outcome.user
-      );
-      saveDatabase(db);
-      return res.json({
-        authenticated: !outcome.mfaRequired,
-        mfaRequired: outcome.mfaRequired,
-        requiresTotp: outcome.requiresTotp,
-        preAuthToken: outcome.preAuthToken,
-        trustDevice: outcome.trustDevice,
-        serverTimeIso: outcome.serverTimeIso,
-        totpPeriodSeconds: outcome.totpPeriodSeconds,
-        nativeWindowsHello: true,
-        user: outcome.user,
-        sessionId: outcome.sessionId,
-        csrfToken: outcome.csrfToken
-      });
-    } catch (err) {
-      const msg = err?.message || "Falha ao autenticar via Windows Hello nativo.";
-      const code = msg.includes(":") ? msg.split(":")[0].trim() : "WINDOWS_HELLO_NATIVE_FAILED";
-      const status = code === "WINDOWS_HELLO_OS_UNSUPPORTED" ? 501 : code === "AUTH_RATE_LIMITED" || code === "AUTH_ACCOUNT_LOCKED" ? 429 : code === "WEBAUTHN_CREDENTIAL_NOT_FOUND" ? 404 : 401;
-      appendAuditLog(
-        db,
-        "AUTH_WINHELLO_NATIVE_LOGIN_FAILED",
-        "AUTH",
-        String(req.body?.email || "unknown"),
-        msg
-      );
-      saveDatabase(db);
-      return res.status(status).json({ error: msg, code, platform: process.platform });
-    }
-  });
-  app.get("/api/auth/windows-hello/status", (_req, res) => {
-    res.json({
-      platform: process.platform,
-      nativeSupported: process.platform === "win32",
-      webauthnSupported: true,
-      hasRegisteredCredentials: authService.hasAnyWebAuthnCredentials()
-    });
-  });
-  app.post("/api/auth/webauthn/link-credential/options", (req, res) => {
-    const actor = getRequestActor(req, res);
-    if (actor.id === "usr-anonymous") {
-      return res.status(401).json({ error: "AUTH_REQUIRED" });
-    }
-    try {
-      const options2 = authService.createWebAuthnLinkOptions({
-        userId: actor.id,
-        rpId: resolveWebAuthnRpId(req),
-        ipAddress: req.ip || "127.0.0.1"
-      });
-      return res.json({ ...options2, publicKey: options2 });
-    } catch (err) {
-      return res.status(400).json({ error: err?.message || "Falha ao gerar desafio para vincular Passkey." });
-    }
-  });
-  app.post("/api/auth/webauthn/link-credential/verify", (req, res) => {
-    const actor = getRequestActor(req, res);
-    if (actor.id === "usr-anonymous") {
-      return res.status(401).json({ error: "AUTH_REQUIRED" });
-    }
-    try {
-      const {
-        challengeId,
-        credentialId,
-        clientDataJSON,
-        attestationObject,
-        authenticatorData,
-        publicKeySpkiBase64,
-        coseAlgorithm,
-        transports,
-        label,
-        credential
-      } = req.body || {};
-      const result = authService.verifyWebAuthnLinkCredential({
-        userId: actor.id,
-        challengeId,
-        credentialId: credentialId || credential?.id || credential?.rawId || "",
-        clientDataJSON: clientDataJSON || credential?.response?.clientDataJSON || "",
-        attestationObject: attestationObject || credential?.response?.attestationObject,
-        authenticatorData: authenticatorData || credential?.response?.authenticatorData,
-        publicKeySpkiBase64: publicKeySpkiBase64 || credential?.response?.publicKey,
-        coseAlgorithm: coseAlgorithm ?? credential?.response?.publicKeyAlgorithm,
-        transports: transports || credential?.response?.transports,
-        label,
-        ipAddress: req.ip || "127.0.0.1"
-      });
-      appendAuditLog(
-        db,
-        "USER_WEBAUTHN_CREDENTIAL_LINKED",
-        "AUTH",
-        result.user.id,
-        `Nova Passkey / Windows Hello vinculada \xE0 conta ${result.user.email}.`,
-        result.user
-      );
-      saveDatabase(db);
-      return res.json({
-        ok: true,
-        user: result.user,
-        credentialId: result.credentialId
-      });
-    } catch (err) {
-      return res.status(400).json({ error: err?.message || "Falha ao vincular Passkey \xE0 conta." });
-    }
-  });
-  app.post("/api/auth/logout", (req, res) => {
-    res.setHeader("Cache-Control", "no-store");
-    const actor = req.authUser;
-    const sessionToken = extractSessionTokenFromRequest(req).token;
-    if (sessionToken) {
-      authService.revokeSession(sessionToken);
-    }
-    if (actor) {
-      appendAuditLog(
-        db,
-        "AUTH_LOGOUT",
-        "AUTH",
-        actor.id,
-        `Sess\xE3o encerrada para ${actor.email}.`,
-        actor
-      );
-      saveDatabase(db);
-    }
-    clearSessionCookies(res);
-    return res.json({ ok: true });
-  });
-  app.get("/api/auth/me", (req, res) => {
-    res.setHeader("Cache-Control", "no-store");
-    const sessionToken = extractSessionTokenFromRequest(req).token;
-    const validated = sessionToken ? authService.validateSession(sessionToken) : null;
-    const user = validated?.user || req.authUser;
-    if (!user) {
-      return res.status(401).json({
-        authenticated: false,
-        error: "SESSION_INVALID",
-        code: "SESSION_INVALID",
-        bootstrapRequired: authService.isBootstrapRequired(),
-        message: "Sess\xE3o ausente, expirada ou inv\xE1lida."
-      });
-    }
-    const storedMeta = authService.listUsers().find((u) => u.id === user.id);
-    return res.json({
-      authenticated: true,
-      id: user.id,
-      email: user.email,
-      name: user.name,
-      role: user.role,
-      totpEnabled: user.mfaEnabled,
-      mfaEnabled: user.mfaEnabled,
-      mfaVerified: user.mfaVerified,
-      createdAt: storedMeta?.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
-      user: {
-        ...user,
-        totpEnabled: user.mfaEnabled,
-        createdAt: storedMeta?.createdAt || (/* @__PURE__ */ new Date()).toISOString()
-      },
-      csrfToken: validated?.session.csrfToken || req.authSession?.csrfToken
-    });
-  });
-  app.delete("/api/auth/me", (req, res) => {
-    const actor = req.authUser;
-    const authSession = req.authSession;
-    if (!actor || actor.id === "usr-anonymous" || actor.id === "usr-test-header") {
-      return res.status(401).json({
-        error: "AUTH_REQUIRED",
-        code: "SESSION_INVALID",
-        message: "Sess\xE3o autenticada obrigat\xF3ria para excluir conta local."
-      });
-    }
-    const expectedCsrf = String(authSession?.csrfToken || "");
-    const providedCsrf = String(req.headers["x-csrf-token"] || req.headers["x-winhood-csrf"] || "").trim();
-    const expBuf = Buffer.from(expectedCsrf, "utf8");
-    const provBuf = Buffer.from(providedCsrf, "utf8");
-    if (!expectedCsrf || expBuf.length !== provBuf.length || !crypto32.timingSafeEqual(expBuf, provBuf)) {
-      return res.status(403).json({
-        error: "CSRF_INVALID",
-        code: "CSRF_INVALID",
-        message: "Token CSRF ausente ou inv\xE1lido para exclus\xE3o de conta."
-      });
-    }
-    const { password, pin } = req.body || {};
-    try {
-      const outcome = authService.deleteOwnAccount(actor.id, { password, pin });
-      clearSessionCookies(res);
-      appendAuditLog(
-        db,
-        "USER_ACCOUNT_DELETED",
-        "AUTH",
-        outcome.deletedUserId,
-        `Conta local "${outcome.email}" exclu\xEDda pelo pr\xF3prio titular (${outcome.revokedSessionsCount} sess\xF5es revogadas).`,
-        actor
-      );
-      saveDatabase(db, true);
-      return res.json({
-        ok: true,
-        deletedUserId: outcome.deletedUserId,
-        revokedSessionsCount: outcome.revokedSessionsCount
-      });
-    } catch (err) {
-      const msg = err?.message || "Falha ao excluir conta local.";
-      const status = msg.startsWith("AUTH_INVALID_CREDENTIALS") ? 401 : msg.startsWith("USER_NOT_FOUND") ? 404 : 400;
-      return res.status(status).json({ error: msg });
-    }
-  });
-  app.get("/api/auth/session", (req, res) => {
-    const sessionToken = extractSessionTokenFromRequest(req).token;
-    const pendingSession = sessionToken ? authService.validateSession(sessionToken, { allowPendingMfa: true }) : null;
-    if (pendingSession) {
-      const mfaRequired = pendingSession.user.mfaEnabled && !pendingSession.user.mfaVerified;
-      return res.json({
-        authenticated: !mfaRequired,
-        mfaRequired,
-        requiresTotp: mfaRequired,
-        serverTimeIso: (/* @__PURE__ */ new Date()).toISOString(),
-        totpPeriodSeconds: 30,
-        bootstrapRequired: authService.isBootstrapRequired(),
-        user: pendingSession.user,
-        csrfToken: pendingSession.session.csrfToken
-      });
-    }
-    if (req.authUser) {
-      return res.json({
-        authenticated: true,
-        mfaRequired: false,
-        requiresTotp: false,
-        serverTimeIso: (/* @__PURE__ */ new Date()).toISOString(),
-        totpPeriodSeconds: 30,
-        bootstrapRequired: authService.isBootstrapRequired(),
-        user: req.authUser,
-        csrfToken: req.authSession?.csrfToken
-      });
-    }
-    return res.json({
-      authenticated: false,
-      mfaRequired: false,
-      requiresTotp: false,
-      serverTimeIso: (/* @__PURE__ */ new Date()).toISOString(),
-      totpPeriodSeconds: 30,
-      bootstrapRequired: authService.isBootstrapRequired(),
-      user: null
-    });
-  });
-  app.post("/api/auth/refresh", (req, res) => {
-    const sessionToken = extractSessionTokenFromRequest(req).token;
-    const renewed = sessionToken ? authService.renewSession(sessionToken) : null;
-    if (!renewed) {
-      return res.status(401).json({ error: "AUTH_SESSION_INVALID", code: "SESSION_EXPIRED" });
-    }
-    setSessionCookies(res, renewed.sessionId, renewed.csrfToken);
-    return res.json({ ok: true, sessionId: renewed.sessionId, csrfToken: renewed.csrfToken });
-  });
-  app.post(["/api/auth/mfa/setup", "/api/auth/totp/setup"], (req, res) => {
-    const actor = getRequestActor(req, res);
-    if (actor.id === "usr-anonymous") {
-      return res.status(401).json({ error: "AUTH_REQUIRED" });
-    }
-    try {
-      const setup = authService.setupMfaForUser(actor.id);
-      appendAuditLog(db, "AUTH_MFA_CONFIGURED", "AUTH", actor.id, `TOTP MFA configurado para ${actor.email}.`, actor);
-      saveDatabase(db);
       return res.json({
         ...setup,
-        serverTimeIso: (/* @__PURE__ */ new Date()).toISOString()
+        qrDataUrl
       });
     } catch (err) {
-      return res.status(400).json({ error: err?.message || "Falha ao configurar MFA." });
+      return res.status(500).json({
+        error: "TOTP_SETUP_FAILED",
+        message: err?.message || "Falha ao iniciar configura\xE7\xE3o TOTP 2FA."
+      });
     }
   });
-  app.post(["/api/auth/mfa/confirm", "/api/auth/totp/verify-setup"], (req, res) => {
-    const actor = getRequestActor(req, res);
-    if (actor.id === "usr-anonymous") {
-      return res.status(401).json({ error: "AUTH_REQUIRED" });
-    }
-    const { totpCode } = req.body || {};
+  app.post(["/api/totp/confirm", "/api/security/totp/confirm"], (req, res) => {
     try {
-      const confirmed = authService.confirmMfaEnrollment(actor.id, totpCode || "");
-      const { recoveryCodes, ...user } = confirmed;
-      appendAuditLog(db, "AUTH_MFA_CONFIRMED", "AUTH", user.id, `MFA ativado e confirmado para ${user.email}. C\xF3digos de recupera\xE7\xE3o emitidos.`, user);
-      saveDatabase(db);
-      return res.json({ ok: true, user, recoveryCodes });
-    } catch (err) {
-      return res.status(400).json({ error: err?.message || "Falha ao confirmar MFA." });
-    }
-  });
-  app.post(["/api/auth/mfa/disable", "/api/auth/totp/disable"], (req, res) => {
-    const actor = getRequestActor(req, res);
-    if (actor.id === "usr-anonymous") {
-      return res.status(401).json({ error: "AUTH_REQUIRED" });
-    }
-    const { password, totpCode, recoveryCode } = req.body || {};
-    const sessionToken = extractSessionTokenFromRequest(req).token || void 0;
-    try {
-      const updatedUser = authService.disableMfaForUser(
-        actor.id,
-        { password, totpCode, recoveryCode },
-        sessionToken
-      );
+      const body = req.body || {};
+      const code = String(body.code || body.totpCode || "").trim();
+      const result = totpService.confirmSetup(code, req.ip || "local");
+      const { isCrossSiteIframe } = setTotpUnlockCookies(res, result.unlockToken, result.csrfToken);
       appendAuditLog(
         db,
-        "AUTH_MFA_DISABLED",
-        "AUTH",
-        actor.id,
-        `Autentica\xE7\xE3o TOTP MFA removida para ${actor.email}.`,
-        updatedUser
-      );
-      saveDatabase(db);
-      return res.json({ ok: true, user: updatedUser });
-    } catch (err) {
-      const msg = err?.message || "Falha ao desabilitar MFA.";
-      const status = msg.startsWith("AUTH_INVALID_") || msg.startsWith("AUTH_TOTP_REPLAY") ? 401 : 400;
-      const code = msg.includes(":") ? msg.split(":")[0].trim() : "MFA_DISABLE_FAILED";
-      return res.status(status).json({ error: msg, code });
-    }
-  });
-  app.post("/api/auth/totp/authenticate", (req, res) => {
-    const { preAuthToken, totpCode, recoveryCode, trustDevice } = req.body || {};
-    if (!preAuthToken) {
-      return res.status(400).json({ error: "AUTH_PREAUTH_REQUIRED: Token de desafio MFA obrigat\xF3rio." });
-    }
-    try {
-      const outcome = authService.authenticateWithTotpPreAuth({
-        preAuthToken,
-        totpCode,
-        recoveryCode,
-        trustDevice: typeof trustDevice === "boolean" ? trustDevice : void 0,
-        ipAddress: req.ip || "127.0.0.1",
-        userAgent: String(req.headers["user-agent"] || "unknown")
-      });
-      setSessionCookies(res, outcome.sessionId, outcome.csrfToken, {
-        trustDevice: outcome.trustDevice
-      });
-      appendAuditLog(
-        db,
-        outcome.usedRecoveryCode ? "AUTH_RECOVERY_CODE_USED" : "AUTH_MFA_VERIFIED",
-        "AUTH",
-        outcome.user.id,
-        outcome.usedRecoveryCode ? `Acesso 2FA conclu\xEDdo com c\xF3digo de recupera\xE7\xE3o para ${outcome.user.email} (restantes: ${outcome.remainingRecoveryCodesCount}).` : `TOTP 2FA validado para ${outcome.user.email} (trustDevice=${outcome.trustDevice}).`,
-        outcome.user
+        "TOTP_2FA_ENABLED",
+        "SECURITY",
+        "optional-totp",
+        "Prote\xE7\xE3o opcional TOTP 2FA (RFC-6238) ativada para o workspace local.",
+        DEFAULT_LOCAL_OPERATOR
       );
       saveDatabase(db);
       return res.json({
-        authenticated: true,
-        mfaRequired: false,
-        requiresTotp: false,
-        user: outcome.user,
-        sessionId: outcome.sessionId,
-        csrfToken: outcome.csrfToken,
-        trustDevice: outcome.trustDevice,
-        usedRecoveryCode: outcome.usedRecoveryCode,
-        remainingRecoveryCodesCount: outcome.remainingRecoveryCodesCount
+        ok: true,
+        enabled: true,
+        unlocked: true,
+        remainingRecoveryCodes: result.remainingRecoveryCodes,
+        csrfToken: result.csrfToken,
+        ...isCrossSiteIframe ? { unlockToken: result.unlockToken } : {}
       });
     } catch (err) {
-      const msg = err?.message || "C\xF3digo TOTP inv\xE1lido.";
-      const status = msg.startsWith("AUTH_RATE_LIMITED") ? 429 : 401;
-      return res.status(status).json({ error: msg });
+      const msg = String(err?.message || "C\xF3digo TOTP inv\xE1lido.");
+      const statusCode = msg.includes("TOTP_RATE_LIMITED") ? 429 : 400;
+      return res.status(statusCode).json({ error: msg, message: msg });
     }
   });
-  app.post("/api/auth/mfa/verify", (req, res) => {
-    const sessionToken = extractSessionTokenFromRequest(req).token || "";
-    const { totpCode, recoveryCode, trustDevice } = req.body || {};
+  app.post(["/api/totp/verify", "/api/security/totp/verify"], (req, res) => {
     try {
-      const result = authService.verifySessionMfa(sessionToken, totpCode || "", {
-        recoveryCode,
-        trustDevice: Boolean(trustDevice)
+      const body = req.body || {};
+      const result = totpService.verifyUnlock({
+        code: body.code,
+        totpCode: body.totpCode,
+        recoveryCode: body.recoveryCode,
+        ipKey: req.ip || "local"
       });
-      const validated = sessionToken ? authService.validateSession(sessionToken) : null;
-      if (trustDevice && validated) {
-        setSessionCookies(res, sessionToken, validated.session.csrfToken, {
-          trustDevice: true
-        });
-      }
-      const { usedRecoveryCode, remainingRecoveryCodesCount, ...user } = result;
+      const { isCrossSiteIframe } = setTotpUnlockCookies(res, result.unlockToken, result.csrfToken);
       appendAuditLog(
         db,
-        usedRecoveryCode ? "AUTH_RECOVERY_CODE_USED" : "AUTH_MFA_VERIFIED",
-        "AUTH",
-        user.id,
-        usedRecoveryCode ? `MFA conclu\xEDdo com c\xF3digo de recupera\xE7\xE3o para ${user.email}.` : `MFA verificado para ${user.email}.`,
-        user
+        result.usedRecoveryCode ? "TOTP_2FA_UNLOCKED_RECOVERY" : "TOTP_2FA_UNLOCKED",
+        "SECURITY",
+        "optional-totp",
+        result.usedRecoveryCode ? "Workspace local desbloqueado com c\xF3digo de recupera\xE7\xE3o de uso \xFAnico." : "Workspace local desbloqueado com c\xF3digo TOTP RFC-6238.",
+        DEFAULT_LOCAL_OPERATOR
       );
       saveDatabase(db);
       return res.json({
-        authenticated: true,
-        mfaRequired: false,
-        user,
-        sessionId: sessionToken || void 0,
-        csrfToken: validated?.session.csrfToken,
-        usedRecoveryCode: Boolean(usedRecoveryCode),
-        remainingRecoveryCodesCount
+        ok: true,
+        enabled: true,
+        unlocked: true,
+        usedRecoveryCode: result.usedRecoveryCode,
+        remainingRecoveryCodes: result.remainingRecoveryCodes,
+        csrfToken: result.csrfToken,
+        ...isCrossSiteIframe ? { unlockToken: result.unlockToken } : {}
       });
     } catch (err) {
-      return res.status(401).json({ error: err?.message || "C\xF3digo TOTP inv\xE1lido." });
+      const msg = String(err?.message || "C\xF3digo TOTP ou c\xF3digo de recupera\xE7\xE3o inv\xE1lido.");
+      const statusCode = msg.includes("TOTP_RATE_LIMITED") ? 429 : 401;
+      return res.status(statusCode).json({ error: msg, message: msg });
     }
   });
-  app.get("/api/auth/users", (req, res) => {
-    if (!requireWritePermission(res, req, "users:manage")) return;
-    res.json({ users: authService.listUsers() });
-  });
-  app.post("/api/auth/users", (req, res) => {
-    if (!requireWritePermission(res, req, "users:manage")) return;
-    const actor = getRequestActor(req, res);
-    try {
-      const { name, email, password, role, enableMfa } = req.body || {};
-      if (!role || !["ADMIN", "SECURITY_LEAD", "AUDITOR", "QA_ENGINEER"].includes(role)) {
-        return res.status(400).json({ error: "Perfil RBAC inv\xE1lido." });
-      }
-      const created = authService.createUser({
-        name: name || "",
-        email: email || "",
-        password: password || "",
-        role,
-        enableMfa: Boolean(enableMfa)
-      });
-      appendAuditLog(
-        db,
-        "USER_CREATED",
-        "AUTH",
-        created.id,
-        `Usu\xE1rio ${created.email} criado com perfil ${created.role}.`,
-        actor
-      );
-      saveDatabase(db);
-      return res.status(201).json({ user: created });
-    } catch (err) {
-      return res.status(400).json({ error: err?.message || "Erro ao criar usu\xE1rio." });
-    }
-  });
-  app.post("/api/auth/recovery/request", (req, res) => {
-    const { email } = req.body || {};
-    const outcome = authService.requestPasswordRecovery(email || "");
+  app.post(["/api/totp/lock", "/api/security/totp/lock"], (req, res) => {
+    const extracted = extractTotpUnlockTokenFromRequest(req);
+    const result = totpService.lock(extracted.token);
+    clearTotpUnlockCookies(res);
     appendAuditLog(
       db,
-      "AUTH_RECOVERY_REQUESTED",
-      "AUTH",
-      String(email || "unknown"),
-      "Solicita\xE7\xE3o de recupera\xE7\xE3o de senha registrada no canal local seguro."
+      "TOTP_2FA_LOCKED",
+      "SECURITY",
+      "optional-totp",
+      "Workspace local bloqueado manualmente pelo operador.",
+      DEFAULT_LOCAL_OPERATOR
     );
     saveDatabase(db);
-    return res.json({
-      ok: true,
-      recoveryChannelHint: outcome.recoveryFilePath ? path19.relative(process.cwd(), outcome.recoveryFilePath) : null,
-      message: "Se o e-mail existir, o token tempor\xE1rio foi gravado no diret\xF3rio local seguro (chmod 0600)."
-    });
+    return res.json(result);
   });
-  app.post("/api/auth/recovery/confirm", (req, res) => {
+  app.post(["/api/totp/disable", "/api/security/totp/disable"], (req, res) => {
     try {
-      const { email, recoveryToken, newPassword } = req.body || {};
-      authService.confirmPasswordRecovery({
-        email: email || "",
-        recoveryToken: recoveryToken || "",
-        newPassword: newPassword || ""
+      const body = req.body || {};
+      const result = totpService.disable({
+        code: body.code,
+        totpCode: body.totpCode,
+        recoveryCode: body.recoveryCode,
+        ipKey: req.ip || "local"
       });
+      clearTotpUnlockCookies(res);
       appendAuditLog(
         db,
-        "AUTH_PASSWORD_RECOVERED",
-        "AUTH",
-        String(email || "unknown"),
-        "Senha redefinida via token de recupera\xE7\xE3o de uso \xFAnico; sess\xF5es anteriores revogadas."
+        "TOTP_2FA_DISABLED",
+        "SECURITY",
+        "optional-totp",
+        "Prote\xE7\xE3o opcional TOTP 2FA desativada; acesso local irrestrito restaurado.",
+        DEFAULT_LOCAL_OPERATOR
       );
       saveDatabase(db);
-      return res.json({ ok: true });
+      return res.json(result);
     } catch (err) {
-      return res.status(400).json({ error: err?.message || "Falha na recupera\xE7\xE3o de senha." });
+      const msg = String(err?.message || "C\xF3digo TOTP ou c\xF3digo de recupera\xE7\xE3o inv\xE1lido.");
+      const statusCode = msg.includes("TOTP_RATE_LIMITED") ? 429 : 401;
+      return res.status(statusCode).json({ error: msg, message: msg });
     }
-  });
-  app.post("/api/auth/switch-role", (req, res) => {
-    const { role, userId } = req.body || {};
-    if (!role || !["ADMIN", "SECURITY_LEAD", "AUDITOR", "QA_ENGINEER"].includes(role)) {
-      return res.status(400).json({ error: "Perfil RBAC inv\xE1lido." });
-    }
-    const actor = getRequestActor(req, res);
-    const sessionToken = extractSessionTokenFromRequest(req).token;
-    if (userId) {
-      if (!requireWritePermission(res, req, "users:manage")) return;
-      try {
-        const updated = authService.updateUserRole(userId, role);
-        appendAuditLog(db, "RBAC_USER_ROLE_UPDATED", "AUTH", userId, `Perfil de ${updated.email} atualizado para ${role}`, actor);
-        saveDatabase(db);
-        return res.json({ user: updated });
-      } catch (err) {
-        return res.status(404).json({ error: err?.message || "Usu\xE1rio n\xE3o encontrado." });
-      }
-    }
-    if (sessionToken) {
-      try {
-        const updatedUser = authService.switchSessionPreviewRole(sessionToken, role);
-        appendAuditLog(db, "RBAC_ROLE_SWITCHED", "AUTH", actor.id, `Perfil de sess\xE3o alterado para ${role}`, actor);
-        saveDatabase(db);
-        return res.json({ user: updatedUser });
-      } catch (err) {
-        return res.status(403).json({ error: "ROLE_ELEVATION_BLOCKED", message: err?.message });
-      }
-    }
-    return res.status(403).json({
-      error: "ROLE_ELEVATION_BLOCKED",
-      message: "Altern\xE2ncia de perfil requer sess\xE3o ADMIN autenticada."
-    });
   });
   app.post("/api/system/reset-empty", (req, res) => {
     if (!requireWritePermission(res, req, "system:reset")) return;
@@ -35702,15 +31903,15 @@ async function createWinHoodApp(options) {
     saveDatabase(db);
     res.json(profile);
   });
-  const execFileAsync2 = promisify2(execFile2);
+  const execFileAsync = promisify(execFile);
   function resolveDockerBinaryPath() {
     if (process.platform === "win32") {
       const programFiles = process.env.ProgramFiles || "C:\\Program Files";
-      const candidate = path19.win32.join(programFiles, "Docker", "Docker", "resources", "bin", "docker.exe");
-      return fs18.existsSync(candidate) ? candidate : "docker";
+      const candidate = path18.win32.join(programFiles, "Docker", "Docker", "resources", "bin", "docker.exe");
+      return fs17.existsSync(candidate) ? candidate : "docker";
     }
     for (const candidate of ["/usr/bin/docker", "/usr/local/bin/docker", "/bin/docker"]) {
-      if (fs18.existsSync(candidate)) return candidate;
+      if (fs17.existsSync(candidate)) return candidate;
     }
     return "docker";
   }
@@ -35721,7 +31922,7 @@ async function createWinHoodApp(options) {
     if (process.platform === "win32" && process.env.SystemRoot) {
       controlledEnv.SystemRoot = process.env.SystemRoot;
     }
-    return execFileAsync2(resolveDockerBinaryPath(), args, {
+    return execFileAsync(resolveDockerBinaryPath(), args, {
       timeout: timeoutMs,
       shell: false,
       env: controlledEnv
@@ -35903,8 +32104,10 @@ async function createWinHoodApp(options) {
     });
   });
   app.get("/api/bootstrap", (req, res) => {
+    const extracted = extractTotpUnlockTokenFromRequest(req);
     res.json({
-      user: getRequestActor(req, res),
+      accessMode: "UNRESTRICTED_LOCAL",
+      totp: totpService.getStatus(extracted.token),
       dashboard: buildDashboardPayload(),
       projects: db.projects,
       softwares: db.softwares.map(stripSoftwareHeavySource),
@@ -35942,7 +32145,7 @@ async function createWinHoodApp(options) {
     const resolvedCategory = (category || resolvedTags[0] || "Avalia\xE7\xE3o Multi-Categoria Transversal").trim();
     const resolvedEnabledCategories = Array.isArray(enabledCategories) && enabledCategories.length > 0 ? enabledCategories : [...ALL_BENCHMARK_CATEGORIES];
     const project = {
-      id: crypto32.randomUUID(),
+      id: crypto30.randomUUID(),
       name: name.trim(),
       category: resolvedCategory,
       domainTags: resolvedTags,
@@ -36195,7 +32398,7 @@ async function createWinHoodApp(options) {
       });
     }
     const nowIso = (/* @__PURE__ */ new Date()).toISOString();
-    const projectId = crypto32.randomUUID();
+    const projectId = crypto30.randomUUID();
     const resolvedTags = Array.isArray(domainTags) && domainTags.length > 0 ? domainTags.map((t) => String(t).trim()).filter(Boolean) : category ? [category.trim(), "multi-category", "mqr-strict"] : ["multi-category", "devsecops", "mqr-strict"];
     const resolvedCategory = (category || resolvedTags[0] || "Avalia\xE7\xE3o Multi-Categoria Transversal").trim();
     const resolvedEnabledCategories = Array.isArray(enabledCategories) && enabledCategories.length > 0 ? enabledCategories : [...ALL_BENCHMARK_CATEGORIES];
@@ -36245,7 +32448,7 @@ async function createWinHoodApp(options) {
     const isolatedPath = writeIsolatedArtifactsToDisk(slug, filesMap, isolatedArtifactsDir);
     const inv = buildTechnicalInventory(filesMap, isolatedPath);
     const createdSoftware = {
-      id: `sw-${crypto32.randomUUID().slice(0, 8)}`,
+      id: `sw-${crypto30.randomUUID().slice(0, 8)}`,
       projectId: project.id,
       name: swName,
       vendor: swVendor,
@@ -36632,7 +32835,7 @@ async function createWinHoodApp(options) {
         const allBlobs = (treeData.tree || []).filter((item) => item.type === "blob" && item.path);
         totalDiscovered = allBlobs.length;
         const eligibleTreeItems = allBlobs.filter((item) => {
-          const ext = path19.extname(item.path).toLowerCase();
+          const ext = path18.extname(item.path).toLowerCase();
           const segments = item.path.split("/").filter(Boolean);
           return [".ts", ".tsx", ".js", ".jsx", ".py", ".sql", ".json", ".cs", ".java", ".go", ".rs", ".md", ".yml", ".yaml", ".toml"].includes(ext) && segments.length > 0 && segments.length <= 20 && !item.path.includes("..") && !item.path.startsWith("/") && !item.path.includes("node_modules/") && !item.path.includes("dist/") && !item.path.includes("vendor/") && !item.path.includes(".git/") && (item.size === void 0 || item.size < 5e5);
         }).slice(0, 100);
@@ -36707,7 +32910,7 @@ async function createWinHoodApp(options) {
     }
     let targetProject = existingProject;
     if (!targetProject) {
-      const projId = crypto32.randomUUID();
+      const projId = crypto30.randomUUID();
       targetProject = {
         id: projId,
         name: (newProjectName || `Benchmark ${repoName}`).trim(),
@@ -36747,7 +32950,7 @@ async function createWinHoodApp(options) {
     const isolatedPath = writeIsolatedArtifactsToDisk(slug, filesMap, isolatedArtifactsDir);
     const inv = buildTechnicalInventory(filesMap, isolatedPath);
     const newSoftware = {
-      id: `sw-${crypto32.randomUUID().slice(0, 8)}`,
+      id: `sw-${crypto30.randomUUID().slice(0, 8)}`,
       projectId: targetProject.id,
       name: repoName,
       vendor: owner || "Comunidade GitHub",
@@ -36929,7 +33132,7 @@ async function createWinHoodApp(options) {
       isolatedPath = writeIsolatedArtifactsToDisk(slug, filesMap, isolatedArtifactsDir);
       inv = buildTechnicalInventory(filesMap, isolatedPath);
     }
-    const swId = `sw-${crypto32.randomUUID().slice(0, 8)}`;
+    const swId = `sw-${crypto30.randomUUID().slice(0, 8)}`;
     const commit = hasSource ? body.commitHash && body.commitHash.trim().length > 0 ? body.commitHash.trim() : `PKG_${inv.packageSha256.slice(0, 16)}` : body.commitHash && body.commitHash.trim().length > 0 ? body.commitHash.trim() : "NOT_DECLARED";
     const resolvedDomainTags = Array.isArray(body.domainTags) && body.domainTags.length > 0 ? body.domainTags.map((t) => String(t).trim()).filter(Boolean) : body.category ? [body.category.trim(), ...Object.keys(inv.languageBreakdown).map((l) => l.toLowerCase())] : ["multi-category", ...Object.keys(inv.languageBreakdown).map((l) => l.toLowerCase())];
     const newSw = {
@@ -37219,7 +33422,7 @@ async function createWinHoodApp(options) {
     if (!targetProject) {
       const nowIso = (/* @__PURE__ */ new Date()).toISOString();
       targetProject = {
-        id: `proj-${crypto32.randomUUID().slice(0, 8)}`,
+        id: `proj-${crypto30.randomUUID().slice(0, 8)}`,
         name: "Projeto Principal (Zero-Configura\xE7\xE3o)",
         category: "Aplica\xE7\xF5es Web & Microsservi\xE7os",
         objective: "Auditoria Autom\xE1tica de Qualidade e Seguran\xE7a",
@@ -37259,7 +33462,7 @@ async function createWinHoodApp(options) {
         message: `O software "${missingSources[0].name}" n\xE3o possui c\xF3digo-fonte importado. Ingest\xE3o de fontes reais obrigat\xF3ria antes da an\xE1lise.`
       });
     }
-    const runId = `run-${crypto32.randomUUID().slice(0, 8)}`;
+    const runId = `run-${crypto30.randomUUID().slice(0, 8)}`;
     const activeEnabledCategories = targetProject.enabledCategories && targetProject.enabledCategories.length > 0 ? targetProject.enabledCategories : [...ALL_BENCHMARK_CATEGORIES];
     const activeWeights = normalizeEnabledCategoryWeights(DEFAULT_CATEGORY_WEIGHTS, activeEnabledCategories);
     const activeEnv = DEFAULT_BENCHMARK_PROFILES[0].equivalenceEnvironment;
@@ -37381,7 +33584,7 @@ async function createWinHoodApp(options) {
     if (!project) {
       const nowIso = (/* @__PURE__ */ new Date()).toISOString();
       project = {
-        id: `proj-${crypto32.randomUUID().slice(0, 8)}`,
+        id: `proj-${crypto30.randomUUID().slice(0, 8)}`,
         name: `Avalia\xE7\xE3o Independente (${selectedSoftwares.map((s) => s.name).join(" vs ")})`,
         category: "Avalia\xE7\xE3o Multi-Categoria Transversal",
         domainTags: ["multi-category", "standalone"],
@@ -37443,7 +33646,7 @@ async function createWinHoodApp(options) {
     }
     const activeQualityGateId = qualityGateId || project.defaultQualityGateId || "qg-sonar-way-mqr";
     const resolvedProfileName = profileName || matchedSpecializedProfile?.name || (resolvedAssessmentMode === "INDIVIDUAL" ? `Auditoria Individual - ${selectedSoftwares[0]?.name}` : "Benchmark WinHood");
-    const runId = `run-${crypto32.randomUUID().slice(0, 8)}`;
+    const runId = `run-${crypto30.randomUUID().slice(0, 8)}`;
     const runningRun = createInitialRunningBenchmark({
       runId,
       projectId: project.id,
@@ -38828,7 +35031,7 @@ async function createWinHoodApp(options) {
         sourceFilesSha256Manifest: Object.entries(sw.sourceFilesContent || {}).sort(([a], [b]) => a.localeCompare(b)).map(([filePath, content]) => ({
           filePath,
           bytes: Buffer.byteLength(content, "utf8"),
-          sha256: crypto32.createHash("sha256").update(content, "utf8").digest("hex")
+          sha256: crypto30.createHash("sha256").update(content, "utf8").digest("hex")
         }))
       })),
       section05_algebraicScoreCardsBreakdown: run.scoreCards.map((sc) => ({
@@ -38962,157 +35165,6 @@ async function createWinHoodApp(options) {
       cacheStats
     });
   });
-  app.get("/api/admin/integrations/github-oauth", (req, res) => {
-    const actor = getRequestActor(req, res);
-    if (actor.role !== "ADMIN") {
-      return res.status(403).json({
-        error: "ADMIN_REQUIRED",
-        code: "ADMIN_REQUIRED",
-        currentRole: actor.role,
-        message: "ACESSO RESTRITO: Apenas administradores (ADMIN) podem inspecionar o status de configura\xE7\xE3o do GitHub OAuth 2.0."
-      });
-    }
-    res.setHeader("Cache-Control", "no-store");
-    return res.json(
-      inspectGitHubOAuthServerStatus({
-        env: process.env,
-        callbackUrl: resolveGitHubCallbackUrl(req),
-        overrideCredentials: resolveStoredGitHubOAuthOverride()
-      })
-    );
-  });
-  app.put("/api/admin/integrations/github-oauth", analysisRateLimiter, (req, res) => {
-    const actor = getRequestActor(req, res);
-    if (actor.role !== "ADMIN") {
-      return res.status(403).json({
-        error: "ADMIN_REQUIRED",
-        code: "ADMIN_REQUIRED",
-        currentRole: actor.role,
-        message: "ACESSO RESTRITO: Apenas administradores (ADMIN) podem atualizar credenciais do GitHub OAuth 2.0."
-      });
-    }
-    const body = req.body || {};
-    const rawClientId = typeof body.clientId === "string" ? body.clientId.trim() : "";
-    const rawClientSecret = typeof body.clientSecret === "string" ? body.clientSecret.trim() : "";
-    if (!rawClientId && !rawClientSecret) {
-      return res.status(400).json({
-        error: "OAUTH_CREDENTIALS_REQUIRED",
-        code: "OAUTH_CREDENTIALS_REQUIRED",
-        message: "Informe WINHOOD_GITHUB_OAUTH_CLIENT_ID e/ou WINHOOD_GITHUB_OAUTH_CLIENT_SECRET para salvar."
-      });
-    }
-    let nextEncryptedClientId = db.githubOAuthConfig?.encryptedClientId ?? null;
-    let nextEncryptedClientSecret = db.githubOAuthConfig?.encryptedClientSecret ?? null;
-    if (rawClientId) {
-      const check = validateOAuthCredentialInput(rawClientId, "WINHOOD_GITHUB_OAUTH_CLIENT_ID");
-      if ("error" in check) {
-        return res.status(400).json({
-          error: "INVALID_CLIENT_ID",
-          code: "INVALID_CLIENT_ID",
-          message: check.error
-        });
-      }
-      nextEncryptedClientId = MqrBridgeConnection.encryptToken(check.value);
-    }
-    if (rawClientSecret) {
-      const check = validateOAuthCredentialInput(
-        rawClientSecret,
-        "WINHOOD_GITHUB_OAUTH_CLIENT_SECRET"
-      );
-      if ("error" in check) {
-        return res.status(400).json({
-          error: "INVALID_CLIENT_SECRET",
-          code: "INVALID_CLIENT_SECRET",
-          message: check.error
-        });
-      }
-      nextEncryptedClientSecret = MqrBridgeConnection.encryptToken(check.value);
-    }
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    db.githubOAuthConfig = {
-      encryptedClientId: nextEncryptedClientId,
-      encryptedClientSecret: nextEncryptedClientSecret,
-      updatedAt: now,
-      updatedByUserId: actor.id
-    };
-    appendAuditLog(
-      db,
-      "GITHUB_OAUTH_CONFIG_UPDATED",
-      "AUTH",
-      "github-oauth",
-      `Credenciais GitHub OAuth 2.0 atualizadas e cifradas em AES-256-GCM (${rawClientId ? "Client ID atualizado" : "Client ID mantido"}; ${rawClientSecret ? "Client Secret atualizado" : "Client Secret mantido"}).`,
-      actor
-    );
-    saveDatabase(db, true);
-    res.setHeader("Cache-Control", "no-store");
-    return res.json(
-      inspectGitHubOAuthServerStatus({
-        env: process.env,
-        callbackUrl: resolveGitHubCallbackUrl(req),
-        overrideCredentials: resolveStoredGitHubOAuthOverride()
-      })
-    );
-  });
-  app.delete("/api/admin/integrations/github-oauth", analysisRateLimiter, (req, res) => {
-    const actor = getRequestActor(req, res);
-    if (actor.role !== "ADMIN") {
-      return res.status(403).json({
-        error: "ADMIN_REQUIRED",
-        code: "ADMIN_REQUIRED",
-        currentRole: actor.role,
-        message: "ACESSO RESTRITO: Apenas administradores (ADMIN) podem remover credenciais salvas do GitHub OAuth 2.0."
-      });
-    }
-    delete db.githubOAuthConfig;
-    appendAuditLog(
-      db,
-      "GITHUB_OAUTH_CONFIG_CLEARED",
-      "AUTH",
-      "github-oauth",
-      "Credenciais salvas de GitHub OAuth 2.0 removidas do cofre local (fallback para vari\xE1veis de ambiente, se presentes).",
-      actor
-    );
-    saveDatabase(db, true);
-    res.setHeader("Cache-Control", "no-store");
-    return res.json(
-      inspectGitHubOAuthServerStatus({
-        env: process.env,
-        callbackUrl: resolveGitHubCallbackUrl(req),
-        overrideCredentials: resolveStoredGitHubOAuthOverride()
-      })
-    );
-  });
-  app.post("/api/admin/integrations/github-oauth/verify", analysisRateLimiter, async (req, res) => {
-    const actor = getRequestActor(req, res);
-    if (actor.role !== "ADMIN") {
-      return res.status(403).json({
-        error: "ADMIN_REQUIRED",
-        code: "ADMIN_REQUIRED",
-        currentRole: actor.role,
-        message: "ACESSO RESTRITO: Apenas administradores (ADMIN) podem executar teste de conex\xE3o do GitHub OAuth 2.0."
-      });
-    }
-    const body = req.body || {};
-    const effective = resolveEffectiveGitHubOAuthCredentials();
-    const candidateClientId = typeof body.clientId === "string" && body.clientId.trim() || effective.clientId;
-    const candidateClientSecret = typeof body.clientSecret === "string" && body.clientSecret.trim() || effective.clientSecret;
-    const verification = await verifyGitHubOAuthConnection({
-      clientId: candidateClientId,
-      clientSecret: candidateClientSecret,
-      redirectUri: resolveGitHubCallbackUrl(req)
-    });
-    appendAuditLog(
-      db,
-      "GITHUB_OAUTH_CONNECTION_VERIFIED",
-      "AUTH",
-      "github-oauth",
-      `Teste de conex\xE3o GitHub OAuth 2.0 executado: status=${verification.status} (http=${verification.httpStatus ?? "N/A"}, lat\xEAncia=${verification.latencyMs}ms).`,
-      actor
-    );
-    saveDatabase(db);
-    res.setHeader("Cache-Control", "no-store");
-    return res.json(verification);
-  });
   app.get("/api/sonar/saved-projects", (_req, res) => {
     if (!Array.isArray(db.savedSonarProjects)) {
       db.savedSonarProjects = [];
@@ -39177,7 +35229,7 @@ async function createWinHoodApp(options) {
     );
     if (!existing) {
       existing = {
-        id: id || `sonar-proj-${crypto32.randomUUID().slice(0, 8)}`,
+        id: id || `sonar-proj-${crypto30.randomUUID().slice(0, 8)}`,
         name: (name || cleanProjectKey).trim(),
         platform: resolvedPlatform,
         serverUrl: safeOrigin,
@@ -39990,7 +36042,7 @@ async function createWinHoodApp(options) {
       const existingProfile = db.savedSonarProjects.find((p) => p.projectKey === effectiveKey);
       if (!existingProfile) {
         const newProfile = {
-          id: `sonar-proj-${crypto32.randomUUID().slice(0, 8)}`,
+          id: `sonar-proj-${crypto30.randomUUID().slice(0, 8)}`,
           name: effectiveKey,
           platform: "SONARCLOUD",
           serverUrl: safeOrigin,
@@ -41182,7 +37234,7 @@ async function createWinHoodApp(options) {
       });
     }
     const target = {
-      id: `tgt-${crypto32.randomUUID().slice(0, 8)}`,
+      id: `tgt-${crypto30.randomUUID().slice(0, 8)}`,
       label: label.trim(),
       origin: parsedOrigin.origin,
       purpose: (purpose || "Medi\xE7\xE3o controlada de lat\xEAncia HTTP").trim(),
@@ -41228,7 +37280,7 @@ async function createWinHoodApp(options) {
     let attachedToRunId = null;
     if (targetRun) {
       const execRecord = {
-        id: `uexec-test-${crypto32.randomUUID().slice(0, 8)}`,
+        id: `uexec-test-${crypto30.randomUUID().slice(0, 8)}`,
         runId: targetRun.id,
         softwareId: sw.id,
         kind: "TEST_EXECUTION",
@@ -41287,7 +37339,7 @@ async function createWinHoodApp(options) {
           sc.metricsSummary.testCoveragePercent = parsed.lineCoveragePercent;
           targetRun.executionRecords = [
             {
-              id: `uexec-cov-${crypto32.randomUUID().slice(0, 8)}`,
+              id: `uexec-cov-${crypto30.randomUUID().slice(0, 8)}`,
               runId: targetRun.id,
               softwareId,
               kind: "COVERAGE_IMPORT",
@@ -41390,7 +37442,7 @@ async function createWinHoodApp(options) {
           sc.metricsSummary.throughputRps = result.throughputRps ?? 0;
           targetRun.executionRecords = [
             {
-              id: `uexec-perf-${crypto32.randomUUID().slice(0, 8)}`,
+              id: `uexec-perf-${crypto30.randomUUID().slice(0, 8)}`,
               runId: targetRun.id,
               softwareId,
               kind: "HTTP_PERF_PROBE",
@@ -41502,29 +37554,7 @@ async function createWinHoodApp(options) {
       if (gitarAdapter.getConnection().reencryptStoredToken(ctx)) {
         reencryptedCount += 1;
       }
-      if (db.githubOAuthConfig) {
-        if (db.githubOAuthConfig.encryptedClientId) {
-          const reencId = MqrBridgeConnection.reencryptToken(
-            db.githubOAuthConfig.encryptedClientId,
-            ctx
-          );
-          if (reencId) {
-            db.githubOAuthConfig.encryptedClientId = reencId;
-            reencryptedCount += 1;
-          }
-        }
-        if (db.githubOAuthConfig.encryptedClientSecret) {
-          const reencSecret = MqrBridgeConnection.reencryptToken(
-            db.githubOAuthConfig.encryptedClientSecret,
-            ctx
-          );
-          if (reencSecret) {
-            db.githubOAuthConfig.encryptedClientSecret = reencSecret;
-            reencryptedCount += 1;
-          }
-        }
-      }
-      reencryptedCount += authService.reencryptTotpSecrets(ctx);
+      reencryptedCount += totpService.reencryptTotpSecrets(ctx);
     });
     appendAuditLog(
       db,
@@ -41585,14 +37615,14 @@ async function createWinHoodApp(options) {
     const probePayload = `winhood-keystore-self-test:${Date.now()}:${actor.email}`;
     const testPayloadSha256 = computeSha256(probePayload);
     const hmacKey = KeyManagementService.getActiveEvidenceHmacKey();
-    const hmacDigest = crypto32.createHmac("sha256", hmacKey.secret).update(probePayload, "utf8").digest("hex");
+    const hmacDigest = crypto30.createHmac("sha256", hmacKey.secret).update(probePayload, "utf8").digest("hex");
     const resolvedHmacSecret = KeyManagementService.getEvidenceSecretByKeyId(hmacKey.keyId);
-    const hmacExpected = resolvedHmacSecret ? crypto32.createHmac("sha256", resolvedHmacSecret).update(probePayload, "utf8").digest("hex") : "";
+    const hmacExpected = resolvedHmacSecret ? crypto30.createHmac("sha256", resolvedHmacSecret).update(probePayload, "utf8").digest("hex") : "";
     const hmacValid = Boolean(hmacDigest && hmacDigest === hmacExpected);
     const edKey = KeyManagementService.getActiveEvidenceEd25519Key();
-    const edSignature = crypto32.sign(null, Buffer.from(probePayload, "utf8"), edKey.privateKeyPem);
+    const edSignature = crypto30.sign(null, Buffer.from(probePayload, "utf8"), edKey.privateKeyPem);
     const resolvedPub = KeyManagementService.getEd25519PublicKeyByKeyId(edKey.keyId) || edKey.publicKeyPem;
-    const ed25519Valid = crypto32.verify(null, Buffer.from(probePayload, "utf8"), resolvedPub, edSignature);
+    const ed25519Valid = crypto30.verify(null, Buffer.from(probePayload, "utf8"), resolvedPub, edSignature);
     const encryptedProbe = MqrBridgeConnection.encryptToken(probePayload);
     const decryptedProbe = MqrBridgeConnection.decryptToken(encryptedProbe);
     const aesGcmValid = decryptedProbe === probePayload;
@@ -41892,15 +37922,14 @@ async function createWinHoodApp(options) {
   return {
     app,
     dbManager,
-    authService,
+    totpService,
     getDb: () => db
   };
 }
 async function startServer(options) {
   const dataDir = resolveWinHoodDataRoot(options?.dataDir);
   const { app } = await createWinHoodApp({
-    dataDir,
-    enforceProductionAuth: options?.enforceProductionAuth
+    dataDir
   });
   const isElectronDesktop = options?.environment === "ELECTRON_DESKTOP" || options?.environment === "WINDOWS_PACKAGED" || process.env.WINHOOD_RUNTIME_ENV === "ELECTRON_DESKTOP";
   const shouldEnableVite = options?.enableVite !== void 0 ? options.enableVite : process.env.NODE_ENV !== "production" && !isElectronDesktop;
@@ -41911,11 +37940,11 @@ async function startServer(options) {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = options?.distPath || path19.resolve(process.cwd(), "dist");
-    if (fs18.existsSync(distPath)) {
+    const distPath = options?.distPath || path18.resolve(process.cwd(), "dist");
+    if (fs17.existsSync(distPath)) {
       app.use(express.static(distPath));
       app.get("*", (_req, res) => {
-        res.sendFile(path19.join(distPath, "index.html"));
+        res.sendFile(path18.join(distPath, "index.html"));
       });
     }
   }
@@ -41958,7 +37987,7 @@ async function startServer(options) {
     })
   };
 }
-var isEntrypoint = typeof process !== "undefined" && Array.isArray(process.argv) && Boolean(process.argv[1]) && path19.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+var isEntrypoint = typeof process !== "undefined" && Array.isArray(process.argv) && Boolean(process.argv[1]) && path18.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isEntrypoint) {
   void startServer().catch((err) => {
     console.error("Failed to start WinHood server:", err);

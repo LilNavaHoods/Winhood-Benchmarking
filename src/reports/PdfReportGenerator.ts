@@ -3,13 +3,77 @@ import { ComplianceMapper } from '../evidence/ComplianceMapper';
 import { QualityGateEngine } from '../gate/QualityGateEngine';
 import { RULE_ENGINE_VERSION, RuleRegistry } from '../analyzers/RuleRegistry';
 import { SarifCodec } from '../analyzers/SarifCodec';
-import type { BenchmarkRun } from '../types/benchmark';
+import {
+  computeEvidenceChainHash,
+  verifyEvidenceChainAndManifest,
+} from '../engine/evidenceProvenanceEngine';
+import type { BenchmarkCategoryKey, BenchmarkRun } from '../types/benchmark';
+
+const REPORT_CATEGORY_LABELS: Record<BenchmarkCategoryKey, string> = {
+  functionality: 'Funcionalidade',
+  code_quality: 'Qualidade de Código',
+  security: 'Segurança',
+  performance: 'Desempenho',
+  architecture: 'Arquitetura',
+  database: 'Banco de Dados',
+  reliability: 'Confiabilidade',
+  compatibility: 'Compatibilidade',
+  usability: 'Usabilidade & UX',
+  installation: 'Instalação & SO',
+  privacy: 'Privacidade & LGPD',
+  documentation: 'Documentação',
+};
+
+export const WINHOOD_PLATFORM_VERSION = '4.4.0';
+
+export interface VeracityAdapterSummary {
+  toolId: string;
+  toolName: string;
+  toolVersion: string;
+  executionStatus: 'MEASURED' | 'NOT_INSTALLED' | 'NOT_MEASURED' | 'FAILED';
+  scopeExecuted: string | null;
+  durationMs: number | null;
+  rawOutputSha256: string | null;
+  reason: string | null;
+}
+
+export interface VeracityEpistemicSeparation {
+  measuredEvidenceFacts: string[];
+  inferencesAndHeuristics: string[];
+  unmeasuredDimensions: string[];
+}
+
+export interface VeracityReportBlock {
+  winhoodVersion: string;
+  generatedAtUtc: string;
+  evidenceChainHash: string;
+  evidenceChainRecordsCount: number;
+  evidenceChainVerified: boolean;
+  evidenceVerificationState: string;
+  analyzedFilesSha256: Record<string, string>;
+  adaptersExecuted: VeracityAdapterSummary[];
+  adaptersUnavailable: VeracityAdapterSummary[];
+  measuredCoveragePercent: number;
+  measuredCoverageBySoftware: Array<{
+    softwareId: string;
+    softwareName: string;
+    measuredCoveragePercent: number;
+    weightRenormalizationApplied: boolean;
+    excludedCategories: BenchmarkCategoryKey[];
+    renormalizationExplanation: string;
+  }>;
+  epistemicSeparation: VeracityEpistemicSeparation;
+  scopeLimitationsDisclaimer: string;
+}
 
 export interface ReportProvenanceFooter {
+  winhoodVersion: string;
   engineVersion: string;
   ruleCatalogVersion: string;
   ruleCatalogSha256: string;
   codeHashSha256: string;
+  evidenceChainHash: string;
+  measuredCoveragePercent: number;
   artifactHashes: Record<string, string>;
   appliedGateId: string;
   appliedGateVersion: string;
@@ -18,6 +82,7 @@ export interface ReportProvenanceFooter {
   hmacAlgorithm: 'HMAC-SHA256';
   hmacSignature: string;
   generatedAt: string;
+  veracityBlock: VeracityReportBlock;
 }
 
 const DEFAULT_REPORT_HMAC_KEY =
@@ -31,6 +96,17 @@ function computeHmacSha256(payload: string, secret = DEFAULT_REPORT_HMAC_KEY): s
   return crypto.createHmac('sha256', secret).update(payload).digest('hex');
 }
 
+function timingSafeHexEqual(aHex: string, bHex: string): boolean {
+  if (!aHex || !bHex || aHex.length !== bHex.length) return false;
+  try {
+    const a = Buffer.from(aHex, 'hex');
+    const b = Buffer.from(bHex, 'hex');
+    return a.length === b.length && a.length > 0 && crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
+
 function escapeHtml(raw: string): string {
   return raw
     .replace(/&/g, '&amp;')
@@ -38,6 +114,14 @@ function escapeHtml(raw: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function escapeCsvCell(value: unknown): string {
+  const str = String(value ?? '');
+  if (/[",\r\n]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
 }
 
 function toPdfAscii(text: string): string {
@@ -66,6 +150,273 @@ function wrapText(line: string, maxChars = 88): string[] {
 }
 
 export class PdfReportGenerator {
+  public static buildVeracityReportBlock(run: BenchmarkRun): VeracityReportBlock {
+    const generatedAtUtc = run.completedAt || run.startedAt || '2026-11-14T00:00:00.000Z';
+    const evidenceChain = run.evidenceChain || [];
+    const evidenceChainHash =
+      run.signedManifest?.rootChainSha256 ||
+      run.signedManifest?.merkleOrChainRootSha256 ||
+      computeEvidenceChainHash(evidenceChain);
+
+    const liveVerification =
+      evidenceChain.length > 0 || run.signedManifest
+        ? verifyEvidenceChainAndManifest(evidenceChain, run.signedManifest)
+        : null;
+    const evidenceChainVerified =
+      typeof run.evidenceVerification?.valid === 'boolean'
+        ? run.evidenceVerification.valid
+        : Boolean(liveVerification?.valid);
+    const evidenceVerificationState =
+      run.evidenceVerification?.verificationState ||
+      liveVerification?.verificationState ||
+      run.signedManifest?.verificationState ||
+      'UNVERIFIABLE';
+
+    const analyzedFilesSha256: Record<string, string> = {};
+    for (const vr of run.veracityResults || []) {
+      const hashFromExec = (run.toolExecutions || []).find(
+        (te) => te.softwareId === vr.softwareId && (te.inputArtifactsSha256 || te.sourceHash)
+      );
+      const hashFromChain = evidenceChain.find(
+        (ev) => ev.softwareId === vr.softwareId && ev.sourceHash && ev.sourceHash !== 'UNVERIFIED'
+      );
+      const resolvedHash =
+        hashFromExec?.inputArtifactsSha256 ||
+        hashFromExec?.sourceHash ||
+        hashFromChain?.sourceHash ||
+        'UNAVAILABLE';
+      analyzedFilesSha256[`${vr.softwareName} (${vr.softwareId})`] = resolvedHash;
+    }
+    if (Object.keys(analyzedFilesSha256).length === 0 && run.signedManifest?.sourceHashes?.length) {
+      run.signedManifest.sourceHashes.forEach((h, idx) => {
+        analyzedFilesSha256[`sourceArtifact_${idx + 1}`] = h;
+      });
+    }
+
+    const adaptersExecuted: VeracityAdapterSummary[] = [];
+    const adaptersUnavailable: VeracityAdapterSummary[] = [];
+    const seenToolKeys = new Set<string>();
+
+    for (const te of run.toolExecutions || []) {
+      const dedupeKey = `${te.softwareId}:${te.toolId}`;
+      if (seenToolKeys.has(dedupeKey)) continue;
+      seenToolKeys.add(dedupeKey);
+
+      const execStatus: VeracityAdapterSummary['executionStatus'] =
+        te.executionStatus ||
+        (te.exitCode === 0 && te.veracityStatus !== 'EMPTY_ERROR'
+          ? 'MEASURED'
+          : te.exitCode !== null && te.exitCode !== 0
+            ? 'FAILED'
+            : 'NOT_MEASURED');
+
+      const summary: VeracityAdapterSummary = {
+        toolId: te.toolId,
+        toolName: te.toolName,
+        toolVersion: te.toolVersion || 'UNAVAILABLE',
+        executionStatus: execStatus,
+        scopeExecuted:
+          te.scopeExecuted ||
+          `${te.analyzedFilesCount}/${te.eligibleFilesCount} arquivos (${te.workingDirectory || 'workspace'})`,
+        durationMs: te.durationMs ?? null,
+        rawOutputSha256: te.rawOutputSha256 || null,
+        reason:
+          te.unavailableReason ||
+          (te.failureReasons && te.failureReasons.length > 0 ? te.failureReasons.join('; ') : null),
+      };
+
+      if (execStatus === 'MEASURED') {
+        adaptersExecuted.push(summary);
+      } else {
+        adaptersUnavailable.push(summary);
+      }
+    }
+
+    // Also include unified dynamic executions that were not executed / unavailable
+    for (const ue of run.unifiedExecutions || []) {
+      if (ue.state === 'MEASURED') {
+        adaptersExecuted.push({
+          toolId: ue.kind,
+          toolName: `WinHood Dynamic Runner (${ue.kind})`,
+          toolVersion: WINHOOD_PLATFORM_VERSION,
+          executionStatus: 'MEASURED',
+          scopeExecuted: ue.summary,
+          durationMs: null,
+          rawOutputSha256: ue.evidenceHash || null,
+          reason: null,
+        });
+      } else {
+        adaptersUnavailable.push({
+          toolId: ue.kind,
+          toolName: `WinHood Dynamic Runner (${ue.kind})`,
+          toolVersion: 'UNAVAILABLE',
+          executionStatus: ue.state === 'FAILED' ? 'FAILED' : 'NOT_MEASURED',
+          scopeExecuted: null,
+          durationMs: null,
+          rawOutputSha256: ue.evidenceHash || null,
+          reason: ue.summary || 'Execução dinâmica não realizada neste ciclo.',
+        });
+      }
+    }
+
+    const scoreCards = run.scoreCards || [];
+    const measuredCoverageBySoftware = scoreCards.map((sc) => {
+      const assessedCount = sc.categoryDetails
+        ? Object.values(sc.categoryDetails).filter((cd) => cd.status === 'ASSESSED').length
+        : Object.values(sc.categoryScores || {}).filter((v) => v !== null && v !== undefined).length;
+      const enabledCount = Math.max(
+        1,
+        (run.enabledCategories && run.enabledCategories.length) ||
+          (sc.categoryDetails ? Object.keys(sc.categoryDetails).length : 12)
+      );
+      const fallbackCoverage = Number(((assessedCount / enabledCount) * 100).toFixed(1));
+      const measuredCov =
+        typeof sc.measuredCoveragePercent === 'number'
+          ? sc.measuredCoveragePercent
+          : typeof sc.separatedIndicators?.measuredCoveragePercent === 'number'
+            ? sc.separatedIndicators.measuredCoveragePercent
+            : fallbackCoverage;
+      const excludedCategories =
+        sc.weightRenormalization?.excludedCategories ||
+        (sc.categoryDetails
+          ? (Object.values(sc.categoryDetails)
+              .filter((cd) => cd.status === 'NOT_ASSESSED')
+              .map((cd) => cd.category) as BenchmarkCategoryKey[])
+          : []);
+      const weightRenormalizationApplied = Boolean(
+        sc.weightRenormalization?.applied ?? excludedCategories.length > 0
+      );
+      const renormalizationExplanation =
+        sc.weightRenormalization?.explanation ||
+        (weightRenormalizationApplied
+          ? `Categorias não medidas (${excludedCategories.join(', ')}) excluídas da média ponderada com renormalização proporcional dos pesos restantes.`
+          : 'Todas as categorias habilitadas foram medidas com evidência direta.');
+
+      return {
+        softwareId: sc.softwareId,
+        softwareName: sc.softwareName,
+        measuredCoveragePercent: measuredCov,
+        weightRenormalizationApplied,
+        excludedCategories,
+        renormalizationExplanation,
+      };
+    });
+
+    const measuredCoveragePercent =
+      measuredCoverageBySoftware.length > 0
+        ? Number(
+            (
+              measuredCoverageBySoftware.reduce((acc, s) => acc + s.measuredCoveragePercent, 0) /
+              measuredCoverageBySoftware.length
+            ).toFixed(1)
+          )
+        : 0;
+
+    // 3-Way Epistemic Separation: Fato Medido vs Inferência/Heurística vs Não Medido
+    const measuredEvidenceFacts: string[] = [];
+    const inferencesAndHeuristics: string[] = [];
+    const unmeasuredDimensions: string[] = [];
+
+    measuredEvidenceFacts.push(
+      `Total de achados estáticos/AST registrados com evidência verificável: ${(run.findings || []).length}.`
+    );
+    measuredEvidenceFacts.push(
+      `Adaptadores executados com saída validada: ${adaptersExecuted.length} | Cadeia de evidências SHA-256: ${evidenceChain.length} registros (Root=${evidenceChainHash.slice(0, 16)}...).`
+    );
+
+    for (const sc of scoreCards) {
+      const techScore =
+        sc.separatedIndicators?.technicalScore !== null &&
+        sc.separatedIndicators?.technicalScore !== undefined
+          ? `${sc.separatedIndicators.technicalScore.toFixed(2)} / 5.00`
+          : 'NOT_MEASURED';
+      measuredEvidenceFacts.push(
+        `${sc.softwareName} (v${sc.softwareVersion}): Nota Técnica=${techScore} | Bugs=${sc.metricsSummary?.bugs ?? 0} | Vulnerabilidades=${sc.metricsSummary?.vulnerabilities ?? 0} | Segredos=${sc.metricsSummary?.secretsExposed ?? 0} | Cobertura Efetiva=${measuredCoverageBySoftware.find((m) => m.softwareId === sc.softwareId)?.measuredCoveragePercent ?? measuredCoveragePercent}%.`
+      );
+
+      if (sc.runtimeMetrics?.status === 'MEASURED') {
+        measuredEvidenceFacts.push(
+          `${sc.softwareName}: Desempenho Runtime MEDIDO (P95=${Number(sc.metricsSummary?.p95LatencyMs ?? 0).toFixed(1)} ms, Throughput=${Number(sc.metricsSummary?.throughputRps ?? 0)} RPS).`
+        );
+      } else {
+        unmeasuredDimensions.push(
+          `${sc.softwareName} — Desempenho em Runtime (P50/P95/P99/RPS): NOT_MEASURED (${sc.runtimeMetrics?.reason || 'Requer carga controlada via ControlledTestAndPerfRunner'}).`
+        );
+      }
+
+      if (sc.staticMetrics?.testCoveragePercent !== null && sc.staticMetrics?.testCoveragePercent !== undefined) {
+        measuredEvidenceFacts.push(
+          `${sc.softwareName}: Cobertura de Testes importada de relatório real=${sc.staticMetrics.testCoveragePercent.toFixed(1)}%.`
+        );
+      } else {
+        unmeasuredDimensions.push(
+          `${sc.softwareName} — Cobertura de Testes (LCOV/JaCoCo/Cobertura): NOT_MEASURED (nenhum relatório real de cobertura encontrado no snapshot).`
+        );
+      }
+
+      if (sc.categoryDetails) {
+        for (const cd of Object.values(sc.categoryDetails)) {
+          const catLabel = REPORT_CATEGORY_LABELS[cd.category] || cd.category;
+          if (cd.status === 'NOT_ASSESSED' || cd.finalScore === null) {
+            unmeasuredDimensions.push(
+              `${sc.softwareName} — Categoria ${catLabel} (${cd.category}): ${cd.measurementState || 'NOT_MEASURED'} (excluída da média ponderada; peso original ${cd.originalWeight ?? cd.weight}% renormalizado).`
+            );
+          } else if (cd.measurementState === 'INFERRED') {
+            inferencesAndHeuristics.push(
+              `${sc.softwareName} — Categoria ${catLabel} (${cd.category}): inferida estaticamente (${cd.measurementState}) com nota ${cd.finalScore.toFixed(2)} / 5.00 e peso efetivo ${cd.effectiveWeight ?? cd.weight}%.`
+            );
+          }
+        }
+      }
+
+      if (sc.weightRenormalization?.applied) {
+        inferencesAndHeuristics.push(
+          `${sc.softwareName} — Renormalização de Pesos: ${sc.weightRenormalization.explanation}`
+        );
+      }
+    }
+
+    if (adaptersUnavailable.length > 0) {
+      for (const ad of adaptersUnavailable) {
+        unmeasuredDimensions.push(
+          `Adaptador ${ad.toolName} (${ad.toolId}): ${ad.executionStatus} — ${ad.reason || 'Não executado ou indisponível no host.'}`
+        );
+      }
+    }
+
+    if (inferencesAndHeuristics.length === 0) {
+      inferencesAndHeuristics.push(
+        'Nenhuma heurística auxiliar adicional aplicada além das regras determinísticas AST/MQR.'
+      );
+    }
+    if (unmeasuredDimensions.length === 0) {
+      unmeasuredDimensions.push('Todas as dimensões habilitadas no perfil foram medidas com evidência direta.');
+    }
+
+    const scopeLimitationsDisclaimer =
+      'ESCOPO E LIMITAÇÕES (POLÍTICA ANTI-MOCK): Este relatório reflete exclusivamente evidências efetivamente medidas no snapshot analisado. Dimensões sem execução dinâmica ou ferramentas externas ausentes no host são marcadas explicitamente como NOT_MEASURED ou UNAVAILABLE, excluídas da média ponderada com renormalização documentada dos pesos restantes. Este laudo técnico não constitui certificação regulatória formal (ISO/SOC2/PCI-DSS).';
+
+    return {
+      winhoodVersion: WINHOOD_PLATFORM_VERSION,
+      generatedAtUtc,
+      evidenceChainHash,
+      evidenceChainRecordsCount: evidenceChain.length,
+      evidenceChainVerified,
+      evidenceVerificationState,
+      analyzedFilesSha256,
+      adaptersExecuted,
+      adaptersUnavailable,
+      measuredCoveragePercent,
+      measuredCoverageBySoftware,
+      epistemicSeparation: {
+        measuredEvidenceFacts,
+        inferencesAndHeuristics,
+        unmeasuredDimensions,
+      },
+      scopeLimitationsDisclaimer,
+    };
+  }
+
   public static buildProvenanceFooter(
     run: BenchmarkRun,
     hmacSecret = DEFAULT_REPORT_HMAC_KEY
@@ -73,6 +424,7 @@ export class PdfReportGenerator {
     const gateEval = QualityGateEngine.evaluateFromRun(run);
     const catalogSnapshot = RuleRegistry.getCatalogSnapshot();
     const sm = run.signedManifest;
+    const veracityBlock = this.buildVeracityReportBlock(run);
 
     const engineVersion = sm?.engineVersion || run.algorithmVersion || RULE_ENGINE_VERSION;
     const ruleCatalogVersion = sm?.rulePackVersions?.core || catalogSnapshot.engineVersion || RULE_ENGINE_VERSION;
@@ -96,17 +448,21 @@ export class PdfReportGenerator {
     const artifactHashes: Record<string, string> = {
       findingsDigestSha256: findingsDigest,
       gateDecisionSha256: gateEval.gateHash,
+      evidenceChainSha256: veracityBlock.evidenceChainHash,
       ...(sm?.artifactHashes || {}),
     };
 
-    const generatedAt = run.completedAt || run.startedAt || '2026-11-14T00:00:00.000Z';
+    const generatedAt = veracityBlock.generatedAtUtc;
     const canonicalPayload = JSON.stringify({
+      winhoodVersion: WINHOOD_PLATFORM_VERSION,
       runId: run.id,
       projectName: run.projectName,
       engineVersion,
       ruleCatalogVersion,
       ruleCatalogSha256,
       codeHashSha256,
+      evidenceChainHash: veracityBlock.evidenceChainHash,
+      measuredCoveragePercent: veracityBlock.measuredCoveragePercent,
       artifactHashes,
       appliedGateId: gateEval.gateId,
       appliedGateVersion: gateEval.gateVersion,
@@ -123,10 +479,13 @@ export class PdfReportGenerator {
     );
 
     return {
+      winhoodVersion: WINHOOD_PLATFORM_VERSION,
       engineVersion,
       ruleCatalogVersion,
       ruleCatalogSha256,
       codeHashSha256,
+      evidenceChainHash: veracityBlock.evidenceChainHash,
+      measuredCoveragePercent: veracityBlock.measuredCoveragePercent,
       artifactHashes,
       appliedGateId: gateEval.gateId,
       appliedGateVersion: gateEval.gateVersion,
@@ -135,12 +494,13 @@ export class PdfReportGenerator {
       hmacAlgorithm: 'HMAC-SHA256',
       hmacSignature,
       generatedAt,
+      veracityBlock,
     };
   }
 
   /**
    * Verifies the cryptographic integrity (Report SHA-256 and HMAC-SHA256 signature)
-   * embedded inside a generated PDF buffer.
+   * embedded inside a generated PDF buffer using constant-time comparison.
    */
   public static verifyPdfIntegrity(
     pdfBuffer: Buffer,
@@ -153,6 +513,8 @@ export class PdfReportGenerator {
     ruleCatalogSha256: string | null;
     codeHashSha256: string | null;
     appliedGateHashSha256: string | null;
+    evidenceChainHash: string | null;
+    winhoodVersion: string | null;
   } {
     const raw = pdfBuffer.toString('latin1');
     const extract = (label: string): string | null => {
@@ -167,6 +529,8 @@ export class PdfReportGenerator {
     const ruleCatalogSha256 = extract('Provenance-RuleCatalog-SHA256');
     const codeHashSha256 = extract('Provenance-Code-SHA256');
     const appliedGateHashSha256 = extract('Provenance-Gate-SHA256');
+    const evidenceChainHash = extract('Provenance-EvidenceChain-SHA256');
+    const winhoodVersion = extract('Provenance-WinHood-Version');
 
     if (
       !reportContentSha256 ||
@@ -184,6 +548,8 @@ export class PdfReportGenerator {
         ruleCatalogSha256,
         codeHashSha256,
         appliedGateHashSha256,
+        evidenceChainHash,
+        winhoodVersion,
       };
     }
 
@@ -192,10 +558,12 @@ export class PdfReportGenerator {
       hmacSecret
     );
 
+    const hmacMatched = timingSafeHexEqual(expectedHmac, hmacSignature);
+
     return {
       valid:
         raw.startsWith('%PDF-1.4') &&
-        expectedHmac === hmacSignature &&
+        hmacMatched &&
         reportContentSha256.length === 64,
       reportContentSha256,
       hmacSignature,
@@ -203,12 +571,16 @@ export class PdfReportGenerator {
       ruleCatalogSha256,
       codeHashSha256,
       appliedGateHashSha256,
+      evidenceChainHash,
+      winhoodVersion,
     };
   }
 
   /**
    * Generates a self-contained HTML5 report (100% inline CSS, zero external requests)
-   * with executive summary, findings table, quality gate state, evidence chain, and provenance footer.
+   * with full parity against PDF/JSON/CSV/SARIF: executive summary, scorecards without
+   * fabricated zeroes, 3-way epistemic separation, adapters executed vs unavailable,
+   * findings table, evidence chain, and cryptographic provenance footer.
    */
   public static generateSelfContainedHtml(
     run: BenchmarkRun,
@@ -216,6 +588,7 @@ export class PdfReportGenerator {
   ): string {
     const gateEval = QualityGateEngine.evaluateFromRun(run);
     const provenance = this.buildProvenanceFooter(run, hmacSecret);
+    const vb = provenance.veracityBlock;
     const findings = run.findings || [];
     const chain = run.evidenceChain || [];
 
@@ -227,6 +600,51 @@ export class PdfReportGenerator {
           : gateEval.decision === 'INCONCLUSIVE'
             ? '#94a3b8'
             : '#ef4444';
+
+    const scoreCardRows = (run.scoreCards || [])
+      .map((sc) => {
+        const covInfo = vb.measuredCoverageBySoftware.find((m) => m.softwareId === sc.softwareId);
+        const scoreLabel =
+          sc.separatedIndicators?.technicalScore !== null &&
+          sc.separatedIndicators?.technicalScore !== undefined
+            ? `${sc.separatedIndicators.technicalScore.toFixed(2)} / 5.00`
+            : 'NOT_MEASURED';
+        const perfLabel =
+          sc.runtimeMetrics?.status === 'MEASURED'
+            ? `P95 ${Number(sc.metricsSummary?.p95LatencyMs ?? 0).toFixed(1)} ms (${Number(sc.metricsSummary?.throughputRps ?? 0)} RPS)`
+            : 'NOT_MEASURED (Análise Estática)';
+        const catBreakdown = sc.categoryDetails
+          ? Object.values(sc.categoryDetails)
+              .map((cd) => {
+                const scoreStr =
+                  cd.status === 'ASSESSED' && cd.finalScore !== null
+                    ? `${cd.finalScore.toFixed(2)} / 5.00`
+                    : cd.measurementState || 'NOT_MEASURED';
+                return `<li><code>${escapeHtml(cd.category)}</code> [${escapeHtml(cd.status)}]: <strong>${escapeHtml(scoreStr)}</strong> (Peso Original: ${cd.originalWeight ?? cd.weight}% → Efetivo: ${cd.effectiveWeight ?? cd.weight}%)</li>`;
+              })
+              .join('\n')
+          : '<li>Sem detalhamento categórico disponível.</li>';
+
+        return `<div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px;">
+            <h3 style="margin:0;color:#f8fafc;">${escapeHtml(sc.softwareName)} (v${escapeHtml(sc.softwareVersion)})</h3>
+            <strong style="color:#38bdf8;font-size:16px;">${escapeHtml(scoreLabel)}</strong>
+          </div>
+          <div style="font-size:12px;color:#94a3b8;margin:6px 0 10px 0;">
+            Classificação: <strong>${escapeHtml(sc.classificationLabel)}</strong> |
+            Quality Gate: <strong>${escapeHtml(sc.separatedIndicators?.qualityGateDecision || sc.qualityGate?.status || 'INCONCLUSIVE')}</strong> |
+            Cobertura de Medição Efetiva: <strong>${covInfo?.measuredCoveragePercent ?? vb.measuredCoveragePercent}%</strong> |
+            Desempenho Runtime: <strong>${escapeHtml(perfLabel)}</strong>
+          </div>
+          ${
+            covInfo?.weightRenormalizationApplied
+              ? `<div style="font-size:12px;color:#fbbf24;margin-bottom:8px;">Renormalização de Pesos Aplicada: ${escapeHtml(covInfo.renormalizationExplanation)}</div>`
+              : ''
+          }
+          <ul style="margin:6px 0 0 18px;font-size:12px;">${catBreakdown}</ul>
+        </div>`;
+      })
+      .join('\n');
 
     const findingsRows =
       findings.length === 0
@@ -254,11 +672,27 @@ export class PdfReportGenerator {
               (b, idx) => `<tr>
           <td>#${idx + 1}</td>
           <td>${escapeHtml((b as { title?: string }).title || b.toolName || 'STEP')}</td>
-          <td><code>${escapeHtml(((b as { previousHash?: string }).previousHash || 'GENESIS').slice(0, 20))}...</code></td>
-          <td><code>${escapeHtml(((b as { sha256?: string }).sha256 || '').slice(0, 32))}...</code></td>
+          <td><code>${escapeHtml((b.previousRecordSha256 || 'GENESIS').slice(0, 20))}...</code></td>
+          <td><code>${escapeHtml((b.sha256 || '').slice(0, 32))}...</code></td>
         </tr>`
             )
             .join('\n');
+
+    const adaptersTableRows = [...vb.adaptersExecuted, ...vb.adaptersUnavailable]
+      .map(
+        (ad) => `<tr>
+        <td><code>${escapeHtml(ad.toolId)}</code></td>
+        <td>${escapeHtml(ad.toolName)}</td>
+        <td><code>${escapeHtml(ad.toolVersion)}</code></td>
+        <td><strong>${escapeHtml(ad.executionStatus)}</strong></td>
+        <td>${escapeHtml(ad.scopeExecuted || ad.reason || 'N/A')}</td>
+      </tr>`
+      )
+      .join('\n');
+
+    const analyzedFilesRows = Object.entries(vb.analyzedFilesSha256)
+      .map(([k, v]) => `<li><strong>${escapeHtml(k)}:</strong> <code>${escapeHtml(v)}</code></li>`)
+      .join('\n');
 
     const artifactRows = Object.entries(provenance.artifactHashes)
       .map(
@@ -272,7 +706,7 @@ export class PdfReportGenerator {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>WinHood Audit Report — ${escapeHtml(run.projectName)} (${escapeHtml(run.id)})</title>
+  <title>WinHood Audit Report v${escapeHtml(vb.winhoodVersion)} — ${escapeHtml(run.projectName)} (${escapeHtml(run.id)})</title>
   <style>
     :root { color-scheme: dark; }
     * { box-sizing: border-box; }
@@ -322,6 +756,22 @@ export class PdfReportGenerator {
       padding: 18px;
       margin-bottom: 16px;
     }
+    .epistemic-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 16px;
+    }
+    .epistemic-box {
+      background: #0b1220;
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+      padding: 14px;
+      font-size: 12px;
+    }
+    .epistemic-box h3 { margin: 0 0 8px 0; font-size: 13px; }
+    .ep-fact h3 { color: #10b981; }
+    .ep-heur h3 { color: #f59e0b; }
+    .ep-unm h3 { color: #f87171; }
     table {
       width: 100%;
       border-collapse: collapse;
@@ -371,9 +821,9 @@ export class PdfReportGenerator {
   <div class="container">
     <header>
       <div>
-        <h1>WINHOOD BENCHMARKING — RELATÓRIO DE AUDITORIA INDEPENDENTE (MODO MQR)</h1>
-        <div>Execução: <code>${escapeHtml(run.id)}</code> | Projeto: <strong>${escapeHtml(run.projectName)}</strong></div>
-        <div>Início: ${escapeHtml(run.startedAt)} | Conclusão: ${escapeHtml(run.completedAt || provenance.generatedAt)}</div>
+        <h1>WINHOOD BENCHMARKING v${escapeHtml(vb.winhoodVersion)} — RELATÓRIO DE AUDITORIA INDEPENDENTE (MODO MQR)</h1>
+        <div>Execução: <code>${escapeHtml(run.id)}</code> | Projeto: <strong>${escapeHtml(run.projectName)}</strong> | Cobertura Efetiva: <strong>${vb.measuredCoveragePercent}%</strong></div>
+        <div>Timestamp UTC: <code>${escapeHtml(vb.generatedAtUtc)}</code> | Evidence Chain Hash: <code>${escapeHtml(vb.evidenceChainHash)}</code></div>
       </div>
       <div>
         <div class="gate-badge">QUALITY GATE: ${escapeHtml(gateEval.decision)} (Exit Code ${gateEval.cliExitCode})</div>
@@ -381,14 +831,33 @@ export class PdfReportGenerator {
     </header>
 
     <section>
-      <h2>1. Sumário Executivo</h2>
+      <h2>1. Sumário Executivo &amp; ScoreCards</h2>
       <div class="card">
         <p>${escapeHtml(run.executiveSummary || 'Auditoria estática, fluxo de dados (Taint Analysis), segredos, IaC e composição de software (SCA/SBOM) concluída de forma determinística.')}</p>
+      </div>
+      ${scoreCardRows}
+    </section>
+
+    <section>
+      <h2>2. Separação Epistêmica (Evidência Medida vs. Heurística vs. Não Medido)</h2>
+      <div class="epistemic-grid">
+        <div class="epistemic-box ep-fact">
+          <h3>Evidência Medida (Fato)</h3>
+          <ul>${vb.epistemicSeparation.measuredEvidenceFacts.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>
+        </div>
+        <div class="epistemic-box ep-heur">
+          <h3>Inferência / Heurística</h3>
+          <ul>${vb.epistemicSeparation.inferencesAndHeuristics.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>
+        </div>
+        <div class="epistemic-box ep-unm">
+          <h3>Não Medido (NOT_MEASURED / UNAVAILABLE)</h3>
+          <ul>${vb.epistemicSeparation.unmeasuredDimensions.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>
+        </div>
       </div>
     </section>
 
     <section>
-      <h2>2. Estado do Quality Gate (${escapeHtml(gateEval.gateName)} — v${escapeHtml(gateEval.gateVersion)})</h2>
+      <h2>3. Estado do Quality Gate (${escapeHtml(gateEval.gateName)} — v${escapeHtml(gateEval.gateVersion)})</h2>
       <table>
         <thead>
           <tr>
@@ -414,7 +883,25 @@ export class PdfReportGenerator {
     </section>
 
     <section>
-      <h2>3. Tabela de Achados (${findings.length} total)</h2>
+      <h2>4. Adaptadores Executados vs. Indisponíveis (${vb.adaptersExecuted.length} executados / ${vb.adaptersUnavailable.length} indisponíveis)</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Adapter ID</th>
+            <th>Ferramenta</th>
+            <th>Versão Real</th>
+            <th>Status</th>
+            <th>Escopo / Motivo</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${adaptersTableRows || '<tr><td colspan="5" style="text-align:center;color:#94a3b8;">Nenhum adaptador registrado nesta execução.</td></tr>'}
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>5. Tabela de Achados (${findings.length} total)</h2>
       <table>
         <thead>
           <tr>
@@ -433,7 +920,7 @@ export class PdfReportGenerator {
     </section>
 
     <section>
-      <h2>4. Trilha Criptográfica de Evidência</h2>
+      <h2>6. Trilha Criptográfica de Evidência</h2>
       <table>
         <thead>
           <tr>
@@ -450,15 +937,24 @@ export class PdfReportGenerator {
     </section>
 
     <footer class="provenance-footer" id="winhood-provenance-footer">
-      <strong>RODAPÉ DE PROVENIÊNCIA CRIPTOGRÁFICA E ASSINATURA DO RELATÓRIO</strong>
+      <strong>BLOCO DE PROVENIÊNCIA, VERACIDADE E ASSINATURA CRIPTOGRÁFICA DO RELATÓRIO</strong>
+      <p>${escapeHtml(vb.scopeLimitationsDisclaimer)}</p>
       <ul>
+        <li><strong>Versão do WinHood:</strong> <code>${escapeHtml(provenance.winhoodVersion)}</code> | <strong>Timestamp UTC:</strong> <code>${escapeHtml(provenance.generatedAt)}</code></li>
         <li><strong>Versão do Motor (Engine Version):</strong> <code>${escapeHtml(provenance.engineVersion)}</code></li>
+        <li><strong>Cobertura de Medição Efetiva (measuredCoveragePercent):</strong> <code>${provenance.measuredCoveragePercent}%</code></li>
+        <li><strong>Hash da Cadeia de Evidências (evidenceChainHash):</strong> <code>${escapeHtml(provenance.evidenceChainHash)}</code> (Estado: <code>${escapeHtml(vb.evidenceVerificationState)}</code> | Verificado: <code>${String(vb.evidenceChainVerified)}</code>)</li>
         <li><strong>Versão do Catálogo de Regras:</strong> <code>${escapeHtml(provenance.ruleCatalogVersion)}</code> (SHA-256: <code>${escapeHtml(provenance.ruleCatalogSha256)}</code>)</li>
         <li><strong>Hash do Código Analisado (Code SHA-256):</strong> <code>${escapeHtml(provenance.codeHashSha256)}</code></li>
         <li><strong>Versão do Quality Gate Aplicado:</strong> <code>${escapeHtml(provenance.appliedGateId)} v${escapeHtml(provenance.appliedGateVersion)}</code> (Gate SHA-256: <code>${escapeHtml(provenance.appliedGateHashSha256)}</code>)</li>
         <li><strong>Hash Canônico do Relatório (Report SHA-256):</strong> <code>${escapeHtml(provenance.reportContentSha256)}</code></li>
         <li><strong>Assinatura Criptográfica (${escapeHtml(provenance.hmacAlgorithm)}):</strong> <code>${escapeHtml(provenance.hmacSignature)}</code></li>
       </ul>
+      ${
+        analyzedFilesRows
+          ? `<div><strong>SHA-256 dos Pacotes/Arquivos Analisados:</strong></div><ul>${analyzedFilesRows}</ul>`
+          : ''
+      }
       <div><strong>Hashes dos Artefatos Vinculados:</strong></div>
       <ul>
         ${artifactRows}
@@ -471,8 +967,8 @@ export class PdfReportGenerator {
 
   /**
    * Generates a deterministic, audit-grade binary PDF 1.4 document (%PDF-1.4)
-   * with valid byte-accurate xref offsets, multi-page pagination, provenance footer,
-   * embedded Report SHA-256, and HMAC-SHA256 signature.
+   * with valid byte-accurate xref offsets, multi-page pagination, Veracity & Provenance
+   * Block, 3-way epistemic separation, embedded Report SHA-256, and HMAC-SHA256 signature.
    */
   public static generateFromRun(
     run: BenchmarkRun,
@@ -480,6 +976,7 @@ export class PdfReportGenerator {
   ): Buffer {
     const gateEval = QualityGateEngine.evaluateFromRun(run);
     const provenance = this.buildProvenanceFooter(run, hmacSecret);
+    const vb = provenance.veracityBlock;
     const compliance = ComplianceMapper.buildTraceabilityMatrix({
       runId: run.id,
       findings: run.findings || [],
@@ -498,9 +995,10 @@ export class PdfReportGenerator {
       }
     };
 
-    pushLine('WINHOOD INDEPENDENT SOFTWARE AUDIT & BENCHMARKING REPORT (MQR MODE)', true, 14);
+    pushLine(`WINHOOD INDEPENDENT SOFTWARE AUDIT & BENCHMARKING REPORT (MQR MODE) v${vb.winhoodVersion}`, true, 13);
     pushLine(`Run ID: ${run.id} | Project: ${run.projectName} | Algorithm: ${run.algorithmVersion}`);
-    pushLine(`Started: ${run.startedAt} | Completed: ${run.completedAt || provenance.generatedAt}`);
+    pushLine(`Timestamp UTC: ${vb.generatedAtUtc} | Measured Coverage: ${vb.measuredCoveragePercent}%`);
+    pushLine(`Evidence Chain Hash: ${vb.evidenceChainHash}`);
 
     pushSection('1. QUALITY GATE DECISION & VERSIONING');
     pushLine(`Gate: ${gateEval.gateName} (${gateEval.gateId} v${gateEval.gateVersion})`, true);
@@ -515,45 +1013,69 @@ export class PdfReportGenerator {
     pushSection('2. EXECUTIVE SUMMARY & SCORECARDS');
     pushLine(run.executiveSummary || 'No executive summary provided.');
     for (const sc of run.scoreCards || []) {
+      const covInfo = vb.measuredCoverageBySoftware.find((m) => m.softwareId === sc.softwareId);
       const scoreStr =
         sc.separatedIndicators?.technicalScore !== null && sc.separatedIndicators?.technicalScore !== undefined
           ? `${sc.separatedIndicators.technicalScore.toFixed(2)} / 5.00`
           : 'NOT_MEASURED';
       pushLine(
-        `- ${sc.softwareName} (${sc.softwareVersion}): Score=${scoreStr} | ScopeCov=${sc.separatedIndicators?.scopeCoveragePercent ?? 0}% | Confidence=${sc.separatedIndicators?.evidenceConfidence ?? 'LOW'} | Vulns=${sc.metricsSummary?.vulnerabilities ?? 0} | Secrets=${sc.metricsSummary?.secretsExposed ?? 0}`
+        `- ${sc.softwareName} (${sc.softwareVersion}): Score=${scoreStr} | MeasuredCov=${covInfo?.measuredCoveragePercent ?? vb.measuredCoveragePercent}% | ScopeCov=${sc.separatedIndicators?.scopeCoveragePercent ?? 0}% | Confidence=${sc.separatedIndicators?.evidenceConfidence ?? 'LOW'} | Vulns=${sc.metricsSummary?.vulnerabilities ?? 0} | Secrets=${sc.metricsSummary?.secretsExposed ?? 0}`
       );
+      if (covInfo?.weightRenormalizationApplied) {
+        pushLine(`  Weight Renormalization: ${covInfo.renormalizationExplanation}`);
+      }
     }
 
-    pushSection('3. SIGNED EVIDENCE PROVENANCE & ARTIFACT HASHES');
+    pushSection('3. EPISTEMIC SEPARATION (MEASURED FACT vs HEURISTIC vs NOT_MEASURED)');
+    pushLine('3.1 Evidencia Medida (Fato):', true);
+    for (const fact of vb.epistemicSeparation.measuredEvidenceFacts.slice(0, 12)) {
+      pushLine(`  [FACT] ${fact}`);
+    }
+    pushLine('3.2 Inferencia / Heuristica:', true);
+    for (const heur of vb.epistemicSeparation.inferencesAndHeuristics.slice(0, 12)) {
+      pushLine(`  [HEURISTIC] ${heur}`);
+    }
+    pushLine('3.3 Nao Medido (NOT_MEASURED / UNAVAILABLE):', true);
+    for (const unm of vb.epistemicSeparation.unmeasuredDimensions.slice(0, 14)) {
+      pushLine(`  [NOT_MEASURED] ${unm}`);
+    }
+
+    pushSection('4. ADAPTERS EXECUTED VS UNAVAILABLE & ANALYZED ARTIFACTS SHA-256');
+    pushLine(
+      `Executed Adapters: ${vb.adaptersExecuted.length} | Unavailable/Not Measured Adapters: ${vb.adaptersUnavailable.length}`,
+      true
+    );
+    for (const ad of vb.adaptersExecuted.slice(0, 15)) {
+      pushLine(`  [EXECUTED:${ad.executionStatus}] ${ad.toolId} (${ad.toolName} v${ad.toolVersion})`);
+    }
+    for (const ad of vb.adaptersUnavailable.slice(0, 15)) {
+      pushLine(`  [${ad.executionStatus}] ${ad.toolId} (${ad.toolName}): ${ad.reason || 'UNAVAILABLE'}`);
+    }
+    for (const [k, v] of Object.entries(vb.analyzedFilesSha256)) {
+      pushLine(`  Analyzed Artifact [${k}]: ${v}`);
+    }
+
+    pushSection('5. SIGNED EVIDENCE PROVENANCE & COMPLIANCE TRACEABILITY');
+    pushLine(`Scope & Limitations: ${vb.scopeLimitationsDisclaimer}`);
     if (run.signedManifest) {
       const sm = run.signedManifest;
       pushLine(`Manifest ID: ${sm.manifestId} | Signature Algorithm: ${sm.signatureAlgorithm || 'HMAC-SHA256'}`);
-      pushLine(`Verification State: ${run.evidenceVerification?.verificationState || sm.verificationState} | Valid: ${Boolean(run.evidenceVerification?.valid)}`);
-      pushLine(`Engine Version: ${sm.engineVersion || run.algorithmVersion} | Rule Catalog SHA-256: ${sm.ruleCatalogSha256 || provenance.ruleCatalogSha256}`);
+      pushLine(`Verification State: ${vb.evidenceVerificationState} | Valid: ${vb.evidenceChainVerified}`);
       pushLine(`Root Chain SHA-256: ${sm.merkleOrChainRootSha256}`);
       pushLine(`Manifest Payload SHA-256: ${sm.manifestPayloadSha256}`);
-      if (sm.artifactHashes) {
-        for (const [k, v] of Object.entries(sm.artifactHashes)) {
-          pushLine(`  Artifact [${k}]: ${v}`);
-        }
-      }
-    } else {
-      pushLine('Signed provenance computed directly from deterministic run state.');
     }
-
-    pushSection('4. COMPLIANCE TRACEABILITY MATRIX (NON-CERTIFICATION)');
     pushLine(compliance.disclaimer);
     for (const [fw, entries] of Object.entries(compliance.byFramework)) {
       const detected = entries.filter((e) => e.findingsCount > 0);
       pushLine(`Framework ${fw}: ${detected.length}/${entries.length} controls with findings in analyzed scope`, true);
-      for (const e of detected.slice(0, 8)) {
+      for (const e of detected.slice(0, 6)) {
         pushLine(
           `  - ${e.controlId} (${e.controlTitle}): ${e.findingsCount} finding(s), CWEs=[${e.matchedCwes.join(', ')}]`
         );
       }
     }
 
-    pushSection('5. FINDINGS SUMMARY (TOP 30 BY SEVERITY)');
+    pushSection('6. FINDINGS SUMMARY (TOP 30 BY SEVERITY)');
     const sevOrder: Record<string, number> = {
       BLOCKER: 0,
       CRITICAL: 1,
@@ -576,8 +1098,11 @@ export class PdfReportGenerator {
       }
     }
 
-    pushSection('6. PROVENANCE FOOTER & CRYPTOGRAPHIC REPORT SIGNATURE');
+    pushSection('7. PROVENANCE FOOTER & CRYPTOGRAPHIC REPORT SIGNATURE');
+    rawLines.push({ text: `Provenance-WinHood-Version: ${provenance.winhoodVersion}`, bold: true, size: 10 });
     rawLines.push({ text: `Provenance-Engine-Version: ${provenance.engineVersion}`, bold: true, size: 10 });
+    rawLines.push({ text: `Provenance-Measured-Coverage-Percent: ${provenance.measuredCoveragePercent}`, size: 10 });
+    rawLines.push({ text: `Provenance-EvidenceChain-SHA256: ${provenance.evidenceChainHash}`, bold: true, size: 10 });
     rawLines.push({ text: `Provenance-RuleCatalog-Version: ${provenance.ruleCatalogVersion}`, size: 10 });
     rawLines.push({ text: `Provenance-RuleCatalog-SHA256: ${provenance.ruleCatalogSha256}`, size: 10 });
     rawLines.push({ text: `Provenance-Code-SHA256: ${provenance.codeHashSha256}`, size: 10 });
@@ -623,7 +1148,7 @@ export class PdfReportGenerator {
         if (currentY < 45) break;
       }
       streamLines.push(
-        `(${toPdfAscii(`WinHood Signed Audit Report - Page ${p + 1}/${pages.length} | SHA256:${provenance.reportContentSha256.slice(0, 16)}`)}) Tj`
+        `(${toPdfAscii(`WinHood v${WINHOOD_PLATFORM_VERSION} Signed Audit Report - Page ${p + 1}/${pages.length} | SHA256:${provenance.reportContentSha256.slice(0, 16)}`)}) Tj`
       );
       streamLines.push('ET');
       const streamContent = streamLines.join('\n');
@@ -661,12 +1186,168 @@ export class PdfReportGenerator {
     return Buffer.from(chunks.join(''), 'latin1');
   }
 
+  public static generateCsvReport(
+    run: BenchmarkRun,
+    hmacSecret = DEFAULT_REPORT_HMAC_KEY
+  ): string {
+    const provenance = this.buildProvenanceFooter(run, hmacSecret);
+    const vb = provenance.veracityBlock;
+    const lines: string[] = [
+      `# WinHoodVersion=${vb.winhoodVersion},RunId=${run.id},GeneratedAtUTC=${vb.generatedAtUtc},MeasuredCoveragePercent=${vb.measuredCoveragePercent},EvidenceChainHash=${vb.evidenceChainHash},EvidenceVerified=${vb.evidenceChainVerified},ReportSHA256=${provenance.reportContentSha256},ReportHMAC=${provenance.hmacSignature}`,
+      `# AdaptersExecuted=${vb.adaptersExecuted.map((a) => `${a.toolId}@${a.toolVersion}`).join(';') || 'NONE'},AdaptersUnavailable=${vb.adaptersUnavailable.map((a) => `${a.toolId}:${a.executionStatus}`).join(';') || 'NONE'}`,
+      `# ScopeDisclaimer=${vb.scopeLimitationsDisclaimer}`,
+    ];
+
+    const headers = [
+      'RecordType',
+      'EpistemicClass',
+      'FindingID',
+      'Software',
+      'Version',
+      'Category',
+      'Severity',
+      'ValidationStatus',
+      'Tool',
+      'RuleID',
+      'File',
+      'Line',
+      'CWE',
+      'CVE',
+      'CVSS',
+      'MeasuredCoveragePercent',
+      'EvidenceSHA256',
+      'Title',
+      'Details',
+    ];
+    lines.push(headers.join(','));
+
+    for (const sc of run.scoreCards || []) {
+      const covInfo = vb.measuredCoverageBySoftware.find((m) => m.softwareId === sc.softwareId);
+      const scoreVal =
+        sc.separatedIndicators?.technicalScore !== null &&
+        sc.separatedIndicators?.technicalScore !== undefined
+          ? sc.separatedIndicators.technicalScore.toFixed(2)
+          : 'NOT_MEASURED';
+      lines.push(
+        [
+          'SCORECARD',
+          'MEASURED_FACT',
+          `score-${sc.softwareId}`,
+          sc.softwareName,
+          sc.softwareVersion,
+          'OVERALL',
+          'INFO',
+          sc.separatedIndicators?.qualityGateDecision || sc.qualityGate?.status || 'INCONCLUSIVE',
+          'WinHood Scoring Engine',
+          run.algorithmVersion,
+          'SCORECARD',
+          0,
+          '',
+          '',
+          scoreVal,
+          covInfo?.measuredCoveragePercent ?? vb.measuredCoveragePercent,
+          vb.evidenceChainHash,
+          `OverallScore=${scoreVal}/5.00 (${sc.classificationLabel})`,
+          covInfo?.renormalizationExplanation || '',
+        ]
+          .map(escapeCsvCell)
+          .join(',')
+      );
+    }
+
+    for (const f of run.findings || []) {
+      lines.push(
+        [
+          'FINDING',
+          'MEASURED_FACT',
+          f.id,
+          f.softwareName,
+          f.softwareVersion,
+          f.category,
+          f.severity,
+          f.validationStatus,
+          f.toolName,
+          f.originalRuleId,
+          f.filePath,
+          f.lineNumber,
+          f.cwe || '',
+          f.cve || '',
+          f.cvss ?? '',
+          vb.measuredCoveragePercent,
+          f.evidenceSha256,
+          f.title,
+          f.whyItIsAnIssue || f.description || '',
+        ]
+          .map(escapeCsvCell)
+          .join(',')
+      );
+    }
+
+    for (const heur of vb.epistemicSeparation.inferencesAndHeuristics) {
+      lines.push(
+        [
+          'EPISTEMIC_NOTE',
+          'INFERENCE_HEURISTIC',
+          '',
+          run.projectName,
+          vb.winhoodVersion,
+          'HEURISTIC',
+          'INFO',
+          'DOCUMENTED',
+          'WinHood Veracity Engine',
+          'EPISTEMIC_HEURISTIC',
+          '',
+          0,
+          '',
+          '',
+          '',
+          vb.measuredCoveragePercent,
+          vb.evidenceChainHash,
+          'Inferência / Heurística',
+          heur,
+        ]
+          .map(escapeCsvCell)
+          .join(',')
+      );
+    }
+
+    for (const unm of vb.epistemicSeparation.unmeasuredDimensions) {
+      lines.push(
+        [
+          'EPISTEMIC_NOTE',
+          'NOT_MEASURED_OR_UNAVAILABLE',
+          '',
+          run.projectName,
+          vb.winhoodVersion,
+          'UNMEASURED',
+          'INFO',
+          'NOT_MEASURED',
+          'WinHood Veracity Engine',
+          'EPISTEMIC_UNMEASURED',
+          '',
+          0,
+          '',
+          '',
+          '',
+          vb.measuredCoveragePercent,
+          vb.evidenceChainHash,
+          'Não Medido (NOT_MEASURED / UNAVAILABLE)',
+          unm,
+        ]
+          .map(escapeCsvCell)
+          .join(',')
+      );
+    }
+
+    return lines.join('\n');
+  }
+
   /**
-   * Unified multi-format ReportExporter supporting pdf, html, sarif, and json.
+   * Unified multi-format ReportExporter supporting pdf, html, sarif, json, and csv.
    */
   public static exportReport(
     run: BenchmarkRun,
-    format: 'pdf' | 'html' | 'sarif' | 'json',
+    format: 'pdf' | 'html' | 'sarif' | 'json' | 'csv',
     hmacSecret = DEFAULT_REPORT_HMAC_KEY
   ): { contentType: string; buffer: Buffer; provenance: ReportProvenanceFooter } {
     const provenance = this.buildProvenanceFooter(run, hmacSecret);
@@ -686,6 +1367,15 @@ export class PdfReportGenerator {
       };
     }
 
+    if (format === 'csv') {
+      const csv = this.generateCsvReport(run, hmacSecret);
+      return {
+        contentType: 'text/csv; charset=utf-8',
+        buffer: Buffer.from(csv, 'utf8'),
+        provenance,
+      };
+    }
+
     if (format === 'sarif') {
       const sarif = SarifCodec.exportSarif210(run.findings || [], {
         toolVersion: provenance.engineVersion,
@@ -694,8 +1384,12 @@ export class PdfReportGenerator {
       if (runs[0]) {
         runs[0].properties = {
           ...((runs[0].properties as Record<string, unknown>) || {}),
+          winhoodVersion: WINHOOD_PLATFORM_VERSION,
           gateDecision: gateEval.decision,
           gateVersion: gateEval.gateVersion,
+          evidenceChainHash: provenance.evidenceChainHash,
+          measuredCoveragePercent: provenance.measuredCoveragePercent,
+          veracityBlock: provenance.veracityBlock,
           provenanceFooter: provenance,
         };
       }
@@ -708,17 +1402,22 @@ export class PdfReportGenerator {
 
     const jsonReport = {
       schemaVersion: 'winhood-audit-report/v4.4.0',
+      winhoodVersion: WINHOOD_PLATFORM_VERSION,
       runId: run.id,
       projectName: run.projectName,
       startedAt: run.startedAt,
       completedAt: run.completedAt || provenance.generatedAt,
       executiveSummary: run.executiveSummary,
+      measuredCoveragePercent: provenance.measuredCoveragePercent,
+      evidenceChainHash: provenance.evidenceChainHash,
       qualityGate: gateEval,
       scoreCards: run.scoreCards,
       findingsCount: (run.findings || []).length,
       findings: run.findings || [],
       evidenceVerification: run.evidenceVerification,
       signedManifest: run.signedManifest,
+      veracityBlock: provenance.veracityBlock,
+      epistemicSeparation: provenance.veracityBlock.epistemicSeparation,
       provenanceFooter: provenance,
     };
 

@@ -610,6 +610,8 @@ export interface ToolAdapterInfo {
   configurationState?: ToolLifecycleState;
   readinessState?: ToolLifecycleState;
   executionState?: ToolLifecycleState;
+  executionStatus?: 'MEASURED' | 'NOT_INSTALLED' | 'NOT_MEASURED' | 'FAILED';
+  unavailableReason?: string | null;
   description: string;
   supportedLanguages: string[];
   lastExecutionAt: string | null;
@@ -686,6 +688,11 @@ export interface ToolExecutionRecord {
   toolVersion: string;
   integrationType?: ToolIntegrationType;
   executionMethod?: 'NATIVE_AST_ENGINE' | 'CLI_BINARY' | 'EXTERNAL_API' | 'SANDBOX_WORKER' | 'NOT_EXECUTED';
+  executionStatus?: 'MEASURED' | 'NOT_INSTALLED' | 'NOT_MEASURED' | 'FAILED';
+  commandExecuted?: string | null;
+  scopeExecuted?: string | null;
+  inputArtifactsSha256?: string | null;
+  unavailableReason?: string | null;
   resultCompleteness?: ToolResultCompletenessState;
   configurationUsed?: Record<string, any>;
   configHash?: string;
@@ -812,6 +819,9 @@ export interface MarketCompetitorCandidate {
   category: string;
   estimatedSimilarityPercent: number;
   similarityScore: number;
+  similarityOrigin?: 'HEURISTIC_METADATA_SIMILARITY';
+  isMeasuredBenchmark?: false;
+  similarityDisclaimer?: string;
   similarityBreakdown: {
     purpose: number;
     features: number;
@@ -890,9 +900,19 @@ export interface SoftwareScoreCard {
   separatedIndicators?: {
     technicalScore: number | null;
     scopeCoveragePercent: number;
+    measuredCoveragePercent?: number;
     evidenceConfidence: 'HIGH' | 'MEDIUM' | 'LOW';
     qualityGateDecision: ExecutiveQualityGateDecision;
     veracityState: VeracityClassification;
+  };
+  measuredCoveragePercent?: number;
+  weightRenormalization?: {
+    applied: boolean;
+    excludedCategories: BenchmarkCategoryKey[];
+    originalWeightSum: number;
+    measuredWeightSum: number;
+    redistributedWeightPercent: number;
+    explanation: string;
   };
   originalWeights?: Record<BenchmarkCategoryKey, number>;
   effectiveWeights?: Record<BenchmarkCategoryKey, number>;
@@ -1240,7 +1260,7 @@ export interface AuditLogEntry {
   id: string;
   timestamp: string;
   actor: string;
-  role: 'ADMIN' | 'SECURITY_LEAD' | 'AUDITOR' | 'QA_ENGINEER' | 'SYSTEM';
+  role: 'LOCAL_OPERATOR' | 'ADMIN' | 'SECURITY_LEAD' | 'AUDITOR' | 'QA_ENGINEER' | 'SYSTEM';
   action: string;
   entityType: string;
   entityId: string;
@@ -2233,6 +2253,7 @@ export type MetricMeasurementState =
   | 'IMPORTED'
   | 'INFERRED'
   | 'NOT_MEASURED'
+  | 'UNAVAILABLE'
   | 'NOT_APPLICABLE'
   | 'FAILED'
   | 'INCONCLUSIVE';

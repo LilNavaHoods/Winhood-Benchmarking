@@ -13,7 +13,7 @@ import { createWinHoodPreloadBridge } from '../../electron-preload';
 import {
   ELECTRON_SECURITY_WEB_PREFERENCES,
   bootstrapWindowsDesktop,
-  isAllowedExternalAuthUrl,
+  isAllowedExternalRepoUrl,
   isAuthorizedLoopbackSender,
   stripTrailingSlashes,
 } from '../../electron-main';
@@ -70,7 +70,7 @@ describe('Windows Desktop Architecture, Electron Security & Lifecycle Suite (FAS
     const res3 = (await bridge.openLogsFolder()) as { channel: string };
     assert.equal(res3.channel, 'winhood:open-logs-folder');
 
-    const res4 = (await bridge.openExternalUrl('https://github.com/login/oauth/authorize')) as unknown as {
+    const res4 = (await bridge.openExternalUrl('https://github.com/LilNavaHoods/Winhood-Benchmarking')) as unknown as {
       channel: string;
     };
     assert.equal(res4.channel, 'winhood:open-external-url');
@@ -78,19 +78,21 @@ describe('Windows Desktop Architecture, Electron Security & Lifecycle Suite (FAS
     assert.equal(invoked.length, 4);
     assert.deepEqual(invoked[3], {
       channel: 'winhood:open-external-url',
-      payload: { url: 'https://github.com/login/oauth/authorize' },
+      payload: { url: 'https://github.com/LilNavaHoods/Winhood-Benchmarking' },
     });
     // Ensure raw ipcRenderer or require is NOT exposed on bridge
     assert.equal('ipcRenderer' in bridge, false);
     assert.equal('require' in bridge, false);
 
-    // Verify strict HTTPS GitHub allowlist for shell.openExternal
-    assert.equal(isAllowedExternalAuthUrl('https://github.com/login/oauth/authorize?client_id=abc'), true);
-    assert.equal(isAllowedExternalAuthUrl('https://www.github.com/login/device'), true);
-    assert.equal(isAllowedExternalAuthUrl('https://evil.example.com/login/oauth/authorize'), false);
-    assert.equal(isAllowedExternalAuthUrl('http://github.com/login/oauth/authorize'), false);
-    assert.equal(isAllowedExternalAuthUrl('javascript:alert(1)'), false);
-    assert.equal(isAllowedExternalAuthUrl('not-a-valid-url'), false);
+    // Verify strict HTTPS GitHub repository allowlist for shell.openExternal (OAuth/Device URLs blocked)
+    assert.equal(isAllowedExternalRepoUrl('https://github.com/LilNavaHoods/Winhood-Benchmarking'), true);
+    assert.equal(isAllowedExternalRepoUrl('https://www.github.com/facebook/react'), true);
+    assert.equal(isAllowedExternalRepoUrl('https://github.com/login/oauth/authorize?client_id=abc'), false);
+    assert.equal(isAllowedExternalRepoUrl('https://www.github.com/login/device'), false);
+    assert.equal(isAllowedExternalRepoUrl('https://evil.example.com/repo'), false);
+    assert.equal(isAllowedExternalRepoUrl('http://github.com/facebook/react'), false);
+    assert.equal(isAllowedExternalRepoUrl('javascript:alert(1)'), false);
+    assert.equal(isAllowedExternalRepoUrl('not-a-valid-url'), false);
   });
 
   it('3. Electron Main enforces hardened webPreferences and validates loopback IPC sender origin', () => {
@@ -150,45 +152,16 @@ describe('Windows Desktop Architecture, Electron Security & Lifecycle Suite (FAS
       assert.ok(desktopInstance.backend.port > 0);
       assert.equal(desktopInstance.windowUrl, `http://localhost:${desktopInstance.backend.port}`);
 
-      // Verify bootstrap_admin_token.txt was written inside per-user WinHoodPaths.rootDataDir
-      const bootstrapTokenFile = path.join(
-        desktopInstance.layout.rootDataDir,
-        'bootstrap_admin_token.txt'
-      );
-      assert.equal(fs.existsSync(bootstrapTokenFile), true);
-      const bootstrapToken =
-        fs
-          .readFileSync(bootstrapTokenFile, 'utf8')
-          .split(/\r?\n/)
-          .map((l) => l.trim())
-          .find((l) => l && !l.startsWith('#')) || '';
+      // Verify unrestricted local desktop access (no bootstrap_admin_token.txt or login gate)
+      const healthRes = await fetch(`${desktopInstance.backend.url}/api/health`);
+      assert.equal(healthRes.status, 200);
+      const healthJson = (await healthRes.json()) as { accessMode?: string; totpEnabled?: boolean };
+      assert.equal(healthJson.accessMode, 'UNRESTRICTED_LOCAL');
+      assert.equal(healthJson.totpEnabled, false);
 
-      const bootRes = await fetch(`${desktopInstance.backend.url}/api/auth/bootstrap-admin`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          bootstrapToken,
-          name: 'Desktop Admin',
-          email: 'desktop.admin@winhood.local',
-          password: 'DesktopStrongPassword!2026',
-        }),
-      });
-      assert.equal(bootRes.status, 201);
-      const setCookies =
-        typeof (bootRes.headers as any).getSetCookie === 'function'
-          ? ((bootRes.headers as any).getSetCookie() as string[])
-          : [bootRes.headers.get('set-cookie') || ''];
-      const sessionCookie = setCookies
-        .map((c) => c.split(';')[0].trim())
-        .filter(Boolean)
-        .join('; ');
-
-      // Verify /api/sonar/methodology-summary is reachable on the desktop backend with real session cookie
+      // Verify /api/sonar/methodology-summary is reachable directly on the desktop backend without login
       const methRes = await fetch(
-        `${desktopInstance.backend.url}/api/sonar/methodology-summary`,
-        {
-          headers: { Cookie: sessionCookie },
-        }
+        `${desktopInstance.backend.url}/api/sonar/methodology-summary`
       );
       assert.equal(methRes.status, 200);
       const methJson = (await methRes.json()) as {

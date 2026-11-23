@@ -28,6 +28,42 @@ export function buildOpenApiSpec(serverOrigin = 'http://localhost:3000'): Record
           responses: { '200': { description: 'OpenAPI JSON document' } },
         },
       },
+      '/api/totp/status': {
+        get: {
+          summary: 'Inspect optional TOTP 2FA status (enabled/unlocked); unrestricted local access when disabled',
+          responses: { '200': { description: 'Optional TOTP status payload' } },
+        },
+      },
+      '/api/totp/setup': {
+        post: {
+          summary: 'Generate RFC-6238 TOTP secret, otpauth URI, QR Code data URL, and 8 single-use recovery codes',
+          responses: { '200': { description: 'Pending TOTP setup bundle' } },
+        },
+      },
+      '/api/totp/confirm': {
+        post: {
+          summary: 'Confirm first 6-digit TOTP code to enable optional 2FA protection',
+          responses: { '200': { description: 'Optional TOTP enabled and current session unlocked' } },
+        },
+      },
+      '/api/totp/verify': {
+        post: {
+          summary: 'Unlock local workspace using a 6-digit TOTP code or single-use recovery code',
+          responses: { '200': { description: 'Session unlocked' }, '401': { description: 'Invalid or replayed code' } },
+        },
+      },
+      '/api/totp/disable': {
+        post: {
+          summary: 'Disable optional TOTP 2FA protection after verifying a valid TOTP or recovery code',
+          responses: { '200': { description: 'Optional TOTP disabled; unrestricted local access restored' } },
+        },
+      },
+      '/api/totp/lock': {
+        post: {
+          summary: 'Manually lock the current local session when optional TOTP 2FA is active',
+          responses: { '200': { description: 'Session locked' } },
+        },
+      },
       '/api/rules/catalog': {
         get: {
           summary: 'Public versioned rule catalog (CWE, OWASP Top 10, CVSS, examples, packs SHA-256)',

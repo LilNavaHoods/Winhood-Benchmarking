@@ -1064,8 +1064,13 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                         </div>
                       </div>
                       <div className="p-2 rounded border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10]">
-                        <div className="text-[10px] text-slate-400 font-sans">2. Cobertura Escopo</div>
-                        <div className="font-bold text-[#31d6c4]">{sep.scopeCoveragePercent}%</div>
+                        <div className="text-[10px] text-slate-400 font-sans">2. Cobertura Medição</div>
+                        <div className="font-bold text-[#31d6c4]">
+                          {sc.measuredCoveragePercent ?? sep.measuredCoveragePercent ?? sep.scopeCoveragePercent}%
+                        </div>
+                        <div className="text-[9px] text-slate-500">
+                          Escopo arq.: {sep.scopeCoveragePercent}%
+                        </div>
                       </div>
                       <div className="p-2 rounded border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080b10]">
                         <div className="text-[10px] text-slate-400 font-sans">3. Confiança Evid.</div>
@@ -1106,6 +1111,12 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                           {sep.veracityState}
                         </div>
                       </div>
+                    </div>
+                  )}
+                  {sc.weightRenormalization?.applied && (
+                    <div className="mt-2 px-2.5 py-1.5 rounded border border-amber-500/30 bg-amber-500/5 text-[11px] text-amber-700 dark:text-amber-300">
+                      <strong>Renormalização de Pesos ({sc.measuredCoveragePercent ?? 0}% medido):</strong>{' '}
+                      {sc.weightRenormalization.explanation}
                     </div>
                   )}
 

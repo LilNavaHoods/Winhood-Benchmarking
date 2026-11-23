@@ -97,10 +97,10 @@ export const PrivacyAndTermsModal: React.FC<PrivacyAndTermsModalProps> = ({
 
               <div className="space-y-1.5">
                 <h4 className="font-bold text-slate-900 dark:text-slate-100">
-                  2. Cookies Estritamente Técnicos (HttpOnly)
+                  2. Cookies Estritamente Técnicos (TOTP 2FA Opcional)
                 </h4>
                 <p>
-                  O WinHood utiliza apenas dois cookies locais estritamente funcionais (<code className="font-mono">winhood_session</code> com <code className="font-mono">HttpOnly</code> e <code className="font-mono">winhood_csrf</code>) para manter sua sessão local autenticada e proteger contra ataques CSRF. Nenhum cookie é usado para publicidade ou rastreamento.
+                  Por padrão o WinHood opera com acesso local livre sem necessidade de login ou cadastro. Quando você ativa voluntariamente a proteção <strong>2FA (TOTP RFC-6238)</strong>, o sistema utiliza apenas dois cookies locais técnicos (<code className="font-mono">winhood_totp_unlock</code> com <code className="font-mono">HttpOnly</code> e <code className="font-mono">winhood_csrf</code>) para manter o desbloqueio local e proteger contra ataques CSRF. Nenhum cookie é usado para publicidade ou rastreamento.
                 </p>
               </div>
 
@@ -115,10 +115,10 @@ export const PrivacyAndTermsModal: React.FC<PrivacyAndTermsModalProps> = ({
 
               <div className="space-y-1.5">
                 <h4 className="font-bold text-slate-900 dark:text-slate-100">
-                  4. Direito de Exclusão de Dados Locais
+                  4. Controle Total dos Dados Locais e 2FA Opcional
                 </h4>
                 <p>
-                  Você pode excluir sua própria conta local a qualquer momento pelo botão <strong>&quot;Excluir minha conta&quot;</strong> no rodapé do menu lateral (<code className="font-mono">DELETE /api/auth/me</code>), revogando imediatamente todas as sessões e removendo seu registro de <code className="font-mono">auth_users.json</code>.
+                  Nenhuma conta ou senha é criada. Você pode desativar a proteção 2FA (TOTP Opcional) ou limpar o workspace local a qualquer momento, removendo imediatamente o segredo TOTP criptografado de <code className="font-mono">totp_config.json</code>.
                 </p>
               </div>
 
@@ -178,7 +178,7 @@ export const PrivacyAndTermsModal: React.FC<PrivacyAndTermsModalProps> = ({
                 </h4>
                 <ul className="list-disc pl-5 space-y-1">
                   <li><strong>Criptografia em Repouso:</strong> AES-256-GCM (<code className="font-mono">whdb:enc:v2</code>) + rotação KMS.</li>
-                  <li><strong>Autenticação Local:</strong> Senha e PIN com <code className="font-mono">scrypt</code> (N=32768, r=8, p=1), TOTP RFC 6238 e Windows Hello (WebAuthn FIDO2 <code className="font-mono">ES256</code>/<code className="font-mono">RS256</code>).</li>
+                  <li><strong>Acesso Local &amp; 2FA Opcional:</strong> Acesso local livre sem cadastro ou senha, com proteção opcional via <strong>TOTP 2FA (RFC-6238)</strong> armazenado com <code className="font-mono">AES-256-GCM</code>, códigos de recuperação em <code className="font-mono">SHA-256</code> com salt e comparação em tempo constante (<code className="font-mono">timingSafeEqual</code>).</li>
                   <li><strong>Isolamento Electron:</strong> <code className="font-mono">nodeIntegration: false</code>, <code className="font-mono">contextIsolation: true</code>, <code className="font-mono">sandbox: true</code>, <code className="font-mono">SsrfGuard</code> e proteção CSRF Double-Submit.</li>
                 </ul>
               </div>

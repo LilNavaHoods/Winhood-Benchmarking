@@ -10,24 +10,6 @@ import { buildOpenApiSpec } from '../api/openApiSpec';
 import { PrDecorationAdapter } from '../integrations/ci/PrDecorationAdapter';
 import { createWinHoodApp } from '../../server';
 
-function readBootstrapTokenFromFile(filePath: string): string {
-  const raw = fs.readFileSync(filePath, 'utf8');
-  return raw
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l && !l.startsWith('#'))[0] || '';
-}
-
-function extractCookieHeader(res: Response): string {
-  const anyHeaders = res.headers as unknown as { getSetCookie?: () => string[] };
-  const rawList: string[] =
-    typeof anyHeaders.getSetCookie === 'function'
-      ? anyHeaders.getSetCookie()
-      : res.headers.get('set-cookie')
-        ? [res.headers.get('set-cookie') as string]
-        : [];
-  return rawList.map((line) => line.split(';')[0]).join('; ');
-}
 
 test('WinHood CLI executes rules, analyze --deterministic, gate exit codes (0/1/3), and sbom', async () => {
   const ver = await runCli(['--version']);
@@ -104,59 +86,49 @@ test('OpenAPI 3.0.3 spec and Express REST governance/catalog/PDF/SARIF endpoints
     const apiJson = (await apiRes.json()) as { openapi: string };
     assert.equal(apiJson.openapi, '3.0.3');
 
-    // 2. Bootstrap Admin session
-    const token = readBootstrapTokenFromFile(path.join(tmpDataDir, 'bootstrap_admin_token.txt'));
-    const bsRes = await fetch(`${baseUrl}/api/auth/bootstrap-admin`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        bootstrapToken: token,
-        name: 'Test Admin',
-        email: 'admin@winhood.local',
-        password: 'WinHood#StrongPassword2026!',
-      }),
-    });
-    assert.equal(bsRes.status, 201);
-    const cookieHeader = extractCookieHeader(bsRes);
-    const bsBody = (await bsRes.json()) as { csrfToken: string };
-    const authHeaders = {
-      Cookie: cookieHeader,
-      'X-WinHood-CSRF': bsBody.csrfToken,
+    // 2. Verify Unrestricted Local Access by default (TOTP optional disabled)
+    const totpStatusRes = await fetch(`${baseUrl}/api/totp/status`);
+    assert.equal(totpStatusRes.status, 200);
+    const totpStatusJson = (await totpStatusRes.json()) as { enabled: boolean; unlocked: boolean };
+    assert.equal(totpStatusJson.enabled, false);
+    assert.equal(totpStatusJson.unlocked, true);
+
+    const jsonHeaders = {
       'Content-Type': 'application/json',
     };
 
-    // 3. Seed real workspace so we have a completed BenchmarkRun
+    // 3. Seed real workspace directly without login so we have a completed BenchmarkRun
     const seedRes = await fetch(`${baseUrl}/api/system/seed-real-workspace`, {
       method: 'POST',
-      headers: authHeaders,
+      headers: jsonHeaders,
     });
     assert.equal(seedRes.status, 200);
 
-    const dashRes = await fetch(`${baseUrl}/api/bootstrap`, { headers: { Cookie: cookieHeader } });
+    const dashRes = await fetch(`${baseUrl}/api/bootstrap`);
     assert.equal(dashRes.status, 200);
     const dashJson = (await dashRes.json()) as { dashboard?: { latestRun?: { id: string } } };
     const runId = dashJson.dashboard?.latestRun?.id;
     assert.ok(runId);
 
     // 4. Rules & Secrets catalogs
-    const rulesRes = await fetch(`${baseUrl}/api/rules/catalog`, { headers: { Cookie: cookieHeader } });
+    const rulesRes = await fetch(`${baseUrl}/api/rules/catalog`);
     assert.equal(rulesRes.status, 200);
     const rulesData = (await rulesRes.json()) as { totalRules: number; plugins: unknown[] };
     assert.ok(rulesData.totalRules >= 15);
     assert.ok(rulesData.plugins.length >= 2);
 
-    const secretsRes = await fetch(`${baseUrl}/api/secrets/catalog`, { headers: { Cookie: cookieHeader } });
+    const secretsRes = await fetch(`${baseUrl}/api/secrets/catalog`);
     assert.equal(secretsRes.status, 200);
     const secretsData = (await secretsRes.json()) as { patternsCount: number };
     assert.ok(secretsData.patternsCount >= 5);
 
     // 5. Quality Gates list, evaluation, signed webhook preview, PR decoration
-    const gatesRes = await fetch(`${baseUrl}/api/quality-gates`, { headers: { Cookie: cookieHeader } });
+    const gatesRes = await fetch(`${baseUrl}/api/quality-gates`);
     assert.equal(gatesRes.status, 200);
 
     const evalRes = await fetch(`${baseUrl}/api/quality-gates/evaluate`, {
       method: 'POST',
-      headers: authHeaders,
+      headers: jsonHeaders,
       body: JSON.stringify({ runId, gateId: 'winhood-standard-v2' }),
     });
     assert.equal(evalRes.status, 200);
@@ -166,7 +138,7 @@ test('OpenAPI 3.0.3 spec and Express REST governance/catalog/PDF/SARIF endpoints
 
     const hookRes = await fetch(`${baseUrl}/api/webhooks/sign-test`, {
       method: 'POST',
-      headers: authHeaders,
+      headers: jsonHeaders,
       body: JSON.stringify({ runId, gateId: 'winhood-standard-v2' }),
     });
     assert.equal(hookRes.status, 200);
@@ -176,7 +148,7 @@ test('OpenAPI 3.0.3 spec and Express REST governance/catalog/PDF/SARIF endpoints
 
     const prRes = await fetch(`${baseUrl}/api/integrations/pr-decoration`, {
       method: 'POST',
-      headers: authHeaders,
+      headers: jsonHeaders,
       body: JSON.stringify({ runId, provider: 'GITHUB', repository: 'winhood/demo' }),
     });
     assert.equal(prRes.status, 200);
@@ -184,22 +156,18 @@ test('OpenAPI 3.0.3 spec and Express REST governance/catalog/PDF/SARIF endpoints
     assert.ok(prData.decoration.markdownComment.includes('WinHood'));
 
     // 6. Compliance Matrix, Portfolio Summary, Signed SBOM & Binary PDF Export
-    const compRes = await fetch(`${baseUrl}/api/compliance/${runId}/matrix`, { headers: { Cookie: cookieHeader } });
+    const compRes = await fetch(`${baseUrl}/api/compliance/${runId}/matrix`);
     assert.equal(compRes.status, 200);
 
-    const portRes = await fetch(`${baseUrl}/api/portfolio/summary`, { headers: { Cookie: cookieHeader } });
+    const portRes = await fetch(`${baseUrl}/api/portfolio/summary`);
     assert.equal(portRes.status, 200);
 
-    const sbomRes = await fetch(`${baseUrl}/api/runs/${runId}/sbom?format=cyclonedx`, {
-      headers: { Cookie: cookieHeader },
-    });
+    const sbomRes = await fetch(`${baseUrl}/api/runs/${runId}/sbom?format=cyclonedx`);
     assert.equal(sbomRes.status, 200);
     const sbomBody = (await sbomRes.json()) as { signatureVerification: { valid: boolean } };
     assert.equal(sbomBody.signatureVerification.valid, true);
 
-    const pdfRes = await fetch(`${baseUrl}/api/reports/${runId}/export?format=pdf`, {
-      headers: { Cookie: cookieHeader },
-    });
+    const pdfRes = await fetch(`${baseUrl}/api/reports/${runId}/export?format=pdf`);
     assert.equal(pdfRes.status, 200);
     assert.equal(pdfRes.headers.get('content-type')?.includes('application/pdf'), true);
     const pdfBuf = Buffer.from(await pdfRes.arrayBuffer());
@@ -208,7 +176,7 @@ test('OpenAPI 3.0.3 spec and Express REST governance/catalog/PDF/SARIF endpoints
     // 7. Native SARIF endpoint
     const sarifAnalyzeRes = await fetch(`${baseUrl}/api/analyze/sarif`, {
       method: 'POST',
-      headers: authHeaders,
+      headers: jsonHeaders,
       body: JSON.stringify({
         softwareName: 'InlineTarget',
         filesMap: { 'src/app.ts': 'export function f(x: any) { return eval(x); }\n' },

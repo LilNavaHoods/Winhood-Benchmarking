@@ -32,15 +32,9 @@ import type {
   SonarInstanceRecord,
 } from '../types/benchmark';
 import { HairlineAnimatedFigure } from './HairlineAnimatedFigure';
-import {
-  GitHubOAuthAdminPanel,
-  type GitHubOAuthAdminStatusView,
-  type GitHubOAuthVerificationView,
-} from './GitHubOAuthAdminPanel';
 
 interface ToolsAndIntegrationsModuleProps {
   softwares: Software[];
-  currentUserRole?: 'ADMIN' | 'SECURITY_LEAD' | 'QA_ENGINEER' | 'AUDITOR' | null;
   onNotify: (message: string, type?: 'success' | 'error') => void;
 }
 
@@ -53,24 +47,11 @@ type SubView =
 
 export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProps> = ({
   softwares,
-  currentUserRole,
   onNotify,
 }) => {
-  const isAdminUser = currentUserRole === 'ADMIN';
   const [subView, setSubView] = useState<SubView>('cards');
   const [loading, setLoading] = useState<boolean>(true);
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [githubOAuthStatus, setGithubOAuthStatus] = useState<GitHubOAuthAdminStatusView | null>(
-    null
-  );
-  const [githubOAuthLoading, setGithubOAuthLoading] = useState<boolean>(false);
-  const [githubOAuthSaving, setGithubOAuthSaving] = useState<boolean>(false);
-  const [githubOAuthVerifying, setGithubOAuthVerifying] = useState<boolean>(false);
-  const [githubOAuthClearing, setGithubOAuthClearing] = useState<boolean>(false);
-  const [githubOAuthError, setGithubOAuthError] = useState<string | null>(null);
-  const [githubOAuthVerification, setGithubOAuthVerification] =
-    useState<GitHubOAuthVerificationView | null>(null);
-  const [copiedCallbackUrl, setCopiedCallbackUrl] = useState<boolean>(false);
 
   const [toolsDb, setToolsDb] = useState<SonarAndToolsDatabaseBundle | null>(null);
   const [hostResources, setHostResources] = useState<{
@@ -175,164 +156,9 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
     }
   }, [onNotify]);
 
-  const fetchGitHubOAuthAdminStatus = useCallback(async () => {
-    if (!isAdminUser) {
-      setGithubOAuthStatus(null);
-      setGithubOAuthError(null);
-      setGithubOAuthVerification(null);
-      return;
-    }
-    setGithubOAuthLoading(true);
-    setGithubOAuthError(null);
-    try {
-      const res = await fetch('/api/admin/integrations/github-oauth');
-      const data = await res.json();
-      if (!res.ok) {
-        setGithubOAuthStatus(null);
-        setGithubOAuthError(
-          data?.message || data?.error || 'Não foi possível verificar o status do GitHub OAuth 2.0.'
-        );
-        return;
-      }
-      setGithubOAuthStatus(data as GitHubOAuthAdminStatusView);
-    } catch {
-      setGithubOAuthStatus(null);
-      setGithubOAuthError('Erro de comunicação ao verificar variáveis do GitHub OAuth 2.0.');
-    } finally {
-      setGithubOAuthLoading(false);
-    }
-  }, [isAdminUser]);
-
   useEffect(() => {
     fetchToolsData();
   }, [fetchToolsData]);
-
-  useEffect(() => {
-    fetchGitHubOAuthAdminStatus();
-  }, [fetchGitHubOAuthAdminStatus]);
-
-  const handleCopyCallbackUrl = async () => {
-    if (!githubOAuthStatus?.callbackUrlEffective) return;
-    try {
-      await navigator.clipboard.writeText(githubOAuthStatus.callbackUrlEffective);
-      setCopiedCallbackUrl(true);
-      onNotify('Callback URL do GitHub OAuth copiada para a área de transferência.', 'success');
-      window.setTimeout(() => setCopiedCallbackUrl(false), 2000);
-    } catch {
-      onNotify('Não foi possível copiar automaticamente; copie o endereço exibido.', 'error');
-    }
-  };
-
-  const handleSaveGitHubOAuthCredentials = async (payload: {
-    clientId?: string;
-    clientSecret?: string;
-  }): Promise<boolean> => {
-    if (!isAdminUser) return false;
-    setGithubOAuthSaving(true);
-    setGithubOAuthError(null);
-    try {
-      const res = await fetch('/api/admin/integrations/github-oauth', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        const msg =
-          data?.message || data?.error || 'Falha ao salvar credenciais do GitHub OAuth 2.0.';
-        setGithubOAuthError(msg);
-        onNotify(msg, 'error');
-        return false;
-      }
-      if (data?.connectionStatus) {
-        setGithubOAuthStatus(data as GitHubOAuthAdminStatusView);
-      } else {
-        await fetchGitHubOAuthAdminStatus();
-      }
-      setGithubOAuthVerification(null);
-      onNotify(
-        'Credenciais do GitHub OAuth 2.0 cifradas e salvas com sucesso no servidor.',
-        'success'
-      );
-      return true;
-    } catch {
-      const msg = 'Erro de comunicação ao salvar credenciais do GitHub OAuth 2.0.';
-      setGithubOAuthError(msg);
-      onNotify(msg, 'error');
-      return false;
-    } finally {
-      setGithubOAuthSaving(false);
-    }
-  };
-
-  const handleVerifyGitHubOAuthConnection = async (payload: {
-    clientId?: string;
-    clientSecret?: string;
-  }): Promise<void> => {
-    if (!isAdminUser) return;
-    setGithubOAuthVerifying(true);
-    setGithubOAuthError(null);
-    try {
-      const res = await fetch('/api/admin/integrations/github-oauth/verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        const msg =
-          data?.message || data?.error || 'Falha ao testar conexão com o GitHub OAuth 2.0.';
-        setGithubOAuthError(msg);
-        onNotify(msg, 'error');
-        return;
-      }
-      const result = data as GitHubOAuthVerificationView;
-      setGithubOAuthVerification(result);
-      if (result.verified) {
-        onNotify('Conexão GitHub OAuth 2.0 verificada com sucesso junto à API oficial.', 'success');
-      } else {
-        onNotify(result.message || 'Falha na verificação das credenciais GitHub OAuth 2.0.', 'error');
-      }
-    } catch {
-      const msg = 'Erro de comunicação ao executar verificação do GitHub OAuth 2.0.';
-      setGithubOAuthError(msg);
-      onNotify(msg, 'error');
-    } finally {
-      setGithubOAuthVerifying(false);
-    }
-  };
-
-  const handleClearGitHubOAuthCredentials = async (): Promise<void> => {
-    if (!isAdminUser) return;
-    setGithubOAuthClearing(true);
-    setGithubOAuthError(null);
-    try {
-      const res = await fetch('/api/admin/integrations/github-oauth', {
-        method: 'DELETE',
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        const msg =
-          data?.message || data?.error || 'Falha ao limpar credenciais salvas do GitHub OAuth.';
-        setGithubOAuthError(msg);
-        onNotify(msg, 'error');
-        return;
-      }
-      if (data?.connectionStatus) {
-        setGithubOAuthStatus(data as GitHubOAuthAdminStatusView);
-      } else {
-        await fetchGitHubOAuthAdminStatus();
-      }
-      setGithubOAuthVerification(null);
-      onNotify('Credenciais salvas no cofre do GitHub OAuth 2.0 foram removidas.', 'success');
-    } catch {
-      const msg = 'Erro de comunicação ao remover credenciais salvas do GitHub OAuth 2.0.';
-      setGithubOAuthError(msg);
-      onNotify(msg, 'error');
-    } finally {
-      setGithubOAuthClearing(false);
-    }
-  };
 
   const handleProbeInstance = async (params: {
     instanceId: string;
@@ -756,25 +582,6 @@ export const ToolsAndIntegrationsModule: React.FC<ToolsAndIntegrationsModuleProp
       {/* ===================================================================== */}
       {subView === 'cards' && (
         <div className="space-y-6">
-          {/* PAINEL ADMINISTRATIVO: STATUS E CONFIGURAÇÃO DO GITHUB OAUTH 2.0 */}
-          {isAdminUser && (
-            <GitHubOAuthAdminPanel
-              status={githubOAuthStatus}
-              loading={githubOAuthLoading}
-              saving={githubOAuthSaving}
-              verifying={githubOAuthVerifying}
-              clearing={githubOAuthClearing}
-              error={githubOAuthError}
-              verificationResult={githubOAuthVerification}
-              copiedCallbackUrl={copiedCallbackUrl}
-              onRefresh={fetchGitHubOAuthAdminStatus}
-              onCopyCallbackUrl={handleCopyCallbackUrl}
-              onSaveCredentials={handleSaveGitHubOAuthCredentials}
-              onVerifyConnection={handleVerifyGitHubOAuthConnection}
-              onClearCredentials={handleClearGitHubOAuthCredentials}
-            />
-          )}
-
           {/* PAINEL DE INSTALAÇÃO NATIVA WINDOWS DESKTOP (.EXE / APP LOCAL) */}
           <div className="rounded-lg border border-[#31d6c4]/40 bg-white dark:bg-[#0f141c] p-5 space-y-4">
             <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 dark:border-slate-800 pb-3">

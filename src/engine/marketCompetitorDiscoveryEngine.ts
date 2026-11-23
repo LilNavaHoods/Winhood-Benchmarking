@@ -1193,6 +1193,10 @@ export class MarketCompetitorDiscoveryEngine {
         estimatedSimilarityPercent: sim.totalSimilarityPercent,
         similarityScore: sim.totalSimilarityPercent,
         computedMatchScore: sim.totalSimilarityPercent,
+        similarityOrigin: 'HEURISTIC_METADATA_SIMILARITY',
+        isMeasuredBenchmark: false,
+        similarityDisclaimer:
+          'Similaridade estimada exclusivamente por heurística de metadados de catálogo (HEURISTIC_METADATA_SIMILARITY) — não constitui benchmark técnico medido.',
         similarityBreakdown: sim.breakdown,
         matchReasons: sim.matchReasons,
         matchReasonSummary: sim.matchReasonSummary,
