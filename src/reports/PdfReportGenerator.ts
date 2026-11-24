@@ -234,21 +234,22 @@ export class PdfReportGenerator {
 
     // Also include unified dynamic executions that were not executed / unavailable
     for (const ue of run.unifiedExecutions || []) {
+      const toolId = ue.kind || 'dynamic-runner';
       if (ue.state === 'MEASURED') {
         adaptersExecuted.push({
-          toolId: ue.kind,
-          toolName: `WinHood Dynamic Runner (${ue.kind})`,
+          toolId,
+          toolName: `WinHood Dynamic Runner (${toolId})`,
           toolVersion: WINHOOD_PLATFORM_VERSION,
           executionStatus: 'MEASURED',
-          scopeExecuted: ue.summary,
+          scopeExecuted: ue.summary ?? null,
           durationMs: null,
           rawOutputSha256: ue.evidenceHash || null,
           reason: null,
         });
       } else {
         adaptersUnavailable.push({
-          toolId: ue.kind,
-          toolName: `WinHood Dynamic Runner (${ue.kind})`,
+          toolId,
+          toolName: `WinHood Dynamic Runner (${toolId})`,
           toolVersion: 'UNAVAILABLE',
           executionStatus: ue.state === 'FAILED' ? 'FAILED' : 'NOT_MEASURED',
           scopeExecuted: null,

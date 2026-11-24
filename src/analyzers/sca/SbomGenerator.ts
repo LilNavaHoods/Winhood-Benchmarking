@@ -148,7 +148,7 @@ function deterministicUuidFromSeed(seed: string): string {
 }
 
 const UUID_V4_URN_REGEX = /^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const PURL_REGEX = /^pkg:[a-z0-9.+-]+\/.+@.+$/i;
+const PURL_REGEX = /^pkg:[a-z0-9.+-]+\/[^@]+@[^@]+$/i;
 const SHA256_HEX_REGEX = /^[0-9a-f]{64}$/i;
 const ISO_TIMESTAMP_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
 
@@ -450,12 +450,7 @@ export class SbomGenerator {
       name: c.name,
       version: c.version,
       purl: c.purl,
-      scope:
-        c.dependencyScope === 'DIRECT'
-          ? 'required'
-          : c.dependencyScope === 'OPTIONAL'
-            ? 'optional'
-            : 'optional',
+      scope: c.dependencyScope === 'DIRECT' ? 'required' : 'optional',
       hashes: c.sha256 ? [{ alg: 'SHA-256', content: c.sha256 }] : [],
       licenses: c.license && c.license !== 'UNKNOWN' && c.license !== 'NOASSERTION'
         ? [{ license: { id: c.license } }]

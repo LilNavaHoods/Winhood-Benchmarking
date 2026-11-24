@@ -302,20 +302,27 @@ function tryLinuxSecretServiceStoreOrLoadKek(accountName: string): { seedBuffer:
   if (!process.env.DBUS_SESSION_BUS_ADDRESS) {
     return { seedBuffer: null, available: false };
   }
+  const secretToolBin = ['/usr/bin/secret-tool', '/bin/secret-tool', '/usr/local/bin/secret-tool'].find((p) =>
+    fs.existsSync(p)
+  );
+  if (!secretToolBin) {
+    return { seedBuffer: null, available: false };
+  }
+  const safeEnv = { ...process.env, PATH: '/usr/bin:/bin' };
   try {
     const lookupRes = spawnSync(
-      'secret-tool',
+      secretToolBin,
       ['lookup', 'application', 'winhood-benchmarking', 'account', accountName],
-      { shell: false, encoding: 'utf8', timeout: 3000 }
+      { shell: false, encoding: 'utf8', timeout: 3000, env: safeEnv }
     );
     if (lookupRes.status === 0 && lookupRes.stdout && lookupRes.stdout.trim().length >= 64) {
       return { seedBuffer: Buffer.from(lookupRes.stdout.trim(), 'hex'), available: true };
     }
     const newSeedHex = crypto.randomBytes(32).toString('hex');
     const storeRes = spawnSync(
-      'secret-tool',
+      secretToolBin,
       ['store', '--label=WinHood Keystore KEK', 'application', 'winhood-benchmarking', 'account', accountName],
-      { shell: false, input: newSeedHex, encoding: 'utf8', timeout: 3000 }
+      { shell: false, input: newSeedHex, encoding: 'utf8', timeout: 3000, env: safeEnv }
     );
     if (storeRes.status === 0) {
       return { seedBuffer: Buffer.from(newSeedHex, 'hex'), available: true };
@@ -1179,7 +1186,8 @@ export class KeyManagementService {
       }
     } catch (err: any) {
       throw new Error(
-        `KEYSTORE_PERSISTENCE_FAILED: Não foi possível persistir o keystore de forma segura em ${storePath}: ${err?.message || String(err)}`
+        `KEYSTORE_PERSISTENCE_FAILED: Não foi possível persistir o keystore de forma segura em ${storePath}: ${err?.message || String(err)}`,
+        { cause: err }
       );
     }
   }

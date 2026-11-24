@@ -98,17 +98,48 @@ async function runDesktopBuild() {
     };
   }
 
+  const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'));
+  const commitSha = (process.env.GITHUB_SHA || process.env.COMMIT_SHA || '').trim() || 'UNAVAILABLE';
+
   const manifest = {
+    schemaVersion: '2.0.0',
+    packageName: pkg.name,
+    version: pkg.version,
+    commitSha,
     builtAt: new Date().toISOString(),
+    buildEnvironment: {
+      nodeVersion: process.version,
+      platform: process.platform,
+      arch: process.arch,
+      ci: Boolean(process.env.CI),
+    },
     nodeVersion: process.version,
     platform: process.platform,
     arch: process.arch,
     artifacts,
   };
 
+  const manifestJson = JSON.stringify(manifest, null, 2);
   const manifestPath = path.join(distDesktopDir, 'build-manifest.json');
-  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
-  console.log('[WinHood Desktop Build] Completed successfully. Manifest:', manifestPath);
+  fs.writeFileSync(manifestPath, manifestJson, 'utf8');
+
+  const provenance = {
+    predicateType: 'https://winhood.local/provenance/desktop-build/v1',
+    subject: {
+      packageName: pkg.name,
+      version: pkg.version,
+      commitSha,
+      manifestPath: 'dist-desktop/build-manifest.json',
+      manifestSha256: crypto.createHash('sha256').update(manifestJson, 'utf8').digest('hex'),
+    },
+    artifactsSha256: Object.fromEntries(
+      Object.entries(artifacts).map(([rel, info]) => [rel, info.sha256])
+    ),
+    generatedAt: manifest.builtAt,
+  };
+  const provenancePath = path.join(distDesktopDir, 'provenance-attestation.json');
+  fs.writeFileSync(provenancePath, JSON.stringify(provenance, null, 2), 'utf8');
+  console.log('[WinHood Desktop Build] Completed successfully. Manifest:', manifestPath, '| Provenance:', provenancePath);
 }
 
 runDesktopBuild().catch((err) => {

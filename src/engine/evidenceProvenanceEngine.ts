@@ -505,7 +505,7 @@ export function verifyEvidenceChainAndManifest(
 
   let manifestSignatureValid = false;
   let ed25519SignatureValid: boolean | null = null;
-  let verificationState: ManifestVerificationState = 'UNVERIFIABLE';
+  let verificationState: ManifestVerificationState;
   let expectedRootHash = actualRootHash;
 
   if (!signedManifest) {

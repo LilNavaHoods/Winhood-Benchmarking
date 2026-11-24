@@ -413,20 +413,27 @@ function tryLinuxSecretServiceStoreOrLoadKek(accountName) {
   if (!process.env.DBUS_SESSION_BUS_ADDRESS) {
     return { seedBuffer: null, available: false };
   }
+  const secretToolBin = ["/usr/bin/secret-tool", "/bin/secret-tool", "/usr/local/bin/secret-tool"].find(
+    (p) => fs.existsSync(p)
+  );
+  if (!secretToolBin) {
+    return { seedBuffer: null, available: false };
+  }
+  const safeEnv = { ...process.env, PATH: "/usr/bin:/bin" };
   try {
     const lookupRes = spawnSync(
-      "secret-tool",
+      secretToolBin,
       ["lookup", "application", "winhood-benchmarking", "account", accountName],
-      { shell: false, encoding: "utf8", timeout: 3e3 }
+      { shell: false, encoding: "utf8", timeout: 3e3, env: safeEnv }
     );
     if (lookupRes.status === 0 && lookupRes.stdout && lookupRes.stdout.trim().length >= 64) {
       return { seedBuffer: Buffer.from(lookupRes.stdout.trim(), "hex"), available: true };
     }
     const newSeedHex = crypto.randomBytes(32).toString("hex");
     const storeRes = spawnSync(
-      "secret-tool",
+      secretToolBin,
       ["store", "--label=WinHood Keystore KEK", "application", "winhood-benchmarking", "account", accountName],
-      { shell: false, input: newSeedHex, encoding: "utf8", timeout: 3e3 }
+      { shell: false, input: newSeedHex, encoding: "utf8", timeout: 3e3, env: safeEnv }
     );
     if (storeRes.status === 0) {
       return { seedBuffer: Buffer.from(newSeedHex, "hex"), available: true };
@@ -1131,7 +1138,8 @@ var KeyManagementService = class _KeyManagementService {
       }
     } catch (err) {
       throw new Error(
-        `KEYSTORE_PERSISTENCE_FAILED: N\xE3o foi poss\xEDvel persistir o keystore de forma segura em ${storePath}: ${err?.message || String(err)}`
+        `KEYSTORE_PERSISTENCE_FAILED: N\xE3o foi poss\xEDvel persistir o keystore de forma segura em ${storePath}: ${err?.message || String(err)}`,
+        { cause: err }
       );
     }
   }
@@ -2459,7 +2467,7 @@ function enrichLegacyOrExternalFinding(partial) {
   const ruleLower = (partial.originalRuleId || "").toLowerCase();
   const defaultCleanCodeAttribute = category === "SAST" || category === "SECRETS" || category === "SCA" || category === "DAST" ? "RESPONSIBLE" : category === "ARCHITECTURE" ? "ADAPTABLE" : category === "DATABASE" ? "INTENTIONAL" : "CONSISTENT";
   const defaultEffort = severity === "BLOCKER" ? 90 : severity === "CRITICAL" ? 60 : severity === "HIGH" ? 45 : severity === "MEDIUM" ? 25 : severity === "LOW" ? 15 : 10;
-  let defaultMqrImpacts = [];
+  let defaultMqrImpacts;
   if (partial.mqrImpacts && partial.mqrImpacts.length > 0) {
     defaultMqrImpacts = partial.mqrImpacts;
   } else if (category === "SECRETS" || ruleLower.includes("secret") || ruleLower.includes("credential")) {
@@ -3041,7 +3049,7 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
       case "database":
         return m.dbSchemaIssues > 0;
       case "reliability":
-        return m.functionalTestsTotal > 0 || m.testCoveragePercent > 0 || m.bugs > 0;
+        return m.functionalTestsTotal > 0 || typeof m.testCoveragePercent === "number" && m.testCoveragePercent > 0 || m.bugs > 0;
       case "installation":
         return input.hasCleanSandboxUninstall !== null;
       case "compatibility":
@@ -3260,9 +3268,11 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
     });
   }
   const hasMeasuredTests = m.functionalTestsTotal > 0;
-  const hasMeasuredCoverage = input.metricProvenance?.testCoveragePercent?.state === "MEASURED" || m.testCoveragePercent > 0;
+  const measuredTestCoverage = typeof m.testCoveragePercent === "number" && Number.isFinite(m.testCoveragePercent) ? m.testCoveragePercent : null;
+  const hasMeasuredCoverage = measuredTestCoverage !== null && (input.metricProvenance?.testCoveragePercent?.state === "MEASURED" || measuredTestCoverage > 0);
   if (hasMeasuredTests || hasMeasuredCoverage) {
-    const coverageRatio = Math.min(1, m.testCoveragePercent / 85);
+    const effectiveCoveragePct = measuredTestCoverage ?? 0;
+    const coverageRatio = Math.min(1, effectiveCoveragePct / 85);
     const activeFactor = hasMeasuredTests && hasMeasuredCoverage ? 0.5 * passRatio + 0.5 * coverageRatio : hasMeasuredTests ? passRatio : coverageRatio;
     const reliabilityBaseTarget = round2(4.8 * activeFactor);
     const reliabilityCoverageGap = round2(reliabilityBaseTarget - 5);
@@ -3270,12 +3280,12 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
       pushReason("reliability", {
         impactType: "METRIC_THRESHOLD",
         scoreDelta: reliabilityCoverageGap,
-        severity: m.testCoveragePercent < 50 ? "HIGH" : "LOW",
+        severity: effectiveCoveragePct < 50 ? "HIGH" : "LOW",
         ruleId: "metric.reliability.coverage-and-pass-rate",
-        title: `Cobertura de testes verificada (${m.testCoveragePercent.toFixed(1)}%) e taxa de aprova\xE7\xE3o funcional (${Math.round(passRatio * 100)}%)`,
-        whyExplanation: `O modelo determin\xEDstico de Confiabilidade pondera as m\xE9tricas reais medidas (cobertura ${m.testCoveragePercent.toFixed(1)}% vs 85% e taxa funcional ${(passRatio * 100).toFixed(1)}%), resultando em ajuste de ${reliabilityCoverageGap.toFixed(2)} pts sobre o teto 5.00.`,
+        title: `Cobertura de testes verificada (${effectiveCoveragePct.toFixed(1)}%) e taxa de aprova\xE7\xE3o funcional (${Math.round(passRatio * 100)}%)`,
+        whyExplanation: `O modelo determin\xEDstico de Confiabilidade pondera as m\xE9tricas reais medidas (cobertura ${effectiveCoveragePct.toFixed(1)}% vs 85% e taxa funcional ${(passRatio * 100).toFixed(1)}%), resultando em ajuste de ${reliabilityCoverageGap.toFixed(2)} pts sobre o teto 5.00.`,
         remediationSummary: "Ampliar testes unit\xE1rios e de integra\xE7\xE3o para atingir >= 85% de cobertura e resili\xEAncia.",
-        remediationEffortMinutes: m.testCoveragePercent < 80 ? 45 : 10
+        remediationEffortMinutes: effectiveCoveragePct < 80 ? 45 : 10
       });
     }
   } else if (reasonsByCat.reliability.length === 0) {
@@ -3704,9 +3714,9 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
       metricKey: "new_coverage",
       label: "Cobertura de Testes no C\xF3digo Eleg\xEDvel",
       threshold: ">= 80.0%",
-      actualValue: !isEligibleForScoring ? "N/A" : hasMeasuredCoverage ? `${m.testCoveragePercent.toFixed(1)}%` : "NOT_MEASURED",
-      status: !isEligibleForScoring ? "NOT_EVALUATED" : !hasMeasuredCoverage ? "NOT_EVALUATED" : m.testCoveragePercent < 80 ? "FAILED" : "PASSED",
-      failureReason: !hasMeasuredCoverage ? "Relat\xF3rio real de cobertura de testes ausente (NOT_MEASURED) \u2014 condi\xE7\xE3o obrigat\xF3ria n\xE3o avaliada." : m.testCoveragePercent < 80 ? `Cobertura de testes (${m.testCoveragePercent.toFixed(1)}%) abaixo do m\xEDnimo exigido pelo Quality Gate (80.0%).` : void 0
+      actualValue: !isEligibleForScoring ? "N/A" : hasMeasuredCoverage && measuredTestCoverage !== null ? `${measuredTestCoverage.toFixed(1)}%` : "NOT_MEASURED",
+      status: !isEligibleForScoring ? "NOT_EVALUATED" : !hasMeasuredCoverage || measuredTestCoverage === null ? "NOT_EVALUATED" : measuredTestCoverage < 80 ? "FAILED" : "PASSED",
+      failureReason: !hasMeasuredCoverage || measuredTestCoverage === null ? "Relat\xF3rio real de cobertura de testes ausente (NOT_MEASURED) \u2014 condi\xE7\xE3o obrigat\xF3ria n\xE3o avaliada." : measuredTestCoverage < 80 ? `Cobertura de testes (${measuredTestCoverage.toFixed(1)}%) abaixo do m\xEDnimo exigido pelo Quality Gate (80.0%).` : void 0
     }
   ];
   const sharedGateEval = QualityGateEngine.evaluateSharedContract({
@@ -3718,7 +3728,7 @@ function calculateDeterministicScoreCard(input, weights, enablePenaltyCaps = tru
     reliabilityRating,
     duplicatedLinesPercent: m.duplicatedLinesPercent,
     hasMeasuredCoverage,
-    testCoveragePercent: m.testCoveragePercent,
+    testCoveragePercent: measuredTestCoverage ?? 0,
     scopeCoveragePercent: hasAnyAssessedCategory ? input.coveragePercent : 0
   });
   const failedConditions = sharedGateEval.failedConditions;
@@ -5009,7 +5019,32 @@ var ParserRegistry = class _ParserRegistry {
           }
         }
         if (node.type === "RegExpLiteral" && typeof node.pattern === "string" && !isNoSonarLine(getLine(node))) {
-          if (/\([^()]*[+*][^()]*\)[+*]/.test(node.pattern)) {
+          const pat = node.pattern;
+          let hasNestedQuantifier = false;
+          let inGroup = false;
+          let groupHasQuantifier = false;
+          for (let i = 0; i < pat.length; i++) {
+            const ch = pat[i];
+            if (ch === "\\") {
+              i++;
+              continue;
+            }
+            if (ch === "(") {
+              inGroup = true;
+              groupHasQuantifier = false;
+            } else if (ch === ")") {
+              const next = pat[i + 1];
+              if (inGroup && groupHasQuantifier && (next === "+" || next === "*")) {
+                hasNestedQuantifier = true;
+                break;
+              }
+              inGroup = false;
+              groupHasQuantifier = false;
+            } else if (inGroup && (ch === "+" || ch === "*")) {
+              groupHasQuantifier = true;
+            }
+          }
+          if (hasNestedQuantifier) {
             const lineNo = getLine(node);
             issues.push({
               ruleId: "typescript:S8786",
@@ -6280,7 +6315,7 @@ var TaintAnalyzer = class {
           targetFn: fn,
           sinkLine: astSastIssue.lineNumber,
           sinkSnippet: getLineSnippet(fn.filePath, astSastIssue.lineNumber),
-          sinkCwe: astSastIssue.cwe,
+          sinkCwe: astSastIssue.cwe || "CWE-89",
           sinkType,
           sinkCallee: astSastIssue.ruleId,
           hopChain: []
@@ -6552,7 +6587,7 @@ var TaintAnalyzer = class {
                 explanation: `${iss.title} (${iss.cwe}) na linha ${iss.lineNumber}.`
               }
             ];
-          } else if (injectionCwes.has(iss.cwe)) {
+          } else if (iss.cwe && injectionCwes.has(iss.cwe)) {
             iss.executionFlows = [
               {
                 stepOrder: 1,
@@ -6700,7 +6735,7 @@ function deterministicUuidFromSeed(seed) {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 var UUID_V4_URN_REGEX = /^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-var PURL_REGEX = /^pkg:[a-z0-9.+-]+\/.+@.+$/i;
+var PURL_REGEX = /^pkg:[a-z0-9.+-]+\/[^@]+@[^@]+$/i;
 var SHA256_HEX_REGEX = /^[0-9a-f]{64}$/i;
 var ISO_TIMESTAMP_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
 var SbomGenerator = class _SbomGenerator {
@@ -6938,7 +6973,7 @@ var SbomGenerator = class _SbomGenerator {
       name: c.name,
       version: c.version,
       purl: c.purl,
-      scope: c.dependencyScope === "DIRECT" ? "required" : c.dependencyScope === "OPTIONAL" ? "optional" : "optional",
+      scope: c.dependencyScope === "DIRECT" ? "required" : "optional",
       hashes: c.sha256 ? [{ alg: "SHA-256", content: c.sha256 }] : [],
       licenses: c.license && c.license !== "UNKNOWN" && c.license !== "NOASSERTION" ? [{ license: { id: c.license } }] : [],
       properties: [
@@ -7944,8 +7979,8 @@ var SandboxExecutor = class _SandboxExecutor {
     }
     const tmpRoot = fs4.mkdtempSync(path4.join(os3.tmpdir(), "winhood-sbx-"));
     const realTmpRoot = fs4.realpathSync(tmpRoot);
-    let isolationState = "ISOLATION_INITIALIZED";
-    let recoveryVerified = false;
+    let isolationState;
+    let recoveryVerified;
     const startMs = performance.now();
     try {
       for (const [relPath, content] of Object.entries(params.filesMap || {})) {
@@ -7985,11 +8020,11 @@ var SandboxExecutor = class _SandboxExecutor {
       let res;
       if (probe.dockerAvailable) {
         try {
-          fs4.chmodSync(realTmpRoot, 493);
+          fs4.chmodSync(realTmpRoot, 488);
           for (const relPath of Object.keys(params.filesMap || {})) {
             const p = path4.resolve(realTmpRoot, relPath.replace(/^\/+/, ""));
             if (p.startsWith(realTmpRoot + path4.sep) && fs4.existsSync(p)) {
-              fs4.chmodSync(p, 420);
+              fs4.chmodSync(p, 416);
             }
           }
         } catch {
@@ -8160,11 +8195,11 @@ ${stderr}` : stderr,
       const nodeRuntime = resolveNodeRuntimeForSubprocess();
       const res = probe.dockerAvailable ? (() => {
         try {
-          fs4.chmodSync(realTmpRoot, 493);
+          fs4.chmodSync(realTmpRoot, 488);
           for (const relPath of Object.keys(params.filesMap || {})) {
             const p = path4.resolve(realTmpRoot, relPath.replace(/^\/+/, ""));
             if (p.startsWith(realTmpRoot + path4.sep) && fs4.existsSync(p)) {
-              fs4.chmodSync(p, 420);
+              fs4.chmodSync(p, 416);
             }
           }
         } catch {
@@ -8251,7 +8286,7 @@ ${stderr}` : stderr,
         limitations: probe.limitations
       };
     } finally {
-      let cleaned = false;
+      let cleaned;
       try {
         fs4.rmSync(realTmpRoot, { recursive: true, force: true });
         cleaned = !fs4.existsSync(realTmpRoot);
@@ -8361,7 +8396,7 @@ ${stderr}` : stderr,
         limitations: []
       };
     } finally {
-      let cleaned = false;
+      let cleaned;
       try {
         fs4.rmSync(realTmpRoot, { recursive: true, force: true });
         cleaned = !fs4.existsSync(realTmpRoot);
@@ -11238,7 +11273,12 @@ export function searchCredentialsController(userInput: string) {
     { id: "archunit-cruiser", name: "WinHood Native Architecture Graph Analyzer", version: "4.4.0", format: "ARCH_GRAPH_JSON" },
     { id: "sqlfluff-db", name: "WinHood Native SQL & Schema Auditor", version: "4.4.0", format: "SARIF_2_1_0" }
   ];
-  const configHash = computeSha256(JSON.stringify({ rulesVersion: "4.4.0", eligibleExtensions: Array.from(ELIGIBLE_EXTENSIONS).sort() }));
+  const configHash = computeSha256(
+    JSON.stringify({
+      rulesVersion: "4.4.0",
+      eligibleExtensions: Array.from(ELIGIBLE_EXTENSIONS).sort((a, b) => a.localeCompare(b))
+    })
+  );
   const toolExecutions = adapterDefs.map((ad, idx) => {
     const toolFindings = findings.filter((f) => f.toolId === ad.id);
     const analyzedFilePaths = eligibleEntries.map(([f]) => f);
@@ -13513,7 +13553,7 @@ function verifyEvidenceChainAndManifest(evidenceChain, signedManifest, secret) {
   const chainIntegrityValid = tamperedRecordIds.length === 0 && brokenLinkIndices.length === 0;
   let manifestSignatureValid = false;
   let ed25519SignatureValid = null;
-  let verificationState = "UNVERIFIABLE";
+  let verificationState;
   let expectedRootHash = actualRootHash;
   if (!signedManifest) {
     details.push("Manifesto assinado ausente na execu\xE7\xE3o.");
@@ -14774,7 +14814,7 @@ var BenchmarkMatcher = class {
     const comparabilityManifests = {};
     for (const sw of softwares) {
       const provided = input.manifestsBySoftware?.[sw.id];
-      const eligibleFiles = Object.keys(sw.sourceFilesContent || {}).sort();
+      const eligibleFiles = Object.keys(sw.sourceFilesContent || {}).sort((a, b) => a.localeCompare(b));
       const manifest = provided || buildComparabilityManifest({
         projectId: sw.projectId || "default-project",
         sourceRepository: sw.repositoryUrl || sw.officialUrl || `local://${sw.id}`,
@@ -16020,7 +16060,7 @@ function executeBenchmarkRunOrchestration(params) {
   const comparabilityManifests = {};
   for (const sw of params.softwares) {
     const veracity = veracityResults.find((v) => v.softwareId === sw.id);
-    const eligibleFiles = Object.keys(sw.sourceFilesContent || {}).sort();
+    const eligibleFiles = Object.keys(sw.sourceFilesContent || {}).sort((a, b) => a.localeCompare(b));
     comparabilityManifests[sw.id] = buildComparabilityManifest({
       projectId: params.projectId,
       sourceRepository: sw.repositoryUrl || sw.officialUrl || `local://${sw.id}`,
@@ -16062,7 +16102,7 @@ function executeBenchmarkRunOrchestration(params) {
     manifestsBySoftware: comparabilityManifests
   });
   comparabilityReport.comparabilityClassification = benchmarkMatchDecision.comparabilityClassification;
-  let referenceSnapshotsUsed = [];
+  let referenceSnapshotsUsed;
   try {
     referenceSnapshotsUsed = new ReferenceRegistry().listSnapshots();
   } catch {
@@ -18725,7 +18765,7 @@ var ToolResourceMonitor = class _ToolResourceMonitor {
     let diskWriteMbPerSec = 320;
     let diskReadMbPerSec = 680;
     let random4kIops = 18500;
-    let tempFileCleanedUp = false;
+    let tempFileCleanedUp;
     try {
       const payloadBuf = Buffer.alloc(testPayloadMb * 1024 * 1024, 90);
       const dWriteStart = performance.now();
@@ -20016,7 +20056,7 @@ var SonarQualityGateMapper = class {
       (c) => c.status === "ERROR" || c.status === "WARN"
     );
     const failedMetrics = failedConditions.map((c) => c.metricLabel);
-    let status = "NOT_COMPUTED";
+    let status;
     let displayLabel = "N\xC3O COMPUTADO";
     if (params.apiError) {
       status = "API_ERROR";
@@ -20047,7 +20087,7 @@ var SonarQualityGateMapper = class {
       fudgeFactorStatus = "NOT_APPLIED";
       fudgeFactorExplanation = "Conjunto de altera\xE7\xF5es igual ou superior a 20 linhas (ou ignoredConditions=false); todas as condi\xE7\xF5es do Quality Gate foram avaliadas integralmente sem Fudge Factor.";
     }
-    let explanationSummary = "";
+    let explanationSummary;
     if (status === "API_ERROR") {
       explanationSummary = `N\xE3o foi poss\xEDvel obter o Quality Gate via Web API (${params.apiErrorMessage || "erro de comunica\xE7\xE3o"}). Nenhuma aprova\xE7\xE3o \xE9 presumida.`;
     } else if (status === "NOT_COMPUTED" || status === "NONE") {
@@ -20927,7 +20967,7 @@ var MqrBridgeVersionManager = class _MqrBridgeVersionManager {
     const osLabel = platform === "win32" ? "Windows 11 / Server x64" : platform === "darwin" ? "macOS (x64 / ARM64)" : "Linux (x86_64 / ARM64)";
     let sqVersion = "26.11.0.134175";
     let sqReleaseDate = "2026-11-04T15:13:10Z";
-    let sqSizeBytes = 915316171;
+    const sqSizeBytes = 915316171;
     let sqOfficialSha256 = "bc18bf0f9faed6d27c9668a89ab86c84b22edeccb1050fbebb9d323bd506e7dc";
     try {
       const controller = new AbortController();
@@ -20965,11 +21005,11 @@ var MqrBridgeVersionManager = class _MqrBridgeVersionManager {
     }
     const sqParts = sqVersion.split(".");
     const sqBuildNumber = sqParts[3] || "134175";
-    let scannerVersion = "8.4.0.16527";
-    let scannerReleaseDate = "2026-11-09T11:20:07Z";
+    const scannerVersion = "8.4.0.16527";
+    const scannerReleaseDate = "2026-11-09T11:20:07Z";
     const isWin = platform === "win32";
     const scannerOsSuffix = isWin ? "windows-x64" : "linux-x64";
-    let scannerSizeBytes = isWin ? 56658888 : 60317685;
+    const scannerSizeBytes = isWin ? 56658888 : 60317685;
     let scannerOfficialSha256 = isWin ? "9998fca7f8897975f8fad850aa92e5a236441ace6c6126a15da34f5a049795ce" : "2a28f118e2e9375dfd36eb27b803e1d37f93daba4db068aca6eef9853041bb24";
     const scannerDownloadUrl = `https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${scannerVersion}-${scannerOsSuffix}.zip`;
     try {
@@ -22233,7 +22273,7 @@ var MqrBridgeIntegrationService = class _MqrBridgeIntegrationService {
             "SONAR_CONTRACT_FORBIDDEN_IN_PRODUCTION: Inst\xE2ncia de contrato de teste n\xE3o pode ser executada fora do ambiente de testes (NODE_ENV=test ou WINHOOD_TEST_MODE=1)."
           );
         }
-        let ceTaskId = null;
+        let ceTaskId;
         const executionId = `exec-${Date.now()}-${params.role.toLowerCase()}`;
         if (!isTestContractInstance) {
           if (!fs12.existsSync(scannerConfig.projectBaseDir)) {
@@ -24712,7 +24752,8 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
         compressed = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
       } catch (err) {
         throw new Error(
-          `DECRYPTION_AUTH_FAILED: Falha de integridade ou autentica\xE7\xE3o AES-256-GCM (${err?.message || "auth tag mismatch"}).`
+          `DECRYPTION_AUTH_FAILED: Falha de integridade ou autentica\xE7\xE3o AES-256-GCM (${err?.message || "auth tag mismatch"}).`,
+          { cause: err }
         );
       }
       let inflated;
@@ -24720,7 +24761,8 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
         inflated = zlib.inflateSync(compressed).toString("utf8");
       } catch (err) {
         throw new Error(
-          `DECRYPTION_PAYLOAD_CORRUPTED: Falha ao descomprimir payload zlib ap\xF3s decifragem (${err?.message || "inflate error"}).`
+          `DECRYPTION_PAYLOAD_CORRUPTED: Falha ao descomprimir payload zlib ap\xF3s decifragem (${err?.message || "inflate error"}).`,
+          { cause: err }
         );
       }
       try {
@@ -24731,7 +24773,8 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
         return parsed;
       } catch (err) {
         throw new Error(
-          `DECRYPTION_PAYLOAD_CORRUPTED: JSON decifrado inv\xE1lido (${err?.message || "json parse error"}).`
+          `DECRYPTION_PAYLOAD_CORRUPTED: JSON decifrado inv\xE1lido (${err?.message || "json parse error"}).`,
+          { cause: err }
         );
       }
     }
@@ -24748,7 +24791,8 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
       return parsed;
     } catch (err) {
       throw new Error(
-        `DECRYPTION_FORMAT_INVALID: JSON bruto inv\xE1lido em sourceFilesMap (${err?.message || "parse error"}).`
+        `DECRYPTION_FORMAT_INVALID: JSON bruto inv\xE1lido em sourceFilesMap (${err?.message || "parse error"}).`,
+        { cause: err }
       );
     }
   }
@@ -24836,7 +24880,7 @@ var PersistentDatabaseManager = class _PersistentDatabaseManager {
     return { sha256: checksum };
   }
   enqueueAtomicWrite(targetPath, data) {
-    const prev = this.pendingQueues.get(targetPath) || Promise.resolve();
+    const prev = this.pendingQueues.get(targetPath) ?? Promise.resolve();
     let resultSha = "";
     const next = prev.catch(() => void 0).then(() => {
       resultSha = this.writeAtomicChecksummed(targetPath, data).sha256;
@@ -27604,7 +27648,7 @@ var DECLARED_BENCHMARK_LANGUAGES = [
   "SQL"
 ];
 function computeGoldenCaseContentSha256(filesMap) {
-  const orderedEntries = Object.keys(filesMap).sort().map((k) => [k, filesMap[k]]);
+  const orderedEntries = Object.keys(filesMap).sort((a, b) => a.localeCompare(b)).map((k) => [k, filesMap[k]]);
   return crypto27.createHash("sha256").update(JSON.stringify(orderedEntries), "utf8").digest("hex");
 }
 function hydrateCorpus(rawCases, datasetVersion, datasetRole) {
@@ -29216,21 +29260,22 @@ var PdfReportGenerator = class {
       }
     }
     for (const ue of run.unifiedExecutions || []) {
+      const toolId = ue.kind || "dynamic-runner";
       if (ue.state === "MEASURED") {
         adaptersExecuted.push({
-          toolId: ue.kind,
-          toolName: `WinHood Dynamic Runner (${ue.kind})`,
+          toolId,
+          toolName: `WinHood Dynamic Runner (${toolId})`,
           toolVersion: WINHOOD_PLATFORM_VERSION,
           executionStatus: "MEASURED",
-          scopeExecuted: ue.summary,
+          scopeExecuted: ue.summary ?? null,
           durationMs: null,
           rawOutputSha256: ue.evidenceHash || null,
           reason: null
         });
       } else {
         adaptersUnavailable.push({
-          toolId: ue.kind,
-          toolName: `WinHood Dynamic Runner (${ue.kind})`,
+          toolId,
+          toolName: `WinHood Dynamic Runner (${toolId})`,
           toolVersion: "UNAVAILABLE",
           executionStatus: ue.state === "FAILED" ? "FAILED" : "NOT_MEASURED",
           scopeExecuted: null,
@@ -30817,6 +30862,9 @@ function extractZipBufferToFilesMap(zipBuffer) {
       const entryName = zipBuffer.subarray(ptr + 46, ptr + 46 + fileNameLen).toString("utf8");
       ptr += 46 + fileNameLen + extraLen + commentLen;
       if (!entryName || entryName.endsWith("/")) continue;
+      if (entryName.includes("\0") || entryName.startsWith("/") || entryName.startsWith("\\") || hasExplicitPathTraversalOrSymlinkAttempt({ [entryName]: "" })) {
+        throw new Error(`ZIP_PATH_TRAVERSAL_BLOCKED: Entrada ZIP insegura bloqueada (${entryName}).`);
+      }
       if (uncompressedSize > 2 * 1024 * 1024 || localHeaderOffset + 30 > zipBuffer.length) {
         skippedBinaryOrInvalid += 1;
         continue;
@@ -30870,6 +30918,9 @@ function extractZipBufferToFilesMap(zipBuffer) {
       const entryName = zipBuffer.subarray(nameStart, nameStart + nameLen).toString("utf8");
       offset = dataEnd;
       if (!entryName || entryName.endsWith("/")) continue;
+      if (entryName.includes("\0") || entryName.startsWith("/") || entryName.startsWith("\\") || hasExplicitPathTraversalOrSymlinkAttempt({ [entryName]: "" })) {
+        throw new Error(`ZIP_PATH_TRAVERSAL_BLOCKED: Entrada ZIP insegura bloqueada (${entryName}).`);
+      }
       if (uncompressedSize > 2 * 1024 * 1024) {
         skippedBinaryOrInvalid += 1;
         continue;
@@ -31345,11 +31396,72 @@ var DEFAULT_LOCAL_OPERATOR = {
   email: "local@winhood.local",
   role: "LOCAL_OPERATOR"
 };
-function appendAuditLog(state, action, entityType, entityId, details, actorUser) {
+var IPV4_OR_CIDR_REGEX = /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\/(?:3[0-2]|[12]?\d))?$/;
+function resolveTrustProxyConfig(rawValue) {
+  if (rawValue === void 0 || rawValue === null) return false;
+  if (typeof rawValue === "boolean") return rawValue ? 1 : false;
+  if (typeof rawValue === "number") {
+    return Number.isInteger(rawValue) && rawValue >= 1 && rawValue <= 10 ? rawValue : false;
+  }
+  const trimmed = String(rawValue).trim();
+  if (!trimmed) return false;
+  const lower = trimmed.toLowerCase();
+  if (lower === "false" || lower === "0" || lower === "off" || lower === "no") return false;
+  if (lower === "true") return 1;
+  if (lower === "loopback" || lower === "linklocal" || lower === "uniquelocal") return lower;
+  if (/^\d+$/.test(trimmed)) {
+    const hops = Number.parseInt(trimmed, 10);
+    return hops >= 1 && hops <= 10 ? hops : false;
+  }
+  const parts = trimmed.split(",").map((p) => p.trim()).filter(Boolean);
+  if (parts.length > 0 && parts.every((p) => IPV4_OR_CIDR_REGEX.test(p) || p === "::1" || p === "loopback")) {
+    return parts;
+  }
+  return false;
+}
+function resolveDeploymentMode(options) {
+  const explicit = (options?.deploymentMode || process.env.WINHOOD_DEPLOYMENT_MODE || "").trim().toUpperCase();
+  if (explicit === "LOCAL_DESKTOP" || explicit === "LOCAL_WEB" || explicit === "REMOTE_DEPLOYMENT") {
+    return explicit;
+  }
+  if (options?.environment === "REMOTE_DEPLOYMENT") {
+    return "REMOTE_DEPLOYMENT";
+  }
+  if (options?.environment === "ELECTRON_DESKTOP" || options?.environment === "WINDOWS_PACKAGED" || process.env.WINHOOD_RUNTIME_ENV === "ELECTRON_DESKTOP") {
+    return "LOCAL_DESKTOP";
+  }
+  const host = (options?.host || "").trim().toLowerCase();
+  const isLoopback = !host || host === "127.0.0.1" || host === "localhost" || host === "::1";
+  if (!isLoopback && process.env.NODE_ENV === "production") {
+    return "REMOTE_DEPLOYMENT";
+  }
+  return "LOCAL_WEB";
+}
+function constantTimeTokenMatch(provided, expected) {
+  if (!provided || !expected) return false;
+  const a = crypto30.createHash("sha256").update(provided, "utf8").digest();
+  const b = crypto30.createHash("sha256").update(expected, "utf8").digest();
+  return crypto30.timingSafeEqual(a, b);
+}
+var HEAVY_JSON_UPLOAD_PATHS = /* @__PURE__ */ new Set([
+  "/api/projects/extract-zip",
+  "/api/projects/upload",
+  "/api/analyze/sarif"
+]);
+function appendAuditLog(state, action, entityType, entityId, details, actorUser, meta) {
   const nowIso = (/* @__PURE__ */ new Date()).toISOString();
   const prevHash = state.auditLogs[0]?.integrityHash || "GENESIS";
   const actorName = actorUser?.name || "Sistema WinHood";
   const actorRole = actorUser?.role || "SYSTEM";
+  const safeDetails = maskSecretsInText(details);
+  const metaParts = [];
+  if (meta?.deploymentMode) metaParts.push(`mode=${meta.deploymentMode}`);
+  if (meta?.origin) metaParts.push(`origin=${meta.origin}`);
+  if (meta?.operationType) metaParts.push(`op=${meta.operationType}`);
+  if (meta?.outcome) metaParts.push(`outcome=${meta.outcome}`);
+  if (meta?.failureReason) metaParts.push(`reason=${maskSecretsInText(meta.failureReason)}`);
+  if (meta?.integrityState) metaParts.push(`integrity=${meta.integrityState}`);
+  const enrichedDetails = metaParts.length > 0 ? `${safeDetails} [${metaParts.join(" | ")}]` : safeDetails;
   const entry = {
     id: `aud-${crypto30.randomUUID().slice(0, 8)}`,
     timestamp: nowIso,
@@ -31358,12 +31470,26 @@ function appendAuditLog(state, action, entityType, entityId, details, actorUser)
     action,
     entityType,
     entityId,
-    details,
-    integrityHash: computeSha256(`${prevHash}|${action}|${entityId}|${nowIso}`)
+    details: enrichedDetails,
+    integrityHash: computeSha256(
+      `${prevHash}|${action}|${entityId}|${actorRole}|${enrichedDetails}|${nowIso}`
+    )
   };
   state.auditLogs.unshift(entry);
 }
 async function createWinHoodApp(options) {
+  const deploymentMode = resolveDeploymentMode({
+    deploymentMode: options?.deploymentMode,
+    environment: options?.environment,
+    host: options?.host
+  });
+  const remoteApiToken = (options?.remoteApiToken ?? process.env.WINHOOD_REMOTE_API_TOKEN ?? "").trim();
+  if (deploymentMode === "REMOTE_DEPLOYMENT" && remoteApiToken.length < 32) {
+    throw new Error(
+      "REMOTE_DEPLOYMENT_TOKEN_REQUIRED: Modo REMOTE_DEPLOYMENT exige WINHOOD_REMOTE_API_TOKEN com no m\xEDnimo 32 caracteres de alta entropia."
+    );
+  }
+  const remoteOperatorFingerprint = remoteApiToken ? computeSha256(remoteApiToken).slice(0, 12) : "";
   const dataDir = resolveWinHoodDataRoot(options?.dataDir);
   ensureWinHoodDirectories(dataDir);
   const isolatedArtifactsDir = path18.join(dataDir, "isolated_artifacts");
@@ -31371,7 +31497,10 @@ async function createWinHoodApp(options) {
   const dbManager = new PersistentDatabaseManager();
   const totpService = new OptionalTotpService(dataDir);
   const app = express();
-  app.set("trust proxy", 1);
+  const trustProxyConfig = resolveTrustProxyConfig(
+    options?.trustProxy !== void 0 ? options.trustProxy : process.env.WINHOOD_TRUST_PROXY
+  );
+  app.set("trust proxy", trustProxyConfig);
   const backupService = new ProjectBackupService(dataDir);
   const rateLimitWindowMs = options?.rateLimits?.windowMs ?? 6e4;
   const ingestionRateLimiter = createInMemoryRateLimiter({
@@ -31391,7 +31520,13 @@ async function createWinHoodApp(options) {
   });
   app.disable("x-powered-by");
   const heavyUploadJsonParser = express.json({ limit: "50mb" });
-  app.use(express.json({ limit: "2mb" }));
+  const defaultJsonParser = express.json({ limit: "2mb" });
+  app.use((req, res, next) => {
+    if (HEAVY_JSON_UPLOAD_PATHS.has(req.path)) {
+      return next();
+    }
+    return defaultJsonParser(req, res, next);
+  });
   app.use(express.urlencoded({ extended: true, limit: "2mb" }));
   const loaded = loadDatabase(dataDir, dbManager);
   let db = loaded.state;
@@ -31606,6 +31741,7 @@ async function createWinHoodApp(options) {
     );
     next();
   });
+  const remoteAuthFailures = /* @__PURE__ */ new Map();
   app.use("/api", (req, res, next) => {
     const rawOrigin = typeof req.headers.origin === "string" ? req.headers.origin : "";
     const canonicalCorsOrigin = resolveAllowedCorsOrigin(rawOrigin);
@@ -31638,10 +31774,89 @@ async function createWinHoodApp(options) {
         db.telemetry.failedRequests += 1;
       }
     });
+    const reqPath = req.path;
+    const clientIp = String(req.ip || req.socket?.remoteAddress || "unknown");
+    const requestOriginLabel = rawOrigin || clientIp;
+    req.winhoodActor = DEFAULT_LOCAL_OPERATOR;
+    req.deploymentMode = deploymentMode;
+    if (deploymentMode === "REMOTE_DEPLOYMENT") {
+      const publicRemotePaths = /* @__PURE__ */ new Set(["/health", "/openapi.json"]);
+      if (!publicRemotePaths.has(reqPath)) {
+        const failState = remoteAuthFailures.get(clientIp);
+        if (failState && failState.lockedUntil > Date.now()) {
+          const retryAfterSeconds = Math.max(
+            1,
+            Math.ceil((failState.lockedUntil - Date.now()) / 1e3)
+          );
+          res.setHeader("Retry-After", String(retryAfterSeconds));
+          appendAuditLog(
+            db,
+            "REMOTE_AUTH_LOCKED",
+            "SECURITY",
+            reqPath,
+            `Tentativa remota bloqueada por brute-force lockout em ${req.method} ${reqPath}`,
+            null,
+            {
+              deploymentMode,
+              origin: requestOriginLabel,
+              operationType: req.method,
+              outcome: "DENIED",
+              failureReason: "BRUTE_FORCE_LOCKOUT",
+              integrityState: loaded.integrityStatus
+            }
+          );
+          saveDatabase(db);
+          return res.status(429).json({
+            error: "REMOTE_AUTH_LOCKED",
+            code: "REMOTE_AUTH_LOCKED",
+            retryAfterSeconds,
+            message: `Acesso remoto temporariamente bloqueado ap\xF3s falhas repetidas. Tente novamente em ${retryAfterSeconds}s.`
+          });
+        }
+        const authHeader = String(req.headers.authorization || "").trim();
+        const bearerToken = authHeader.toLowerCase().startsWith("bearer ") ? authHeader.slice(7).trim() : "";
+        if (!constantTimeTokenMatch(bearerToken, remoteApiToken)) {
+          const prevCount = failState && failState.lockedUntil <= Date.now() ? failState.count : 0;
+          const nextCount = prevCount + 1;
+          const lockedUntil = nextCount >= 5 ? Date.now() + 5 * 6e4 : 0;
+          remoteAuthFailures.set(clientIp, { count: nextCount, lockedUntil });
+          appendAuditLog(
+            db,
+            "REMOTE_AUTH_DENIED",
+            "SECURITY",
+            reqPath,
+            `Acesso remoto rejeitado em ${req.method} ${reqPath} (token ausente ou inv\xE1lido).`,
+            null,
+            {
+              deploymentMode,
+              origin: requestOriginLabel,
+              operationType: req.method,
+              outcome: "DENIED",
+              failureReason: bearerToken ? "INVALID_REMOTE_TOKEN" : "MISSING_REMOTE_TOKEN",
+              integrityState: loaded.integrityStatus
+            }
+          );
+          saveDatabase(db);
+          return res.status(401).json({
+            error: "REMOTE_AUTH_REQUIRED",
+            code: "REMOTE_AUTH_REQUIRED",
+            message: "Modo REMOTE_DEPLOYMENT exige autentica\xE7\xE3o Bearer v\xE1lida (WINHOOD_REMOTE_API_TOKEN)."
+          });
+        }
+        remoteAuthFailures.delete(clientIp);
+        const remoteActor = {
+          id: `remote-operator:${remoteOperatorFingerprint}`,
+          name: `Operador Remoto (${remoteOperatorFingerprint})`,
+          email: "remote@winhood.local",
+          role: "REMOTE_OPERATOR"
+        };
+        req.winhoodActor = remoteActor;
+        req.remoteAuthenticated = true;
+      }
+    }
     if (!totpService.isEnabled()) {
       return next();
     }
-    const reqPath = req.path;
     const publicWhenTotpEnabled = /* @__PURE__ */ new Set([
       "/health",
       "/openapi.json",
@@ -31677,18 +31892,71 @@ async function createWinHoodApp(options) {
     }
     return next();
   });
-  const requireWritePermission = (_res, _req, _scope) => true;
+  const requireWritePermission = (res, req, scope) => {
+    if (deploymentMode !== "REMOTE_DEPLOYMENT") {
+      return true;
+    }
+    const isRemoteAuth = Boolean(req?.remoteAuthenticated);
+    if (!isRemoteAuth) {
+      appendAuditLog(
+        db,
+        "REMOTE_WRITE_DENIED",
+        "SECURITY",
+        scope || req?.path || "mutation",
+        `Muta\xE7\xE3o bloqueada em REMOTE_DEPLOYMENT sem autentica\xE7\xE3o remota v\xE1lida (${scope || "write"}).`,
+        null,
+        {
+          deploymentMode,
+          origin: String(req?.headers?.origin || req?.ip || "unknown"),
+          operationType: req?.method || "WRITE",
+          outcome: "DENIED",
+          failureReason: "REMOTE_WRITE_UNAUTHORIZED",
+          integrityState: loaded.integrityStatus
+        }
+      );
+      saveDatabase(db);
+      if (res && !res.headersSent) {
+        res.status(403).json({
+          error: "REMOTE_WRITE_FORBIDDEN",
+          code: "REMOTE_WRITE_FORBIDDEN",
+          message: "Opera\xE7\xE3o de escrita negada em modo REMOTE_DEPLOYMENT."
+        });
+      }
+      return false;
+    }
+    const actor = req?.winhoodActor || null;
+    if (scope && req) {
+      appendAuditLog(
+        db,
+        "REMOTE_WRITE_AUTHORIZED",
+        "SECURITY",
+        scope,
+        `Muta\xE7\xE3o autorizada em ${req.method} ${req.path}`,
+        actor,
+        {
+          deploymentMode,
+          origin: String(req.headers.origin || req.ip || "unknown"),
+          operationType: req.method,
+          outcome: "SUCCESS",
+          integrityState: loaded.integrityStatus
+        }
+      );
+    }
+    return true;
+  };
   app.get("/api/health", (_req, res) => {
     res.json({
       status: "ONLINE",
       healthStatus: "HEALTHY",
       ready: true,
-      accessMode: "UNRESTRICTED_LOCAL",
+      deploymentMode,
+      accessMode: deploymentMode === "REMOTE_DEPLOYMENT" ? "REMOTE_TOKEN_PROTECTED" : "UNRESTRICTED_LOCAL",
       totpEnabled: totpService.isEnabled(),
+      trustProxyEnabled: trustProxyConfig !== false,
       pid: process.pid,
       service: "WinHood Software Benchmark & Quality Analyzer API",
       timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-      dataDir,
+      dataDir: deploymentMode === "REMOTE_DEPLOYMENT" ? "[RESTRICTED_IN_REMOTE_MODE]" : dataDir,
       storageEngine: PersistentDatabaseManager.STORAGE_KIND,
       schemaVersion: PersistentDatabaseManager.SCHEMA_VERSION,
       storageIntegrity: loaded.integrityStatus,
@@ -32323,12 +32591,32 @@ async function createWinHoodApp(options) {
     if (!requireWritePermission(res, req, "projects:write")) return;
     const { zipBase64 } = req.body || {};
     if (!zipBase64 || typeof zipBase64 !== "string") {
-      return res.status(400).json({ error: "Pacote .zip em base64 ausente ou inv\xE1lido." });
+      return res.status(400).json({
+        error: "INVALID_BASE64_PAYLOAD",
+        message: "Pacote .zip em base64 ausente ou inv\xE1lido."
+      });
+    }
+    const compactB64 = zipBase64.replace(/\s+/g, "");
+    if (compactB64.length === 0 || compactB64.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(compactB64)) {
+      return res.status(400).json({
+        error: "INVALID_BASE64_PAYLOAD",
+        message: "Conte\xFAdo Base64 inv\xE1lido ou corrompido."
+      });
     }
     try {
-      const zipBuffer = Buffer.from(zipBase64, "base64");
+      const zipBuffer = Buffer.from(compactB64, "base64");
       if (zipBuffer.length < 22 || zipBuffer.length > 40 * 1024 * 1024) {
-        return res.status(400).json({ error: "Tamanho do arquivo .zip inv\xE1lido ou acima do limite (40MB)." });
+        return res.status(400).json({
+          error: "ZIP_SIZE_INVALID",
+          message: "Tamanho do arquivo .zip inv\xE1lido ou acima do limite (40MB)."
+        });
+      }
+      const isZipSignature = zipBuffer[0] === 80 && zipBuffer[1] === 75 && (zipBuffer[2] === 3 && zipBuffer[3] === 4 || zipBuffer[2] === 5 && zipBuffer[3] === 6);
+      if (!isZipSignature) {
+        return res.status(400).json({
+          error: "ZIP_EXTRACTION_FAILED",
+          message: "Assinatura bin\xE1ria de arquivo ZIP inv\xE1lida ou corrompida."
+        });
       }
       const { filesMap: extractedMap, skippedCount } = extractZipBufferToFilesMap(zipBuffer);
       return res.json({
@@ -32758,7 +33046,7 @@ async function createWinHoodApp(options) {
     if (projectId && !existingProject) {
       return res.status(404).json({ error: "Projeto informado para importa\xE7\xE3o n\xE3o encontrado." });
     }
-    let filesMap = {};
+    const filesMap = {};
     const branch = sanitizedBranch;
     let realCommitSha = "";
     let treeSha = "";
@@ -36298,7 +36586,7 @@ async function createWinHoodApp(options) {
     );
     const safeProjectKey = (params.projectKey || "").replace(/[^a-zA-Z0-9._:-]/g, "");
     const safeOrg = (params.organization || "").replace(/[^a-zA-Z0-9._-]/g, "");
-    let safeOrigin = "https://sonarcloud.io";
+    let safeOrigin;
     try {
       safeOrigin = validateSonarServerOrigin(params.serverUrl, params.platform);
     } catch {
@@ -37913,7 +38201,19 @@ async function createWinHoodApp(options) {
   app.use(
     "/api",
     (err, _req, res, _next) => {
-      res.status(err?.status || 500).json({
+      if (err?.type === "entity.too.large" || err?.status === 413) {
+        return res.status(413).json({
+          error: "PAYLOAD_TOO_LARGE",
+          message: "Payload excede o limite m\xE1ximo permitido para este endpoint."
+        });
+      }
+      if (err instanceof SyntaxError && err.status === 400) {
+        return res.status(400).json({
+          error: "INVALID_JSON_PAYLOAD",
+          message: "Corpo JSON malformado."
+        });
+      }
+      return res.status(err?.status || 500).json({
         error: "INTERNAL_API_ERROR",
         message: err?.message || "Erro interno no servidor WinHood."
       });
@@ -37923,13 +38223,20 @@ async function createWinHoodApp(options) {
     app,
     dbManager,
     totpService,
+    deploymentMode,
+    trustProxyConfig,
     getDb: () => db
   };
 }
 async function startServer(options) {
   const dataDir = resolveWinHoodDataRoot(options?.dataDir);
   const { app } = await createWinHoodApp({
-    dataDir
+    dataDir,
+    deploymentMode: options?.deploymentMode,
+    remoteApiToken: options?.remoteApiToken,
+    trustProxy: options?.trustProxy,
+    environment: options?.environment,
+    host: options?.host
   });
   const isElectronDesktop = options?.environment === "ELECTRON_DESKTOP" || options?.environment === "WINDOWS_PACKAGED" || process.env.WINHOOD_RUNTIME_ENV === "ELECTRON_DESKTOP";
   const shouldEnableVite = options?.enableVite !== void 0 ? options.enableVite : process.env.NODE_ENV !== "production" && !isElectronDesktop;
@@ -37995,6 +38302,8 @@ if (isEntrypoint) {
 }
 export {
   createWinHoodApp,
+  resolveDeploymentMode,
+  resolveTrustProxyConfig,
   startServer
 };
 //# sourceMappingURL=server.mjs.map

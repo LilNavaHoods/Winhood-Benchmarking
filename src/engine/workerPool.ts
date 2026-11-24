@@ -27,7 +27,7 @@ export interface MultithreadExecutionMetrics {
   cpuSaturationPercent: number;
 }
 
-let activeHardwareProfile: HardwareProfile = initializeDefaultHardwareProfile();
+const activeHardwareProfile: HardwareProfile = initializeDefaultHardwareProfile();
 
 export function initializeDefaultHardwareProfile(): HardwareProfile {
   const cpus = os.cpus() || [];

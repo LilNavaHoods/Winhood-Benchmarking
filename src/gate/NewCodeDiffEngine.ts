@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 export interface DiffFindingLike {
@@ -29,25 +30,62 @@ export interface CleanAsYouCodeEvaluation<T extends DiffFindingLike> {
   reasons: string[];
 }
 
+const SAFE_GIT_REF_REGEX = /^[a-zA-Z0-9._/@^~-]+$/;
+
+function assertSafeGitRef(ref: string, label: string): string {
+  const trimmed = ref.trim();
+  if (!trimmed || trimmed.startsWith('-') || trimmed.includes('..') || !SAFE_GIT_REF_REGEX.test(trimmed)) {
+    throw new Error(`INVALID_GIT_REF (${label}): Ref Git rejeitada por validação estrita.`);
+  }
+  return trimmed;
+}
+
+function resolveSafeGitBinary(): string {
+  const candidates =
+    process.platform === 'win32'
+      ? ['C:\\Program Files\\Git\\cmd\\git.exe', 'C:\\Program Files (x86)\\Git\\cmd\\git.exe']
+      : ['/usr/bin/git', '/usr/local/bin/git', '/opt/homebrew/bin/git'];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return 'git';
+}
+
 export function computeGitNewCodeDiffMap(params?: {
   cwd?: string;
   baseRef?: string;
   headRef?: string;
 }): NewCodeDiffMap {
   const cwd = params?.cwd || process.cwd();
-  const baseRef = params?.baseRef || 'origin/main';
-  const headRef = params?.headRef || 'HEAD';
+  const baseRef = assertSafeGitRef(params?.baseRef || 'origin/main', 'baseRef');
+  const headRef = assertSafeGitRef(params?.headRef || 'HEAD', 'headRef');
+  const gitBin = resolveSafeGitBinary();
+  const safePathEnv =
+    process.platform === 'win32'
+      ? process.env.PATH || 'C:\\Windows\\System32;C:\\Program Files\\Git\\cmd'
+      : '/usr/bin:/bin:/usr/local/bin';
 
-  const mergeBaseSha = execFileSync('git', ['merge-base', baseRef, headRef], {
+  const mergeBaseSha = execFileSync(gitBin, ['merge-base', '--', baseRef, headRef], {
     cwd,
     encoding: 'utf8',
     shell: false,
+    env: { ...process.env, PATH: safePathEnv },
   }).trim();
 
+  if (!/^[0-9a-f]{7,64}$/i.test(mergeBaseSha)) {
+    throw new Error(`INVALID_MERGE_BASE_SHA: Saída inesperada do git merge-base.`);
+  }
+
   const rawDiff = execFileSync(
-    'git',
-    ['diff', '--unified=0', '--no-color', `${mergeBaseSha}..${headRef}`],
-    { cwd, encoding: 'utf8', shell: false, maxBuffer: 25 * 1024 * 1024 }
+    gitBin,
+    ['diff', '--unified=0', '--no-color', `${mergeBaseSha}..${headRef}`, '--'],
+    {
+      cwd,
+      encoding: 'utf8',
+      shell: false,
+      maxBuffer: 25 * 1024 * 1024,
+      env: { ...process.env, PATH: safePathEnv },
+    }
   );
 
   const changedFiles: Record<string, Set<number>> = {};

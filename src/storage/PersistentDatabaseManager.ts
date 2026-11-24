@@ -135,7 +135,8 @@ export class PersistentDatabaseManager {
         compressed = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
       } catch (err: any) {
         throw new Error(
-          `DECRYPTION_AUTH_FAILED: Falha de integridade ou autenticação AES-256-GCM (${err?.message || 'auth tag mismatch'}).`
+          `DECRYPTION_AUTH_FAILED: Falha de integridade ou autenticação AES-256-GCM (${err?.message || 'auth tag mismatch'}).`,
+          { cause: err }
         );
       }
 
@@ -144,7 +145,8 @@ export class PersistentDatabaseManager {
         inflated = zlib.inflateSync(compressed).toString('utf8');
       } catch (err: any) {
         throw new Error(
-          `DECRYPTION_PAYLOAD_CORRUPTED: Falha ao descomprimir payload zlib após decifragem (${err?.message || 'inflate error'}).`
+          `DECRYPTION_PAYLOAD_CORRUPTED: Falha ao descomprimir payload zlib após decifragem (${err?.message || 'inflate error'}).`,
+          { cause: err }
         );
       }
 
@@ -156,7 +158,8 @@ export class PersistentDatabaseManager {
         return parsed as Record<string, string>;
       } catch (err: any) {
         throw new Error(
-          `DECRYPTION_PAYLOAD_CORRUPTED: JSON decifrado inválido (${err?.message || 'json parse error'}).`
+          `DECRYPTION_PAYLOAD_CORRUPTED: JSON decifrado inválido (${err?.message || 'json parse error'}).`,
+          { cause: err }
         );
       }
     }
@@ -175,7 +178,8 @@ export class PersistentDatabaseManager {
       return parsed as Record<string, string>;
     } catch (err: any) {
       throw new Error(
-        `DECRYPTION_FORMAT_INVALID: JSON bruto inválido em sourceFilesMap (${err?.message || 'parse error'}).`
+        `DECRYPTION_FORMAT_INVALID: JSON bruto inválido em sourceFilesMap (${err?.message || 'parse error'}).`,
+        { cause: err }
       );
     }
   }
@@ -281,7 +285,7 @@ export class PersistentDatabaseManager {
   }
 
   public enqueueAtomicWrite<T>(targetPath: string, data: T): Promise<{ sha256: string }> {
-    const prev = this.pendingQueues.get(targetPath) || Promise.resolve();
+    const prev = this.pendingQueues.get(targetPath) ?? Promise.resolve();
     let resultSha = '';
     const next = prev
       .catch(() => undefined)

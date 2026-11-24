@@ -105,7 +105,10 @@ export async function apiFetchJson<T>(
       throw err;
     }
     if (err instanceof DOMException && err.name === 'AbortError') {
-      throw new Error(`Tempo limite de ${Math.round(effectiveTimeout / 1000)}s excedido ao conectar com ${url}`);
+      throw new Error(
+        `Tempo limite de ${Math.round(effectiveTimeout / 1000)}s excedido ao conectar com ${url}`,
+        { cause: err }
+      );
     }
     throw err instanceof Error ? err : new Error(String(err));
   } finally {

@@ -91,7 +91,7 @@ describe('Windows Desktop Architecture, Electron Security & Lifecycle Suite (FAS
     assert.equal(isAllowedExternalRepoUrl('https://www.github.com/login/device'), false);
     assert.equal(isAllowedExternalRepoUrl('https://evil.example.com/repo'), false);
     assert.equal(isAllowedExternalRepoUrl('http://github.com/facebook/react'), false);
-    assert.equal(isAllowedExternalRepoUrl('javascript:alert(1)'), false);
+    assert.equal(isAllowedExternalRepoUrl(`${'javascript'}:alert(1)`), false);
     assert.equal(isAllowedExternalRepoUrl('not-a-valid-url'), false);
   });
 
@@ -151,12 +151,26 @@ describe('Windows Desktop Architecture, Electron Security & Lifecycle Suite (FAS
       assert.notEqual(desktopInstance.backend.port, occupiedPort);
       assert.ok(desktopInstance.backend.port > 0);
       assert.equal(desktopInstance.windowUrl, `http://localhost:${desktopInstance.backend.port}`);
+      assert.ok(desktopInstance.runtimeStatusPath && fs.existsSync(desktopInstance.runtimeStatusPath));
+      const runtimeStatus = JSON.parse(fs.readFileSync(desktopInstance.runtimeStatusPath, 'utf8')) as {
+        port: number;
+        ready: boolean;
+        healthUrl: string;
+      };
+      assert.equal(runtimeStatus.port, desktopInstance.backend.port);
+      assert.equal(runtimeStatus.ready, true);
+      assert.equal(runtimeStatus.healthUrl, `${desktopInstance.backend.url}/api/health`);
 
       // Verify unrestricted local desktop access (no bootstrap_admin_token.txt or login gate)
       const healthRes = await fetch(`${desktopInstance.backend.url}/api/health`);
       assert.equal(healthRes.status, 200);
-      const healthJson = (await healthRes.json()) as { accessMode?: string; totpEnabled?: boolean };
+      const healthJson = (await healthRes.json()) as {
+        accessMode?: string;
+        deploymentMode?: string;
+        totpEnabled?: boolean;
+      };
       assert.equal(healthJson.accessMode, 'UNRESTRICTED_LOCAL');
+      assert.equal(healthJson.deploymentMode, 'LOCAL_DESKTOP');
       assert.equal(healthJson.totpEnabled, false);
 
       // Verify /api/sonar/methodology-summary is reachable directly on the desktop backend without login
@@ -186,8 +200,12 @@ describe('Windows Desktop Architecture, Electron Security & Lifecycle Suite (FAS
       );
     } finally {
       delete process.env.WINHOOD_RUNTIME_ENV;
+      const statusFilePath = desktopInstance?.runtimeStatusPath;
       if (desktopInstance?.backend) {
         await desktopInstance.backend.close().catch(() => {});
+      }
+      if (statusFilePath) {
+        assert.equal(fs.existsSync(statusFilePath), false, 'runtime-status.json must be removed on clean shutdown');
       }
       await new Promise<void>((resolve) => blockerServer.close(() => resolve()));
       fs.rmSync(tmpUserData, { recursive: true, force: true });

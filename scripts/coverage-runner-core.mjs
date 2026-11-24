@@ -116,12 +116,31 @@ export function validateV8SourceMapsInDir({
   return {
     v8FilesCount: v8Files.length,
     checkedScriptsCount: checkedScripts.size,
-    checkedScripts: Array.from(checkedScripts).sort(),
+    checkedScripts: Array.from(checkedScripts).sort((a, b) => a.localeCompare(b)),
     validSourceMapsCount: validScripts.size,
     errors: Array.from(errorMap.entries()).map(([file, reason]) => ({ file, reason })),
   };
 }
 
+/**
+ * @typedef {{ total: number; covered: number; pct: number }} MetricCountSummary
+ * @typedef {{
+ *   statements: MetricCountSummary;
+ *   lines: MetricCountSummary;
+ *   functions: MetricCountSummary;
+ *   branches: MetricCountSummary;
+ *   statementsPct: number;
+ *   linesPct: number;
+ *   functionsPct: number;
+ *   branchesPct: number;
+ * }} FileCoverageSummary
+ */
+
+/**
+ * @param {any} coverageMap
+ * @param {string} rootDir
+ * @param {(rel: string, absPath: string) => boolean} filterFn
+ */
 export function summarizeCoverageMapSubset(coverageMap, rootDir, filterFn) {
   let stmtTot = 0;
   let stmtCov = 0;
@@ -132,6 +151,7 @@ export function summarizeCoverageMapSubset(coverageMap, rootDir, filterFn) {
   let branchesTot = 0;
   let branchesCov = 0;
   let filesCount = 0;
+  /** @type {Record<string, FileCoverageSummary>} */
   const perFile = {};
 
   for (const absPath of coverageMap.files()) {

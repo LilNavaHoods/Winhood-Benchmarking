@@ -426,7 +426,7 @@ export class ToolResourceMonitor {
     let diskWriteMbPerSec = 320;
     let diskReadMbPerSec = 680;
     let random4kIops = 18500;
-    let tempFileCleanedUp = false;
+    let tempFileCleanedUp: boolean;
 
     try {
       const payloadBuf = Buffer.alloc(testPayloadMb * 1024 * 1024, 0x5a);

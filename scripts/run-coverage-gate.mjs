@@ -67,13 +67,16 @@ const c8Exclude = Array.from(
 
 const testFiles = [
   'src/shared/wizardAndBrowserSafety.test.ts',
+  'src/scoring/scoring.test.ts',
   'src/engine/analyzer.test.ts',
+  'src/engine/veracityAudit.test.ts',
   'src/analyzers/analyzers.test.ts',
   'src/analyzers/pluginsAndIac.test.ts',
   'src/gate/gateAndCompliance.test.ts',
   'src/cli/cliAndApi.test.ts',
   'src/intelligence/intelligence.test.ts',
   'src/security/security.test.ts',
+  'src/security/backendHardening.test.ts',
   'src/integrations/mqr-bridge/mqrMethodology.test.ts',
   'src/desktop/desktop.test.ts',
   'src/utils/securityFindingsFilter.test.ts',
@@ -251,21 +254,23 @@ const threeWay = computeThreeWaySeparatedCoverage({
   },
 });
 
-const passed = failures.length === 0;
-
-// Verify c8 generated LCOV & HTML artifacts on disk
-const lcovExists = fs.existsSync(path.join(covDir, 'lcov.info'));
-const htmlExists = fs.existsSync(path.join(covDir, 'index.html'));
+// Verify c8 generated non-empty LCOV & HTML artifacts on disk (never mask missing LCOV as 100%)
+const lcovPath = path.join(covDir, 'lcov.info');
+const htmlPath = path.join(covDir, 'index.html');
+const lcovExists = fs.existsSync(lcovPath) && fs.statSync(lcovPath).size > 0;
+const htmlExists = fs.existsSync(htmlPath) && fs.statSync(htmlPath).size > 0;
 if (!lcovExists || !htmlExists) {
-  failures.push('c8 failed to emit expected coverage/lcov.info or coverage/index.html');
+  failures.push('c8 failed to emit non-empty coverage/lcov.info or coverage/index.html');
 }
+
+const passed = failures.length === 0;
 
 const reportJson = {
   generatedAt: runResult.completedAt,
   startedAt: runResult.startedAt,
   methodology: 'C8_V8_TO_ISTANBUL_ALL_TRUE',
   singleSourceInventory: 'src/execution/CoverageDomainInventory.ts#OFFICIAL_13_COVERAGE_DOMAINS',
-  passed: failures.length === 0,
+  passed,
   failures,
   domainShortfalls,
   sourceMapValidation,

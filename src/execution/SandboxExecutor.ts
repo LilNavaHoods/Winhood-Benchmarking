@@ -295,8 +295,8 @@ export class SandboxExecutor {
 
     const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'winhood-sbx-'));
     const realTmpRoot = fs.realpathSync(tmpRoot);
-    let isolationState: IsolationLifecycleState = 'ISOLATION_INITIALIZED';
-    let recoveryVerified = false;
+    let isolationState: IsolationLifecycleState;
+    let recoveryVerified: boolean;
     const startMs = performance.now();
 
     try {
@@ -341,11 +341,11 @@ export class SandboxExecutor {
       if (probe.dockerAvailable) {
         // Ensure read-only bind mount is readable by unprivileged container UID 65534:65534
         try {
-          fs.chmodSync(realTmpRoot, 0o755);
+          fs.chmodSync(realTmpRoot, 0o750);
           for (const relPath of Object.keys(params.filesMap || {})) {
             const p = path.resolve(realTmpRoot, relPath.replace(/^\/+/, ''));
             if (p.startsWith(realTmpRoot + path.sep) && fs.existsSync(p)) {
-              fs.chmodSync(p, 0o644);
+              fs.chmodSync(p, 0o640);
             }
           }
         } catch {
@@ -534,11 +534,11 @@ export class SandboxExecutor {
       const res = probe.dockerAvailable
         ? (() => {
             try {
-              fs.chmodSync(realTmpRoot, 0o755);
+              fs.chmodSync(realTmpRoot, 0o750);
               for (const relPath of Object.keys(params.filesMap || {})) {
                 const p = path.resolve(realTmpRoot, relPath.replace(/^\/+/, ''));
                 if (p.startsWith(realTmpRoot + path.sep) && fs.existsSync(p)) {
-                  fs.chmodSync(p, 0o644);
+                  fs.chmodSync(p, 0o640);
                 }
               }
             } catch {
@@ -628,7 +628,7 @@ export class SandboxExecutor {
         limitations: probe.limitations,
       };
     } finally {
-      let cleaned = false;
+      let cleaned: boolean;
       try {
         fs.rmSync(realTmpRoot, { recursive: true, force: true });
         cleaned = !fs.existsSync(realTmpRoot);
@@ -757,7 +757,7 @@ export class SandboxExecutor {
         limitations: [],
       };
     } finally {
-      let cleaned = false;
+      let cleaned: boolean;
       try {
         fs.rmSync(realTmpRoot, { recursive: true, force: true });
         cleaned = !fs.existsSync(realTmpRoot);

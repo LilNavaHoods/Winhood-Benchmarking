@@ -1791,7 +1791,12 @@ export function executeRealStaticAnalysisOnSource(
     { id: 'sqlfluff-db', name: 'WinHood Native SQL & Schema Auditor', version: '4.4.0', format: 'SARIF_2_1_0' },
   ];
 
-  const configHash = computeSha256(JSON.stringify({ rulesVersion: '4.4.0', eligibleExtensions: Array.from(ELIGIBLE_EXTENSIONS).sort() }));
+  const configHash = computeSha256(
+    JSON.stringify({
+      rulesVersion: '4.4.0',
+      eligibleExtensions: Array.from(ELIGIBLE_EXTENSIONS).sort((a, b) => a.localeCompare(b)),
+    })
+  );
 
   const toolExecutions: ToolExecutionRecord[] = adapterDefs.map((ad, idx) => {
     const toolFindings = findings.filter((f) => f.toolId === ad.id);

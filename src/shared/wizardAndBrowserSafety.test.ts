@@ -404,7 +404,7 @@ test('Full-stack Benchmarking A/B flow: validation errors, cancellation, recover
   const { createWinHoodApp } = await import('../../server');
   const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'winhood-wizard-ab-e2e-'));
   let server: import('node:http').Server | null = null;
-  let cookies: Record<string, string> = {};
+  const cookies: Record<string, string> = {};
 
   const extractCookies = (res: Response) => {
     const anyHeaders = res.headers as unknown as { getSetCookie?: () => string[] };
@@ -451,7 +451,7 @@ test('Full-stack Benchmarking A/B flow: validation errors, cancellation, recover
     });
     extractCookies(res);
     const rawText = await res.text();
-    let parsed: any = null;
+    let parsed: unknown;
     try {
       parsed = JSON.parse(rawText);
     } catch {

@@ -255,7 +255,7 @@ export class BenchmarkMatcher {
     const comparabilityManifests: Record<string, ComparabilityManifest> = {};
     for (const sw of softwares) {
       const provided = input.manifestsBySoftware?.[sw.id];
-      const eligibleFiles = Object.keys(sw.sourceFilesContent || {}).sort();
+      const eligibleFiles = Object.keys(sw.sourceFilesContent || {}).sort((a, b) => a.localeCompare(b));
       const manifest =
         provided ||
         buildComparabilityManifest({

@@ -365,7 +365,7 @@ export class TaintAnalyzer {
           targetFn: fn,
           sinkLine: astSastIssue.lineNumber,
           sinkSnippet: getLineSnippet(fn.filePath, astSastIssue.lineNumber),
-          sinkCwe: astSastIssue.cwe,
+          sinkCwe: astSastIssue.cwe || 'CWE-89',
           sinkType,
           sinkCallee: astSastIssue.ruleId,
           hopChain: [],
@@ -677,7 +677,7 @@ export class TaintAnalyzer {
                 explanation: `${iss.title} (${iss.cwe}) na linha ${iss.lineNumber}.`,
               },
             ];
-          } else if (injectionCwes.has(iss.cwe)) {
+          } else if (iss.cwe && injectionCwes.has(iss.cwe)) {
             iss.executionFlows = [
               {
                 stepOrder: 1,

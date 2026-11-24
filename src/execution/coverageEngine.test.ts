@@ -348,3 +348,221 @@ test('Phase 4 P0 Reference Microprojects (1 to 11): exact mathematical c8 + v8-t
     }
   }
 });
+
+test('Execution domain: SsrfGuard blocks private IPv4/IPv6/metadata/redirects and allows verified explicit loopback', async () => {
+  const http = await import('node:http');
+  const { SsrfGuard, isDisallowedIpAddress } = await import('./SsrfGuard');
+
+  // IPv4 private / metadata / CGNAT / multicast / broadcast / unspecified / loopback
+  assert.equal(isDisallowedIpAddress('').blocked, true);
+  assert.equal(isDisallowedIpAddress('127.0.0.1', false).blocked, true);
+  assert.equal(isDisallowedIpAddress('127.0.0.1', true).blocked, false);
+  assert.equal(isDisallowedIpAddress('10.0.0.1').blocked, true);
+  assert.equal(isDisallowedIpAddress('172.16.0.5').blocked, true);
+  assert.equal(isDisallowedIpAddress('192.168.1.10').blocked, true);
+  assert.equal(isDisallowedIpAddress('169.254.169.254').blocked, true);
+  assert.equal(isDisallowedIpAddress('0.0.0.0').blocked, true);
+  assert.equal(isDisallowedIpAddress('100.64.0.1').blocked, true);
+  assert.equal(isDisallowedIpAddress('224.0.0.1').blocked, true);
+  assert.equal(isDisallowedIpAddress('240.0.0.1').blocked, true);
+  assert.equal(isDisallowedIpAddress('93.184.216.34').blocked, false);
+
+  // IPv6 & IPv4-mapped IPv6
+  assert.equal(isDisallowedIpAddress('::1', false).blocked, true);
+  assert.equal(isDisallowedIpAddress('::1', true).blocked, false);
+  assert.equal(isDisallowedIpAddress('::').blocked, true);
+  assert.equal(isDisallowedIpAddress('fe80::1').blocked, true);
+  assert.equal(isDisallowedIpAddress('fc00::1').blocked, true);
+  assert.equal(isDisallowedIpAddress('ff02::1').blocked, true);
+  assert.equal(isDisallowedIpAddress('64:ff9b::1').blocked, true);
+  assert.equal(isDisallowedIpAddress('::ffff:127.0.0.1', false).blocked, true);
+  assert.equal(isDisallowedIpAddress('::ffff:7f00:1', false).blocked, true);
+  assert.equal(isDisallowedIpAddress('::ffff:invalid').blocked, true);
+  assert.equal(isDisallowedIpAddress('2606:2800:220:1:248:1893:25c8:1946').blocked, false);
+  assert.equal(isDisallowedIpAddress('not-an-ip').blocked, true);
+
+  assert.equal(SsrfGuard.isExplicitLoopbackUrl('http://127.0.0.1:3000/api/health'), true);
+  assert.equal(SsrfGuard.isExplicitLoopbackUrl('https://example.com'), false);
+  assert.equal(SsrfGuard.isExplicitLoopbackUrl('not a url'), false);
+
+  // URL validations
+  assert.equal((await SsrfGuard.validateUrl({ targetUrl: 'not-a-url' })).allowed, false);
+  assert.equal((await SsrfGuard.validateUrl({ targetUrl: 'file:///etc/passwd' })).allowed, false);
+  assert.equal((await SsrfGuard.validateUrl({ targetUrl: 'http://user:pass@example.com' })).allowed, false);
+  assert.equal((await SsrfGuard.validateUrl({ targetUrl: 'http://metadata.google.internal/' })).allowed, false);
+  assert.equal(
+    (await SsrfGuard.validateUrl({
+      targetUrl: 'http://unregistered.example.com/',
+      requireRegisteredTarget: true,
+      authorizedTargets: [],
+    })).allowed,
+    false
+  );
+
+  // DNS rebinding simulation (public hostname resolving to private IP)
+  const rebindRes = await SsrfGuard.validateUrl({
+    targetUrl: 'https://rebind.example.test/api',
+    dnsResolver: async () => [{ address: '169.254.169.254', family: 4 }],
+  });
+  assert.equal(rebindRes.allowed, false);
+
+  // Safe HTTP probe with redirect to blocked private IP
+  const server = await new Promise<import('node:http').Server>((resolve) => {
+    const s = http.createServer((req, res) => {
+      if (req.url === '/redirect-private') {
+        res.statusCode = 302;
+        res.setHeader('Location', 'http://169.254.169.254/latest/meta-data');
+        res.end();
+        return;
+      }
+      res.statusCode = 200;
+      res.end('ok');
+    });
+    s.listen(0, '127.0.0.1', () => resolve(s));
+  });
+  try {
+    const port = (server.address() as import('node:net').AddressInfo).port;
+    const okRes = await SsrfGuard.pinnedSafeRequest({
+      targetUrl: `http://127.0.0.1:${port}/ok`,
+      allowExplicitLoopback: true,
+      timeoutMs: 3000,
+    });
+    assert.equal(okRes.statusCode, 200);
+    assert.equal(okRes.ok, true);
+
+    await assert.rejects(
+      () =>
+        SsrfGuard.pinnedSafeRequest({
+          targetUrl: `http://127.0.0.1:${port}/redirect-private`,
+          allowExplicitLoopback: true,
+          timeoutMs: 3000,
+        }),
+      /SSRF|bloqueado|Link-local|metadata/i
+    );
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('Execution domain: SandboxExecutor & ControlledTestAndPerfRunner enforce isolation, path traversal defense, verified recovery, and CoverageReportParser formats', async () => {
+  const http = await import('node:http');
+  const { SandboxExecutor, buildMinimalSandboxEnv } = await import('./SandboxExecutor');
+  const { ControlledTestAndPerfRunner } = await import('./ControlledTestAndPerfRunner');
+  const { CoverageReportParser } = await import('./CoverageReportParser');
+
+  const env = buildMinimalSandboxEnv(os.tmpdir(), { SAFE_FLAG: '1' });
+  assert.equal(env.SAFE_FLAG, '1');
+  assert.ok(env.PATH);
+
+  const probe = SandboxExecutor.probeHostIsolation();
+  assert.equal(typeof probe.sandboxAvailable, 'boolean');
+
+  // Path traversal defense in SandboxExecutor
+  const escapeAttempt = SandboxExecutor.runSandboxedNodeTestWithRecovery({
+    filesMap: { '../../escape.mjs': 'console.log(1);' },
+    testFiles: ['../../escape.mjs'],
+    timeoutMs: 5000,
+  });
+  assert.equal(escapeAttempt.blocked, true);
+  assert.equal(escapeAttempt.recoveryVerified, true);
+
+  // ControlledTestAndPerfRunner: no tests, JS test suite, non-JS language tests
+  const noTests = ControlledTestAndPerfRunner.runIsolatedTestSuite({
+    softwareName: 'EmptyPkg',
+    filesMap: { 'src/app.ts': 'export const a = 1;' },
+  });
+  assert.equal(noTests.executed, false);
+  assert.equal(noTests.provenance.state, 'NOT_MEASURED');
+
+  const jsSuite = ControlledTestAndPerfRunner.runIsolatedTestSuite({
+    softwareName: 'JsSamplePkg',
+    filesMap: {
+      'calc.mjs': 'export const add = (a, b) => a + b;\n',
+      'calc.test.mjs':
+        'import test from "node:test"; import assert from "node:assert/strict"; import { add } from "./calc.mjs"; test("adds", () => assert.equal(add(2, 3), 5));\n',
+    },
+    timeoutMs: 10000,
+  });
+  if (!jsSuite.blocked) {
+    assert.equal(jsSuite.executed, true);
+    assert.equal(jsSuite.testsPassed, 1);
+    assert.equal(jsSuite.recoveryVerified, true);
+  }
+
+  const pySuite = ControlledTestAndPerfRunner.runIsolatedTestSuite({
+    softwareName: 'PySamplePkg',
+    filesMap: { 'app.test.py': 'def test_ok(): assert 1 == 1\n' },
+  });
+  assert.equal(pySuite.executed, false);
+  assert.equal(pySuite.provenance.state, 'NOT_MEASURED');
+
+  // ControlledPerfMeasurement: invalid URL, SSRF blocked, and valid local loopback probe
+  const invalidPerf = await ControlledTestAndPerfRunner.measureHttpWorkload({ targetUrl: '' });
+  assert.equal(invalidPerf.status, 'NOT_MEASURED');
+
+  const ssrfPerf = await ControlledTestAndPerfRunner.measureHttpWorkload({
+    targetUrl: 'http://169.254.169.254/latest/meta-data',
+  });
+  assert.equal(ssrfPerf.status, 'BLOCKED_SSRF');
+  assert.equal(ssrfPerf.ssrfBlocked, true);
+
+  const perfSrv = await new Promise<import('node:http').Server>((resolve) => {
+    const s = http.createServer((_req, res) => {
+      res.statusCode = 200;
+      res.end('ok');
+    });
+    s.listen(0, '127.0.0.1', () => resolve(s));
+  });
+  try {
+    const port = (perfSrv.address() as import('node:net').AddressInfo).port;
+    const measuredPerf = await ControlledTestAndPerfRunner.measureHttpWorkload({
+      targetUrl: `http://127.0.0.1:${port}/`,
+      requestsCount: 5,
+      concurrency: 2,
+      allowExplicitLoopback: true,
+      timeoutMs: 3000,
+    });
+    assert.equal(measuredPerf.status, 'MEASURED');
+    assert.equal(measuredPerf.successfulResponses, 5);
+    assert.equal(measuredPerf.targetMetrics.cpuPercent, null);
+  } finally {
+    await new Promise<void>((resolve) => perfSrv.close(() => resolve()));
+  }
+
+  // CoverageReportParser: NONE, LCOV (valid + empty), JaCoCo XML, Cobertura XML, Istanbul JSON (valid + invalid)
+  assert.equal(CoverageReportParser.parseFromFilesMap({}).state, 'NOT_MEASURED');
+  assert.equal(CoverageReportParser.parseLcov(['coverage/lcov.info'], '').state, 'INCONCLUSIVE');
+
+  const lcov = CoverageReportParser.parseFromFilesMap({
+    'coverage/lcov.info': 'SF:src/a.ts\nDA:1,2\nDA:2,0\nBRDA:1,0,0,1\nBRDA:1,0,1,0\nLF:2\nLH:1\nBRF:2\nBRH:1\nend_of_record\n',
+  });
+  assert.equal(lcov.format, 'LCOV');
+  assert.equal(lcov.lineCoveragePercent, 50);
+  assert.equal(lcov.branchCoveragePercent, 50);
+
+  const jacoco = CoverageReportParser.parseFromFilesMap({
+    'jacoco.xml':
+      '<report name="app"><counter type="LINE" missed="2" covered="8"/><counter type="BRANCH" missed="1" covered="3"/></report>',
+  });
+  assert.equal(jacoco.format, 'JACOCO_XML');
+  assert.equal(jacoco.lineCoveragePercent, 80);
+
+  const cobertura = CoverageReportParser.parseFromFilesMap({
+    'cobertura.xml':
+      '<coverage line-rate="0.75" branch-rate="0.50" lines-valid="20" lines-covered="15" branches-valid="10" branches-covered="5"></coverage>',
+  });
+  assert.equal(cobertura.format, 'COBERTURA_XML');
+  assert.equal(cobertura.lineCoveragePercent, 75);
+
+  const istanbul = CoverageReportParser.parseFromFilesMap({
+    'coverage/coverage-final.json': JSON.stringify({
+      'src/app.ts': {
+        statementMap: { '0': { start: { line: 1 } }, '1': { start: { line: 2 } } },
+        s: { '0': 1, '1': 0 },
+        b: { '0': [1, 0] },
+      },
+    }),
+  });
+  assert.equal(istanbul.format, 'ISTANBUL_JSON');
+  assert.equal(istanbul.lineCoveragePercent, 50);
+});

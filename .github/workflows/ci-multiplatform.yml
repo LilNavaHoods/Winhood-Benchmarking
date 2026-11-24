@@ -94,7 +94,7 @@ jobs:
         id: wizard_tests
         run: ./node_modules/.bin/tsx --test src/shared/wizardAndBrowserSafety.test.ts
 
-      - name: Run OAuth 2.0 PKCE, Security & Cryptographic Hardening Suite
+      - name: Run Security, Optional TOTP & Cryptographic Hardening Suite
         id: security_tests
         run: npm run test:security
 
@@ -223,7 +223,7 @@ jobs:
           npm run check:browser-imports
           npm run test:browser-imports
 
-      - name: Typecheck & Lint on Windows (tsc --noEmit)
+      - name: Typecheck & ESLint on Windows
         id: lint
         run: |
           npm run typecheck
@@ -233,7 +233,7 @@ jobs:
         id: build
         run: npm run build
 
-      - name: Run Windows path, Wizard, OAuth, security, and desktop lifecycle tests
+      - name: Run Windows path, Wizard, security, TOTP, and desktop lifecycle tests
         id: unit_tests
         run: npm test
 
@@ -296,6 +296,7 @@ jobs:
           name: winhood-windows-desktop-and-installer
           path: |
             dist-desktop/build-manifest.json
+            dist-desktop/provenance-attestation.json
             release-windows/installer/WinHood-Benchmarking-Setup.exe
             release-windows/windows-installer-e2e-report.json
           if-no-files-found: warn

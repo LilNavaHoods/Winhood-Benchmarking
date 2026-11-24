@@ -1096,7 +1096,32 @@ export class ParserRegistry {
 
         // typescript:S8786 - RegExp literal with super-linear backtracking (nested quantifiers)
         if (node.type === 'RegExpLiteral' && typeof node.pattern === 'string' && !isNoSonarLine(getLine(node))) {
-          if (/\([^()]*[+*][^()]*\)[+*]/.test(node.pattern)) {
+          const pat = node.pattern;
+          let hasNestedQuantifier = false;
+          let inGroup = false;
+          let groupHasQuantifier = false;
+          for (let i = 0; i < pat.length; i++) {
+            const ch = pat[i];
+            if (ch === '\\') {
+              i++;
+              continue;
+            }
+            if (ch === '(') {
+              inGroup = true;
+              groupHasQuantifier = false;
+            } else if (ch === ')') {
+              const next = pat[i + 1];
+              if (inGroup && groupHasQuantifier && (next === '+' || next === '*')) {
+                hasNestedQuantifier = true;
+                break;
+              }
+              inGroup = false;
+              groupHasQuantifier = false;
+            } else if (inGroup && (ch === '+' || ch === '*')) {
+              groupHasQuantifier = true;
+            }
+          }
+          if (hasNestedQuantifier) {
             const lineNo = getLine(node);
             issues.push({
               ruleId: 'typescript:S8786',

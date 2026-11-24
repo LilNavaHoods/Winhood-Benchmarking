@@ -411,7 +411,7 @@ test('Phase 11 E2E: 10 real end-to-end WinHood Benchmarking full-stack HTTP flow
     });
     cookies = extractCookies(res, cookies);
     const rawText = await res.text();
-    let parsed: any = null;
+    let parsed: unknown;
     try {
       parsed = JSON.parse(rawText);
     } catch {
@@ -655,5 +655,335 @@ test('App shell renders unrestricted local workspace with optional TOTP 2FA cont
   assert.equal(appHtml.includes('Entrar com GitHub'), false);
   assert.equal(appHtml.includes('AuthGateModal'), false);
   assert.equal(appHtml.includes('Personal Access Token'), false);
+});
+
+test('All workspace UI modules and modals render cleanly in SSR across empty and populated states', async () => {
+  const [
+    { ArchitectureQaPerfOsModule },
+    { FindingsAndDevSecOpsModule },
+    { GitHubSearchModal },
+    { MarketResearchAndCompetitorsModule },
+    { ProjectUploadModal },
+    { ProjectsAndSoftwaresModule },
+    { ReferenceIntelligenceModule },
+    { SonarDockerCloudHubModule },
+    { UserGuideModule },
+  ] = await Promise.all([
+    import('./ArchitectureQaPerfOsModule'),
+    import('./FindingsAndDevSecOpsModule'),
+    import('./GitHubSearchModal'),
+    import('./MarketResearchAndCompetitorsModule'),
+    import('./ProjectUploadModal'),
+    import('./ProjectsAndSoftwaresModule'),
+    import('./ReferenceIntelligenceModule'),
+    import('./SonarDockerCloudHubModule'),
+    import('./UserGuideModule'),
+  ]);
+
+  const noop = () => {};
+  const noopAsync = async () => {};
+
+  const sampleProject = {
+    id: 'proj-ssr-1',
+    name: 'Projeto SSR Auditoria',
+    category: 'Backend APIs & Segurança',
+    objective: 'Validar renderização determinística dos módulos.',
+    description: 'Projeto de validação SSR.',
+    owner: 'Engenharia',
+    domainTags: ['security', 'clean-code'],
+    defaultQualityProfileIds: ['sonar-way-ts-mqr-2026'],
+    defaultQualityGateId: 'qg-sonar-way-mqr',
+    qualityGateId: 'winhood-standard-v2',
+    history: [{ timestamp: '2026-11-24T00:00:00.000Z', action: 'CREATED', details: 'Projeto SSR criado' }],
+    createdAt: '2026-11-24T00:00:00.000Z',
+    updatedAt: '2026-11-24T00:00:00.000Z',
+  };
+
+  const sampleSoftware = {
+    id: 'sw-ssr-1',
+    projectId: 'proj-ssr-1',
+    name: 'AuditTargetSvc',
+    vendor: 'WinHood Lab',
+    version: '1.0.0',
+    category: 'Backend APIs & Segurança',
+    sourceType: 'UPLOAD_PACKAGE',
+    domainTags: ['typescript', 'security'],
+    architecture: 'Clean Architecture',
+    operatingSystem: 'Windows / Linux',
+    os: 'Windows / Linux',
+    distribution: 'Open-Source',
+    license: 'MIT',
+    languages: ['TypeScript'],
+    packageSha256: 'a'.repeat(64),
+    ingestedInventory: {
+      totalFiles: 1,
+      eligibleFiles: 1,
+      totalLinesOfCode: 42,
+      totalSizeBytes: 1024,
+      languageBreakdown: { TypeScript: 1 },
+      files: [{ path: 'src/repo.ts', sizeBytes: 1024, loc: 42, language: 'TypeScript', sha256: 'b'.repeat(64) }],
+      verifiedIntegrity: true,
+    },
+    description: 'Alvo SSR',
+    createdAt: '2026-11-24T00:00:00.000Z',
+  };
+
+  const populatedRun = {
+    id: 'run-ssr-full',
+    projectId: 'proj-ssr-1',
+    projectName: 'Projeto SSR Auditoria',
+    profileId: 'prof-1',
+    profileName: 'WinHood MQR Strict',
+    status: 'COMPLETED',
+    assessmentMode: 'SINGLE_PROJECT',
+    startedAt: '2026-11-24T00:00:00.000Z',
+    completedAt: '2026-11-24T00:00:04.000Z',
+    weightsUsed: {
+      functionality: 10,
+      code_quality: 15,
+      security: 25,
+      performance: 10,
+      architecture: 15,
+      database: 5,
+      reliability: 10,
+      compatibility: 0,
+      usability: 0,
+      installation: 5,
+      privacy: 5,
+      documentation: 0,
+    },
+    equivalenceEnvironment: {
+      cpuCoresLimit: 4,
+      memoryMbLimit: 2048,
+      profileLabel: 'Isolated Local Host',
+    },
+    scoreCards: [
+      {
+        softwareId: 'sw-ssr-1',
+        softwareName: 'AuditTargetSvc',
+        softwareVersion: '1.0.0',
+        classificationLabel: 'BOM',
+        advantages: ['Criptografia AES-256-GCM verificada'],
+        deficiencies: ['1 achado crítico detectado'],
+        groupedScores: {
+          overallScore: 3.9,
+          technicalScore: 3.9,
+          securityScore: 3.2,
+          qualityScore: 4.3,
+          architectureScore: 4.1,
+          functionalScore: 4.0,
+          performanceScore: 0,
+          technicalDebtRatioPercent: 2.1,
+        },
+        categoryScores: {
+          functionality: 4.0,
+          code_quality: 4.3,
+          security: 3.2,
+          performance: null,
+          architecture: 4.1,
+          database: 4.0,
+          reliability: 4.2,
+          compatibility: null,
+          usability: null,
+          installation: 4.0,
+          privacy: 4.0,
+          documentation: null,
+        },
+        categoryDetails: {},
+        penaltyCapsTriggered: [],
+        metricsSummary: {
+          vulnerabilities: 1,
+          criticalVulns: 1,
+          highVulns: 0,
+          mediumVulns: 0,
+          lowVulns: 0,
+          p50LatencyMs: 0,
+          p95LatencyMs: 0,
+          throughputRps: 0,
+          technicalDebtMinutes: 25,
+          criticalFindings: 1,
+          highFindings: 0,
+        },
+        runtimeMetrics: { status: 'NOT_MEASURED' },
+      },
+    ],
+    findings: [
+      {
+        id: 'f-ssr-1',
+        softwareId: 'sw-ssr-1',
+        softwareName: 'AuditTargetSvc',
+        toolId: 'winhood-sast',
+        toolName: 'WinHood AST Analyzer',
+        originalRuleId: 'typescript:S2077',
+        category: 'SECURITY',
+        severity: 'CRITICAL',
+        title: 'SQL Injection via concatenação',
+        description: 'Consulta SQL concatenada com entrada externa.',
+        whyItIsAnIssue: 'Permite manipulação direta da consulta SQL.',
+        remediation: 'Use consultas parametrizadas ($1).',
+        filePath: 'src/repo.ts',
+        lineNumber: 18,
+        snippet: 'db.query("SELECT * FROM users WHERE id = " + id);',
+        cweId: 'CWE-89',
+        owaspCategory: 'A03:2021-Injection',
+        validationStatus: 'OPEN',
+        remediationEffortMinutes: 25,
+        cleanCodeAttribute: 'TRUSTWORTHY',
+        mqrImpacts: [
+          {
+            softwareQuality: 'SECURITY',
+            severity: 'HIGH',
+            benchmarkCategory: 'security',
+            scoreDeduction: 0.45,
+          },
+        ],
+        contextBefore: [],
+        contextAfter: [],
+        executionFlows: [],
+      },
+    ],
+    architectureGraphs: [
+      {
+        softwareId: 'sw-ssr-1',
+        softwareName: 'AuditTargetSvc',
+        modules: [
+          {
+            id: 'mod-repo',
+            name: 'src/repo.ts',
+            layer: 'infrastructure',
+            afferentCoupling: 2,
+            efferentCoupling: 1,
+            instability: 0.33,
+          },
+        ],
+        edges: [],
+        circularChains: [],
+        layerViolations: [],
+      },
+    ],
+    evidenceChain: [],
+  } as unknown as BenchmarkRun;
+
+  // 1. ArchitectureQaPerfOsModule (empty + populated)
+  const archEmpty = renderToStaticMarkup(React.createElement(ArchitectureQaPerfOsModule, { latestRun: null }));
+  assert.ok(archEmpty.includes('Execute um benchmark'));
+  const archPopulated = renderToStaticMarkup(React.createElement(ArchitectureQaPerfOsModule, { latestRun: populatedRun }));
+  assert.ok(archPopulated.includes('AuditTargetSvc'));
+
+  // 2. FindingsAndDevSecOpsModule (empty + populated)
+  const findEmpty = renderToStaticMarkup(React.createElement(FindingsAndDevSecOpsModule, { latestRun: null }));
+  assert.ok(findEmpty.length > 50);
+  const findPopulated = renderToStaticMarkup(
+    React.createElement(FindingsAndDevSecOpsModule, { latestRun: populatedRun, onRunUpdated: noop, onNotify: noop })
+  );
+  assert.ok(findPopulated.includes('SQL Injection') || findPopulated.includes('typescript:S2077'));
+
+  // 3. GitHubSearchModal (closed + open)
+  assert.equal(
+    renderToStaticMarkup(
+      React.createElement(GitHubSearchModal, {
+        isOpen: false,
+        projects: [],
+        onClose: noop,
+        onSuccess: noopAsync,
+        onNotify: noop,
+      })
+    ),
+    ''
+  );
+  const ghOpen = renderToStaticMarkup(
+    React.createElement(GitHubSearchModal, {
+      isOpen: true,
+      projects: [sampleProject as unknown as import('../types/benchmark').Project],
+      onClose: noop,
+      onSuccess: noopAsync,
+      onNotify: noop,
+    })
+  );
+  assert.ok(ghOpen.includes('GitHub'));
+
+  // 4. MarketResearchAndCompetitorsModule
+  const marketHtml = renderToStaticMarkup(
+    React.createElement(MarketResearchAndCompetitorsModule, {
+      projects: [sampleProject as unknown as import('../types/benchmark').Project],
+      softwares: [sampleSoftware as unknown as import('../types/benchmark').Software],
+      selectedProjectId: 'proj-ssr-1',
+      onRefreshWorkspace: noopAsync,
+      onNavigate: noop,
+      onNotify: noop,
+    })
+  );
+  assert.ok(marketHtml.length > 100);
+
+  // 5. ProjectUploadModal (closed + open)
+  assert.equal(
+    renderToStaticMarkup(
+      React.createElement(ProjectUploadModal, {
+        isOpen: false,
+        onClose: noop,
+        onSuccess: noopAsync,
+        onNotify: noop,
+      })
+    ),
+    ''
+  );
+  const uploadOpen = renderToStaticMarkup(
+    React.createElement(ProjectUploadModal, {
+      isOpen: true,
+      onClose: noop,
+      onSuccess: noopAsync,
+      onNotify: noop,
+    })
+  );
+  assert.ok(uploadOpen.includes('Upload') || uploadOpen.includes('Projeto'));
+
+  // 6. ProjectsAndSoftwaresModule
+  const projSwHtml = renderToStaticMarkup(
+    React.createElement(ProjectsAndSoftwaresModule, {
+      projects: [sampleProject as unknown as import('../types/benchmark').Project],
+      softwares: [sampleSoftware as unknown as import('../types/benchmark').Software],
+      onRefresh: noopAsync,
+      onNotify: noop,
+      onOpenUpload: noop,
+      onOpenGitHub: noop,
+    })
+  );
+  assert.ok(projSwHtml.includes('Projeto SSR Auditoria'));
+
+  // 7. ReferenceIntelligenceModule
+  const refIntelHtml = renderToStaticMarkup(
+    React.createElement(ReferenceIntelligenceModule, {
+      latestRun: populatedRun,
+      softwares: [sampleSoftware as unknown as import('../types/benchmark').Software],
+      onNotify: noop,
+    })
+  );
+  assert.ok(refIntelHtml.length > 100);
+
+  // 8. SonarDockerCloudHubModule
+  const sonarHubHtml = renderToStaticMarkup(
+    React.createElement(SonarDockerCloudHubModule, {
+      onNotify: noop,
+      onRefreshRun: noop,
+    })
+  );
+  assert.ok(sonarHubHtml.includes('Sonar') || sonarHubHtml.includes('MQR'));
+
+  // 9. UserGuideModule (multiple chapters)
+  for (const chapterId of ['quickstart', 'benchmark-weights', 'ab-case-study', 'mqr-bridge-guide', 'gitar-security-guide', 'glossary-faq']) {
+    const guideHtml = renderToStaticMarkup(
+      React.createElement(UserGuideModule, {
+        initialChapterId: chapterId,
+        hasEvaluations: true,
+        softwaresCount: 2,
+        onNavigate: noop,
+        onSeedRealWorkspace: noopAsync,
+        onOpenUploadModal: noop,
+        onOpenGitHubModal: noop,
+        onNotify: noop,
+      })
+    );
+    assert.ok(guideHtml.length > 100, `UserGuideModule chapter ${chapterId} must render`);
+  }
 });
 

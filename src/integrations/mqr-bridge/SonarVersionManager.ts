@@ -62,7 +62,7 @@ export class MqrBridgeVersionManager {
     // Fallback para a versão estável oficial verificada em binaries.sonarsource.com caso sem rede no momento da chamada
     let sqVersion = '26.11.0.134175';
     let sqReleaseDate = '2026-11-04T15:13:10Z';
-    let sqSizeBytes = 915316171;
+    const sqSizeBytes = 915316171;
     let sqOfficialSha256: string | null =
       'bc18bf0f9faed6d27c9668a89ab86c84b22edeccb1050fbebb9d323bd506e7dc';
 
@@ -112,11 +112,11 @@ export class MqrBridgeVersionManager {
     const sqBuildNumber = sqParts[3] || '134175';
 
     // SonarScanner CLI
-    let scannerVersion = '8.4.0.16527';
-    let scannerReleaseDate = '2026-11-09T11:20:07Z';
+    const scannerVersion = '8.4.0.16527';
+    const scannerReleaseDate = '2026-11-09T11:20:07Z';
     const isWin = platform === 'win32';
     const scannerOsSuffix = isWin ? 'windows-x64' : 'linux-x64';
-    let scannerSizeBytes = isWin ? 56658888 : 60317685;
+    const scannerSizeBytes = isWin ? 56658888 : 60317685;
     let scannerOfficialSha256: string | null = isWin
       ? '9998fca7f8897975f8fad850aa92e5a236441ace6c6126a15da34f5a049795ce'
       : '2a28f118e2e9375dfd36eb27b803e1d37f93daba4db068aca6eef9853041bb24';

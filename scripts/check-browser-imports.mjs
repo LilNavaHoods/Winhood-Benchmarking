@@ -474,7 +474,7 @@ export function analyzeBrowserDependencyGraph(options) {
     const current = queue.shift();
     if (!current) break;
 
-    let content = '';
+    let content;
     try {
       content = fs.readFileSync(current.filePath, 'utf8');
     } catch {

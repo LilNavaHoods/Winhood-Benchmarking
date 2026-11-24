@@ -69,7 +69,7 @@ export interface AstIssueCandidate {
   description: string;
   category: NormalizedFinding['category'];
   severity: SeverityLevel;
-  cwe: string;
+  cwe?: string;
   filePath: string;
   lineNumber: number;
   endLineNumber: number;

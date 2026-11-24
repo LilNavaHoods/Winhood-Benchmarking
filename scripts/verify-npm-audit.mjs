@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 
 /**
@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
  *
  * Enforces:
  * - Zero critical/high/moderate vulnerabilities in runtime production dependencies.
+ * - Transparent severity breakdown across critical, high, moderate, and low advisories.
  * - Any remaining advisory in build/dev tooling with no upstream compatible release
  *   must be formally registered in `security/npm-audit-exceptions.json` with:
  *   advisoryId, package, version, dependencyPath, severity, fixAvailable,
@@ -21,6 +22,33 @@ export const DEFAULT_EXCEPTION_REGISTRY_PATH = path.resolve(
   process.cwd(),
   'security/npm-audit-exceptions.json'
 );
+
+function resolveSafeNpmBinary() {
+  const candidates =
+    process.platform === 'win32'
+      ? [
+          path.join(path.dirname(process.execPath), 'npm.cmd'),
+          'C:\\Program Files\\nodejs\\npm.cmd',
+        ]
+      : [
+          path.join(path.dirname(process.execPath), 'npm'),
+          '/usr/local/bin/npm',
+          '/usr/bin/npm',
+        ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return process.platform === 'win32' ? 'npm.cmd' : 'npm';
+}
+
+function getSafeAuditPathEnv() {
+  const nodeBinDir = path.dirname(process.execPath);
+  if (process.platform === 'win32') {
+    const sysRoot = process.env.SystemRoot || 'C:\\Windows';
+    return `${nodeBinDir};${sysRoot}\\System32;${sysRoot}`;
+  }
+  return `${nodeBinDir}:/usr/local/bin:/usr/bin:/bin`;
+}
 
 export function validateExceptionEntry(entry, now = new Date()) {
   const requiredFields = [
@@ -48,7 +76,10 @@ export function validateExceptionEntry(entry, now = new Date()) {
     return { valid: false, reason: `Invalid expiresAt timestamp '${entry.expiresAt}'` };
   }
   if (expires.getTime() <= now.getTime()) {
-    return { valid: false, reason: `Exception for '${entry.package}' (${entry.advisoryId}) expired at ${entry.expiresAt}` };
+    return {
+      valid: false,
+      reason: `Exception for '${entry.package}' (${entry.advisoryId}) expired at ${entry.expiresAt}`,
+    };
   }
   return { valid: true };
 }
@@ -62,16 +93,24 @@ export function evaluateAuditReport(auditJson, exceptionsRegistry, now = new Dat
   const unapprovedVulnerabilities = [];
   const expiredOrInvalidExceptions = [];
   const activeGovernedExceptions = [];
+  const severityCounts = { critical: 0, high: 0, moderate: 0, low: 0, info: 0 };
 
   for (const ex of approvedList) {
     const check = validateExceptionEntry(ex, now);
     if (!check.valid) {
-      expiredOrInvalidExceptions.push({ package: ex.package, advisoryId: ex.advisoryId, reason: check.reason });
+      expiredOrInvalidExceptions.push({
+        package: ex.package,
+        advisoryId: ex.advisoryId,
+        reason: check.reason,
+      });
     }
   }
 
   for (const [pkgName, vulnInfo] of Object.entries(vulns)) {
-    const severity = vulnInfo.severity || 'unknown';
+    const severity = String(vulnInfo.severity || 'unknown').toLowerCase();
+    if (severity in severityCounts) {
+      severityCounts[severity] += 1;
+    }
     if (!['moderate', 'high', 'critical'].includes(severity)) continue;
 
     const matchingException = approvedList.find((e) => e.package === pkgName);
@@ -80,6 +119,7 @@ export function evaluateAuditReport(auditJson, exceptionsRegistry, now = new Dat
         package: pkgName,
         severity,
         range: vulnInfo.range,
+        isDirect: Boolean(vulnInfo.isDirect),
       });
       continue;
     }
@@ -109,6 +149,7 @@ export function evaluateAuditReport(auditJson, exceptionsRegistry, now = new Dat
   return {
     passed,
     totalAdvisoriesCount: Object.keys(vulns).length,
+    severityCounts,
     unapprovedCount: unapprovedVulnerabilities.length,
     activeGovernedExceptionsCount: activeGovernedExceptions.length,
     unapprovedVulnerabilities,
@@ -127,6 +168,7 @@ export function runSelfTest() {
   const sampleAudit = {
     vulnerabilities: {
       picomatch: { name: 'picomatch', severity: 'high', range: '<=4.0.7' },
+      'minor-info-pkg': { name: 'minor-info-pkg', severity: 'low', range: '<1.0.0' },
     },
   };
   const validRegistry = {
@@ -138,9 +180,11 @@ export function runSelfTest() {
         dependencyPath: 'vite > picomatch',
         severity: 'high',
         fixAvailable: 'No upstream picomatch > 4.0.7 published on npm registry yet',
-        winhoodImpact: 'Build-time dev bundler globbing only; never exposed to untrusted user input or runtime analysis',
+        winhoodImpact:
+          'Build-time dev bundler globbing only; never exposed to untrusted user input or runtime analysis',
         justification: 'Upstream picomatch latest release is 4.0.7',
-        compensatingControl: 'WinHood runtime uses internal bounded regex parser and disables external shell/glob execution on untrusted inputs',
+        compensatingControl:
+          'WinHood runtime uses internal bounded regex parser and disables external shell/glob execution on untrusted inputs',
         owner: 'WinHood AppSec & DevSecOps Team',
         approvedAt: '2026-11-17T00:00:00Z',
         expiresAt: '2027-02-17T00:00:00Z',
@@ -151,9 +195,15 @@ export function runSelfTest() {
 
   const resPass = evaluateAuditReport(sampleAudit, validRegistry, new Date('2026-11-17T12:00:00Z'));
   assert.equal(resPass.passed, true);
+  assert.equal(resPass.severityCounts.high, 1);
+  assert.equal(resPass.severityCounts.low, 1);
   assert.equal(resPass.honestStatus, 'GOVERNED_BUILD_TIME_EXCEPTIONS_ACTIVE');
 
-  const resExpired = evaluateAuditReport(sampleAudit, validRegistry, new Date('2027-03-01T00:00:00Z'));
+  const resExpired = evaluateAuditReport(
+    sampleAudit,
+    validRegistry,
+    new Date('2027-03-01T00:00:00Z')
+  );
   assert.equal(resExpired.passed, false);
 
   const resUnapproved = evaluateAuditReport(
@@ -171,9 +221,15 @@ const isMain =
 
 if (isMain) {
   runSelfTest();
-  let rawAudit = '{}';
+  const npmBin = resolveSafeNpmBinary();
+  let rawAudit;
   try {
-    rawAudit = execSync('npm audit --json', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    rawAudit = execFileSync(npmBin, ['audit', '--json'], {
+      encoding: 'utf8',
+      shell: process.platform === 'win32',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      env: { ...process.env, PATH: getSafeAuditPathEnv() },
+    });
   } catch (err) {
     rawAudit = err.stdout ? String(err.stdout) : '{}';
   }
@@ -188,6 +244,6 @@ if (isMain) {
     process.exit(1);
   }
   console.log(
-    `[WinHood NPM Audit Governance] PASSED — Status: ${result.honestStatus} (Unapproved: 0, Governed Build-Time Exceptions: ${result.activeGovernedExceptionsCount}/${result.totalAdvisoriesCount})`
+    `[WinHood NPM Audit Governance] PASSED — Status: ${result.honestStatus} (Critical: ${result.severityCounts.critical}, High: ${result.severityCounts.high}, Moderate: ${result.severityCounts.moderate}, Low: ${result.severityCounts.low} | Unapproved: 0, Governed Exceptions: ${result.activeGovernedExceptionsCount}/${result.totalAdvisoriesCount})`
   );
 }

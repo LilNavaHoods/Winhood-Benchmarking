@@ -170,18 +170,63 @@ function loadElectronRuntime(): any | null {
   return null;
 }
 
+function appendDesktopLog(logsDir: string, message: string): void {
+  try {
+    fs.mkdirSync(logsDir, { recursive: true });
+    const logFile = path.join(logsDir, 'desktop-bootstrap.log');
+    fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${message}\n`, 'utf8');
+  } catch {
+    // Best-effort diagnostic logging
+  }
+}
+
+export function writeDesktopRuntimeStatus(
+  logsDir: string,
+  payload: {
+    pid: number;
+    port: number;
+    url: string;
+    windowUrl: string;
+    healthUrl: string;
+    ready: boolean;
+    startedAt: string;
+    dataDir: string;
+  }
+): string {
+  fs.mkdirSync(logsDir, { recursive: true });
+  const statusFile = path.join(logsDir, 'runtime-status.json');
+  const tmpFile = `${statusFile}.tmp-${process.pid}`;
+  fs.writeFileSync(tmpFile, JSON.stringify(payload, null, 2), 'utf8');
+  fs.renameSync(tmpFile, statusFile);
+  return statusFile;
+}
+
+export function removeDesktopRuntimeStatus(logsDir: string): void {
+  try {
+    const statusFile = path.join(logsDir, 'runtime-status.json');
+    if (fs.existsSync(statusFile)) {
+      fs.unlinkSync(statusFile);
+    }
+  } catch {
+    // Best-effort cleanup on shutdown
+  }
+}
+
 export async function bootstrapWindowsDesktop(options?: {
   customDataDir?: string;
   preferredPort?: number;
   headlessCheckOnly?: boolean;
+  readyTimeoutMs?: number;
 }) {
   process.env.WINHOOD_RUNTIME_ENV = 'ELECTRON_DESKTOP';
   const electron = loadElectronRuntime();
   const isElectronBinary = Boolean(electron?.app && electron?.BrowserWindow);
 
-  // 1. Resolve writable userData directory (never inside Program Files)
+  // 1. Resolve writable userData directory (honors explicit customDataDir & WINHOOD_DATA_DIR, never Program Files)
+  const envDataDir = (process.env.WINHOOD_DATA_DIR || '').trim();
   const rawUserData =
     options?.customDataDir ||
+    envDataDir ||
     (isElectronBinary ? electron.app.getPath('userData') : resolveWinHoodDataRoot());
 
   if (isReadOnlyProgramFilesPath(rawUserData)) {
@@ -192,6 +237,10 @@ export async function bootstrapWindowsDesktop(options?: {
 
   const layout = ensureWinHoodDirectories(rawUserData);
   process.env.WINHOOD_DATA_DIR = layout.rootDataDir;
+  appendDesktopLog(
+    layout.logsDir,
+    `Starting WinHood Desktop bootstrap (pid=${process.pid}, electron=${isElectronBinary}, dataDir=${layout.rootDataDir})`
+  );
 
   // 2. Resolve frontend dist directory
   const candidateDistPaths = [
@@ -204,22 +253,46 @@ export async function bootstrapWindowsDesktop(options?: {
     candidateDistPaths[0];
 
   // 3. Start embedded backend on loopback 127.0.0.1
+  const envPreferredPort = Number.parseInt(process.env.WINHOOD_DESKTOP_PORT || '', 10);
+  const preferredPort =
+    options?.preferredPort !== undefined
+      ? options.preferredPort
+      : Number.isInteger(envPreferredPort) && envPreferredPort >= 0 && envPreferredPort <= 65535
+        ? envPreferredPort
+        : 3000;
+
   const startedBackend: StartedWinHoodServer = await startServer({
     dataDir: layout.rootDataDir,
     host: '127.0.0.1',
-    port: options?.preferredPort ?? 3000,
+    port: preferredPort,
     distPath: resolvedDistPath,
+    deploymentMode: 'LOCAL_DESKTOP',
     environment: 'ELECTRON_DESKTOP',
     enableVite: false,
   });
 
   // 4. Verify real /api/health endpoint before opening window
+  const timeoutMs =
+    options?.readyTimeoutMs ??
+    Math.max(
+      2000,
+      Number.parseInt(process.env.WINHOOD_BACKEND_READY_TIMEOUT_MS || '20000', 10) || 20000
+    );
+  const intervalMs = 200;
+  const maxAttempts = Math.max(5, Math.ceil(timeoutMs / intervalMs));
+
   const health = await waitForBackendHealth({
     baseUrl: startedBackend.url,
     port: startedBackend.port,
+    maxAttempts,
+    intervalMs,
   });
 
   if (!health.healthy) {
+    appendDesktopLog(
+      layout.logsDir,
+      `FATAL_BACKEND_HEALTH: ${startedBackend.url}/api/health failed after ${health.attempts} attempts (${health.errorMessage || 'unknown'})`
+    );
     await startedBackend.close().catch(() => {});
     throw new Error(
       `FATAL_BACKEND_HEALTH: Backend não respondeu em ${startedBackend.url}/api/health após ${health.attempts} tentativas (${health.errorMessage}).`
@@ -227,12 +300,33 @@ export async function bootstrapWindowsDesktop(options?: {
   }
 
   const desktopWindowUrl = `http://localhost:${startedBackend.port}`;
+  const healthUrl = `${stripTrailingSlashes(startedBackend.url)}/api/health`;
+  const runtimeStatusPath = writeDesktopRuntimeStatus(layout.logsDir, {
+    pid: process.pid,
+    port: startedBackend.port,
+    url: startedBackend.url,
+    windowUrl: desktopWindowUrl,
+    healthUrl,
+    ready: true,
+    startedAt: new Date().toISOString(),
+    dataDir: layout.rootDataDir,
+  });
+  appendDesktopLog(
+    layout.logsDir,
+    `Backend healthy on ${healthUrl} (attempts=${health.attempts}, statusFile=${runtimeStatusPath})`
+  );
 
   if (!isElectronBinary || options?.headlessCheckOnly) {
+    const originalClose = startedBackend.close;
+    startedBackend.close = async () => {
+      removeDesktopRuntimeStatus(layout.logsDir);
+      await originalClose();
+    };
     return {
       mode: 'HEADLESS_VERIFIED' as const,
       backend: startedBackend,
       windowUrl: desktopWindowUrl,
+      runtimeStatusPath,
       health,
       layout,
       securityWebPreferences: ELECTRON_SECURITY_WEB_PREFERENCES,
@@ -243,6 +337,8 @@ export async function bootstrapWindowsDesktop(options?: {
 
   const hasSingleInstanceLock = app.requestSingleInstanceLock?.() ?? true;
   if (!hasSingleInstanceLock) {
+    appendDesktopLog(layout.logsDir, 'Secondary Electron instance detected; shutting down cleanly.');
+    removeDesktopRuntimeStatus(layout.logsDir);
     await startedBackend.close().catch(() => {});
     app.quit();
     return null;
@@ -377,6 +473,8 @@ export async function bootstrapWindowsDesktop(options?: {
   const shutdownCleanly = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    appendDesktopLog(layout.logsDir, `Shutting down embedded backend on port ${startedBackend.port}`);
+    removeDesktopRuntimeStatus(layout.logsDir);
     await startedBackend.close().catch(() => {});
   };
 
@@ -395,6 +493,8 @@ export async function bootstrapWindowsDesktop(options?: {
   return {
     mode: 'ELECTRON_WINDOW_ACTIVE' as const,
     backend: startedBackend,
+    windowUrl: desktopWindowUrl,
+    runtimeStatusPath,
     health,
     layout,
     securityWebPreferences: ELECTRON_SECURITY_WEB_PREFERENCES,
@@ -407,8 +507,23 @@ const isDirectEntry =
   Boolean(process.argv[1]) &&
   path.resolve(process.argv[1]) === __filename;
 
-if (isDirectEntry || process.env.WINHOOD_DESKTOP_RUN === 'true') {
+// In packaged Windows/macOS/Linux Electron executables, process.argv[1] is omitted (defaultApp !== true).
+const isPackagedElectronMain =
+  typeof process !== 'undefined' &&
+  Boolean(process.versions?.electron) &&
+  !process.env.NODE_TEST_CONTEXT &&
+  (process as NodeJS.Process & { defaultApp?: boolean }).defaultApp !== true;
+
+if (isDirectEntry || isPackagedElectronMain || process.env.WINHOOD_DESKTOP_RUN === 'true') {
   bootstrapWindowsDesktop().catch((err) => {
+    const fallbackLogsDir = path.join(
+      process.env.WINHOOD_DATA_DIR || resolveWinHoodDataRoot(),
+      'logs'
+    );
+    appendDesktopLog(
+      fallbackLogsDir,
+      `FATAL_BOOTSTRAP_ERROR: ${err instanceof Error ? err.message : String(err)}`
+    );
     console.error('[WinHood Desktop Fatal Error]:', err);
     process.exitCode = 1;
   });

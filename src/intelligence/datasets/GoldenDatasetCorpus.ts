@@ -56,7 +56,7 @@ export interface GoldenDatasetCase extends GoldenDatasetCaseInput {
 
 export function computeGoldenCaseContentSha256(filesMap: Record<string, string>): string {
   const orderedEntries = Object.keys(filesMap)
-    .sort()
+    .sort((a, b) => a.localeCompare(b))
     .map((k) => [k, filesMap[k]]);
   return crypto
     .createHash('sha256')

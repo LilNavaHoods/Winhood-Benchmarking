@@ -942,7 +942,7 @@ export interface SoftwareScoreCard {
     avgCyclomaticComplexity: number;
     avgCognitiveComplexity: number;
     technicalDebtMinutes: number;
-    testCoveragePercent: number;
+    testCoveragePercent: number | null;
     circularDependencies: number;
     couplingIndex: number;
     cohesionIndex: number;
@@ -1260,7 +1260,7 @@ export interface AuditLogEntry {
   id: string;
   timestamp: string;
   actor: string;
-  role: 'LOCAL_OPERATOR' | 'ADMIN' | 'SECURITY_LEAD' | 'AUDITOR' | 'QA_ENGINEER' | 'SYSTEM';
+  role: 'LOCAL_OPERATOR' | 'REMOTE_OPERATOR' | 'ADMIN' | 'SECURITY_LEAD' | 'AUDITOR' | 'QA_ENGINEER' | 'SYSTEM';
   action: string;
   entityType: string;
   entityId: string;

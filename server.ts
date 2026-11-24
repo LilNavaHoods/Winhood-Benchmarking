@@ -37,6 +37,7 @@ import {
   DEFAULT_CATEGORY_WEIGHTS,
   computeSha256,
   enrichLegacyOrExternalFinding,
+  maskSecretsInText,
   normalizeEnabledCategoryWeights,
   validateCategoryWeights,
   validateEquivalenceConditions,
@@ -603,6 +604,14 @@ function extractZipBufferToFilesMap(zipBuffer: Buffer): {
       ptr += 46 + fileNameLen + extraLen + commentLen;
 
       if (!entryName || entryName.endsWith('/')) continue;
+      if (
+        entryName.includes('\0') ||
+        entryName.startsWith('/') ||
+        entryName.startsWith('\\') ||
+        hasExplicitPathTraversalOrSymlinkAttempt({ [entryName]: '' })
+      ) {
+        throw new Error(`ZIP_PATH_TRAVERSAL_BLOCKED: Entrada ZIP insegura bloqueada (${entryName}).`);
+      }
       if (uncompressedSize > 2 * 1024 * 1024 || localHeaderOffset + 30 > zipBuffer.length) {
         skippedBinaryOrInvalid += 1;
         continue;
@@ -659,6 +668,14 @@ function extractZipBufferToFilesMap(zipBuffer: Buffer): {
       offset = dataEnd;
 
       if (!entryName || entryName.endsWith('/')) continue;
+      if (
+        entryName.includes('\0') ||
+        entryName.startsWith('/') ||
+        entryName.startsWith('\\') ||
+        hasExplicitPathTraversalOrSymlinkAttempt({ [entryName]: '' })
+      ) {
+        throw new Error(`ZIP_PATH_TRAVERSAL_BLOCKED: Entrada ZIP insegura bloqueada (${entryName}).`);
+      }
       if (uncompressedSize > 2 * 1024 * 1024) {
         skippedBinaryOrInvalid += 1;
         continue;
@@ -1208,19 +1225,106 @@ function loadDatabase(
   };
 }
 
-interface LocalOperatorActor {
+export type DeploymentMode = 'LOCAL_DESKTOP' | 'LOCAL_WEB' | 'REMOTE_DEPLOYMENT';
+
+export interface OperatorActor {
   id: string;
   name: string;
   email: string;
-  role: 'LOCAL_OPERATOR';
+  role: 'LOCAL_OPERATOR' | 'REMOTE_OPERATOR';
 }
 
-const DEFAULT_LOCAL_OPERATOR: LocalOperatorActor = {
+const DEFAULT_LOCAL_OPERATOR: OperatorActor = {
   id: 'local-workspace',
   name: 'Operador Local',
   email: 'local@winhood.local',
   role: 'LOCAL_OPERATOR',
 };
+
+const IPV4_OR_CIDR_REGEX =
+  /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\/(?:3[0-2]|[12]?\d))?$/;
+
+export function resolveTrustProxyConfig(
+  rawValue?: string | number | boolean
+): boolean | number | string | string[] {
+  if (rawValue === undefined || rawValue === null) return false;
+  if (typeof rawValue === 'boolean') return rawValue ? 1 : false;
+  if (typeof rawValue === 'number') {
+    return Number.isInteger(rawValue) && rawValue >= 1 && rawValue <= 10 ? rawValue : false;
+  }
+  const trimmed = String(rawValue).trim();
+  if (!trimmed) return false;
+  const lower = trimmed.toLowerCase();
+  if (lower === 'false' || lower === '0' || lower === 'off' || lower === 'no') return false;
+  if (lower === 'true') return 1;
+  if (lower === 'loopback' || lower === 'linklocal' || lower === 'uniquelocal') return lower;
+  if (/^\d+$/.test(trimmed)) {
+    const hops = Number.parseInt(trimmed, 10);
+    return hops >= 1 && hops <= 10 ? hops : false;
+  }
+  const parts = trimmed
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (
+    parts.length > 0 &&
+    parts.every((p) => IPV4_OR_CIDR_REGEX.test(p) || p === '::1' || p === 'loopback')
+  ) {
+    return parts;
+  }
+  return false;
+}
+
+export function resolveDeploymentMode(options?: {
+  deploymentMode?: DeploymentMode;
+  environment?: string;
+  host?: string;
+}): DeploymentMode {
+  const explicit = (options?.deploymentMode || process.env.WINHOOD_DEPLOYMENT_MODE || '')
+    .trim()
+    .toUpperCase();
+  if (explicit === 'LOCAL_DESKTOP' || explicit === 'LOCAL_WEB' || explicit === 'REMOTE_DEPLOYMENT') {
+    return explicit as DeploymentMode;
+  }
+  if (options?.environment === 'REMOTE_DEPLOYMENT') {
+    return 'REMOTE_DEPLOYMENT';
+  }
+  if (
+    options?.environment === 'ELECTRON_DESKTOP' ||
+    options?.environment === 'WINDOWS_PACKAGED' ||
+    process.env.WINHOOD_RUNTIME_ENV === 'ELECTRON_DESKTOP'
+  ) {
+    return 'LOCAL_DESKTOP';
+  }
+  const host = (options?.host || '').trim().toLowerCase();
+  const isLoopback = !host || host === '127.0.0.1' || host === 'localhost' || host === '::1';
+  if (!isLoopback && process.env.NODE_ENV === 'production') {
+    return 'REMOTE_DEPLOYMENT';
+  }
+  return 'LOCAL_WEB';
+}
+
+function constantTimeTokenMatch(provided: string, expected: string): boolean {
+  if (!provided || !expected) return false;
+  const a = crypto.createHash('sha256').update(provided, 'utf8').digest();
+  const b = crypto.createHash('sha256').update(expected, 'utf8').digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
+const HEAVY_JSON_UPLOAD_PATHS = new Set([
+  '/api/projects/extract-zip',
+  '/api/projects/upload',
+  '/api/analyze/sarif',
+]);
+
+interface AuditLogMetadata {
+  origin?: string;
+  deploymentMode?: DeploymentMode;
+  operationType?: string;
+  outcome?: 'SUCCESS' | 'DENIED' | 'FAILED';
+  failureReason?: string;
+  integrityState?: string;
+}
 
 function appendAuditLog(
   state: PersistentDatabaseState,
@@ -1228,12 +1332,24 @@ function appendAuditLog(
   entityType: string,
   entityId: string,
   details: string,
-  actorUser?: LocalOperatorActor | null
+  actorUser?: OperatorActor | null,
+  meta?: AuditLogMetadata
 ) {
   const nowIso = new Date().toISOString();
   const prevHash = state.auditLogs[0]?.integrityHash || 'GENESIS';
   const actorName = actorUser?.name || 'Sistema WinHood';
   const actorRole = actorUser?.role || 'SYSTEM';
+  const safeDetails = maskSecretsInText(details);
+  const metaParts: string[] = [];
+  if (meta?.deploymentMode) metaParts.push(`mode=${meta.deploymentMode}`);
+  if (meta?.origin) metaParts.push(`origin=${meta.origin}`);
+  if (meta?.operationType) metaParts.push(`op=${meta.operationType}`);
+  if (meta?.outcome) metaParts.push(`outcome=${meta.outcome}`);
+  if (meta?.failureReason) metaParts.push(`reason=${maskSecretsInText(meta.failureReason)}`);
+  if (meta?.integrityState) metaParts.push(`integrity=${meta.integrityState}`);
+  const enrichedDetails =
+    metaParts.length > 0 ? `${safeDetails} [${metaParts.join(' | ')}]` : safeDetails;
+
   const entry: AuditLogEntry = {
     id: `aud-${crypto.randomUUID().slice(0, 8)}`,
     timestamp: nowIso,
@@ -1242,14 +1358,21 @@ function appendAuditLog(
     action,
     entityType,
     entityId,
-    details,
-    integrityHash: computeSha256(`${prevHash}|${action}|${entityId}|${nowIso}`),
+    details: enrichedDetails,
+    integrityHash: computeSha256(
+      `${prevHash}|${action}|${entityId}|${actorRole}|${enrichedDetails}|${nowIso}`
+    ),
   };
   state.auditLogs.unshift(entry);
 }
 
 export async function createWinHoodApp(options?: {
   dataDir?: string;
+  deploymentMode?: DeploymentMode;
+  remoteApiToken?: string;
+  trustProxy?: string | number | boolean;
+  environment?: StartWinHoodServerOptions['environment'];
+  host?: string;
   rateLimits?: {
     ingestionMax?: number;
     analysisMax?: number;
@@ -1257,6 +1380,25 @@ export async function createWinHoodApp(options?: {
     windowMs?: number;
   };
 }) {
+  const deploymentMode = resolveDeploymentMode({
+    deploymentMode: options?.deploymentMode,
+    environment: options?.environment,
+    host: options?.host,
+  });
+  const remoteApiToken = (
+    options?.remoteApiToken ??
+    process.env.WINHOOD_REMOTE_API_TOKEN ??
+    ''
+  ).trim();
+  if (deploymentMode === 'REMOTE_DEPLOYMENT' && remoteApiToken.length < 32) {
+    throw new Error(
+      'REMOTE_DEPLOYMENT_TOKEN_REQUIRED: Modo REMOTE_DEPLOYMENT exige WINHOOD_REMOTE_API_TOKEN com no mínimo 32 caracteres de alta entropia.'
+    );
+  }
+  const remoteOperatorFingerprint = remoteApiToken
+    ? computeSha256(remoteApiToken).slice(0, 12)
+    : '';
+
   const dataDir = resolveWinHoodDataRoot(options?.dataDir);
   ensureWinHoodDirectories(dataDir);
   const isolatedArtifactsDir = path.join(dataDir, 'isolated_artifacts');
@@ -1265,7 +1407,10 @@ export async function createWinHoodApp(options?: {
   const totpService = new OptionalTotpService(dataDir);
 
   const app = express();
-  app.set('trust proxy', 1);
+  const trustProxyConfig = resolveTrustProxyConfig(
+    options?.trustProxy !== undefined ? options.trustProxy : process.env.WINHOOD_TRUST_PROXY
+  );
+  app.set('trust proxy', trustProxyConfig);
   const backupService = new ProjectBackupService(dataDir);
   const rateLimitWindowMs = options?.rateLimits?.windowMs ?? 60_000;
   const ingestionRateLimiter = createInMemoryRateLimiter({
@@ -1284,9 +1429,15 @@ export async function createWinHoodApp(options?: {
     maxRequests: options?.rateLimits?.backupMax ?? 30,
   });
   app.disable('x-powered-by');
-  // Limite global conservador (2MB) contra DoS; rotas autenticadas de upload usam heavyUploadJsonParser (50MB).
+  // Limite global conservador (2MB) contra DoS; endpoints dedicados de upload pesado usam heavyUploadJsonParser (50MB) sem conflito.
   const heavyUploadJsonParser = express.json({ limit: '50mb' });
-  app.use(express.json({ limit: '2mb' }));
+  const defaultJsonParser = express.json({ limit: '2mb' });
+  app.use((req, res, next) => {
+    if (HEAVY_JSON_UPLOAD_PATHS.has(req.path)) {
+      return next();
+    }
+    return defaultJsonParser(req, res, next);
+  });
   app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
   const loaded = loadDatabase(dataDir, dbManager);
@@ -1428,7 +1579,7 @@ export async function createWinHoodApp(options?: {
   const getRequestActor = (
     _req?: express.Request,
     _res?: express.Response
-  ): LocalOperatorActor => DEFAULT_LOCAL_OPERATOR;
+  ): OperatorActor => DEFAULT_LOCAL_OPERATOR;
 
   const isHostedPreviewRequest = (reqObj: express.Request | undefined): boolean => {
     if (!reqObj) return false;
@@ -1586,7 +1737,9 @@ export async function createWinHoodApp(options?: {
     next();
   });
 
-  // Security CORS + Telemetry + Optional TOTP 2FA Gate (Unrestricted Local Access when TOTP is disabled)
+  const remoteAuthFailures = new Map<string, { count: number; lockedUntil: number }>();
+
+  // Security CORS + Telemetry + Deployment Mode Guard + Optional TOTP 2FA Gate
   app.use('/api', (req, res, next) => {
     const rawOrigin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
     const canonicalCorsOrigin = resolveAllowedCorsOrigin(rawOrigin);
@@ -1622,12 +1775,101 @@ export async function createWinHoodApp(options?: {
       }
     });
 
-    // When Optional TOTP 2FA is disabled, grant immediate unrestricted local access to all routes.
+    const reqPath = req.path;
+    const clientIp = String(req.ip || req.socket?.remoteAddress || 'unknown');
+    const requestOriginLabel = rawOrigin || clientIp;
+
+    // Default local operator for LOCAL_DESKTOP / LOCAL_WEB
+    (req as any).winhoodActor = DEFAULT_LOCAL_OPERATOR;
+    (req as any).deploymentMode = deploymentMode;
+
+    // Remote deployment guard: fail-closed bearer authentication + brute-force lockout + audit logging
+    if (deploymentMode === 'REMOTE_DEPLOYMENT') {
+      const publicRemotePaths = new Set(['/health', '/openapi.json']);
+      if (!publicRemotePaths.has(reqPath)) {
+        const failState = remoteAuthFailures.get(clientIp);
+        if (failState && failState.lockedUntil > Date.now()) {
+          const retryAfterSeconds = Math.max(
+            1,
+            Math.ceil((failState.lockedUntil - Date.now()) / 1000)
+          );
+          res.setHeader('Retry-After', String(retryAfterSeconds));
+          appendAuditLog(
+            db,
+            'REMOTE_AUTH_LOCKED',
+            'SECURITY',
+            reqPath,
+            `Tentativa remota bloqueada por brute-force lockout em ${req.method} ${reqPath}`,
+            null,
+            {
+              deploymentMode,
+              origin: requestOriginLabel,
+              operationType: req.method,
+              outcome: 'DENIED',
+              failureReason: 'BRUTE_FORCE_LOCKOUT',
+              integrityState: loaded.integrityStatus,
+            }
+          );
+          saveDatabase(db);
+          return res.status(429).json({
+            error: 'REMOTE_AUTH_LOCKED',
+            code: 'REMOTE_AUTH_LOCKED',
+            retryAfterSeconds,
+            message: `Acesso remoto temporariamente bloqueado após falhas repetidas. Tente novamente em ${retryAfterSeconds}s.`,
+          });
+        }
+
+        const authHeader = String(req.headers.authorization || '').trim();
+        const bearerToken = authHeader.toLowerCase().startsWith('bearer ')
+          ? authHeader.slice(7).trim()
+          : '';
+        if (!constantTimeTokenMatch(bearerToken, remoteApiToken)) {
+          const prevCount = failState && failState.lockedUntil <= Date.now() ? failState.count : 0;
+          const nextCount = prevCount + 1;
+          const lockedUntil = nextCount >= 5 ? Date.now() + 5 * 60_000 : 0;
+          remoteAuthFailures.set(clientIp, { count: nextCount, lockedUntil });
+          appendAuditLog(
+            db,
+            'REMOTE_AUTH_DENIED',
+            'SECURITY',
+            reqPath,
+            `Acesso remoto rejeitado em ${req.method} ${reqPath} (token ausente ou inválido).`,
+            null,
+            {
+              deploymentMode,
+              origin: requestOriginLabel,
+              operationType: req.method,
+              outcome: 'DENIED',
+              failureReason: bearerToken ? 'INVALID_REMOTE_TOKEN' : 'MISSING_REMOTE_TOKEN',
+              integrityState: loaded.integrityStatus,
+            }
+          );
+          saveDatabase(db);
+          return res.status(401).json({
+            error: 'REMOTE_AUTH_REQUIRED',
+            code: 'REMOTE_AUTH_REQUIRED',
+            message:
+              'Modo REMOTE_DEPLOYMENT exige autenticação Bearer válida (WINHOOD_REMOTE_API_TOKEN).',
+          });
+        }
+
+        remoteAuthFailures.delete(clientIp);
+        const remoteActor: OperatorActor = {
+          id: `remote-operator:${remoteOperatorFingerprint}`,
+          name: `Operador Remoto (${remoteOperatorFingerprint})`,
+          email: 'remote@winhood.local',
+          role: 'REMOTE_OPERATOR',
+        };
+        (req as any).winhoodActor = remoteActor;
+        (req as any).remoteAuthenticated = true;
+      }
+    }
+
+    // When Optional TOTP 2FA is disabled, grant immediate unrestricted local access (or authorized remote access).
     if (!totpService.isEnabled()) {
       return next();
     }
 
-    const reqPath = req.path;
     const publicWhenTotpEnabled = new Set([
       '/health',
       '/openapi.json',
@@ -1672,12 +1914,63 @@ export async function createWinHoodApp(options?: {
     return next();
   });
 
-  // Unrestricted Local Workspace: zero RBAC restrictions on local operations
+  // Unrestricted Local Workspace (LOCAL_DESKTOP / LOCAL_WEB) + Fail-Closed Mutation Guard in REMOTE_DEPLOYMENT
   const requireWritePermission = (
-    _res?: express.Response,
-    _req?: express.Request,
-    _scope?: string
-  ): boolean => true;
+    res?: express.Response,
+    req?: express.Request,
+    scope?: string
+  ): boolean => {
+    if (deploymentMode !== 'REMOTE_DEPLOYMENT') {
+      return true;
+    }
+    const isRemoteAuth = Boolean((req as any)?.remoteAuthenticated);
+    if (!isRemoteAuth) {
+      appendAuditLog(
+        db,
+        'REMOTE_WRITE_DENIED',
+        'SECURITY',
+        scope || req?.path || 'mutation',
+        `Mutação bloqueada em REMOTE_DEPLOYMENT sem autenticação remota válida (${scope || 'write'}).`,
+        null,
+        {
+          deploymentMode,
+          origin: String(req?.headers?.origin || req?.ip || 'unknown'),
+          operationType: req?.method || 'WRITE',
+          outcome: 'DENIED',
+          failureReason: 'REMOTE_WRITE_UNAUTHORIZED',
+          integrityState: loaded.integrityStatus,
+        }
+      );
+      saveDatabase(db);
+      if (res && !res.headersSent) {
+        res.status(403).json({
+          error: 'REMOTE_WRITE_FORBIDDEN',
+          code: 'REMOTE_WRITE_FORBIDDEN',
+          message: 'Operação de escrita negada em modo REMOTE_DEPLOYMENT.',
+        });
+      }
+      return false;
+    }
+    const actor = ((req as any)?.winhoodActor as OperatorActor | undefined) || null;
+    if (scope && req) {
+      appendAuditLog(
+        db,
+        'REMOTE_WRITE_AUTHORIZED',
+        'SECURITY',
+        scope,
+        `Mutação autorizada em ${req.method} ${req.path}`,
+        actor,
+        {
+          deploymentMode,
+          origin: String(req.headers.origin || req.ip || 'unknown'),
+          operationType: req.method,
+          outcome: 'SUCCESS',
+          integrityState: loaded.integrityStatus,
+        }
+      );
+    }
+    return true;
+  };
 
   // 1. Health & Observability
   app.get('/api/health', (_req, res) => {
@@ -1685,12 +1978,17 @@ export async function createWinHoodApp(options?: {
       status: 'ONLINE',
       healthStatus: 'HEALTHY',
       ready: true,
-      accessMode: 'UNRESTRICTED_LOCAL',
+      deploymentMode,
+      accessMode:
+        deploymentMode === 'REMOTE_DEPLOYMENT'
+          ? 'REMOTE_TOKEN_PROTECTED'
+          : 'UNRESTRICTED_LOCAL',
       totpEnabled: totpService.isEnabled(),
+      trustProxyEnabled: trustProxyConfig !== false,
       pid: process.pid,
       service: 'WinHood Software Benchmark & Quality Analyzer API',
       timestamp: new Date().toISOString(),
-      dataDir,
+      dataDir: deploymentMode === 'REMOTE_DEPLOYMENT' ? '[RESTRICTED_IN_REMOTE_MODE]' : dataDir,
       storageEngine: PersistentDatabaseManager.STORAGE_KIND,
       schemaVersion: PersistentDatabaseManager.SCHEMA_VERSION,
       storageIntegrity: loaded.integrityStatus,
@@ -2425,12 +2723,40 @@ export async function createWinHoodApp(options?: {
     if (!requireWritePermission(res, req, 'projects:write')) return;
     const { zipBase64 } = (req.body || {}) as { zipBase64?: string };
     if (!zipBase64 || typeof zipBase64 !== 'string') {
-      return res.status(400).json({ error: 'Pacote .zip em base64 ausente ou inválido.' });
+      return res.status(400).json({
+        error: 'INVALID_BASE64_PAYLOAD',
+        message: 'Pacote .zip em base64 ausente ou inválido.',
+      });
+    }
+    const compactB64 = zipBase64.replace(/\s+/g, '');
+    if (
+      compactB64.length === 0 ||
+      compactB64.length % 4 !== 0 ||
+      !/^[A-Za-z0-9+/]+={0,2}$/.test(compactB64)
+    ) {
+      return res.status(400).json({
+        error: 'INVALID_BASE64_PAYLOAD',
+        message: 'Conteúdo Base64 inválido ou corrompido.',
+      });
     }
     try {
-      const zipBuffer = Buffer.from(zipBase64, 'base64');
+      const zipBuffer = Buffer.from(compactB64, 'base64');
       if (zipBuffer.length < 22 || zipBuffer.length > 40 * 1024 * 1024) {
-        return res.status(400).json({ error: 'Tamanho do arquivo .zip inválido ou acima do limite (40MB).' });
+        return res.status(400).json({
+          error: 'ZIP_SIZE_INVALID',
+          message: 'Tamanho do arquivo .zip inválido ou acima do limite (40MB).',
+        });
+      }
+      const isZipSignature =
+        zipBuffer[0] === 0x50 &&
+        zipBuffer[1] === 0x4b &&
+        ((zipBuffer[2] === 0x03 && zipBuffer[3] === 0x04) ||
+          (zipBuffer[2] === 0x05 && zipBuffer[3] === 0x06));
+      if (!isZipSignature) {
+        return res.status(400).json({
+          error: 'ZIP_EXTRACTION_FAILED',
+          message: 'Assinatura binária de arquivo ZIP inválida ou corrompida.',
+        });
       }
       const { filesMap: extractedMap, skippedCount } = extractZipBufferToFilesMap(zipBuffer);
       return res.json({
@@ -2972,7 +3298,7 @@ export async function createWinHoodApp(options?: {
       return res.status(404).json({ error: 'Projeto informado para importação não encontrado.' });
     }
 
-    let filesMap: Record<string, string> = {};
+    const filesMap: Record<string, string> = {};
     const branch = sanitizedBranch;
     let realCommitSha = '';
     let treeSha = '';
@@ -7253,7 +7579,7 @@ export async function createWinHoodApp(options?: {
     );
     const safeProjectKey = (params.projectKey || '').replace(/[^a-zA-Z0-9._:-]/g, '');
     const safeOrg = (params.organization || '').replace(/[^a-zA-Z0-9._-]/g, '');
-    let safeOrigin = 'https://sonarcloud.io';
+    let safeOrigin: string;
     try {
       safeOrigin = validateSonarServerOrigin(params.serverUrl, params.platform);
     } catch {
@@ -9176,7 +9502,19 @@ export async function createWinHoodApp(options?: {
   app.use(
     '/api',
     (err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-      res.status(err?.status || 500).json({
+      if (err?.type === 'entity.too.large' || err?.status === 413) {
+        return res.status(413).json({
+          error: 'PAYLOAD_TOO_LARGE',
+          message: 'Payload excede o limite máximo permitido para este endpoint.',
+        });
+      }
+      if (err instanceof SyntaxError && (err as { status?: number }).status === 400) {
+        return res.status(400).json({
+          error: 'INVALID_JSON_PAYLOAD',
+          message: 'Corpo JSON malformado.',
+        });
+      }
+      return res.status(err?.status || 500).json({
         error: 'INTERNAL_API_ERROR',
         message: err?.message || 'Erro interno no servidor WinHood.',
       });
@@ -9187,6 +9525,8 @@ export async function createWinHoodApp(options?: {
     app,
     dbManager,
     totpService,
+    deploymentMode,
+    trustProxyConfig,
     getDb: () => db,
   };
 }
@@ -9196,6 +9536,9 @@ export interface StartWinHoodServerOptions {
   host?: string;
   port?: number;
   distPath?: string;
+  deploymentMode?: DeploymentMode;
+  remoteApiToken?: string;
+  trustProxy?: string | number | boolean;
   environment?:
     | 'AI_STUDIO_PREVIEW'
     | 'LOCAL_WEB_DEVELOPMENT'
@@ -9222,6 +9565,11 @@ export async function startServer(
   const dataDir = resolveWinHoodDataRoot(options?.dataDir);
   const { app } = await createWinHoodApp({
     dataDir,
+    deploymentMode: options?.deploymentMode,
+    remoteApiToken: options?.remoteApiToken,
+    trustProxy: options?.trustProxy,
+    environment: options?.environment,
+    host: options?.host,
   });
 
   const isElectronDesktop =

@@ -187,10 +187,10 @@ export function generateCiSummaryReport(input) {
     `| NPM Vulnerability Governance (\`audit\`) | \`${linuxSteps.audit}\` | \`node scripts/verify-npm-audit.mjs\` (${input.auditStatus || 'status from step output'}) |`,
     `| Browser-Safe Imports Guardrail (\`browser_imports\`) | \`${linuxSteps.browser_imports}\` | \`npm run check:browser-imports\` + \`npm run test:browser-imports\` |`,
     `| TypeScript Typecheck (\`typecheck\`) | \`${linuxSteps.typecheck}\` | \`npm run typecheck\` (\`tsc --noEmit\`) |`,
-    `| TypeScript Strict (\`lint\`) | \`${linuxSteps.lint}\` | \`npm run lint\` (\`tsc --noEmit\`) |`,
+    `| ESLint Quality & Security (\`lint\`) | \`${linuxSteps.lint}\` | \`npm run lint\` (\`eslint .\`) |`,
     `| Production Frontend Build (\`build\`) | \`${linuxSteps.build}\` | \`npm run build\` (Vite + browser-safe import gate) |`,
     `| Benchmark Wizard & A/B E2E (\`wizard_tests\`) | \`${linuxSteps.wizard_tests}\` | \`src/shared/wizardAndBrowserSafety.test.ts\` |`,
-    `| OAuth, Security & Keystore Suite (\`security_tests\`) | \`${linuxSteps.security_tests}\` | \`npm run test:security\` |`,
+    `| Security, Optional TOTP & Keystore Suite (\`security_tests\`) | \`${linuxSteps.security_tests}\` | \`npm run test:security\` |`,
     `| Coverage Gate c8 (\`coverage\`) | \`${linuxSteps.coverage}\` | ${covEvidence} |`,
     `| Coverage Artifact | \`${coverageArtifact.status}\` | ${coverageArtifact.detail} |`,
     `| CLI Determinism (\`determinism\`) | \`${linuxSteps.determinism}\` | Consecutive SHA-256 CLI output equality |`,
@@ -205,9 +205,9 @@ export function generateCiSummaryReport(input) {
     `| Lockfile Integrity (\`lockfile\`) | \`${windowsSteps.lockfile}\` | \`package-lock.json\` verified on Windows |`,
     `| Deterministic Install (\`install\`) | \`${windowsSteps.install}\` | \`npm ci --ignore-scripts\` + Electron runtime |`,
     `| Browser-Safe Imports (\`browser_imports\`) | \`${windowsSteps.browser_imports}\` | \`npm run check:browser-imports\` + \`npm run test:browser-imports\` |`,
-    `| TypeScript Strict (\`lint\`) | \`${windowsSteps.lint}\` | \`npm run typecheck && npm run lint\` on win32-x64 |`,
+    `| Typecheck & ESLint (\`lint\`) | \`${windowsSteps.lint}\` | \`npm run typecheck && npm run lint\` on win32-x64 |`,
     `| Production Frontend Build (\`build\`) | \`${windowsSteps.build}\` | \`npm run build\` on win32-x64 |`,
-    `| Multiplatform Unit/Desktop/OAuth Tests (\`unit_tests\`) | \`${windowsSteps.unit_tests}\` | \`npm test\` |`,
+    `| Multiplatform Unit/Desktop/Security Tests (\`unit_tests\`) | \`${windowsSteps.unit_tests}\` | \`npm test\` |`,
     `| Desktop Bundle Build (\`build_desktop\`) | \`${windowsSteps.build_desktop}\` | \`npm run build:desktop\` |`,
     `| Unpacked Win32 Electron (\`pack_win\`) | \`${windowsSteps.pack_win}\` | \`npm run pack:win\` |`,
     `| Inno Setup Compile (\`inno_compile\`) | \`${windowsSteps.inno_compile}\` | ${winInstallerArtifact.detail} |`,
@@ -330,7 +330,7 @@ export function runSelfTest() {
   assert.equal(s3.overallStatus, 'FAILED');
   assert.equal(s3.windowsJobStatus, 'SKIPPED');
   assert.equal(s3.linuxSteps.lint, 'SKIPPED');
-  assert.ok(!s3.markdown.includes('| TypeScript Strict (`lint`) | `PASSED`'), 'Must never hardcode lint as PASSED');
+  assert.ok(!s3.markdown.includes('| ESLint Quality & Security (`lint`) | `PASSED`'), 'Must never hardcode lint as PASSED');
 
   // Scenario 4: Failure before coverage (browser_imports fails -> build & coverage SKIPPED)
   const s4 = generateCiSummaryReport({

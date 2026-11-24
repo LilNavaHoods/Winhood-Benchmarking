@@ -121,7 +121,7 @@ export function enrichLegacyOrExternalFinding(
               ? 15
               : 10;
 
-  let defaultMqrImpacts: MqrCategoryImpact[] = [];
+  let defaultMqrImpacts: MqrCategoryImpact[];
   if (partial.mqrImpacts && partial.mqrImpacts.length > 0) {
     defaultMqrImpacts = partial.mqrImpacts;
   } else if (category === 'SECRETS' || ruleLower.includes('secret') || ruleLower.includes('credential')) {
@@ -852,7 +852,11 @@ export function calculateDeterministicScoreCard(
       case 'database':
         return m.dbSchemaIssues > 0;
       case 'reliability':
-        return m.functionalTestsTotal > 0 || m.testCoveragePercent > 0 || m.bugs > 0;
+        return (
+          m.functionalTestsTotal > 0 ||
+          (typeof m.testCoveragePercent === 'number' && m.testCoveragePercent > 0) ||
+          m.bugs > 0
+        );
       case 'installation':
         return input.hasCleanSandboxUninstall !== null;
       case 'compatibility':
@@ -1090,12 +1094,18 @@ export function calculateDeterministicScoreCard(
 
   // 7. RELIABILITY metric thresholds
   const hasMeasuredTests = m.functionalTestsTotal > 0;
+  const measuredTestCoverage =
+    typeof m.testCoveragePercent === 'number' && Number.isFinite(m.testCoveragePercent)
+      ? m.testCoveragePercent
+      : null;
   const hasMeasuredCoverage =
-    input.metricProvenance?.testCoveragePercent?.state === 'MEASURED' ||
-    m.testCoveragePercent > 0;
+    measuredTestCoverage !== null &&
+    (input.metricProvenance?.testCoveragePercent?.state === 'MEASURED' ||
+      measuredTestCoverage > 0);
 
   if (hasMeasuredTests || hasMeasuredCoverage) {
-    const coverageRatio = Math.min(1, m.testCoveragePercent / 85);
+    const effectiveCoveragePct = measuredTestCoverage ?? 0;
+    const coverageRatio = Math.min(1, effectiveCoveragePct / 85);
     const activeFactor =
       hasMeasuredTests && hasMeasuredCoverage
         ? 0.5 * passRatio + 0.5 * coverageRatio
@@ -1108,12 +1118,12 @@ export function calculateDeterministicScoreCard(
       pushReason('reliability', {
         impactType: 'METRIC_THRESHOLD',
         scoreDelta: reliabilityCoverageGap,
-        severity: m.testCoveragePercent < 50 ? 'HIGH' : 'LOW',
+        severity: effectiveCoveragePct < 50 ? 'HIGH' : 'LOW',
         ruleId: 'metric.reliability.coverage-and-pass-rate',
-        title: `Cobertura de testes verificada (${m.testCoveragePercent.toFixed(1)}%) e taxa de aprovação funcional (${Math.round(passRatio * 100)}%)`,
-        whyExplanation: `O modelo determinístico de Confiabilidade pondera as métricas reais medidas (cobertura ${m.testCoveragePercent.toFixed(1)}% vs 85% e taxa funcional ${(passRatio * 100).toFixed(1)}%), resultando em ajuste de ${reliabilityCoverageGap.toFixed(2)} pts sobre o teto 5.00.`,
+        title: `Cobertura de testes verificada (${effectiveCoveragePct.toFixed(1)}%) e taxa de aprovação funcional (${Math.round(passRatio * 100)}%)`,
+        whyExplanation: `O modelo determinístico de Confiabilidade pondera as métricas reais medidas (cobertura ${effectiveCoveragePct.toFixed(1)}% vs 85% e taxa funcional ${(passRatio * 100).toFixed(1)}%), resultando em ajuste de ${reliabilityCoverageGap.toFixed(2)} pts sobre o teto 5.00.`,
         remediationSummary: 'Ampliar testes unitários e de integração para atingir >= 85% de cobertura e resiliência.',
-        remediationEffortMinutes: m.testCoveragePercent < 80 ? 45 : 10,
+        remediationEffortMinutes: effectiveCoveragePct < 80 ? 45 : 10,
       });
     }
   } else if (reasonsByCat.reliability.length === 0) {
@@ -1655,21 +1665,22 @@ export function calculateDeterministicScoreCard(
       threshold: '>= 80.0%',
       actualValue: !isEligibleForScoring
         ? 'N/A'
-        : hasMeasuredCoverage
-          ? `${m.testCoveragePercent.toFixed(1)}%`
+        : hasMeasuredCoverage && measuredTestCoverage !== null
+          ? `${measuredTestCoverage.toFixed(1)}%`
           : 'NOT_MEASURED',
       status: !isEligibleForScoring
         ? 'NOT_EVALUATED'
-        : !hasMeasuredCoverage
+        : !hasMeasuredCoverage || measuredTestCoverage === null
           ? 'NOT_EVALUATED'
-          : m.testCoveragePercent < 80.0
+          : measuredTestCoverage < 80.0
             ? 'FAILED'
             : 'PASSED',
-      failureReason: !hasMeasuredCoverage
-        ? 'Relatório real de cobertura de testes ausente (NOT_MEASURED) — condição obrigatória não avaliada.'
-        : m.testCoveragePercent < 80.0
-          ? `Cobertura de testes (${m.testCoveragePercent.toFixed(1)}%) abaixo do mínimo exigido pelo Quality Gate (80.0%).`
-          : undefined,
+      failureReason:
+        !hasMeasuredCoverage || measuredTestCoverage === null
+          ? 'Relatório real de cobertura de testes ausente (NOT_MEASURED) — condição obrigatória não avaliada.'
+          : measuredTestCoverage < 80.0
+            ? `Cobertura de testes (${measuredTestCoverage.toFixed(1)}%) abaixo do mínimo exigido pelo Quality Gate (80.0%).`
+            : undefined,
     },
   ];
 
@@ -1682,7 +1693,7 @@ export function calculateDeterministicScoreCard(
     reliabilityRating,
     duplicatedLinesPercent: m.duplicatedLinesPercent,
     hasMeasuredCoverage,
-    testCoveragePercent: m.testCoveragePercent,
+    testCoveragePercent: measuredTestCoverage ?? 0,
     scopeCoveragePercent: hasAnyAssessedCategory ? input.coveragePercent : 0,
   });
 

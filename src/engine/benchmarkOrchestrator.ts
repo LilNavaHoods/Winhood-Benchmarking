@@ -1212,7 +1212,7 @@ export function executeBenchmarkRunOrchestration(params: {
   const comparabilityManifests: Record<string, import('../types/benchmark').ComparabilityManifest> = {};
   for (const sw of params.softwares) {
     const veracity = veracityResults.find((v) => v.softwareId === sw.id);
-    const eligibleFiles = Object.keys(sw.sourceFilesContent || {}).sort();
+    const eligibleFiles = Object.keys(sw.sourceFilesContent || {}).sort((a, b) => a.localeCompare(b));
     comparabilityManifests[sw.id] = buildComparabilityManifest({
       projectId: params.projectId,
       sourceRepository: sw.repositoryUrl || sw.officialUrl || `local://${sw.id}`,
@@ -1260,7 +1260,7 @@ export function executeBenchmarkRunOrchestration(params: {
   });
   comparabilityReport.comparabilityClassification = benchmarkMatchDecision.comparabilityClassification;
 
-  let referenceSnapshotsUsed: import('../types/benchmark').ReferenceSnapshotRecord[] = [];
+  let referenceSnapshotsUsed: import('../types/benchmark').ReferenceSnapshotRecord[];
   try {
     referenceSnapshotsUsed = new ReferenceRegistry().listSnapshots();
   } catch {

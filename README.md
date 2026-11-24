@@ -1,6 +1,7 @@
 # WinHood — Independent Software Audit & Comparative Benchmarking Platform
 
-![Test Coverage](https://img.shields.io/badge/coverage-96.4%25-brightgreen)
+![Core Audited Coverage](https://img.shields.io/badge/core%20audited%20(6%20domains)-83.98%25%20L%20%7C%2090.14%25%20F%20%7C%2095.72%25%20B-brightgreen)
+![All 13 Domains Coverage](https://img.shields.io/badge/all%2013%20domains%20(all%3Atrue)-71.10%25%20L%20%7C%2085.82%25%20B-blue)
 ![Critical Motors Coverage](https://img.shields.io/badge/scoring%20%7C%20evidence%20%7C%20comparability-%E2%89%A595%25-success)
 ![Open Standards](https://img.shields.io/badge/standards-SARIF%202.1.0%20%7C%20CWE%20%7C%20OWASP%20%7C%20CVSS%20%7C%20CycloneDX%20%7C%20SPDX-blue)
 ![Version](https://img.shields.io/badge/version-4.4.0-0ea5e9)
@@ -52,26 +53,33 @@ WinHood operates strictly as an **independent audit, evidence, and comparative b
   - [`docs/CI_INTEGRATION.md`](./docs/CI_INTEGRATION.md) — Canonical CI exit codes (`0..4`), GitHub Action, GitLab Component, Jenkins Shared Library, and signed webhook validation in Node.js, Python, and Go.
   - [`RULE_CATALOG.md`](./RULE_CATALOG.md) & [`CHANGELOG_RULES.md`](./CHANGELOG_RULES.md) — Public catalog of rules and SemVer policy.
   - [`CHANGELOG.md`](./CHANGELOG.md) & [`docs/MIGRATION.md`](./docs/MIGRATION.md) — Iteration changelog and configuration migration guide.
-  - [`SECURITY_ARCHITECTURE.md`](./SECURITY_ARCHITECTURE.md) — Auth, CSRF, RBAC, DPAPI/KMS, SSRF guard, upload safety, and sandbox isolation.
+  - [`SECURITY_ARCHITECTURE.md`](./SECURITY_ARCHITECTURE.md) — Local-First access model, optional TOTP 2FA, explicit remote deployment guard, DPAPI/KMS envelope keystore, SSRF guard, upload safety, and sandbox isolation.
+  - [`ISSUE_REMEDIATION_REPORT.md`](./ISSUE_REMEDIATION_REPORT.md) — Complete issue remediation audit trail, real per-domain coverage table, SonarCloud baseline/remediation matrix, and CI/CD verification status.
 
 ---
 
-## 3. Running & Verifying
+## 3. Running, Verifying & Measured Coverage
 
 ```bash
-# Install dependencies
-npm install
+# Install dependencies deterministically
+npm ci --ignore-scripts
 
 # Verify browser-safe frontend dependency graph (zero Node.js imports)
 npm run check:browser-imports
 
-# TypeScript check
+# TypeScript strict type checking (strict: true)
+npm run typecheck
+
+# ESLint static quality & security rules
 npm run lint
 
-# Run all unit, security, analyzer, gate, CLI, API & IDE extension integration tests
+# Dependency vulnerability governance audit
+node scripts/verify-npm-audit.mjs
+
+# Run all unit, security, analyzer, gate, CLI, API & IDE extension tests
 npm test
 
-# Run test suite with coverage gate (>=80% global, >=95% in src/scoring, src/evidence, src/comparability)
+# Run full test suite with official 13-domain c8 Coverage Gate (all: true) & LCOV generation
 npm run test:coverage
 
 # Generate audit reports in all 4 formats (PDF, HTML, SARIF, JSON)
@@ -84,35 +92,32 @@ npx tsx cli/winhood-cli.ts report --format=json --path ./src/gate --out report.j
 npm run dev
 ```
 
+### Official Measured Coverage Scope (`npm run test:coverage`, `c8 + v8-to-istanbul`, `all: true`)
+
+| Scope | Eligible Files | Lines | Functions | Branches | Gate Threshold | Status |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Core Audited Engine (6 domains)** | 19 | **83.98%** | **90.14%** | **95.72%** | ≥80% L / ≥80% F / ≥75% B | **PASSED** |
+| **Critical Motors (`src/scoring`, `src/evidence`, `src/comparability`)** | 4 | **100.00%** | **100.00%** | **98.08%–100%** | ≥95% L / ≥95% F / ≥95% B | **PASSED** |
+| **All 13 Official Domains Aggregate** | 83 | **71.10%** | **59.53%** | **85.82%** | 12/13 domains meet domain targets (`src/components/` interactive DOM handlers tracked honestly in `coverage/coverage-summary.json`) | **REPORTED** |
+
+> All eligible source files remain in the coverage denominator (`all: true`, 0 unexecuted files). Non-empty `coverage/lcov.info` and `coverage/index.html` artifacts are enforced before gate approval.
+
 ---
 
-## 4. One-Time Admin Setup — GitHub Social Login (OAuth 2.0 + PKCE S256)
+## 4. Access Model: Unrestricted Local-First + Optional TOTP 2FA & Explicit Remote Deployment
 
-End users authenticate directly via GitHub in the browser by clicking **Entrar ou cadastrar com GitHub** (same-tab redirect to `/api/auth/github/oauth/start`), without ever creating a PAT, typing a GitHub password, or supplying a Client ID/Client Secret.
+### Local-First Mode (`LOCAL_DESKTOP` / `LOCAL_WEB`, Default)
+WinHood opens directly into the full workspace with **unrestricted local access**:
+- No account registration, login screen, password, PIN, OAuth, PAT, Device Flow, WebAuthn, or Windows Hello is required.
+- **Optional TOTP 2FA (RFC-6238)** can be enabled or disabled directly from the top bar whenever the local operator wants an extra session lock.
 
-### Step-by-Step Administrator Configuration
-1. Open **GitHub Developer Settings** (`https://github.com/settings/developers` → **OAuth Apps** → **New OAuth App**).
-2. Fill in **Homepage URL** and **Authorization callback URL** for your deployment scenario:
-   - **Local Development (`npm run dev`):**
-     - Homepage URL: `http://localhost:3000`
-     - Authorization callback URL: `http://localhost:3000/api/auth/github/oauth/callback`
-   - **Production / Cloud (HTTPS required):**
-     - Homepage URL: `https://<your-domain>`
-     - Authorization callback URL: `https://<your-domain>/api/auth/github/oauth/callback`
-     - Set `NODE_ENV=production`, `APP_URL=https://<your-domain>` (or explicit `WINHOOD_GITHUB_OAUTH_CALLBACK_URL`), and `WINHOOD_TRUST_PROXY=true` only when behind a trusted HTTPS reverse proxy.
-   - **Desktop Installation (Electron — loopback server):**
-     - Homepage URL: `http://127.0.0.1:3000` (or `http://localhost:3000` when using a fixed local port)
-     - Authorization callback URL: `http://127.0.0.1:3000/api/auth/github/oauth/callback`
-     - In Electron Desktop, the administrator may store the OAuth App credentials either via environment variables or once through **Ferramentas & Integrações → GitHub OAuth Admin** (encrypted at rest via `AES-256-GCM` / OS keystore).
-3. Copy the generated **Client ID** and generate a new **Client Secret** in GitHub.
-4. Configure credentials on the server (choose one):
-   - **Environment variables (recommended for servers/containers):** set `WINHOOD_GITHUB_OAUTH_CLIENT_ID` and `WINHOOD_GITHUB_OAUTH_CLIENT_SECRET` in `.env` or your secret manager (never prefix with `VITE_*` and never commit secrets).
-   - **Admin Panel Vault:** sign in as an administrator (`ADMIN`) and save them in **Ferramentas & Integrações → GitHub OAuth Admin**.
-5. **Restart the server** after updating `.env` or environment variables (`npm run dev` / `npm start` / systemd / container restart).
-6. **Validate & Test OAuth:**
-   - Check `GET /api/auth/github/oauth/status` (must return `"configured": true` and the expected `callbackUrl`, without ever returning `clientSecret`).
-   - Open the login modal and click **Entrar ou cadastrar com GitHub** (or click **Verificar Conexão** in the Admin Panel) to confirm the browser redirects to `https://github.com/login/oauth/authorize`, returns to `/api/auth/github/oauth/callback`, and creates an authenticated `HttpOnly` session.
-7. **Optional Sign-up Policy:** set `WINHOOD_GITHUB_ALLOW_SIGNUP=false` to restrict GitHub social login to pre-existing linked accounts.
+### Explicit Remote Deployment Mode (`REMOTE_DEPLOYMENT`)
+When hosting WinHood outside a local workstation, configure explicit fail-closed protection via environment variables (see [`.env.example`](./.env.example)):
+1. Set `WINHOOD_DEPLOYMENT_MODE=REMOTE_DEPLOYMENT`.
+2. Set `WINHOOD_REMOTE_API_TOKEN` to a high-entropy secret (`>= 32` characters). The server refuses to start in `REMOTE_DEPLOYMENT` if this token is absent or weak.
+3. Clients authenticate with `Authorization: Bearer <WINHOOD_REMOTE_API_TOKEN>` (validated in constant time via SHA-256 + `crypto.timingSafeEqual`, with per-IP brute-force lockout after 5 failed attempts).
+4. Set `WINHOOD_TRUST_PROXY=false` by default; only enable an explicit hop count (e.g. `1`), `loopback`, or trusted IP/CIDR list when behind a verified reverse proxy.
+5. Set `WINHOOD_KEYSTORE_MASTER_SECRET` (`>= 32` bytes) in server/container environments without native OS keystore integration.
 
 ---
 
@@ -146,17 +151,19 @@ WinHood enforces a strict compile-time and CI boundary between browser code and 
 
 ---
 
-## 7. Installation, Authentication & Troubleshooting
+## 7. Installation, Deployment & Troubleshooting
 
 - **Install & Verify Locally:**
   ```bash
-  npm ci
+  npm ci --ignore-scripts
   npm run check:browser-imports
   npm run typecheck
+  npm run lint
   npm run build
   npm test
+  npm run test:coverage
   ```
-- **GitHub OAuth shows "Login com GitHub ainda não está habilitado":** the server does not have `WINHOOD_GITHUB_OAUTH_CLIENT_ID` and `WINHOOD_GITHUB_OAUTH_CLIENT_SECRET` configured yet. Follow Section 4 and restart the server.
-- **`redirect_uri_mismatch` on GitHub:** the callback URL registered in GitHub Developer Settings must match `WINHOOD_GITHUB_OAUTH_CALLBACK_URL` (or `<origin>/api/auth/github/oauth/callback`) character-for-character, with no query string or fragment.
-- **Invalid or expired OAuth state (`state_mismatch` / `state_expired`):** ensure cookies are enabled for the application origin, avoid opening stale OAuth callback URLs twice (single-use anti-replay), and in production ensure HTTPS + `WINHOOD_TRUST_PROXY=true` when behind a TLS-terminating proxy.
+- **Server refuses to start with `REMOTE_DEPLOYMENT_TOKEN_REQUIRED`:** `WINHOOD_DEPLOYMENT_MODE=REMOTE_DEPLOYMENT` requires `WINHOOD_REMOTE_API_TOKEN` with at least 32 characters. For local workstation use, keep `WINHOOD_DEPLOYMENT_MODE=LOCAL_WEB` (default) or `LOCAL_DESKTOP`.
+- **HTTP `413 PAYLOAD_TOO_LARGE` on upload:** Standard API endpoints enforce a `2mb` JSON cap, while `/api/projects/upload`, `/api/projects/extract-zip`, and `/api/analyze/sarif` accept up to `50mb`. Ensure uploads stay within the `50mb` JSON / `40mb` ZIP limit and contain valid paths (no path traversal).
+- **Rate limiter sees proxy IP instead of client IP behind a reverse proxy:** `WINHOOD_TRUST_PROXY` defaults to `false` to prevent `X-Forwarded-For` spoofing. Set `WINHOOD_TRUST_PROXY=1` (or your exact trusted proxy hop count / CIDR list) only when deployed behind a trusted reverse proxy.
 - **Node-only import error during `npm run build`:** inspect the exact dependency chain printed by `npm run check:browser-imports`, extract shared pure logic into `src/shared/`, and keep server services behind `/api/*` endpoints.

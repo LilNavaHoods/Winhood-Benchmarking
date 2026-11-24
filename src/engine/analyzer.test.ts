@@ -146,7 +146,10 @@ test('executeRealStaticAnalysisOnSource detects real SAST, Secrets, SCA, SQL, an
   assert.equal(analysisKeeSafe.computedMetrics.circularDependencies, 0);
   assert.equal(analysisKeeSafe.hasEncryptionAtRest, true);
   assert.equal(analysisKeeSafe.hasAuditTrail, true);
-  assert.ok(analysisKeeSafe.computedMetrics.testCoveragePercent >= 80);
+  assert.ok(
+    typeof analysisKeeSafe.computedMetrics.testCoveragePercent === 'number' &&
+      analysisKeeSafe.computedMetrics.testCoveragePercent >= 80
+  );
 });
 
 test('calculateDeterministicScoreCard enforces Penalty Caps, populates all 12 categories with evaluationReasons, and satisfies algebraic reconciliation with [0.0, 5.0] clamp', () => {

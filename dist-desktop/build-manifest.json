@@ -1,24 +1,34 @@
 {
-  "builtAt": "2026-11-23T22:51:31.683Z",
+  "schemaVersion": "2.0.0",
+  "packageName": "winhood-benchmarking",
+  "version": "4.4.0",
+  "commitSha": "UNAVAILABLE",
+  "builtAt": "2026-11-24T22:44:39.423Z",
+  "buildEnvironment": {
+    "nodeVersion": "v22.23.5",
+    "platform": "linux",
+    "arch": "x64",
+    "ci": false
+  },
   "nodeVersion": "v22.23.5",
   "platform": "linux",
   "arch": "x64",
   "artifacts": {
     "dist/index.html": {
       "sizeBytes": 1764,
-      "sha256": "84a6a67ef9fac3d69a462093a06505ed28ecadfb5159268df5dbcb1c3e0a5bd2"
+      "sha256": "796896db643019797d3c2283b90e6237be1a6ddd886f07c6b155454019789243"
     },
     "dist-desktop/server.mjs": {
-      "sizeBytes": 1660015,
-      "sha256": "e32e98ad37df23e7c95d39634e4270fbb3eaeb48eabdcf9aee37072209912bb0"
+      "sizeBytes": 1673067,
+      "sha256": "f6237c76a6b2812777012bd476ce3f9b30087fb381cc5b8da7feae9ea5dd5121"
     },
     "dist-desktop/electron-main.mjs": {
-      "sizeBytes": 1671367,
-      "sha256": "ed49856b24a2377d667afcbb820191e7da7ae1d9310dfad2d1540cac2ccc60ef"
+      "sizeBytes": 1687886,
+      "sha256": "8ffdfed9cc3eb2994a71e3b3a3d9446bae4839b7ba7c636aa829dc026ea304f7"
     },
     "dist-desktop/electron-preload.cjs": {
-      "sizeBytes": 2564,
-      "sha256": "7594f67f9af7b92bb2816e098828c763fdd4bc943b984f5e11bd94d8a0eea2a1"
+      "sizeBytes": 2578,
+      "sha256": "a301592dc3b0d38ff6170b8052ef0f6d96c20ed8a25927856a5d23b8fa4a93cc"
     }
   }
 }

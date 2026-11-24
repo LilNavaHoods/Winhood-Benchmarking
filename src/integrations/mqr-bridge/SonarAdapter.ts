@@ -536,7 +536,7 @@ export class MqrBridgeIntegrationService {
           );
         }
 
-        let ceTaskId: string | null = null;
+        let ceTaskId: string | null;
         const executionId = `exec-${Date.now()}-${params.role.toLowerCase()}`;
 
         if (!isTestContractInstance) {

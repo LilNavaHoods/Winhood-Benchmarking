@@ -84,8 +84,24 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
   // Loaded Files Map: { relativePath: content }
   const [filesMap, setFilesMap] = useState<Record<string, string>>({});
   const [skippedCount, setSkippedCount] = useState<number>(0);
+  const [packageHash, setPackageHash] = useState<string>('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
+
+  React.useEffect(() => {
+    if (!isOpen) return;
+    let active = true;
+    computeClientSha256(filesMap)
+      .then((hash) => {
+        if (active) setPackageHash(hash);
+      })
+      .catch(() => {
+        if (active) setPackageHash('');
+      });
+    return () => {
+      active = false;
+    };
+  }, [filesMap, isOpen]);
 
   if (!isOpen) return null;
 
@@ -275,21 +291,6 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
     (acc, text) => acc + text.split(/\r?\n/).length,
     0
   );
-  const [packageHash, setPackageHash] = useState<string>('');
-
-  React.useEffect(() => {
-    let active = true;
-    computeClientSha256(filesMap)
-      .then((hash) => {
-        if (active) setPackageHash(hash);
-      })
-      .catch(() => {
-        if (active) setPackageHash('');
-      });
-    return () => {
-      active = false;
-    };
-  }, [filesMap]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

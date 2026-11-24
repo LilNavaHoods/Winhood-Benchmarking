@@ -128,7 +128,7 @@ export class SonarQualityGateMapper {
     );
     const failedMetrics = failedConditions.map((c) => c.metricLabel);
 
-    let status: SonarQualityGateRecord['status'] = 'NOT_COMPUTED';
+    let status: SonarQualityGateRecord['status'];
     let displayLabel: SonarQualityGateRecord['displayLabel'] = 'NÃO COMPUTADO';
 
     if (params.apiError) {
@@ -178,7 +178,7 @@ export class SonarQualityGateMapper {
     }
 
     // Explicação textual consolidada (Seção 9.2)
-    let explanationSummary = '';
+    let explanationSummary: string;
     if (status === 'API_ERROR') {
       explanationSummary = `Não foi possível obter o Quality Gate via Web API (${params.apiErrorMessage || 'erro de comunicação'}). Nenhuma aprovação é presumida.`;
     } else if (status === 'NOT_COMPUTED' || status === 'NONE') {
