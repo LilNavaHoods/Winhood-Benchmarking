@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import http from 'node:http';
 import type {
   GitarCiFailureRecord,
@@ -122,7 +123,7 @@ export class GitarAdapter {
     };
 
     // Servidor HTTP efêmero implementando o contrato documentado da API Gitar (/v1/health, /v1/projects, /v1/merge-requests/status)
-    const token = 'gitar_pat_verified_2026';
+    const token = `ephemeral_contract_${crypto.randomBytes(8).toString('hex')}`;
     const server = http.createServer((req, res) => {
       const url = new URL(req.url || '/', 'http://127.0.0.1');
       res.setHeader('Content-Type', 'application/json');

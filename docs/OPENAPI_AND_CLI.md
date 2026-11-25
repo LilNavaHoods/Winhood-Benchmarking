@@ -61,7 +61,7 @@ npm run cli -- sarif-import --input ./external.sarif.json
 - **GitHub Action:** `integrations/github-action/action.yml`
 - **GitLab CI Template:** `integrations/gitlab/winhood-gitlab-ci.yml`
 - **Jenkins Pipeline & Step:** `integrations/jenkins/Jenkinsfile` & `WinHoodGateStep.groovy`
-- **VS Code Extension:** `integrations/vscode-extension/` (diagnostics + status bar Quality Gate state)
+- **VS Code Extension:** `packages/vscode-extension/` (diagnostics + status bar Quality Gate state)
 - **JetBrains / IntelliJ Plugin:** `integrations/jetbrains/` (`WinHoodAuditAction.kt`)
 
 ### Desktop (Offline Electron) vs Server Parity

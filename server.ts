@@ -7,7 +7,6 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import express from 'express';
 import QRCode from 'qrcode';
-import { createServer as createViteServer } from 'vite';
 import type {
   AppEnvironment,
   AssessmentMode,
@@ -42,7 +41,6 @@ import {
   validateCategoryWeights,
   validateEquivalenceConditions,
 } from './src/engine/scoringEngine';
-import zlib from 'node:zlib';
 import {
   buildTechnicalInventory,
   sanitizeUploadedFilesMap,
@@ -127,12 +125,38 @@ import { buildOpenApiSpec } from './src/api/openApiSpec';
 import { PrDecorationAdapter, type PrCiProvider } from './src/integrations/ci/PrDecorationAdapter';
 import { SonarMetricsMapper } from './src/integrations/mqr-bridge/SonarMetricsMapper';
 import { SonarQualityGateMapper } from './src/integrations/mqr-bridge/SonarQualityGateMapper';
-import { DEFAULT_SONAR_METRIC_KEYS } from './src/integrations/mqr-bridge/SonarApiClient';
+import {
+  DEFAULT_SONAR_METRIC_KEYS,
+  type RawSonarHotspotApiItem,
+  type RawSonarIssueApiItem,
+} from './src/integrations/mqr-bridge/SonarApiClient';
 import {
   ensureWinHoodDirectories,
   resolveWinHoodDataRoot,
 } from './src/storage/WinHoodPaths';
+import {
+  extractZipBufferToFilesMap,
+  hasExplicitPathTraversalOrSymlinkAttempt,
+} from './src/server/zipExtractor';
+import {
+  MAX_TRACKED_IPS,
+  RemoteAuthFailureTracker,
+  appendSecurityAuthAuditJsonl,
+  buildAllowedOriginMap,
+  constantTimeTokenMatch,
+  createInMemoryRateLimiter,
+  parseValidPortNumber,
+  resolveDeploymentMode,
+  resolveRuntimeEnv,
+  resolveTrustProxyConfig,
+  type DeploymentMode,
+  type RuntimeEnv,
+} from './src/server/securityMiddleware';
+import { registerGracefulShutdown } from './src/server/gracefulShutdown';
 import type http from 'node:http';
+
+export { resolveDeploymentMode, resolveRuntimeEnv, resolveTrustProxyConfig };
+export type { DeploymentMode, RuntimeEnv };
 
 const PORT = Number(process.env.PORT || 3000);
 const DEFAULT_DATA_DIR = resolveWinHoodDataRoot();
@@ -425,76 +449,55 @@ async function validateSonarServerOriginSafe(
   return safeOrigin;
 }
 
+interface SafePinnedHttpResponse {
+  ok: boolean;
+  status: number;
+  headers: Record<string, string>;
+  text: () => Promise<string>;
+  json: <T = unknown>() => Promise<T>;
+}
+
 async function fetchWithTimeoutAndNoRedirect(
   url: string,
-  init: RequestInit,
+  init: RequestInit = {},
   timeoutMs = 8000
-): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(url, {
-      ...init,
-      redirect: 'manual',
-      signal: controller.signal,
-    });
-    if (response.status >= 300 && response.status < 400) {
-      throw new Error(`SSRF_REDIRECT_BLOCKED: Redirecionamento HTTP ${response.status} bloqueado.`);
-    }
-    return response;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-interface RateLimitOptions {
-  windowMs: number;
-  maxRequests: number;
-  bucketName: string;
-}
-
-function createInMemoryRateLimiter(opts: RateLimitOptions): express.RequestHandler {
-  const buckets = new Map<string, { count: number; resetAt: number }>();
-  const cleanupTimer = setInterval(() => {
-    const now = Date.now();
-    for (const [key, entry] of buckets.entries()) {
-      if (entry.resetAt <= now) {
-        buckets.delete(key);
+): Promise<SafePinnedHttpResponse> {
+  const normalizedHeaders: Record<string, string> = {};
+  if (init.headers) {
+    if (init.headers instanceof Headers) {
+      init.headers.forEach((value, key) => {
+        normalizedHeaders[key] = value;
+      });
+    } else if (Array.isArray(init.headers)) {
+      for (const [key, value] of init.headers) {
+        normalizedHeaders[key] = value;
+      }
+    } else {
+      for (const [key, value] of Object.entries(init.headers)) {
+        if (value !== undefined) {
+          normalizedHeaders[key] = String(value);
+        }
       }
     }
-  }, Math.max(opts.windowMs, 15_000));
-  cleanupTimer.unref();
-
-  return (req, res, next) => {
-    const now = Date.now();
-    const actorKey =
-      String((req as any).authUser?.id || '') ||
-      String(req.ip || req.socket?.remoteAddress || 'unknown');
-    const compositeKey = `${opts.bucketName}:${actorKey}`;
-
-    let entry = buckets.get(compositeKey);
-    if (!entry || entry.resetAt <= now) {
-      entry = { count: 0, resetAt: now + opts.windowMs };
-      buckets.set(compositeKey, entry);
-    }
-
-    entry.count += 1;
-    const remaining = Math.max(0, opts.maxRequests - entry.count);
-    const retryAfterSeconds = Math.max(1, Math.ceil((entry.resetAt - now) / 1000));
-
-    res.setHeader('X-RateLimit-Limit', String(opts.maxRequests));
-    res.setHeader('X-RateLimit-Remaining', String(remaining));
-
-    if (entry.count > opts.maxRequests) {
-      res.setHeader('Retry-After', String(retryAfterSeconds));
-      return res.status(429).json({
-        error: 'RATE_LIMITED',
-        bucket: opts.bucketName,
-        retryAfterSeconds,
-        message: `Limite de requisições excedido para ${opts.bucketName}. Tente novamente em ${retryAfterSeconds}s.`,
-      });
-    }
-    return next();
+  }
+  const bodyPayload =
+    typeof init.body === 'string' || Buffer.isBuffer(init.body) ? init.body : undefined;
+  const res = await SsrfGuard.pinnedSafeRequest({
+    targetUrl: url,
+    method: init.method || 'GET',
+    headers: normalizedHeaders,
+    body: bodyPayload,
+    timeoutMs,
+    allowExplicitLoopback: SsrfGuard.isExplicitLoopbackUrl(url),
+    followRedirects: false,
+    maxRedirects: 0,
+  });
+  return {
+    ok: res.ok,
+    status: res.statusCode,
+    headers: res.headers,
+    text: async () => res.bodyText,
+    json: async <T = unknown>() => res.json<T>(),
   };
 }
 
@@ -552,164 +555,7 @@ function writeIsolatedArtifactsToDisk(
   return targetDir;
 }
 
-function hasExplicitPathTraversalOrSymlinkAttempt(rawFilesMap: Record<string, string>): boolean {
-  for (const [rawPath, content] of Object.entries(rawFilesMap || {})) {
-    const normalized = rawPath.replace(/\\/g, '/');
-    const segments = normalized.split('/').filter(Boolean);
-    if (
-      /^[a-zA-Z]:\//.test(normalized) ||
-      segments.includes('..') ||
-      normalized.includes('../') ||
-      normalized.includes('..\\') ||
-      segments.length > 20 ||
-      (typeof content === 'string' && content.startsWith('SYMLINK:'))
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function extractZipBufferToFilesMap(zipBuffer: Buffer): {
-  filesMap: Record<string, string>;
-  skippedCount: number;
-} {
-  const rawExtracted: Record<string, string> = {};
-  let skippedBinaryOrInvalid = 0;
-
-  // Locate End of Central Directory (EOCD: 0x06054b50) to read Central Directory accurately
-  let eocdOffset = -1;
-  const minEocdSearch = Math.max(0, zipBuffer.length - 65557);
-  for (let i = zipBuffer.length - 22; i >= minEocdSearch; i--) {
-    if (zipBuffer.readUInt32LE(i) === 0x06054b50) {
-      eocdOffset = i;
-      break;
-    }
-  }
-
-  if (eocdOffset >= 0) {
-    const totalEntries = zipBuffer.readUInt16LE(eocdOffset + 10);
-    const cdOffset = zipBuffer.readUInt32LE(eocdOffset + 16);
-    let ptr = cdOffset;
-    for (let idx = 0; idx < totalEntries && ptr + 46 <= zipBuffer.length; idx++) {
-      if (zipBuffer.readUInt32LE(ptr) !== 0x02014b50) break;
-      const compressionMethod = zipBuffer.readUInt16LE(ptr + 10);
-      const compressedSize = zipBuffer.readUInt32LE(ptr + 20);
-      const uncompressedSize = zipBuffer.readUInt32LE(ptr + 24);
-      const fileNameLen = zipBuffer.readUInt16LE(ptr + 28);
-      const extraLen = zipBuffer.readUInt16LE(ptr + 30);
-      const commentLen = zipBuffer.readUInt16LE(ptr + 32);
-      const localHeaderOffset = zipBuffer.readUInt32LE(ptr + 42);
-      const entryName = zipBuffer.subarray(ptr + 46, ptr + 46 + fileNameLen).toString('utf8');
-      ptr += 46 + fileNameLen + extraLen + commentLen;
-
-      if (!entryName || entryName.endsWith('/')) continue;
-      if (
-        entryName.includes('\0') ||
-        entryName.startsWith('/') ||
-        entryName.startsWith('\\') ||
-        hasExplicitPathTraversalOrSymlinkAttempt({ [entryName]: '' })
-      ) {
-        throw new Error(`ZIP_PATH_TRAVERSAL_BLOCKED: Entrada ZIP insegura bloqueada (${entryName}).`);
-      }
-      if (uncompressedSize > 2 * 1024 * 1024 || localHeaderOffset + 30 > zipBuffer.length) {
-        skippedBinaryOrInvalid += 1;
-        continue;
-      }
-      if (zipBuffer.readUInt32LE(localHeaderOffset) !== 0x04034b50) {
-        skippedBinaryOrInvalid += 1;
-        continue;
-      }
-      const lfhNameLen = zipBuffer.readUInt16LE(localHeaderOffset + 26);
-      const lfhExtraLen = zipBuffer.readUInt16LE(localHeaderOffset + 28);
-      const dataStart = localHeaderOffset + 30 + lfhNameLen + lfhExtraLen;
-      const dataEnd = dataStart + compressedSize;
-      if (dataEnd > zipBuffer.length) {
-        skippedBinaryOrInvalid += 1;
-        continue;
-      }
-
-      try {
-        const slice = zipBuffer.subarray(dataStart, dataEnd);
-        let decodedBuf: Buffer;
-        if (compressionMethod === 0) {
-          decodedBuf = slice;
-        } else if (compressionMethod === 8) {
-          decodedBuf = zlib.inflateRawSync(slice, { maxOutputLength: 2 * 1024 * 1024 });
-        } else {
-          skippedBinaryOrInvalid += 1;
-          continue;
-        }
-        const text = decodedBuf.toString('utf8');
-        if (text.includes('\0')) {
-          skippedBinaryOrInvalid += 1;
-          continue;
-        }
-        rawExtracted[entryName] = text;
-      } catch {
-        skippedBinaryOrInvalid += 1;
-      }
-    }
-  } else {
-    // Fallback sequential Local File Header scan (0x04034b50)
-    let offset = 0;
-    while (offset + 30 <= zipBuffer.length) {
-      if (zipBuffer.readUInt32LE(offset) !== 0x04034b50) break;
-      const compressionMethod = zipBuffer.readUInt16LE(offset + 8);
-      const compressedSize = zipBuffer.readUInt32LE(offset + 18);
-      const uncompressedSize = zipBuffer.readUInt32LE(offset + 22);
-      const nameLen = zipBuffer.readUInt16LE(offset + 26);
-      const extraLen = zipBuffer.readUInt16LE(offset + 28);
-      const nameStart = offset + 30;
-      const dataStart = nameStart + nameLen + extraLen;
-      const dataEnd = dataStart + compressedSize;
-      if (dataEnd > zipBuffer.length) break;
-      const entryName = zipBuffer.subarray(nameStart, nameStart + nameLen).toString('utf8');
-      offset = dataEnd;
-
-      if (!entryName || entryName.endsWith('/')) continue;
-      if (
-        entryName.includes('\0') ||
-        entryName.startsWith('/') ||
-        entryName.startsWith('\\') ||
-        hasExplicitPathTraversalOrSymlinkAttempt({ [entryName]: '' })
-      ) {
-        throw new Error(`ZIP_PATH_TRAVERSAL_BLOCKED: Entrada ZIP insegura bloqueada (${entryName}).`);
-      }
-      if (uncompressedSize > 2 * 1024 * 1024) {
-        skippedBinaryOrInvalid += 1;
-        continue;
-      }
-      try {
-        const slice = zipBuffer.subarray(dataStart, dataEnd);
-        const decodedBuf =
-          compressionMethod === 0
-            ? slice
-            : compressionMethod === 8
-              ? zlib.inflateRawSync(slice, { maxOutputLength: 2 * 1024 * 1024 })
-              : null;
-        if (!decodedBuf) {
-          skippedBinaryOrInvalid += 1;
-          continue;
-        }
-        const text = decodedBuf.toString('utf8');
-        if (text.includes('\0')) {
-          skippedBinaryOrInvalid += 1;
-          continue;
-        }
-        rawExtracted[entryName] = text;
-      } catch {
-        skippedBinaryOrInvalid += 1;
-      }
-    }
-  }
-
-  const { sanitizedMap, skippedFiles } = sanitizeUploadedFilesMap(rawExtracted);
-  return {
-    filesMap: sanitizedMap,
-    skippedCount: skippedBinaryOrInvalid + skippedFiles.length,
-  };
-}
+// ZIP extraction & path traversal validation extracted to src/server/zipExtractor.ts (WH-AUD-003, WH-AUD-009)
 
 function buildRepresentativeCompetitorFiles(candidate: MarketCompetitorCandidate): Record<string, string> {
   const safeSlug = candidate.name.toLowerCase().replace(/[^a-z0-9_-]+/g, '-');
@@ -1225,13 +1071,17 @@ function loadDatabase(
   };
 }
 
-export type DeploymentMode = 'LOCAL_DESKTOP' | 'LOCAL_WEB' | 'REMOTE_DEPLOYMENT';
-
 export interface OperatorActor {
   id: string;
   name: string;
   email: string;
   role: 'LOCAL_OPERATOR' | 'REMOTE_OPERATOR';
+}
+
+interface WinHoodRequest extends express.Request {
+  winhoodActor?: OperatorActor;
+  deploymentMode?: DeploymentMode;
+  remoteAuthenticated?: boolean;
 }
 
 const DEFAULT_LOCAL_OPERATOR: OperatorActor = {
@@ -1241,75 +1091,7 @@ const DEFAULT_LOCAL_OPERATOR: OperatorActor = {
   role: 'LOCAL_OPERATOR',
 };
 
-const IPV4_OR_CIDR_REGEX =
-  /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\/(?:3[0-2]|[12]?\d))?$/;
-
-export function resolveTrustProxyConfig(
-  rawValue?: string | number | boolean
-): boolean | number | string | string[] {
-  if (rawValue === undefined || rawValue === null) return false;
-  if (typeof rawValue === 'boolean') return rawValue ? 1 : false;
-  if (typeof rawValue === 'number') {
-    return Number.isInteger(rawValue) && rawValue >= 1 && rawValue <= 10 ? rawValue : false;
-  }
-  const trimmed = String(rawValue).trim();
-  if (!trimmed) return false;
-  const lower = trimmed.toLowerCase();
-  if (lower === 'false' || lower === '0' || lower === 'off' || lower === 'no') return false;
-  if (lower === 'true') return 1;
-  if (lower === 'loopback' || lower === 'linklocal' || lower === 'uniquelocal') return lower;
-  if (/^\d+$/.test(trimmed)) {
-    const hops = Number.parseInt(trimmed, 10);
-    return hops >= 1 && hops <= 10 ? hops : false;
-  }
-  const parts = trimmed
-    .split(',')
-    .map((p) => p.trim())
-    .filter(Boolean);
-  if (
-    parts.length > 0 &&
-    parts.every((p) => IPV4_OR_CIDR_REGEX.test(p) || p === '::1' || p === 'loopback')
-  ) {
-    return parts;
-  }
-  return false;
-}
-
-export function resolveDeploymentMode(options?: {
-  deploymentMode?: DeploymentMode;
-  environment?: string;
-  host?: string;
-}): DeploymentMode {
-  const explicit = (options?.deploymentMode || process.env.WINHOOD_DEPLOYMENT_MODE || '')
-    .trim()
-    .toUpperCase();
-  if (explicit === 'LOCAL_DESKTOP' || explicit === 'LOCAL_WEB' || explicit === 'REMOTE_DEPLOYMENT') {
-    return explicit as DeploymentMode;
-  }
-  if (options?.environment === 'REMOTE_DEPLOYMENT') {
-    return 'REMOTE_DEPLOYMENT';
-  }
-  if (
-    options?.environment === 'ELECTRON_DESKTOP' ||
-    options?.environment === 'WINDOWS_PACKAGED' ||
-    process.env.WINHOOD_RUNTIME_ENV === 'ELECTRON_DESKTOP'
-  ) {
-    return 'LOCAL_DESKTOP';
-  }
-  const host = (options?.host || '').trim().toLowerCase();
-  const isLoopback = !host || host === '127.0.0.1' || host === 'localhost' || host === '::1';
-  if (!isLoopback && process.env.NODE_ENV === 'production') {
-    return 'REMOTE_DEPLOYMENT';
-  }
-  return 'LOCAL_WEB';
-}
-
-function constantTimeTokenMatch(provided: string, expected: string): boolean {
-  if (!provided || !expected) return false;
-  const a = crypto.createHash('sha256').update(provided, 'utf8').digest();
-  const b = crypto.createHash('sha256').update(expected, 'utf8').digest();
-  return crypto.timingSafeEqual(a, b);
-}
+// resolveTrustProxyConfig, resolveDeploymentMode and constantTimeTokenMatch extracted to src/server/securityMiddleware.ts
 
 const HEAVY_JSON_UPLOAD_PATHS = new Set([
   '/api/projects/extract-zip',
@@ -1364,6 +1146,9 @@ function appendAuditLog(
     ),
   };
   state.auditLogs.unshift(entry);
+  if (state.auditLogs.length > 5000) {
+    state.auditLogs.length = 5000;
+  }
 }
 
 export async function createWinHoodApp(options?: {
@@ -1373,6 +1158,7 @@ export async function createWinHoodApp(options?: {
   trustProxy?: string | number | boolean;
   environment?: StartWinHoodServerOptions['environment'];
   host?: string;
+  port?: number;
   rateLimits?: {
     ingestionMax?: number;
     analysisMax?: number;
@@ -1384,6 +1170,9 @@ export async function createWinHoodApp(options?: {
     deploymentMode: options?.deploymentMode,
     environment: options?.environment,
     host: options?.host,
+  });
+  const runtimeEnv = resolveRuntimeEnv({
+    environment: options?.environment,
   });
   const remoteApiToken = (
     options?.remoteApiToken ??
@@ -1454,9 +1243,42 @@ export async function createWinHoodApp(options?: {
   }
 
   let pendingSaveTimer: NodeJS.Timeout | null = null;
+  let pendingSaveState: PersistentDatabaseState | null = null;
   const writeDatabaseAtomically = (state: PersistentDatabaseState): void => {
     ensureDirectories(dataDir, isolatedArtifactsDir);
     dbManager.writeAtomicChecksummed(storeFile, state);
+  };
+  const scheduleDatabaseSave = (state: PersistentDatabaseState, delayMs = 2000): void => {
+    ensureDirectories(dataDir, isolatedArtifactsDir);
+    pendingSaveState = state;
+    if (pendingSaveTimer) {
+      return;
+    }
+    pendingSaveTimer = setTimeout(() => {
+      const targetState = pendingSaveState || state;
+      pendingSaveTimer = null;
+      pendingSaveState = null;
+      try {
+        writeDatabaseAtomically(targetState);
+      } catch (persistErr) {
+        console.error('[WinHood Persistence Error] Falha ao gravar banco atômico:', persistErr);
+      }
+    }, delayMs);
+    pendingSaveTimer.unref();
+  };
+  const flushPendingDatabaseSave = (): void => {
+    if (!pendingSaveTimer && !pendingSaveState) return;
+    if (pendingSaveTimer) {
+      clearTimeout(pendingSaveTimer);
+      pendingSaveTimer = null;
+    }
+    const targetState = pendingSaveState || db;
+    pendingSaveState = null;
+    try {
+      writeDatabaseAtomically(targetState);
+    } catch (persistErr) {
+      console.error('[WinHood Persistence Error] Falha no flush final do banco atômico:', persistErr);
+    }
   };
   const saveDatabase = (state: PersistentDatabaseState, immediate = false): void => {
     ensureDirectories(dataDir, isolatedArtifactsDir);
@@ -1465,20 +1287,25 @@ export async function createWinHoodApp(options?: {
         clearTimeout(pendingSaveTimer);
         pendingSaveTimer = null;
       }
+      pendingSaveState = null;
       writeDatabaseAtomically(state);
       return;
     }
+    pendingSaveState = state;
     if (pendingSaveTimer) {
       clearTimeout(pendingSaveTimer);
     }
     pendingSaveTimer = setTimeout(() => {
+      const targetState = pendingSaveState || state;
+      pendingSaveTimer = null;
+      pendingSaveState = null;
       try {
-        writeDatabaseAtomically(state);
+        writeDatabaseAtomically(targetState);
       } catch (persistErr) {
         console.error('[WinHood Persistence Error] Falha ao gravar banco atômico:', persistErr);
       }
-      pendingSaveTimer = null;
     }, 80);
+    pendingSaveTimer.unref();
   };
 
   const lifecycleManager = new ExternalToolLifecycleManager();
@@ -1686,17 +1513,23 @@ export async function createWinHoodApp(options?: {
     return { token: undefined, source: null };
   };
 
-  const allowedOriginMap = new Map<string, string>();
-  for (const candidate of [
-    'http://localhost:3000',
-    'http://127.0.0.1:3000',
-    ...(process.env.WINHOOD_ALLOWED_ORIGINS || '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean),
-  ]) {
-    allowedOriginMap.set(candidate, candidate);
-  }
+  const allowedOriginMap = buildAllowedOriginMap({
+    deploymentMode,
+    effectivePort: options?.port,
+    envPort: process.env.PORT,
+    winhoodPort: process.env.WINHOOD_PORT,
+    allowedOriginsEnv: process.env.WINHOOD_ALLOWED_ORIGINS,
+  });
+
+  const registerAllowedLocalPort = (port: number): void => {
+    if (deploymentMode !== 'LOCAL_WEB') return;
+    const validPort = parseValidPortNumber(port);
+    if (validPort === null) return;
+    const localhostOrigin = `http://localhost:${validPort}`;
+    const loopbackOrigin = `http://127.0.0.1:${validPort}`;
+    allowedOriginMap.set(localhostOrigin, localhostOrigin);
+    allowedOriginMap.set(loopbackOrigin, loopbackOrigin);
+  };
 
   // tssecurity:S8348: Nunca refletir req.headers.origin diretamente; retornar apenas valor canônico reconstruído da allowlist.
   const resolveAllowedCorsOrigin = (origin: string): string | null => {
@@ -1737,10 +1570,13 @@ export async function createWinHoodApp(options?: {
     next();
   });
 
-  const remoteAuthFailures = new Map<string, { count: number; lockedUntil: number }>();
+  const remoteAuthFailureTracker = new RemoteAuthFailureTracker({
+    maxTrackedIps: MAX_TRACKED_IPS,
+  });
 
   // Security CORS + Telemetry + Deployment Mode Guard + Optional TOTP 2FA Gate
   app.use('/api', (req, res, next) => {
+    const whReq = req as WinHoodRequest;
     const rawOrigin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
     const canonicalCorsOrigin = resolveAllowedCorsOrigin(rawOrigin);
     if (canonicalCorsOrigin) {
@@ -1780,20 +1616,16 @@ export async function createWinHoodApp(options?: {
     const requestOriginLabel = rawOrigin || clientIp;
 
     // Default local operator for LOCAL_DESKTOP / LOCAL_WEB
-    (req as any).winhoodActor = DEFAULT_LOCAL_OPERATOR;
-    (req as any).deploymentMode = deploymentMode;
+    whReq.winhoodActor = DEFAULT_LOCAL_OPERATOR;
+    whReq.deploymentMode = deploymentMode;
 
-    // Remote deployment guard: fail-closed bearer authentication + brute-force lockout + audit logging
+    // Remote deployment guard: fail-closed bearer authentication + bounded brute-force lockout + non-blocking JSONL audit (WH-AUD-006)
     if (deploymentMode === 'REMOTE_DEPLOYMENT') {
       const publicRemotePaths = new Set(['/health', '/openapi.json']);
       if (!publicRemotePaths.has(reqPath)) {
-        const failState = remoteAuthFailures.get(clientIp);
-        if (failState && failState.lockedUntil > Date.now()) {
-          const retryAfterSeconds = Math.max(
-            1,
-            Math.ceil((failState.lockedUntil - Date.now()) / 1000)
-          );
-          res.setHeader('Retry-After', String(retryAfterSeconds));
+        const lockState = remoteAuthFailureTracker.isLocked(clientIp);
+        if (lockState.locked) {
+          res.setHeader('Retry-After', String(lockState.retryAfterSeconds));
           appendAuditLog(
             db,
             'REMOTE_AUTH_LOCKED',
@@ -1810,12 +1642,22 @@ export async function createWinHoodApp(options?: {
               integrityState: loaded.integrityStatus,
             }
           );
-          saveDatabase(db);
+          appendSecurityAuthAuditJsonl(dataDir, {
+            timestamp: new Date().toISOString(),
+            action: 'REMOTE_AUTH_LOCKED',
+            method: req.method,
+            path: reqPath,
+            origin: requestOriginLabel,
+            deploymentMode,
+            failureReason: 'BRUTE_FORCE_LOCKOUT',
+            integrityState: loaded.integrityStatus,
+          });
+          scheduleDatabaseSave(db, 2000);
           return res.status(429).json({
             error: 'REMOTE_AUTH_LOCKED',
             code: 'REMOTE_AUTH_LOCKED',
-            retryAfterSeconds,
-            message: `Acesso remoto temporariamente bloqueado após falhas repetidas. Tente novamente em ${retryAfterSeconds}s.`,
+            retryAfterSeconds: lockState.retryAfterSeconds,
+            message: `Acesso remoto temporariamente bloqueado após falhas repetidas. Tente novamente em ${lockState.retryAfterSeconds}s.`,
           });
         }
 
@@ -1824,10 +1666,8 @@ export async function createWinHoodApp(options?: {
           ? authHeader.slice(7).trim()
           : '';
         if (!constantTimeTokenMatch(bearerToken, remoteApiToken)) {
-          const prevCount = failState && failState.lockedUntil <= Date.now() ? failState.count : 0;
-          const nextCount = prevCount + 1;
-          const lockedUntil = nextCount >= 5 ? Date.now() + 5 * 60_000 : 0;
-          remoteAuthFailures.set(clientIp, { count: nextCount, lockedUntil });
+          remoteAuthFailureTracker.recordFailure(clientIp);
+          const failureReason = bearerToken ? 'INVALID_REMOTE_TOKEN' : 'MISSING_REMOTE_TOKEN';
           appendAuditLog(
             db,
             'REMOTE_AUTH_DENIED',
@@ -1840,11 +1680,21 @@ export async function createWinHoodApp(options?: {
               origin: requestOriginLabel,
               operationType: req.method,
               outcome: 'DENIED',
-              failureReason: bearerToken ? 'INVALID_REMOTE_TOKEN' : 'MISSING_REMOTE_TOKEN',
+              failureReason,
               integrityState: loaded.integrityStatus,
             }
           );
-          saveDatabase(db);
+          appendSecurityAuthAuditJsonl(dataDir, {
+            timestamp: new Date().toISOString(),
+            action: 'REMOTE_AUTH_DENIED',
+            method: req.method,
+            path: reqPath,
+            origin: requestOriginLabel,
+            deploymentMode,
+            failureReason,
+            integrityState: loaded.integrityStatus,
+          });
+          scheduleDatabaseSave(db, 2000);
           return res.status(401).json({
             error: 'REMOTE_AUTH_REQUIRED',
             code: 'REMOTE_AUTH_REQUIRED',
@@ -1853,15 +1703,15 @@ export async function createWinHoodApp(options?: {
           });
         }
 
-        remoteAuthFailures.delete(clientIp);
+        remoteAuthFailureTracker.clear(clientIp);
         const remoteActor: OperatorActor = {
           id: `remote-operator:${remoteOperatorFingerprint}`,
           name: `Operador Remoto (${remoteOperatorFingerprint})`,
           email: 'remote@winhood.local',
           role: 'REMOTE_OPERATOR',
         };
-        (req as any).winhoodActor = remoteActor;
-        (req as any).remoteAuthenticated = true;
+        whReq.winhoodActor = remoteActor;
+        whReq.remoteAuthenticated = true;
       }
     }
 
@@ -1979,6 +1829,7 @@ export async function createWinHoodApp(options?: {
       healthStatus: 'HEALTHY',
       ready: true,
       deploymentMode,
+      runtimeEnv,
       accessMode:
         deploymentMode === 'REMOTE_DEPLOYMENT'
           ? 'REMOTE_TOKEN_PROTECTED'
@@ -2267,9 +2118,22 @@ export async function createWinHoodApp(options?: {
     }
   }
 
+  const DEFAULT_PINNED_SONAR_DOCKER_IMAGE = 'sonarqube:25.1.0.102122-community';
+  const resolveSonarDockerImage = (): string => {
+    const configured = (process.env.WINHOOD_SONAR_DOCKER_IMAGE || '').trim();
+    if (configured && !configured.endsWith(':latest')) {
+      return configured;
+    }
+    return DEFAULT_PINNED_SONAR_DOCKER_IMAGE;
+  };
+  const isRunningInsideDockerContainer = (): boolean =>
+    process.env.WINHOOD_RUNTIME_ENV === 'DOCKER_LOCAL_WEB' || fs.existsSync('/.dockerenv');
+
   // 3.2 MqrBridge Docker Official vs SonarCloud Hub
   app.get('/api/sonar/docker-status', async (_req, res) => {
-    const isDockerInstalled = await checkDockerCliAvailable();
+    const runningInContainer = isRunningInsideDockerContainer();
+    const sonarDockerImage = resolveSonarDockerImage();
+    const isDockerInstalled = runningInContainer ? false : await checkDockerCliAvailable();
     const probeRes = await MqrBridgeConnection.probeMqrBridge({
       serverUrl: 'http://localhost:9000',
       mode: 'DOCKER',
@@ -2277,8 +2141,10 @@ export async function createWinHoodApp(options?: {
     });
     res.json({
       isDockerInstalled,
-      dockerContainerSuggestedCommand:
-        'docker run -d --name mqr-bridge -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true -p 9000:9000 mqr-bridge:latest',
+      runningInContainer,
+      dockerContainerSuggestedCommand: runningInContainer
+        ? 'docker compose --profile sonar up -d'
+        : `docker run -d --name mqr-bridge -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true -p 127.0.0.1:9000:9000 ${sonarDockerImage}`,
       serverUrl: 'http://localhost:9000',
       isReachable: probeRes.httpReachable,
       connectionState: probeRes.connectionState,
@@ -2291,6 +2157,18 @@ export async function createWinHoodApp(options?: {
 
   app.post('/api/sonar/docker-auto-start', async (req, res) => {
     if (!requireWritePermission(res, req, 'sonar:config')) return;
+    if (isRunningInsideDockerContainer()) {
+      return res.json({
+        ok: false,
+        available: false,
+        runningInContainer: true,
+        fallbackToNative: true,
+        suggestedCommand: 'docker compose --profile sonar up -d',
+        message:
+          'WinHood está em execução dentro de container Docker (DOCKER_LOCAL_WEB). Para iniciar o serviço auxiliar SonarQube no host com isolamento loopback, execute: docker compose --profile sonar up -d. O Motor Nativo Multi-Core permanece ativo sem erro.',
+      });
+    }
+    const sonarDockerImage = resolveSonarDockerImage();
     try {
       const isDockerInstalled = await checkDockerCliAvailable();
       if (!isDockerInstalled) {
@@ -2299,7 +2177,7 @@ export async function createWinHoodApp(options?: {
           available: false,
           fallbackToNative: true,
           message:
-            'Docker não detectado na máquina host. O Motor Nativo Multi-Core WinHood foi ativado automaticamente com equivalência total ao MqrBridge (Ratings A–E e SARIF 2.1.0).',
+            'Docker não detectado na máquina host. O Motor Nativo Multi-Core WinHood foi ativado automaticamente com suporte completo a Ratings A–E e SARIF 2.1.0.',
         });
       }
 
@@ -2317,7 +2195,7 @@ export async function createWinHoodApp(options?: {
             available: true,
             status: 'RUNNING',
             alreadyRunning: true,
-            message: 'O container oficial do MqrBridge já está ativo e pronto em http://localhost:9000.',
+            message: 'O container oficial do MqrBridge já está ativo e pronto em http://127.0.0.1:9000.',
           });
         }
 
@@ -2329,14 +2207,14 @@ export async function createWinHoodApp(options?: {
             available: true,
             status: 'STARTING',
             message:
-              'Container MqrBridge iniciado com sucesso pelo backend! O serviço estará pronto em instantes na porta 9000.',
+              'Container MqrBridge iniciado com sucesso pelo backend! O serviço estará pronto em instantes em http://127.0.0.1:9000.',
           });
         }
       } catch {
         // If query failed, try running container
       }
 
-      // Create and run new container
+      // Create and run new container strictly confined to loopback 127.0.0.1:9000:9000 with pinned image tag (WH-AUD-005)
       await runDockerCli(
         [
           'run',
@@ -2346,8 +2224,8 @@ export async function createWinHoodApp(options?: {
           '-e',
           'SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true',
           '-p',
-          '9000:9000',
-          'mqr-bridge:latest',
+          '127.0.0.1:9000:9000',
+          sonarDockerImage,
         ],
         8000
       );
@@ -2356,15 +2234,17 @@ export async function createWinHoodApp(options?: {
         ok: true,
         available: true,
         status: 'CREATED_AND_STARTING',
-        message:
-          'Container oficial mqr-bridge:latest criado e iniciado na porta 9000 sem intervenção manual.',
+        image: sonarDockerImage,
+        bindAddress: '127.0.0.1:9000',
+        message: `Container ${sonarDockerImage} criado e iniciado estritamente em 127.0.0.1:9000 sem exposição LAN.`,
       });
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : 'Host indisponível';
       return res.json({
         ok: false,
         available: false,
         fallbackToNative: true,
-        message: `Falha ao acionar Docker (${err?.message || 'Host indisponível'}). O Motor Nativo Multi-Core assumiu a análise de forma transparente.`,
+        message: `Falha ao acionar Docker (${errMsg}). O Motor Nativo Multi-Core assumiu a análise de forma transparente.`,
       });
     }
   });
@@ -2474,7 +2354,12 @@ export async function createWinHoodApp(options?: {
   app.get('/api/bootstrap', (req, res) => {
     const extracted = extractTotpUnlockTokenFromRequest(req);
     res.json({
-      accessMode: 'UNRESTRICTED_LOCAL',
+      deploymentMode,
+      runtimeEnv,
+      accessMode:
+        deploymentMode === 'REMOTE_DEPLOYMENT'
+          ? 'REMOTE_TOKEN_PROTECTED'
+          : 'UNRESTRICTED_LOCAL',
       totp: totpService.getStatus(extracted.token),
       dashboard: buildDashboardPayload(),
       projects: db.projects,
@@ -2764,10 +2649,17 @@ export async function createWinHoodApp(options?: {
         skippedCount,
         extractedCount: Object.keys(extractedMap).length,
       });
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error ? err.message : 'Não foi possível extrair os arquivos do pacote .zip.';
+      const errorCode = msg.startsWith('ZIP_BOMB_BLOCKED')
+        ? 'ZIP_BOMB_BLOCKED'
+        : msg.startsWith('ZIP_PATH_TRAVERSAL_BLOCKED')
+          ? 'ZIP_PATH_TRAVERSAL_BLOCKED'
+          : 'ZIP_EXTRACTION_FAILED';
       return res.status(400).json({
-        error: 'ZIP_EXTRACTION_FAILED',
-        message: err?.message || 'Não foi possível extrair os arquivos do pacote .zip.',
+        error: errorCode,
+        message: msg,
       });
     }
   });
@@ -7113,7 +7005,7 @@ export async function createWinHoodApp(options?: {
           8000
         );
         if (qgRes.ok) {
-          const qgJson = await qgRes.json();
+          const qgJson = await qgRes.json<{ projectStatus?: Record<string, unknown> }>();
           qualityGate = qgJson.projectStatus || qgJson;
         }
       } catch {
@@ -7121,7 +7013,12 @@ export async function createWinHoodApp(options?: {
       }
 
       // 2. Component Measures (MQR + Standard + New Code + Cobertura Separada)
-      let measures: any[] = [];
+      let measures: Array<{
+        metric: string;
+        value?: string;
+        period?: { value?: string };
+        periods?: Array<{ value?: string }>;
+      }> = [];
       const measuresMap: Record<string, string | number> = {};
       try {
         const mKeys = DEFAULT_SONAR_METRIC_KEYS.join(',');
@@ -7131,7 +7028,16 @@ export async function createWinHoodApp(options?: {
           8000
         );
         if (mRes.ok) {
-          const mJson = await mRes.json();
+          const mJson = await mRes.json<{
+            component?: {
+              measures?: Array<{
+                metric: string;
+                value?: string;
+                period?: { value?: string };
+                periods?: Array<{ value?: string }>;
+              }>;
+            };
+          }>();
           measures = mJson.component?.measures || [];
           for (const m of measures) {
             measuresMap[m.metric] =
@@ -7146,7 +7052,7 @@ export async function createWinHoodApp(options?: {
       }
 
       // 3. Hotspots
-      let hotspots: any[] = [];
+      let hotspots: RawSonarHotspotApiItem[] = [];
       try {
         const hsRes = await fetchWithTimeoutAndNoRedirect(
           `${safeOrigin}/api/hotspots/search?projectKey=${encodeURIComponent(effectiveKey)}&ps=500`,
@@ -7154,7 +7060,7 @@ export async function createWinHoodApp(options?: {
           8000
         );
         if (hsRes.ok) {
-          const hsJson = await hsRes.json();
+          const hsJson = await hsRes.json<{ hotspots?: RawSonarHotspotApiItem[] }>();
           hotspots = hsJson.hotspots || [];
         }
       } catch {
@@ -7162,7 +7068,7 @@ export async function createWinHoodApp(options?: {
       }
 
       // 4. Issues Paginadas
-      const allIssues: any[] = [];
+      const allIssues: RawSonarIssueApiItem[] = [];
       let page = 1;
       let totalIssues = 0;
       let issuesFailed = false;
@@ -7177,7 +7083,10 @@ export async function createWinHoodApp(options?: {
           issuesFailed = true;
           break;
         }
-        const issJson = await issRes.json();
+        const issJson = await issRes.json<{
+          total?: number;
+          issues?: RawSonarIssueApiItem[];
+        }>();
         totalIssues = Number(issJson.total ?? (issJson.issues || []).length);
         const batch = issJson.issues || [];
         allIssues.push(...batch);
@@ -7186,7 +7095,13 @@ export async function createWinHoodApp(options?: {
       } while (allIssues.length < totalIssues && page <= 20);
 
       // 5. Quality Profiles Reais (/api/qualityprofiles/search)
-      let realProfiles: any[] = [];
+      let realProfiles: Array<{
+        key?: string;
+        name?: string;
+        language?: string;
+        isBuiltIn?: boolean;
+        isDefault?: boolean;
+      }> = [];
       try {
         const orgParam = effectiveOrg ? `&organization=${encodeURIComponent(effectiveOrg)}` : '';
         const qpRes = await fetchWithTimeoutAndNoRedirect(
@@ -7195,7 +7110,15 @@ export async function createWinHoodApp(options?: {
           8000
         );
         if (qpRes.ok) {
-          const qpJson = await qpRes.json();
+          const qpJson = await qpRes.json<{
+            profiles?: Array<{
+              key?: string;
+              name?: string;
+              language?: string;
+              isBuiltIn?: boolean;
+              isDefault?: boolean;
+            }>;
+          }>();
           realProfiles = Array.isArray(qpJson.profiles) ? qpJson.profiles : [];
         }
       } catch {
@@ -7212,7 +7135,7 @@ export async function createWinHoodApp(options?: {
           8000
         );
         if (qgNameRes.ok) {
-          const qgNameJson = await qgNameRes.json();
+          const qgNameJson = await qgNameRes.json<{ qualityGate?: { name?: string } }>();
           if (qgNameJson?.qualityGate?.name) {
             verifiedGateName = String(qgNameJson.qualityGate.name);
           }
@@ -8310,8 +8233,33 @@ export async function createWinHoodApp(options?: {
       return res.json({ gitarIntegration: g });
     }
 
+    if (apiBaseUrl && apiBaseUrl.trim().length > 0) {
+      const candidateBaseUrl = apiBaseUrl.trim();
+      const ssrfCheck = await SsrfGuard.validateUrl({
+        targetUrl: candidateBaseUrl,
+        allowExplicitLoopback: SsrfGuard.isExplicitLoopbackUrl(candidateBaseUrl),
+      });
+      if (!ssrfCheck.allowed) {
+        const blockedMessage = `SSRF_BLOCKED: ${ssrfCheck.reason}`;
+        lifecycleManager.appendLog('GITAR_AI', 'WARN', 'GITAR_SSRF_BLOCKED', blockedMessage);
+        return res.status(400).json({
+          error: 'SSRF_BLOCKED',
+          message: blockedMessage,
+          health: {
+            healthy: false,
+            state: 'PROVIDER_UNAVAILABLE',
+            provider: gitProvider || g.gitProvider,
+            apiBaseUrl: candidateBaseUrl,
+            checkedAt: new Date().toISOString(),
+            latencyMs: 0,
+            message: blockedMessage,
+          },
+        });
+      }
+      g.apiBaseUrl = candidateBaseUrl;
+    }
+
     if (gitProvider) g.gitProvider = gitProvider;
-    if (apiBaseUrl) g.apiBaseUrl = apiBaseUrl.trim();
     if (explicitExternalCodeConsent !== undefined) {
       g.explicitExternalCodeConsent = Boolean(explicitExternalCodeConsent);
     }
@@ -9526,8 +9474,15 @@ export async function createWinHoodApp(options?: {
     dbManager,
     totpService,
     deploymentMode,
+    runtimeEnv,
     trustProxyConfig,
+    registerAllowedLocalPort,
     getDb: () => db,
+    flushPendingSave: flushPendingDatabaseSave,
+    dispose: () => {
+      flushPendingDatabaseSave();
+      remoteAuthFailureTracker.dispose();
+    },
   };
 }
 
@@ -9543,6 +9498,7 @@ export interface StartWinHoodServerOptions {
     | 'AI_STUDIO_PREVIEW'
     | 'LOCAL_WEB_DEVELOPMENT'
     | 'LOCAL_PRODUCTION'
+    | 'DOCKER_LOCAL_WEB'
     | 'ELECTRON_DESKTOP'
     | 'WINDOWS_PACKAGED'
     | 'REMOTE_DEPLOYMENT';
@@ -9563,13 +9519,14 @@ export async function startServer(
   options?: StartWinHoodServerOptions
 ): Promise<StartedWinHoodServer> {
   const dataDir = resolveWinHoodDataRoot(options?.dataDir);
-  const { app } = await createWinHoodApp({
+  const { app, dispose, registerAllowedLocalPort } = await createWinHoodApp({
     dataDir,
     deploymentMode: options?.deploymentMode,
     remoteApiToken: options?.remoteApiToken,
     trustProxy: options?.trustProxy,
     environment: options?.environment,
     host: options?.host,
+    port: options?.port,
   });
 
   const isElectronDesktop =
@@ -9582,8 +9539,9 @@ export async function startServer(
       ? options.enableVite
       : process.env.NODE_ENV !== 'production' && !isElectronDesktop;
 
-  // Mount Vite or Static Dist
+  // Mount Vite (dev-only dynamic import) or Static Dist (Docker / production standalone)
   if (shouldEnableVite) {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -9593,8 +9551,11 @@ export async function startServer(
     const distPath = options?.distPath || path.resolve(process.cwd(), 'dist');
     if (fs.existsSync(distPath)) {
       app.use(express.static(distPath));
-      app.get('*', (_req, res) => {
-        res.sendFile(path.join(distPath, 'index.html'));
+      app.get('*', (req, res) => {
+        if (req.path === '/api' || req.path.startsWith('/api/')) {
+          return res.status(404).json({ error: 'ENDPOINT_NOT_FOUND' });
+        }
+        return res.sendFile(path.join(distPath, 'index.html'));
       });
     }
   }
@@ -9622,11 +9583,13 @@ export async function startServer(
   let server: http.Server;
   try {
     server = await listenOnPort(requestedPort);
-  } catch (err: any) {
-    if (err?.code === 'EADDRINUSE' && isElectronDesktop && requestedPort !== 0) {
+  } catch (err: unknown) {
+    const errCode = (err as NodeJS.ErrnoException | undefined)?.code;
+    if (errCode === 'EADDRINUSE' && isElectronDesktop && requestedPort !== 0) {
       // Dynamic fallback port on loopback for desktop mode
       server = await listenOnPort(0);
     } else {
+      dispose();
       throw err;
     }
   }
@@ -9634,7 +9597,17 @@ export async function startServer(
   const addr = server.address();
   const effectivePort =
     typeof addr === 'object' && addr !== null ? addr.port : requestedPort;
+  registerAllowedLocalPort(effectivePort);
   const effectiveUrl = `http://${bindHost === '0.0.0.0' ? '127.0.0.1' : bindHost}:${effectivePort}`;
+
+  const shutdownController = registerGracefulShutdown({
+    server,
+    onBeforeClose: () => {
+      dispose();
+    },
+    signals: isEntrypoint ? ['SIGINT', 'SIGTERM'] : [],
+    exitProcess: isEntrypoint,
+  });
 
   console.log(`WinHood Benchmark Server listening on http://${bindHost}:${effectivePort}`);
 
@@ -9645,13 +9618,10 @@ export async function startServer(
     port: effectivePort,
     url: effectiveUrl,
     dataDir,
-    close: () =>
-      new Promise<void>((resolve, reject) => {
-        server.close((err) => {
-          if (err) reject(err);
-          else resolve();
-        });
-      }),
+    close: async () => {
+      shutdownController.unregister();
+      await shutdownController.shutdown('SERVER_CLOSE');
+    },
   };
 }
 

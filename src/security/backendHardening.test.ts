@@ -2,17 +2,31 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import type http from 'node:http';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync, spawn } from 'node:child_process';
+import net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import zlib from 'node:zlib';
 import {
   createWinHoodApp,
   resolveDeploymentMode,
+  resolveRuntimeEnv,
   resolveTrustProxyConfig,
+  startServer,
 } from '../../server';
 import { KeyManagementService } from './KeyManagementService';
+import {
+  MAX_ZIP_ENTRIES,
+  extractZipBufferToFilesMap,
+} from '../server/zipExtractor';
+import {
+  RemoteAuthFailureTracker,
+  buildAllowedOriginMap,
+  parseValidPortNumber,
+} from '../server/securityMiddleware';
+import { registerGracefulShutdown } from '../server/gracefulShutdown';
 
 /**
  * Builds a minimal valid uncompressed (STORE, method 0) ZIP archive buffer in pure Node.js
@@ -562,3 +576,608 @@ test('KeyManagementService enforces secret domain separation, production fail-cl
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+/**
+ * Helper to build a real DEFLATE (method 8) ZIP archive buffer with EOCD (or LFH-only).
+ */
+function buildDeflatedZipBuffer(
+  entries: Array<{ name: string; rawData: Buffer }>,
+  includeEocd = true
+): Buffer {
+  const localParts: Buffer[] = [];
+  const centralParts: Buffer[] = [];
+  let offset = 0;
+
+  for (const entry of entries) {
+    const nameBuf = Buffer.from(entry.name, 'utf8');
+    const compressed = zlib.deflateRawSync(entry.rawData, { level: 9 });
+    const lfh = Buffer.alloc(30);
+    lfh.writeUInt32LE(0x04034b50, 0);
+    lfh.writeUInt16LE(20, 4);
+    lfh.writeUInt16LE(8, 8); // DEFLATE
+    lfh.writeUInt32LE(compressed.length, 18);
+    lfh.writeUInt32LE(entry.rawData.length, 22);
+    lfh.writeUInt16LE(nameBuf.length, 26);
+
+    localParts.push(lfh, nameBuf, compressed);
+
+    if (includeEocd) {
+      const cdh = Buffer.alloc(46);
+      cdh.writeUInt32LE(0x02014b50, 0);
+      cdh.writeUInt16LE(20, 4);
+      cdh.writeUInt16LE(20, 6);
+      cdh.writeUInt16LE(8, 10); // DEFLATE
+      cdh.writeUInt32LE(compressed.length, 20);
+      cdh.writeUInt32LE(entry.rawData.length, 24);
+      cdh.writeUInt16LE(nameBuf.length, 28);
+      cdh.writeUInt32LE(offset, 42);
+      centralParts.push(cdh, nameBuf);
+    }
+
+    offset += 30 + nameBuf.length + compressed.length;
+  }
+
+  if (!includeEocd) {
+    return Buffer.concat(localParts);
+  }
+
+  const centralDir = Buffer.concat(centralParts);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(centralDir.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  return Buffer.concat([...localParts, centralDir, eocd]);
+}
+
+test('WH-AUD-003: extractZipBufferToFilesMap and /api/projects/extract-zip block ZIP bombs (high compression ratio, >2000 entries, cumulative >64MB)', async () => {
+  // 1. High compression ratio >= 100x (compressed >= 1KB, uncompressed ~1.8MB of repeated ASCII)
+  const bombPayload = Buffer.alloc(1_800_000, 0x41); // 'A' repeated -> compresses to ~1.7KB (> 1000x ratio)
+  const ratioBombZip = buildDeflatedZipBuffer([{ name: 'src/bomb.ts', rawData: bombPayload }], true);
+  assert.throws(
+    () => extractZipBufferToFilesMap(ratioBombZip),
+    /ZIP_BOMB_BLOCKED/
+  );
+
+  // Also test LFH-only fallback path without EOCD
+  const lfhOnlyBombZip = buildDeflatedZipBuffer([{ name: 'src/bomb.ts', rawData: bombPayload }], false);
+  assert.throws(
+    () => extractZipBufferToFilesMap(lfhOnlyBombZip),
+    /ZIP_BOMB_BLOCKED/
+  );
+
+  // 2. Excess entry count (> MAX_ZIP_ENTRIES = 2000)
+  const tooManyEntries = Array.from({ length: MAX_ZIP_ENTRIES + 1 }, (_, i) => ({
+    name: `src/file_${i}.ts`,
+    content: Buffer.from(`export const x${i} = ${i};`, 'utf8'),
+  }));
+  const floodZip = buildStoredZipBuffer(tooManyEntries);
+  assert.throws(
+    () => extractZipBufferToFilesMap(floodZip),
+    /ZIP_BOMB_BLOCKED/
+  );
+
+  // 3. Cumulative uncompressed volume > 64MB across multiple <= 2MB entries (34 x 2MB = 68MB)
+  const pseudoRandom2Mb = crypto.randomBytes(2 * 1024 * 1024).toString('base64').slice(0, 1_950_000);
+  const entryBuf = Buffer.from(pseudoRandom2Mb, 'utf8');
+  const cumulativeEntries = Array.from({ length: 35 }, (_, i) => ({
+    name: `src/chunk_${i}.txt`,
+    content: entryBuf,
+  }));
+  const cumulativeZip = buildStoredZipBuffer(cumulativeEntries);
+  assert.throws(
+    () => extractZipBufferToFilesMap(cumulativeZip),
+    /ZIP_BOMB_BLOCKED/
+  );
+
+  // 4. End-to-end HTTP check on /api/projects/extract-zip -> HTTP 400 with error: ZIP_BOMB_BLOCKED
+  const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'winhood-zipbomb-http-'));
+  let srv: http.Server | null = null;
+  try {
+    const { app, dispose } = await createWinHoodApp({ dataDir: tmpDataDir });
+    srv = await new Promise<http.Server>((resolve) => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    const baseUrl = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+
+    const bombRes = await fetch(`${baseUrl}/api/projects/extract-zip`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ zipBase64: ratioBombZip.toString('base64') }),
+    });
+    assert.equal(bombRes.status, 400);
+    const bombJson = (await bombRes.json()) as { error: string; message: string };
+    assert.equal(bombJson.error, 'ZIP_BOMB_BLOCKED');
+    assert.ok(bombJson.message.includes('ZIP_BOMB_BLOCKED'));
+
+    const floodRes = await fetch(`${baseUrl}/api/projects/extract-zip`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ zipBase64: floodZip.toString('base64') }),
+    });
+    assert.equal(floodRes.status, 400);
+    const floodJson = (await floodRes.json()) as { error: string };
+    assert.equal(floodJson.error, 'ZIP_BOMB_BLOCKED');
+
+    dispose();
+  } finally {
+    if (srv) await new Promise<void>((resolve) => srv!.close(() => resolve()));
+    fs.rmSync(tmpDataDir, { recursive: true, force: true });
+  }
+});
+
+test('WH-AUD-005 & WH-AUD-006 & WH-AUD-009: Docker confinement/container guidance, bounded RemoteAuthFailureTracker + JSONL audit, and graceful shutdown', async () => {
+  // 1. Bounded RemoteAuthFailureTracker enforces maxTrackedIps ceiling and pruning
+  const tracker = new RemoteAuthFailureTracker({
+    maxTrackedIps: 100,
+    lockoutThreshold: 5,
+    lockoutDurationMs: 60_000,
+    entryTtlMs: 5000,
+    cleanupIntervalMs: 60_000,
+  });
+  try {
+    const t0 = 1_000_000;
+    for (let i = 0; i < 150; i++) {
+      tracker.recordFailure(`198.51.100.${i}`, t0);
+    }
+    assert.equal(tracker.size(), 100, 'Tracker must remain strictly bounded at maxTrackedIps');
+
+    for (let i = 0; i < 5; i++) {
+      tracker.recordFailure('203.0.113.55', t0 + 10);
+    }
+    assert.equal(tracker.isLocked('203.0.113.55', t0 + 20).locked, true);
+    assert.ok(tracker.pruneExpired(t0 + 100_000) > 0, 'Expired entries must be pruned');
+    assert.equal(tracker.size(), 0);
+  } finally {
+    tracker.dispose();
+  }
+
+  // 2. REMOTE_DEPLOYMENT writes failed auth events to append-only logs/security-auth-audit.jsonl without secret leakage
+  const tmpRemoteDir = fs.mkdtempSync(path.join(os.tmpdir(), 'winhood-remote-jsonl-'));
+  let remoteSrv: http.Server | null = null;
+  try {
+    const token = `wh_remote_${crypto.randomBytes(24).toString('hex')}`;
+    const { app, dispose } = await createWinHoodApp({
+      dataDir: tmpRemoteDir,
+      deploymentMode: 'REMOTE_DEPLOYMENT',
+      remoteApiToken: token,
+    });
+    remoteSrv = await new Promise<http.Server>((resolve) => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    const baseUrl = `http://127.0.0.1:${(remoteSrv.address() as AddressInfo).port}`;
+
+    for (let i = 0; i < 6; i++) {
+      await fetch(`${baseUrl}/api/projects`, {
+        headers: { Authorization: 'Bearer wrong-token-must-never-leak' },
+      });
+    }
+
+    const auditJsonlPath = path.join(tmpRemoteDir, 'logs', 'security-auth-audit.jsonl');
+    assert.equal(fs.existsSync(auditJsonlPath), true, 'security-auth-audit.jsonl must be created');
+    const lines = fs.readFileSync(auditJsonlPath, 'utf8').trim().split('\n');
+    assert.equal(lines.length, 6, 'All 5 denied + 1 locked events must be logged to JSONL');
+    const parsedEvents = lines.map((l) => JSON.parse(l) as { action: string; failureReason: string });
+    assert.equal(parsedEvents[0]?.action, 'REMOTE_AUTH_DENIED');
+    assert.equal(parsedEvents[5]?.action, 'REMOTE_AUTH_LOCKED');
+    assert.equal(
+      fs.readFileSync(auditJsonlPath, 'utf8').includes('wrong-token-must-never-leak'),
+      false,
+      'JSONL audit log must never leak raw bearer tokens'
+    );
+    dispose();
+  } finally {
+    if (remoteSrv) await new Promise<void>((resolve) => remoteSrv!.close(() => resolve()));
+    fs.rmSync(tmpRemoteDir, { recursive: true, force: true });
+  }
+
+  // 3. WH-AUD-005: Docker status confines bind to 127.0.0.1:9000:9000 with pinned image, and DOCKER_LOCAL_WEB returns compose profile guidance
+  const tmpDockerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'winhood-docker-confine-'));
+  const prevRuntimeEnv = process.env.WINHOOD_RUNTIME_ENV;
+  let dockerSrv: http.Server | null = null;
+  try {
+    process.env.WINHOOD_RUNTIME_ENV = 'DOCKER_LOCAL_WEB';
+    const { app, dispose } = await createWinHoodApp({ dataDir: tmpDockerDir });
+    dockerSrv = await new Promise<http.Server>((resolve) => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    const baseUrl = `http://127.0.0.1:${(dockerSrv.address() as AddressInfo).port}`;
+
+    const autoStartRes = await fetch(`${baseUrl}/api/sonar/docker-auto-start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    assert.equal(autoStartRes.status, 200);
+    const autoStartJson = (await autoStartRes.json()) as {
+      ok: boolean;
+      runningInContainer: boolean;
+      fallbackToNative: boolean;
+      suggestedCommand: string;
+    };
+    assert.equal(autoStartJson.ok, false);
+    assert.equal(autoStartJson.runningInContainer, true);
+    assert.equal(autoStartJson.fallbackToNative, true);
+    assert.equal(autoStartJson.suggestedCommand, 'docker compose --profile sonar up -d');
+
+    const statusRes = await fetch(`${baseUrl}/api/sonar/docker-status`);
+    assert.equal(statusRes.status, 200);
+    const statusJson = (await statusRes.json()) as {
+      runningInContainer: boolean;
+      dockerContainerSuggestedCommand: string;
+    };
+    assert.equal(statusJson.runningInContainer, true);
+    assert.equal(statusJson.dockerContainerSuggestedCommand, 'docker compose --profile sonar up -d');
+    assert.equal(statusJson.dockerContainerSuggestedCommand.includes(':latest'), false);
+    dispose();
+  } finally {
+    if (prevRuntimeEnv === undefined) delete process.env.WINHOOD_RUNTIME_ENV;
+    else process.env.WINHOOD_RUNTIME_ENV = prevRuntimeEnv;
+    if (dockerSrv) await new Promise<void>((resolve) => dockerSrv!.close(() => resolve()));
+    fs.rmSync(tmpDockerDir, { recursive: true, force: true });
+  }
+
+  // 4. WH-AUD-009: registerGracefulShutdown flushes state and closes server idempotently
+  let flushedCount = 0;
+  const dummySrv = http.createServer((_req, res) => res.end('ok'));
+  await new Promise<void>((resolve) => dummySrv.listen(0, '127.0.0.1', () => resolve()));
+  const ctrl = registerGracefulShutdown({
+    server: dummySrv,
+    onBeforeClose: () => {
+      flushedCount += 1;
+    },
+    signals: [],
+  });
+  const firstResult = await ctrl.shutdown('TEST_SHUTDOWN');
+  const secondResult = await ctrl.shutdown('SECOND_CALL');
+  assert.equal(firstResult.closed, true);
+  assert.equal(firstResult.flushed, true);
+  assert.equal(secondResult.reason, 'TEST_SHUTDOWN');
+  assert.equal(flushedCount, 1, 'Graceful shutdown must be idempotent');
+  ctrl.unregister();
+});
+
+async function getFreeLoopbackPort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const address = probe.address() as AddressInfo;
+      const freePort = address.port;
+      probe.close(() => resolve(freePort));
+    });
+  });
+}
+
+test('Módulo 03: Docker Local-Web runtime detection, dynamic CORS, SPA fallback, standalone dist-server bundle & container contracts', async () => {
+  // 1. Unit checks for resolveRuntimeEnv, parseValidPortNumber & buildAllowedOriginMap
+  assert.equal(resolveRuntimeEnv({ runtimeEnv: 'DOCKER_LOCAL_WEB' }), 'DOCKER_LOCAL_WEB');
+  assert.equal(resolveRuntimeEnv({ environment: 'DOCKER_LOCAL_WEB' }), 'DOCKER_LOCAL_WEB');
+  assert.equal(
+    resolveRuntimeEnv({ runtimeEnv: '', environment: undefined, dockerEnvFileExists: true }),
+    'DOCKER_LOCAL_WEB'
+  );
+  assert.equal(
+    resolveRuntimeEnv({ runtimeEnv: '', environment: 'ELECTRON_DESKTOP', dockerEnvFileExists: false }),
+    'ELECTRON_DESKTOP'
+  );
+  assert.equal(
+    resolveRuntimeEnv({ runtimeEnv: '', environment: undefined, dockerEnvFileExists: false }),
+    'LOCAL_NODE'
+  );
+
+  assert.equal(parseValidPortNumber('3080'), 3080);
+  assert.equal(parseValidPortNumber(0), null);
+  assert.equal(parseValidPortNumber(70000), null);
+  assert.equal(parseValidPortNumber('not-a-port'), null);
+
+  const localOrigins = buildAllowedOriginMap({
+    deploymentMode: 'LOCAL_WEB',
+    effectivePort: 3040,
+    winhoodPort: '3088',
+    allowedOriginsEnv: 'http://localhost:4100',
+  });
+  assert.equal(localOrigins.get('http://localhost:3000'), 'http://localhost:3000');
+  assert.equal(localOrigins.get('http://localhost:3040'), 'http://localhost:3040');
+  assert.equal(localOrigins.get('http://127.0.0.1:3088'), 'http://127.0.0.1:3088');
+  assert.equal(localOrigins.get('http://localhost:4100'), 'http://localhost:4100');
+
+  const remoteOrigins = buildAllowedOriginMap({
+    deploymentMode: 'REMOTE_DEPLOYMENT',
+    effectivePort: 3040,
+    winhoodPort: '3088',
+  });
+  assert.equal(remoteOrigins.has('http://localhost:3088'), false);
+
+  // 2. startServer in production static mode (enableVite: false) with SPA fallback, /api/* 404 JSON, dynamic CORS, and loopback TOTP cookie
+  const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'winhood-docker-web-data-'));
+  const tmpDistDir = fs.mkdtempSync(path.join(os.tmpdir(), 'winhood-docker-web-dist-'));
+  const prevWinhoodPort = process.env.WINHOOD_PORT;
+  const prevNodeEnv = process.env.NODE_ENV;
+  const prevDataDir = process.env.WINHOOD_DATA_DIR;
+  const prevMasterSecret = process.env.WINHOOD_KEYSTORE_MASTER_SECRET;
+  let started: Awaited<ReturnType<typeof startServer>> | null = null;
+  try {
+    fs.mkdirSync(path.join(tmpDistDir, 'assets'), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDistDir, 'index.html'),
+      '<!doctype html><html><body><div id="root">WinHood SPA</div></body></html>',
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(tmpDistDir, 'assets', 'bundle.js'),
+      'console.log("winhood-static-asset");',
+      'utf8'
+    );
+
+    process.env.WINHOOD_PORT = '3088';
+    process.env.NODE_ENV = 'production';
+    process.env.WINHOOD_DATA_DIR = tmpDataDir;
+    process.env.WINHOOD_KEYSTORE_MASTER_SECRET = crypto.randomBytes(32).toString('hex');
+    started = await startServer({
+      dataDir: tmpDataDir,
+      distPath: tmpDistDir,
+      host: '127.0.0.1',
+      port: 0,
+      deploymentMode: 'LOCAL_WEB',
+      environment: 'DOCKER_LOCAL_WEB',
+      enableVite: false,
+    });
+
+    const healthRes = await fetch(`${started.url}/api/health`);
+    assert.equal(healthRes.status, 200);
+    const healthJson = (await healthRes.json()) as {
+      deploymentMode: string;
+      runtimeEnv: string;
+      accessMode: string;
+    };
+    assert.equal(healthJson.deploymentMode, 'LOCAL_WEB');
+    assert.equal(healthJson.runtimeEnv, 'DOCKER_LOCAL_WEB');
+    assert.equal(healthJson.accessMode, 'UNRESTRICTED_LOCAL');
+
+    const bootRes = await fetch(`${started.url}/api/bootstrap`);
+    assert.equal(bootRes.status, 200);
+    const bootJson = (await bootRes.json()) as {
+      deploymentMode: string;
+      runtimeEnv: string;
+      accessMode: string;
+    };
+    assert.equal(bootJson.deploymentMode, 'LOCAL_WEB');
+    assert.equal(bootJson.runtimeEnv, 'DOCKER_LOCAL_WEB');
+    assert.equal(bootJson.accessMode, 'UNRESTRICTED_LOCAL');
+
+    // Dynamic CORS allows configured WINHOOD_PORT (3088) and bound ephemeral port, blocks foreign origins
+    const corsCustomRes = await fetch(`${started.url}/api/health`, {
+      method: 'OPTIONS',
+      headers: { Origin: 'http://localhost:3088' },
+    });
+    assert.equal(corsCustomRes.status, 204);
+    assert.equal(corsCustomRes.headers.get('access-control-allow-origin'), 'http://localhost:3088');
+
+    const corsBoundRes = await fetch(`${started.url}/api/health`, {
+      method: 'OPTIONS',
+      headers: { Origin: `http://localhost:${started.port}` },
+    });
+    assert.equal(corsBoundRes.status, 204);
+    assert.equal(
+      corsBoundRes.headers.get('access-control-allow-origin'),
+      `http://localhost:${started.port}`
+    );
+
+    const corsBlockedRes = await fetch(`${started.url}/api/health`, {
+      method: 'OPTIONS',
+      headers: { Origin: 'https://untrusted.example' },
+    });
+    assert.equal(corsBlockedRes.status, 403);
+
+    // Static assets, SPA fallback, and strict /api/* 404 JSON
+    const indexRes = await fetch(`${started.url}/`);
+    assert.equal(indexRes.status, 200);
+    assert.match(await indexRes.text(), /WinHood SPA/);
+
+    const assetRes = await fetch(`${started.url}/assets/bundle.js`);
+    assert.equal(assetRes.status, 200);
+    assert.match(await assetRes.text(), /winhood-static-asset/);
+
+    const spaRouteRes = await fetch(`${started.url}/projects/demo/reports`);
+    assert.equal(spaRouteRes.status, 200);
+    assert.match(await spaRouteRes.text(), /WinHood SPA/);
+
+    const missingApiRes = await fetch(`${started.url}/api/does-not-exist-docker-check`);
+    assert.equal(missingApiRes.status, 404);
+    const missingApiJson = (await missingApiRes.json()) as { error: string };
+    assert.equal(missingApiJson.error, 'ENDPOINT_NOT_FOUND');
+
+    // POST /api/gitar/configure blocks cloud metadata SSRF upfront with HTTP 400 SSRF_BLOCKED
+    const gitarSsrfRes = await fetch(`${started.url}/api/gitar/configure`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        gitProvider: 'GITHUB',
+        apiBaseUrl: 'http://169.254.169.254',
+      }),
+    });
+    assert.equal(gitarSsrfRes.status, 400);
+    const gitarSsrfJson = (await gitarSsrfRes.json()) as { error: string; message: string };
+    assert.equal(gitarSsrfJson.error, 'SSRF_BLOCKED');
+    assert.match(gitarSsrfJson.message, /SSRF_BLOCKED/);
+
+    // Optional TOTP cookies on http://127.0.0.1:<port> in NODE_ENV=production use SameSite=Strict without Secure
+    const setupRes = await fetch(`${started.url}/api/totp/setup`, {
+      method: 'POST',
+    });
+    assert.equal(setupRes.status, 200);
+    const setupJson = (await setupRes.json()) as { secret: string };
+    assert.ok(setupJson.secret.length >= 16);
+
+    const { generateTotpCode } = await import('./OptionalTotpService');
+    const validCode = generateTotpCode(setupJson.secret);
+    const confirmRes = await fetch(`${started.url}/api/totp/confirm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: validCode }),
+    });
+    assert.equal(confirmRes.status, 200);
+    const setCookies =
+      typeof confirmRes.headers.getSetCookie === 'function'
+        ? confirmRes.headers.getSetCookie()
+        : [confirmRes.headers.get('set-cookie') || ''];
+    const joinedCookies = setCookies.join('; ');
+    assert.match(joinedCookies, /winhood_totp_unlock=/);
+    assert.match(joinedCookies, /winhood_csrf=/);
+    assert.match(joinedCookies, /SameSite=Strict/);
+    assert.equal(/;\s*Secure\b/i.test(joinedCookies), false);
+    assert.equal(
+      fs.existsSync(path.join(tmpDataDir, 'keys', 'keystore.json')),
+      true,
+      'Keystore must persist inside WINHOOD_DATA_DIR/keys/ for Docker volume durability'
+    );
+    assert.equal(
+      fs.existsSync(path.join(tmpDataDir, 'keys', 'trust-store.json')),
+      true,
+      'Trust store must persist inside WINHOOD_DATA_DIR/keys/ for Docker volume durability'
+    );
+  } finally {
+    if (started) await started.close();
+    if (prevWinhoodPort === undefined) delete process.env.WINHOOD_PORT;
+    else process.env.WINHOOD_PORT = prevWinhoodPort;
+    if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = prevNodeEnv;
+    if (prevDataDir === undefined) delete process.env.WINHOOD_DATA_DIR;
+    else process.env.WINHOOD_DATA_DIR = prevDataDir;
+    if (prevMasterSecret === undefined) delete process.env.WINHOOD_KEYSTORE_MASTER_SECRET;
+    else process.env.WINHOOD_KEYSTORE_MASTER_SECRET = prevMasterSecret;
+    fs.rmSync(tmpDataDir, { recursive: true, force: true });
+    fs.rmSync(tmpDistDir, { recursive: true, force: true });
+  }
+
+  // 3. Standalone dist-server/server.mjs build & real process execution with SIGTERM graceful shutdown
+  const rootDir = process.cwd();
+  const bundlePath = path.join(rootDir, 'dist-server', 'server.mjs');
+  execFileSync(process.execPath, [path.join(rootDir, 'scripts', 'build-server.mjs')], {
+    cwd: rootDir,
+    stdio: 'pipe',
+  });
+  assert.equal(fs.existsSync(bundlePath), true, 'dist-server/server.mjs must be built');
+  const bundleCode = fs.readFileSync(bundlePath, 'utf8');
+  assert.equal(
+    /^\s*import\s+[\s\S]*?\s+from\s+["']vite["']/m.test(bundleCode),
+    false,
+    'Production server bundle must not statically import vite'
+  );
+
+  const freePort = await getFreeLoopbackPort();
+  const tmpStandaloneDir = fs.mkdtempSync(path.join(os.tmpdir(), 'winhood-standalone-bundle-'));
+  const child = spawn(process.execPath, [bundlePath], {
+    cwd: rootDir,
+    env: {
+      ...process.env,
+      NODE_ENV: 'production',
+      PORT: String(freePort),
+      WINHOOD_PORT: '3099',
+      WINHOOD_DEPLOYMENT_MODE: 'LOCAL_WEB',
+      WINHOOD_RUNTIME_ENV: 'DOCKER_LOCAL_WEB',
+      WINHOOD_ALLOW_NETWORK_BIND: 'false',
+      WINHOOD_DATA_DIR: tmpStandaloneDir,
+      WINHOOD_KEYSTORE_MASTER_SECRET: crypto.randomBytes(32).toString('hex'),
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    let healthy = false;
+    for (let attempt = 0; attempt < 40; attempt++) {
+      try {
+        const res = await fetch(`http://127.0.0.1:${freePort}/api/health`);
+        if (res.ok) {
+          const body = (await res.json()) as {
+            status: string;
+            runtimeEnv: string;
+            deploymentMode: string;
+          };
+          assert.equal(body.status, 'ONLINE');
+          assert.equal(body.runtimeEnv, 'DOCKER_LOCAL_WEB');
+          assert.equal(body.deploymentMode, 'LOCAL_WEB');
+          healthy = true;
+          break;
+        }
+      } catch {
+        await new Promise((r) => setTimeout(r, 150));
+      }
+    }
+    assert.equal(healthy, true, 'Standalone dist-server/server.mjs must become healthy');
+
+    const preflightRes = await fetch(`http://127.0.0.1:${freePort}/api/health`, {
+      method: 'OPTIONS',
+      headers: { Origin: 'http://localhost:3099' },
+    });
+    assert.equal(preflightRes.status, 204);
+    assert.equal(preflightRes.headers.get('access-control-allow-origin'), 'http://localhost:3099');
+
+    const exitCodePromise = new Promise<number | null>((resolve) => {
+      child.once('exit', (code) => resolve(code));
+    });
+    child.kill('SIGTERM');
+    const exitCode = await Promise.race([
+      exitCodePromise,
+      new Promise<number | null>((resolve) => setTimeout(() => resolve(-1), 6000)),
+    ]);
+    assert.equal(exitCode, 0, 'Standalone server must exit cleanly with code 0 on SIGTERM');
+  } finally {
+    if (child.exitCode === null) {
+      child.kill('SIGKILL');
+    }
+    fs.rmSync(tmpStandaloneDir, { recursive: true, force: true });
+  }
+
+  // 4. Hardened Docker & 1-click distribution file contracts
+  const dockerfile = fs.readFileSync(path.join(rootDir, 'Dockerfile'), 'utf8');
+  assert.match(dockerfile, /FROM node:22-bookworm-slim AS builder/);
+  assert.match(dockerfile, /FROM node:22-bookworm-slim AS deps/);
+  assert.match(dockerfile, /FROM node:22-bookworm-slim AS runtime/);
+  assert.match(dockerfile, /USER winhood/);
+  assert.match(dockerfile, /HEALTHCHECK/);
+  assert.match(dockerfile, /CMD \["node", "dist-server\/server\.mjs"\]/);
+  assert.match(dockerfile, /npm ci --omit=dev --ignore-scripts/);
+
+  const dockerignore = fs.readFileSync(path.join(rootDir, '.dockerignore'), 'utf8');
+  assert.match(dockerignore, /^\.env\.docker$/m);
+  assert.match(dockerignore, /^dist-server$/m);
+  assert.match(dockerignore, /^!LICENSE$/m);
+  assert.match(dockerignore, /^!SECURITY\.md$/m);
+
+  const compose = fs.readFileSync(path.join(rootDir, 'docker-compose.yml'), 'utf8');
+  assert.match(compose, /127\.0\.0\.1:\$\{WINHOOD_PORT:-3000\}:3000/);
+  assert.match(compose, /127\.0\.0\.1:9000:9000/);
+  assert.match(compose, /cap_drop:\s*\n\s*-\s*ALL/);
+  assert.match(compose, /no-new-privileges:true/);
+  assert.match(compose, /winhood_data:\/data\/winhood/);
+  assert.match(compose, /WINHOOD_KEYSTORE_MASTER_SECRET/);
+  assert.equal(compose.includes(':latest'), false, 'docker-compose.yml must never pin :latest');
+
+  const envExample = fs.readFileSync(path.join(rootDir, '.env.docker.example'), 'utf8');
+  assert.match(envExample, /^WINHOOD_PORT=3000$/m);
+  assert.match(envExample, /^WINHOOD_KEYSTORE_MASTER_SECRET=$/m);
+
+  const gitignore = fs.readFileSync(path.join(rootDir, '.gitignore'), 'utf8');
+  assert.match(gitignore, /^!\.env\.docker\.example$/m);
+  assert.match(gitignore, /^\.env\.docker$/m);
+
+  const pkgJson = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8')) as {
+    dependencies: Record<string, string>;
+    devDependencies: Record<string, string>;
+  };
+  assert.equal(pkgJson.dependencies['vite'], undefined);
+  assert.equal(pkgJson.dependencies['@vitejs/plugin-react'], undefined);
+  assert.equal(pkgJson.dependencies['@tailwindcss/vite'], undefined);
+  assert.ok(pkgJson.devDependencies['vite']);
+  assert.ok(pkgJson.devDependencies['@vitejs/plugin-react']);
+  assert.ok(pkgJson.devDependencies['@tailwindcss/vite']);
+
+  assert.equal(fs.existsSync(path.join(rootDir, 'scripts', 'docker-up.sh')), true);
+  assert.equal(fs.existsSync(path.join(rootDir, 'scripts', 'docker-up.ps1')), true);
+  assert.equal(fs.existsSync(path.join(rootDir, 'scripts', 'verify-docker-local-web.mjs')), true);
+  assert.equal(fs.existsSync(path.join(rootDir, 'DOCKER_LOCAL_WEB.md')), true);
+});
+
+

@@ -176,9 +176,10 @@ export class MqrBridgeConnection {
       };
     }
 
+    const allowExplicitLoopback = SsrfGuard.isExplicitLoopbackUrl(rawUrl);
     const ssrf = await SsrfGuard.validateUrl({
       targetUrl: rawUrl,
-      allowExplicitLoopback: SsrfGuard.isExplicitLoopbackUrl(rawUrl),
+      allowExplicitLoopback,
     });
     if (!ssrf.allowed) {
       return {
@@ -210,41 +211,19 @@ export class MqrBridgeConnection {
     }
 
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-      const statusRes = await fetch(`${rawUrl}/api/system/status`, {
+      const statusRes = await SsrfGuard.pinnedSafeRequest({
+        targetUrl: `${rawUrl}/api/system/status`,
         method: 'GET',
         headers,
-        redirect: 'manual',
-        signal: controller.signal,
+        timeoutMs,
+        allowExplicitLoopback,
+        followRedirects: false,
+        maxRedirects: 0,
       });
-      clearTimeout(timer);
-
-      if (statusRes.status >= 300 && statusRes.status < 400) {
-        return {
-          connectionState: 'SERVER_UNAVAILABLE',
-          httpReachable: false,
-          authenticated: false,
-          version: null,
-          edition: null,
-          systemStatus: 'REDIRECT_BLOCKED',
-          apiCompatibility: 'UNKNOWN',
-          permissions: {
-            browse: false,
-            executeAnalysis: false,
-            administerQualityGates: false,
-            provisioning: false,
-          },
-          tokenExpiresAt: null,
-          latencyMs: Math.round((performance.now() - start) * 10) / 10,
-          errorMessage: `SSRF_REDIRECT_BLOCKED: Servidor respondeu com redirecionamento HTTP ${statusRes.status}.`,
-        };
-      }
 
       const latencyMs = Math.round((performance.now() - start) * 10) / 10;
 
-      if (statusRes.status === 401 || statusRes.status === 403) {
+      if (statusRes.statusCode === 401 || statusRes.statusCode === 403) {
         return {
           connectionState: 'AUTH_FAILED',
           httpReachable: true,
@@ -261,7 +240,7 @@ export class MqrBridgeConnection {
           },
           tokenExpiresAt: null,
           latencyMs,
-          errorMessage: `Falha de autenticação HTTP ${statusRes.status}: token Bearer inválido ou ausente.`,
+          errorMessage: `Falha de autenticação HTTP ${statusRes.statusCode}: token Bearer inválido ou ausente.`,
         };
       }
 
@@ -272,7 +251,7 @@ export class MqrBridgeConnection {
           authenticated: false,
           version: null,
           edition: null,
-          systemStatus: `HTTP_${statusRes.status}`,
+          systemStatus: `HTTP_${statusRes.statusCode}`,
           apiCompatibility: 'UNKNOWN',
           permissions: {
             browse: false,
@@ -282,15 +261,15 @@ export class MqrBridgeConnection {
           },
           tokenExpiresAt: null,
           latencyMs,
-          errorMessage: `Servidor respondeu com status inesperado HTTP ${statusRes.status}.`,
+          errorMessage: `Servidor respondeu com status inesperado HTTP ${statusRes.statusCode}.`,
         };
       }
 
-      const statusJson = (await statusRes.json()) as {
+      const statusJson = statusRes.json<{
         id?: string;
         version?: string;
         status?: string;
-      };
+      }>();
 
       const version = statusJson.version || null;
       const systemStatus = statusJson.status || 'UNKNOWN';
@@ -351,15 +330,16 @@ export class MqrBridgeConnection {
       let authenticated = false;
       let tokenExpiresAt: string | null = null;
       if (options.token && options.token.trim().length > 0) {
-        const authController = new AbortController();
-        const authTimer = setTimeout(() => authController.abort(), timeoutMs);
-        const authRes = await fetch(`${rawUrl}/api/authentication/validate`, {
+        const authRes = await SsrfGuard.pinnedSafeRequest({
+          targetUrl: `${rawUrl}/api/authentication/validate`,
           method: 'GET',
           headers,
-          redirect: 'manual',
-          signal: authController.signal,
-        }).finally(() => clearTimeout(authTimer));
-        if (authRes.status === 401 || authRes.status === 403) {
+          timeoutMs,
+          allowExplicitLoopback,
+          followRedirects: false,
+          maxRedirects: 0,
+        });
+        if (authRes.statusCode === 401 || authRes.statusCode === 403) {
           return {
             connectionState: 'AUTH_FAILED',
             httpReachable: true,
@@ -380,7 +360,7 @@ export class MqrBridgeConnection {
           };
         }
         if (authRes.ok) {
-          const authJson = (await authRes.json()) as { valid?: boolean; tokenExpiresAt?: string };
+          const authJson = authRes.json<{ valid?: boolean; tokenExpiresAt?: string }>();
           authenticated = Boolean(authJson.valid);
           if (authJson.tokenExpiresAt) {
             tokenExpiresAt = authJson.tokenExpiresAt;
@@ -417,16 +397,17 @@ export class MqrBridgeConnection {
       };
       if (authenticated) {
         try {
-          const userController = new AbortController();
-          const userTimer = setTimeout(() => userController.abort(), timeoutMs);
-          const userRes = await fetch(`${rawUrl}/api/users/current`, {
+          const userRes = await SsrfGuard.pinnedSafeRequest({
+            targetUrl: `${rawUrl}/api/users/current`,
             method: 'GET',
             headers,
-            redirect: 'manual',
-            signal: userController.signal,
-          }).finally(() => clearTimeout(userTimer));
+            timeoutMs,
+            allowExplicitLoopback,
+            followRedirects: false,
+            maxRedirects: 0,
+          });
           if (userRes.ok) {
-            const userJson = (await userRes.json()) as { permissions?: { global?: string[] } };
+            const userJson = userRes.json<{ permissions?: { global?: string[] } }>();
             const globalPerms = userJson.permissions?.global;
             if (Array.isArray(globalPerms)) {
               verifiedPerms = {
@@ -470,8 +451,49 @@ export class MqrBridgeConnection {
           ? null
           : 'Servidor UP, mas nenhum token Bearer válido foi autenticado para execução de análises.',
       };
-    } catch (err: any) {
+    } catch (err: unknown) {
       const latencyMs = Math.round((performance.now() - start) * 10) / 10;
+      const errMsg = err instanceof Error ? err.message : 'Falha de conexão';
+      if (errMsg.startsWith('SSRF_REDIRECT_BLOCKED')) {
+        return {
+          connectionState: 'SERVER_UNAVAILABLE',
+          httpReachable: false,
+          authenticated: false,
+          version: null,
+          edition: null,
+          systemStatus: 'REDIRECT_BLOCKED',
+          apiCompatibility: 'UNKNOWN',
+          permissions: {
+            browse: false,
+            executeAnalysis: false,
+            administerQualityGates: false,
+            provisioning: false,
+          },
+          tokenExpiresAt: null,
+          latencyMs,
+          errorMessage: errMsg,
+        };
+      }
+      if (errMsg.startsWith('SSRF_BLOCKED')) {
+        return {
+          connectionState: 'SERVER_UNAVAILABLE',
+          httpReachable: false,
+          authenticated: false,
+          version: null,
+          edition: null,
+          systemStatus: 'SSRF_BLOCKED',
+          apiCompatibility: 'UNKNOWN',
+          permissions: {
+            browse: false,
+            executeAnalysis: false,
+            administerQualityGates: false,
+            provisioning: false,
+          },
+          tokenExpiresAt: null,
+          latencyMs,
+          errorMessage: errMsg,
+        };
+      }
       const isLocal =
         rawUrl.includes('localhost') || rawUrl.includes('127.0.0.1');
       return {
@@ -491,8 +513,8 @@ export class MqrBridgeConnection {
         tokenExpiresAt: null,
         latencyMs,
         errorMessage: isLocal
-          ? `Nenhum servidor MqrBridge em execução em ${rawUrl} (${err?.message || 'ECONNREFUSED'}). O servidor não é iniciado automaticamente nem simulado.`
-          : `Servidor MqrBridge remoto inacessível em ${rawUrl}: ${err?.message || 'Falha de conexão'}.`,
+          ? `Nenhum servidor MqrBridge em execução em ${rawUrl} (${errMsg || 'ECONNREFUSED'}). O servidor não é iniciado automaticamente nem simulado.`
+          : `Servidor MqrBridge remoto inacessível em ${rawUrl}: ${errMsg || 'Falha de conexão'}.`,
       };
     }
   }

@@ -1,4 +1,5 @@
 import type { GitarConnectionState, GitProviderType } from '../../types/benchmark';
+import { SsrfGuard } from '../../execution/SsrfGuard';
 
 export interface GitarHealthStatus {
   healthy: boolean;
@@ -53,22 +54,43 @@ export class GitarInstallationHealth {
     while (cleanUrl.endsWith('/')) {
       cleanUrl = cleanUrl.slice(0, -1);
     }
+
+    const healthUrl = `${cleanUrl}/health`;
+    const allowExplicitLoopback = SsrfGuard.isExplicitLoopbackUrl(cleanUrl);
+    const ssrf = await SsrfGuard.validateUrl({
+      targetUrl: healthUrl,
+      allowExplicitLoopback,
+    });
+    if (!ssrf.allowed) {
+      const latencyMs = Math.round((performance.now() - start) * 10) / 10;
+      return {
+        healthy: false,
+        state: 'PROVIDER_UNAVAILABLE',
+        provider: params.provider,
+        apiBaseUrl: cleanUrl,
+        checkedAt: nowIso,
+        latencyMs,
+        message: `SSRF_BLOCKED: ${ssrf.reason}`,
+      };
+    }
+
     try {
-      const controller = new AbortController();
-      const t = setTimeout(() => controller.abort(), 3500);
-      const res = await fetch(`${cleanUrl}/health`, {
+      const res = await SsrfGuard.pinnedSafeRequest({
+        targetUrl: healthUrl,
         method: 'GET',
         headers: {
           Accept: 'application/json',
           Authorization: `Bearer ${params.token.trim()}`,
           'User-Agent': 'WinHood-GitarAdapter/2.0',
         },
-        signal: controller.signal,
+        timeoutMs: 3500,
+        allowExplicitLoopback,
+        followRedirects: false,
+        maxRedirects: 0,
       });
-      clearTimeout(t);
       const latencyMs = Math.round((performance.now() - start) * 10) / 10;
 
-      if (res.status === 401 || res.status === 403) {
+      if (res.statusCode === 401 || res.statusCode === 403) {
         return {
           healthy: false,
           state: 'AUTH_FAILED',
@@ -76,7 +98,7 @@ export class GitarInstallationHealth {
           apiBaseUrl: cleanUrl,
           checkedAt: nowIso,
           latencyMs,
-          message: `Falha de autenticação HTTP ${res.status} na API Gitar (${cleanUrl}/health).`,
+          message: `Falha de autenticação HTTP ${res.statusCode} na API Gitar (${healthUrl}).`,
         };
       }
 
@@ -88,7 +110,7 @@ export class GitarInstallationHealth {
           apiBaseUrl: cleanUrl,
           checkedAt: nowIso,
           latencyMs,
-          message: `Endpoint Gitar respondeu com HTTP ${res.status}.`,
+          message: `Endpoint Gitar respondeu com HTTP ${res.statusCode}.`,
         };
       }
 
@@ -101,8 +123,20 @@ export class GitarInstallationHealth {
         latencyMs,
         message: `Integração Gitar AI (${params.provider}) autenticada e operacional (${latencyMs}ms).`,
       };
-    } catch (err: any) {
+    } catch (err: unknown) {
       const latencyMs = Math.round((performance.now() - start) * 10) / 10;
+      const errMsg = err instanceof Error ? err.message : 'Erro de conexão';
+      if (errMsg.startsWith('SSRF_REDIRECT_BLOCKED') || errMsg.startsWith('SSRF_BLOCKED')) {
+        return {
+          healthy: false,
+          state: 'PROVIDER_UNAVAILABLE',
+          provider: params.provider,
+          apiBaseUrl: cleanUrl,
+          checkedAt: nowIso,
+          latencyMs,
+          message: errMsg,
+        };
+      }
       return {
         healthy: false,
         state: 'PROVIDER_UNAVAILABLE',
@@ -110,7 +144,7 @@ export class GitarInstallationHealth {
         apiBaseUrl: cleanUrl,
         checkedAt: nowIso,
         latencyMs,
-        message: `API Gitar (${cleanUrl}) indisponível ou sem rota ativa: ${err?.message || 'Erro de conexão'}.`,
+        message: `API Gitar (${cleanUrl}) indisponível ou sem rota ativa: ${errMsg}.`,
       };
     }
   }

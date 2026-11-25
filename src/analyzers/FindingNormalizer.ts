@@ -78,6 +78,8 @@ export class FindingNormalizer {
       filePath: candidate.filePath,
       lineNumber: candidate.lineNumber,
       endLineNumber: candidate.endLineNumber,
+      columnStart: candidate.columnStart,
+      columnEnd: candidate.columnEnd,
       snippet: ctx.snippet || maskSecretsInText(candidate.snippet),
       contextBefore: ctx.contextBefore,
       contextAfter: ctx.contextAfter,

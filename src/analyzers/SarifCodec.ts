@@ -296,7 +296,7 @@ export class SarifCodec {
 
       const rulesById = new Map<string, Record<string, any>>();
       const ruleArrays = [
-        Array.isArray(driver.rules) ? driver.rules : [],
+        ...(Array.isArray(driver.rules) ? driver.rules : []),
         ...(Array.isArray(run.tool?.extensions)
           ? run.tool.extensions.flatMap((ext: any) => (Array.isArray(ext?.rules) ? ext.rules : []))
           : []),

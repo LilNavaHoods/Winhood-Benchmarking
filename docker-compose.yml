@@ -1,0 +1,60 @@
+services:
+  winhood:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: winhood-benchmarking:4.4.0
+    container_name: winhood-benchmarking
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:${WINHOOD_PORT:-3000}:3000"
+    volumes:
+      - winhood_data:/data/winhood
+    env_file:
+      - path: .env.docker
+        required: false
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      WINHOOD_DEPLOYMENT_MODE: LOCAL_WEB
+      WINHOOD_RUNTIME_ENV: DOCKER_LOCAL_WEB
+      WINHOOD_ALLOW_NETWORK_BIND: "true"
+      WINHOOD_BIND_HOST: 0.0.0.0
+      WINHOOD_DATA_DIR: /data/winhood
+      WINHOOD_PORT: "${WINHOOD_PORT:-3000}"
+      WINHOOD_KEYSTORE_MASTER_SECRET: "${WINHOOD_KEYSTORE_MASTER_SECRET:?Defina WINHOOD_KEYSTORE_MASTER_SECRET (>= 32 bytes) em .env.docker e execute ./scripts/docker-up.sh ou docker compose --env-file .env.docker up -d --build}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  sonar-local:
+    profiles:
+      - sonar
+    image: "${WINHOOD_SONAR_DOCKER_IMAGE:-sonarqube:25.1.0.102122-community}"
+    container_name: winhood-sonar-local
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:9000:9000"
+    environment:
+      SONAR_ES_BOOTSTRAP_CHECKS_DISABLE: "true"
+    volumes:
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_extensions:/opt/sonarqube/extensions
+      - sonarqube_logs:/opt/sonarqube/logs
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9000/api/system/status | grep -q '\"status\":\"UP\"'"]
+      interval: 20s
+      timeout: 5s
+      start_period: 60s
+      retries: 6
+
+volumes:
+  winhood_data:
+  sonarqube_data:
+  sonarqube_extensions:
+  sonarqube_logs:

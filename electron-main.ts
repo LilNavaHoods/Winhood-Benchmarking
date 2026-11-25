@@ -217,10 +217,36 @@ export async function bootstrapWindowsDesktop(options?: {
   preferredPort?: number;
   headlessCheckOnly?: boolean;
   readyTimeoutMs?: number;
+  electronOverride?: any;
 }) {
   process.env.WINHOOD_RUNTIME_ENV = 'ELECTRON_DESKTOP';
-  const electron = loadElectronRuntime();
+  const electron = options?.electronOverride ?? loadElectronRuntime();
   const isElectronBinary = Boolean(electron?.app && electron?.BrowserWindow);
+
+  // 0. Acquire Single-Instance Lock BEFORE initializing data dirs, starting backend, or touching runtime-status.json (WH-AUD-008)
+  let activeMainWindow: {
+    isMinimized?: () => boolean;
+    restore?: () => void;
+    show?: () => void;
+    focus?: () => void;
+  } | null = null;
+
+  if (isElectronBinary && !options?.headlessCheckOnly) {
+    const hasSingleInstanceLock = electron.app.requestSingleInstanceLock?.() ?? true;
+    if (!hasSingleInstanceLock) {
+      electron.app.quit?.();
+      return null;
+    }
+    electron.app.on?.('second-instance', () => {
+      if (activeMainWindow) {
+        if (activeMainWindow.isMinimized?.()) {
+          activeMainWindow.restore?.();
+        }
+        activeMainWindow.show?.();
+        activeMainWindow.focus?.();
+      }
+    });
+  }
 
   // 1. Resolve writable userData directory (honors explicit customDataDir & WINHOOD_DATA_DIR, never Program Files)
   const envDataDir = (process.env.WINHOOD_DATA_DIR || '').trim();
@@ -335,15 +361,6 @@ export async function bootstrapWindowsDesktop(options?: {
 
   const { app, BrowserWindow, ipcMain, session, shell } = electron;
 
-  const hasSingleInstanceLock = app.requestSingleInstanceLock?.() ?? true;
-  if (!hasSingleInstanceLock) {
-    appendDesktopLog(layout.logsDir, 'Secondary Electron instance detected; shutting down cleanly.');
-    removeDesktopRuntimeStatus(layout.logsDir);
-    await startedBackend.close().catch(() => {});
-    app.quit();
-    return null;
-  }
-
   await app.whenReady();
 
   // Strict permission allowlist for loopback Electron desktop window
@@ -452,6 +469,7 @@ export async function bootstrapWindowsDesktop(options?: {
       preload: resolvedPreloadPath,
     },
   });
+  activeMainWindow = mainWindow;
 
   // 8. Navigation and popup hardening
   mainWindow.webContents.setWindowOpenHandler?.(({ url }: { url: string }) => {

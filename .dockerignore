@@ -1,0 +1,36 @@
+# Build outputs and generated artifacts
+node_modules
+dist
+dist-desktop
+dist-server
+coverage
+release
+release-windows
+
+# VCS, IDE, temporary and local data directories
+.git
+.gitignore
+.aistudio
+.winhood_data
+.vscode
+.idea
+
+# Local secrets and environment files (never bake into image)
+.env
+.env.local
+.env.docker
+.env.*.local
+
+# Archives, logs and packaged extensions
+*.log
+*.vsix
+*.zip
+*.exe
+*.msi
+
+# Documentation excluded by default, except required legal and security notices
+*.md
+!LICENSE
+!PRIVACY.md
+!TERMS.md
+!SECURITY.md

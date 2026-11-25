@@ -66,11 +66,13 @@ const c8Exclude = Array.from(
 );
 
 const testFiles = [
+  'scripts/check-browser-imports.test.ts',
   'src/shared/wizardAndBrowserSafety.test.ts',
   'src/scoring/scoring.test.ts',
   'src/engine/analyzer.test.ts',
   'src/engine/veracityAudit.test.ts',
   'src/analyzers/analyzers.test.ts',
+  'src/analyzers/externalAdapters.test.ts',
   'src/analyzers/pluginsAndIac.test.ts',
   'src/gate/gateAndCompliance.test.ts',
   'src/cli/cliAndApi.test.ts',

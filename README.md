@@ -54,6 +54,7 @@ WinHood operates strictly as an **independent audit, evidence, and comparative b
   - [`RULE_CATALOG.md`](./RULE_CATALOG.md) & [`CHANGELOG_RULES.md`](./CHANGELOG_RULES.md) — Public catalog of rules and SemVer policy.
   - [`CHANGELOG.md`](./CHANGELOG.md) & [`docs/MIGRATION.md`](./docs/MIGRATION.md) — Iteration changelog and configuration migration guide.
   - [`SECURITY_ARCHITECTURE.md`](./SECURITY_ARCHITECTURE.md) — Local-First access model, optional TOTP 2FA, explicit remote deployment guard, DPAPI/KMS envelope keystore, SSRF guard, upload safety, and sandbox isolation.
+  - [`DOCKER_LOCAL_WEB.md`](./DOCKER_LOCAL_WEB.md) — Execução completa em Docker no modo Local-Web (`http://localhost:3000`) sem instalador `.exe`, com persistência cifrada em volume e confinamento em `127.0.0.1`.
   - [`ISSUE_REMEDIATION_REPORT.md`](./ISSUE_REMEDIATION_REPORT.md) — Complete issue remediation audit trail, real per-domain coverage table, SonarCloud baseline/remediation matrix, and CI/CD verification status.
 
 ---
@@ -87,6 +88,13 @@ npx tsx cli/winhood-cli.ts report --format=pdf --path ./src/gate --out report.pd
 npx tsx cli/winhood-cli.ts report --format=html --path ./src/gate --out report.html
 npx tsx cli/winhood-cli.ts report --format=sarif --path ./src/gate --out report.sarif
 npx tsx cli/winhood-cli.ts report --format=json --path ./src/gate --out report.json
+
+# Build standalone production server bundle (dist-server/server.mjs)
+npm run build && npm run build:server
+
+# Run 100% in Docker Local-Web (http://localhost:3000, no .exe required — see DOCKER_LOCAL_WEB.md)
+./scripts/docker-up.sh
+# Windows PowerShell: powershell -ExecutionPolicy Bypass -File .\scripts\docker-up.ps1
 
 # Start fullstack server (Express API + Vite frontend on port 3000)
 npm run dev

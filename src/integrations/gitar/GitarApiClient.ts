@@ -27,41 +27,36 @@ export class GitarApiClient {
   }
 
   private async getJson<T>(path: string): Promise<{ ok: boolean; status: number; data: T | null; error?: string }> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 4000);
     const targetUrl = `${this.apiBaseUrl}${path.startsWith('/') ? path : `/${path}`}`;
+    const allowExplicitLoopback = SsrfGuard.isExplicitLoopbackUrl(this.apiBaseUrl);
     try {
-      const ssrf = await SsrfGuard.validateUrl({
+      const res = await SsrfGuard.pinnedSafeRequest({
         targetUrl,
-        allowExplicitLoopback: SsrfGuard.isExplicitLoopbackUrl(this.apiBaseUrl),
-      });
-      if (!ssrf.allowed) {
-        clearTimeout(timer);
-        return { ok: false, status: 403, data: null, error: `SSRF_BLOCKED: ${ssrf.reason}` };
-      }
-
-      const res = await fetch(targetUrl, {
         method: 'GET',
-        redirect: 'manual',
         headers: {
           Accept: 'application/json',
           Authorization: `Bearer ${this.token}`,
           'User-Agent': 'WinHood-GitarApiClient/2.0',
         },
-        signal: controller.signal,
+        timeoutMs: 4000,
+        allowExplicitLoopback,
+        followRedirects: false,
+        maxRedirects: 0,
       });
-      clearTimeout(timer);
-      if (res.status >= 300 && res.status < 400) {
-        return { ok: false, status: res.status, data: null, error: `SSRF_REDIRECT_BLOCKED: HTTP ${res.status}` };
-      }
       if (!res.ok) {
-        return { ok: false, status: res.status, data: null, error: `HTTP ${res.status}` };
+        return { ok: false, status: res.statusCode, data: null, error: `HTTP ${res.statusCode}` };
       }
-      const data = (await res.json()) as T;
-      return { ok: true, status: res.status, data };
-    } catch (err: any) {
-      clearTimeout(timer);
-      return { ok: false, status: 0, data: null, error: err?.message || 'Network failure' };
+      const data = res.json<T>();
+      return { ok: true, status: res.statusCode, data };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Network failure';
+      if (msg.startsWith('SSRF_BLOCKED')) {
+        return { ok: false, status: 403, data: null, error: msg };
+      }
+      if (msg.startsWith('SSRF_REDIRECT_BLOCKED')) {
+        return { ok: false, status: 302, data: null, error: msg };
+      }
+      return { ok: false, status: 0, data: null, error: msg };
     }
   }
 

@@ -409,4 +409,110 @@ describe('Windows Desktop Architecture, Electron Security & Lifecycle Suite (FAS
       else (globalThis as any).document = prevDocument;
     }
   });
+
+  it('8. WH-AUD-008: Single-instance lock executes BEFORE startServer/runtime-status.json and second-instance restores & focuses primary window', async () => {
+    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'winhood-single-inst-'));
+    const logsDir = path.join(tmpUserData, 'logs');
+    fs.mkdirSync(logsDir, { recursive: true });
+    const existingRuntimeStatusPath = path.join(logsDir, 'runtime-status.json');
+    const originalStatusContent = JSON.stringify({ pid: 99999, port: 3000, ready: true });
+    fs.writeFileSync(existingRuntimeStatusPath, originalStatusContent, 'utf8');
+
+    try {
+      // 1. Secondary instance (requestSingleInstanceLock returns false) quits immediately without starting backend or deleting runtime-status.json
+      let quitCalled = false;
+      const secondaryElectronMock = {
+        app: {
+          requestSingleInstanceLock: () => false,
+          quit: () => {
+            quitCalled = true;
+          },
+          getPath: () => tmpUserData,
+          on: () => {},
+          whenReady: async () => {},
+        },
+        BrowserWindow: class {},
+      };
+
+      const secondaryResult = await bootstrapWindowsDesktop({
+        customDataDir: tmpUserData,
+        electronOverride: secondaryElectronMock,
+      });
+      assert.equal(secondaryResult, null);
+      assert.equal(quitCalled, true);
+      assert.equal(
+        fs.readFileSync(existingRuntimeStatusPath, 'utf8'),
+        originalStatusContent,
+        'Secondary instance must never overwrite or delete primary runtime-status.json'
+      );
+
+      // 2. Primary instance acquires lock, registers second-instance handler, and restores + focuses window when triggered
+      const appHandlers = new Map<string, Array<() => void>>();
+      let restored = false;
+      let focused = false;
+      let shownCount = 0;
+
+      class MockBrowserWindow {
+        webContents = {
+          setWindowOpenHandler: () => {},
+          on: () => {},
+        };
+        async loadURL(_url: string) {}
+        show() {
+          shownCount += 1;
+        }
+        isMinimized() {
+          return true;
+        }
+        restore() {
+          restored = true;
+        }
+        focus() {
+          focused = true;
+        }
+      }
+
+      const primaryElectronMock = {
+        app: {
+          requestSingleInstanceLock: () => true,
+          quit: () => {},
+          getPath: () => tmpUserData,
+          on: (event: string, cb: () => void) => {
+            const list = appHandlers.get(event) || [];
+            list.push(cb);
+            appHandlers.set(event, list);
+          },
+          whenReady: async () => {},
+        },
+        BrowserWindow: MockBrowserWindow,
+        ipcMain: { handle: () => {} },
+        session: {},
+        shell: {},
+      };
+
+      const primaryResult = await bootstrapWindowsDesktop({
+        customDataDir: tmpUserData,
+        preferredPort: 0,
+        electronOverride: primaryElectronMock,
+      });
+      assert.ok(primaryResult);
+      assert.equal(primaryResult.mode, 'ELECTRON_WINDOW_ACTIVE');
+      try {
+        const secondInstanceHandlers = appHandlers.get('second-instance') || [];
+        assert.ok(secondInstanceHandlers.length >= 1, 'second-instance handler must be registered');
+        for (const handler of secondInstanceHandlers) {
+          handler();
+        }
+        assert.equal(restored, true, 'Minimized primary window must be restored on second-instance');
+        assert.equal(focused, true, 'Primary window must be focused on second-instance');
+        assert.ok(shownCount >= 2, 'Primary window must be shown on launch and second-instance');
+      } finally {
+        await primaryResult.backend.close().catch(() => {});
+      }
+    } finally {
+      delete process.env.WINHOOD_RUNTIME_ENV;
+      fs.rmSync(tmpUserData, { recursive: true, force: true });
+    }
+  });
 });
+

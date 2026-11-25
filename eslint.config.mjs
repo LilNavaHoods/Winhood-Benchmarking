@@ -8,6 +8,7 @@ export default tseslint.config(
     ignores: [
       'dist/**',
       'dist-desktop/**',
+      'dist-server/**',
       'coverage/**',
       'node_modules/**',
       'release-windows/**',

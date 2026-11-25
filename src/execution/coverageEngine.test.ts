@@ -566,3 +566,129 @@ test('Execution domain: SandboxExecutor & ControlledTestAndPerfRunner enforce is
   assert.equal(istanbul.format, 'ISTANBUL_JSON');
   assert.equal(istanbul.lineCoveragePercent, 50);
 });
+
+test('WH-AUD-007: SsrfGuard blocks expanded/translated/compatible IPv6 private addresses and pinnedSafeRequest prevents DNS rebinding & redirects', async () => {
+  const { SsrfGuard, isDisallowedIpAddress, parseIpv6ToHextets } = await import('./SsrfGuard');
+  const http = await import('node:http');
+
+  // 1. Canonical IPv6 parsing & expanded IPv4-mapped / translated / compatible addresses
+  assert.deepEqual(parseIpv6ToHextets('::1'), [0, 0, 0, 0, 0, 0, 0, 1]);
+  assert.equal(parseIpv6ToHextets('not-an-ipv6'), null);
+
+  const mustBlockIps = [
+    '0:0:0:0:0:ffff:127.0.0.1',
+    '0:0:0:0:0:ffff:7f00:1',
+    '0000:0000:0000:0000:0000:ffff:a9fe:a9fe',
+    '0:0:0:0:0:ffff:10.0.0.1',
+    '0:0:0:0:0:ffff:192.168.1.1',
+    '::ffff:0:127.0.0.1',
+    '::ffff:0:10.0.0.1',
+    '0:0:0:0:ffff:0:a9fe:a9fe',
+    '::127.0.0.1',
+    '::169.254.169.254',
+    '0:0:0:0:0:0:7f00:1',
+    '0:0:0:0:0:0:a9fe:a9fe',
+    'fe80::1',
+    'fc00::1',
+    'fd12:3456:789a::1',
+    'ff02::1',
+    '64:ff9b::10.0.0.1',
+    '2001:db8::1',
+  ];
+  for (const ip of mustBlockIps) {
+    const res = isDisallowedIpAddress(ip, false);
+    assert.equal(res.blocked, true, `Expected IPv6 address ${ip} to be blocked`);
+  }
+
+  // Legitimate public IPv6 must remain allowed
+  assert.equal(isDisallowedIpAddress('2606:4700:4700::1111', false).blocked, false);
+
+  // URL-level validation blocks expanded IPv6 forms
+  const expandedCheck = await SsrfGuard.validateUrl({
+    targetUrl: 'http://[0:0:0:0:0:ffff:169.254.169.254]/latest/meta-data',
+    allowExplicitLoopback: false,
+  });
+  assert.equal(expandedCheck.allowed, false);
+
+  // 2. pinnedSafeRequest supports POST + headers + JSON body + strict redirect rejection + single pinned DNS lookup
+  const srv = http.createServer((req, res) => {
+    if (req.url === '/redirect') {
+      res.statusCode = 302;
+      res.setHeader('Location', 'http://169.254.169.254/latest/meta-data');
+      res.end();
+      return;
+    }
+    if (req.url === '/large') {
+      res.statusCode = 200;
+      res.end('x'.repeat(2048));
+      return;
+    }
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => {
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('X-Custom-Echo', String(req.headers['x-winhood-probe'] || ''));
+      res.end(
+        JSON.stringify({
+          method: req.method,
+          body: Buffer.concat(chunks).toString('utf8'),
+        })
+      );
+    });
+  });
+  await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', () => resolve()));
+  const port = (srv.address() as import('node:net').AddressInfo).port;
+
+  try {
+    // DNS pinning verification: resolver is called once and pinned to 127.0.0.1 (no second rebind lookup)
+    let dnsCalls = 0;
+    const pinnedRes = await SsrfGuard.pinnedSafeRequest({
+      targetUrl: `http://pinned-test.local:${port}/echo`,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-WinHood-Probe': 'anti-rebinding-ok',
+      },
+      body: JSON.stringify({ ping: true }),
+      allowExplicitLoopback: true,
+      followRedirects: false,
+      dnsResolver: async () => {
+        dnsCalls += 1;
+        return [{ address: '127.0.0.1', family: 4 }];
+      },
+    });
+    assert.equal(dnsCalls, 1, 'DNS resolver must only be invoked once per hop (pinned IP)');
+    assert.equal(pinnedRes.ok, true);
+    assert.equal(pinnedRes.statusCode, 200);
+    assert.equal(pinnedRes.headers['x-custom-echo'], 'anti-rebinding-ok');
+    const parsedBody = pinnedRes.json<{ method: string; body: string }>();
+    assert.equal(parsedBody.method, 'POST');
+    assert.equal(parsedBody.body, JSON.stringify({ ping: true }));
+
+    // Redirect blocked when followRedirects: false
+    await assert.rejects(
+      () =>
+        SsrfGuard.pinnedSafeRequest({
+          targetUrl: `http://127.0.0.1:${port}/redirect`,
+          allowExplicitLoopback: true,
+          followRedirects: false,
+        }),
+      /SSRF_REDIRECT_BLOCKED/
+    );
+
+    // Oversized response blocked by maxResponseBytes
+    await assert.rejects(
+      () =>
+        SsrfGuard.pinnedSafeRequest({
+          targetUrl: `http://127.0.0.1:${port}/large`,
+          allowExplicitLoopback: true,
+          maxResponseBytes: 512,
+        }),
+      /RESPONSE_TOO_LARGE/
+    );
+  } finally {
+    await new Promise<void>((resolve) => srv.close(() => resolve()));
+  }
+});
+

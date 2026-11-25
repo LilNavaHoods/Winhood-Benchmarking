@@ -419,7 +419,12 @@ export class KeyManagementService {
   );
 
   private static getStorePath(customPath?: string): string {
-    return customPath || process.env.WINHOOD_KEYSTORE_PATH || KeyManagementService.DEFAULT_STORE_PATH;
+    if (customPath) return customPath;
+    if (process.env.WINHOOD_KEYSTORE_PATH) return process.env.WINHOOD_KEYSTORE_PATH;
+    if (process.env.WINHOOD_DATA_DIR && process.env.WINHOOD_DATA_DIR.trim()) {
+      return path.join(path.resolve(process.env.WINHOOD_DATA_DIR.trim()), 'keys', 'keystore.json');
+    }
+    return KeyManagementService.DEFAULT_STORE_PATH;
   }
 
   public static getTrustStorePath(customStorePath?: string): string {

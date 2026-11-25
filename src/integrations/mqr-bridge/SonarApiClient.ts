@@ -142,62 +142,47 @@ export class MqrBridgeApiClient {
     endpointPath: string,
     options: RequestInit = {}
   ): Promise<{ ok: boolean; status: number; data: T | null; rawHash: string; error?: string }> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     const url = `${this.baseUrl}${endpointPath.startsWith('/') ? endpointPath : `/${endpointPath}`}`;
+    const allowExplicitLoopback = SsrfGuard.isExplicitLoopbackUrl(this.baseUrl);
 
     try {
-      const ssrf = await SsrfGuard.validateUrl({
-        targetUrl: url,
-        allowExplicitLoopback: SsrfGuard.isExplicitLoopbackUrl(this.baseUrl),
-      });
-      if (!ssrf.allowed) {
-        clearTimeout(timer);
-        return {
-          ok: false,
-          status: 403,
-          data: null,
-          rawHash: computeSha256(`SSRF_BLOCKED|${url}`),
-          error: `SSRF_BLOCKED: ${ssrf.reason}`,
-        };
-      }
+      const mergedHeaders: Record<string, string> = {
+        ...this.buildHeaders(),
+        ...(options.headers as Record<string, string> | undefined),
+      };
+      const bodyPayload =
+        typeof options.body === 'string' || Buffer.isBuffer(options.body)
+          ? options.body
+          : undefined;
 
-      const res = await fetch(url, {
-        ...options,
-        redirect: 'manual',
-        headers: {
-          ...this.buildHeaders(),
-          ...(options.headers as Record<string, string> | undefined),
-        },
-        signal: controller.signal,
+      const res = await SsrfGuard.pinnedSafeRequest({
+        targetUrl: url,
+        method: options.method || 'GET',
+        headers: mergedHeaders,
+        body: bodyPayload,
+        timeoutMs: this.timeoutMs,
+        allowExplicitLoopback,
+        followRedirects: false,
+        maxRedirects: 0,
       });
-      clearTimeout(timer);
-      if (res.status >= 300 && res.status < 400) {
-        return {
-          ok: false,
-          status: res.status,
-          data: null,
-          rawHash: computeSha256(`SSRF_REDIRECT_BLOCKED|${url}|${res.status}`),
-          error: `SSRF_REDIRECT_BLOCKED: Redirecionamento HTTP ${res.status} bloqueado.`,
-        };
-      }
-      const rawText = await res.text();
-      const rawHash = computeSha256(rawText || `STATUS_${res.status}`);
+
+      const rawText = res.bodyText;
+      const rawHash = computeSha256(rawText || `STATUS_${res.statusCode}`);
 
       if (!res.ok) {
         return {
           ok: false,
-          status: res.status,
+          status: res.statusCode,
           data: null,
           rawHash,
-          error: `HTTP ${res.status}: ${rawText.slice(0, 200)}`,
+          error: `HTTP ${res.statusCode}: ${rawText.slice(0, 200)}`,
         };
       }
 
       if (!rawText || rawText.trim().length === 0) {
         return {
           ok: true,
-          status: res.status,
+          status: res.statusCode,
           data: null,
           rawHash,
         };
@@ -206,21 +191,39 @@ export class MqrBridgeApiClient {
       const parsed = JSON.parse(rawText) as T;
       return {
         ok: true,
-        status: res.status,
+        status: res.statusCode,
         data: parsed,
         rawHash,
       };
-    } catch (err: any) {
-      clearTimeout(timer);
-      const isAbort = err?.name === 'AbortError';
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : 'Falha de conexão HTTP';
+      if (errMsg.startsWith('SSRF_BLOCKED')) {
+        return {
+          ok: false,
+          status: 403,
+          data: null,
+          rawHash: computeSha256(`SSRF_BLOCKED|${url}`),
+          error: errMsg,
+        };
+      }
+      if (errMsg.startsWith('SSRF_REDIRECT_BLOCKED')) {
+        return {
+          ok: false,
+          status: 302,
+          data: null,
+          rawHash: computeSha256(`SSRF_REDIRECT_BLOCKED|${url}`),
+          error: errMsg,
+        };
+      }
+      const isTimeout = errMsg.startsWith('Timeout after');
       return {
         ok: false,
-        status: isAbort ? 408 : 0,
+        status: isTimeout ? 408 : 0,
         data: null,
-        rawHash: computeSha256(`ERR|${url}|${err?.message || 'NETWORK_ERR'}`),
-        error: isAbort
+        rawHash: computeSha256(`ERR|${url}|${errMsg}`),
+        error: isTimeout
           ? 'TIMEOUT: Requisição excedeu o tempo limite configurado.'
-          : err?.message || 'Falha de conexão HTTP',
+          : errMsg,
       };
     }
   }

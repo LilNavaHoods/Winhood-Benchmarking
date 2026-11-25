@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -828,7 +829,7 @@ export class MqrBridgeIntegrationService {
    */
   public static async startEphemeralSonarWebApiContractServer(
     softwares: Software[],
-    validToken = 'squ_winhood_verified_token_2026'
+    validToken = `ephemeral_contract_${crypto.randomBytes(8).toString('hex')}`
   ): Promise<{
     serverUrl: string;
     port: number;
@@ -1863,7 +1864,7 @@ export class MqrBridgeIntegrationService {
       // 15.1 Token inválido
       const badTokenProbe = await MqrBridgeConnection.probeMqrBridge({
         serverUrl: contractServer.serverUrl,
-        token: 'squ_invalid_token_000',
+        token: `ephemeral_invalid_${crypto.randomBytes(8).toString('hex')}`,
         mode: 'REMOTE',
       });
       recordStep(

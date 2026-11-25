@@ -40,29 +40,69 @@ function inCidr4(ip: string, base: string, maskBits: number): boolean {
   return (ipInt & mask) === (baseInt & mask);
 }
 
-export function isDisallowedIpAddress(rawIp: string, allowLoopbackExplicit = false): { blocked: boolean; reason?: string } {
-  const ip = rawIp.trim().toLowerCase();
-  if (!ip) return { blocked: true, reason: 'Endereço IP vazio.' };
+function hextetsToIpv4(hi: number, lo: number): string {
+  return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+}
 
-  // Handle IPv4-mapped IPv6 addresses like ::ffff:127.0.0.1 or ::ffff:7f00:1
-  if (ip.startsWith('::ffff:')) {
-    const suffix = ip.slice(7);
-    if (net.isIPv4(suffix)) {
-      return isDisallowedIpAddress(suffix, allowLoopbackExplicit);
+export function parseIpv6ToHextets(rawIp: string): number[] | null {
+  const cleaned = rawIp.trim().toLowerCase().replace(/^\[|\]$/g, '').split('%')[0] ?? '';
+  if (!cleaned || !cleaned.includes(':')) return null;
+
+  let working = cleaned;
+  // Convert trailing embedded dotted-quad IPv4 (e.g. ::ffff:127.0.0.1, 0:0:0:0:0:ffff:10.0.0.1, ::169.254.169.254)
+  const lastColon = working.lastIndexOf(':');
+  const tail = working.slice(lastColon + 1);
+  if (tail.includes('.')) {
+    if (!net.isIPv4(tail)) return null;
+    const octets = tail.split('.').map((p) => Number.parseInt(p, 10));
+    if (octets.length !== 4 || octets.some((n) => Number.isNaN(n) || n < 0 || n > 255)) {
+      return null;
     }
-    const hexMatch = suffix.match(/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-    if (hexMatch) {
-      const hi = Number.parseInt(hexMatch[1]!, 16);
-      const lo = Number.parseInt(hexMatch[2]!, 16);
-      const v4 = `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
-      return isDisallowedIpAddress(v4, allowLoopbackExplicit);
-    }
-    return { blocked: true, reason: `IPv6 mapeado bloqueado (${ip}).` };
+    const hi = ((octets[0]! << 8) | octets[1]!).toString(16);
+    const lo = ((octets[2]! << 8) | octets[3]!).toString(16);
+    working = `${working.slice(0, lastColon + 1)}${hi}:${lo}`;
   }
+
+  const doubleColonParts = working.split('::');
+  if (doubleColonParts.length > 2) return null;
+
+  const parseGroups = (part: string): number[] | null => {
+    if (!part) return [];
+    const groups = part.split(':');
+    const out: number[] = [];
+    for (const g of groups) {
+      if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
+      out.push(Number.parseInt(g, 16));
+    }
+    return out;
+  };
+
+  if (doubleColonParts.length === 2) {
+    const left = parseGroups(doubleColonParts[0]!);
+    const right = parseGroups(doubleColonParts[1]!);
+    if (!left || !right) return null;
+    const missing = 8 - (left.length + right.length);
+    if (missing < 1) return null;
+    return [...left, ...new Array<number>(missing).fill(0), ...right];
+  }
+
+  const full = parseGroups(working);
+  if (!full || full.length !== 8) return null;
+  return full;
+}
+
+export function isDisallowedIpAddress(
+  rawIp: string,
+  allowLoopbackExplicit = false
+): { blocked: boolean; reason?: string } {
+  const ip = rawIp.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (!ip) return { blocked: true, reason: 'Endereço IP vazio.' };
 
   if (net.isIPv4(ip)) {
     if (inCidr4(ip, '127.0.0.0', 8)) {
-      return allowLoopbackExplicit ? { blocked: false } : { blocked: true, reason: `Loopback IPv4 bloqueado (${ip}).` };
+      return allowLoopbackExplicit
+        ? { blocked: false }
+        : { blocked: true, reason: `Loopback IPv4 bloqueado (${ip}).` };
     }
     if (inCidr4(ip, '10.0.0.0', 8)) return { blocked: true, reason: `Rede privada RFC1918 bloqueada (${ip}).` }; // NOSONAR (typescript:S1313): range privado bloqueado intencionalmente pela proteção SSRF
     if (inCidr4(ip, '172.16.0.0', 12)) return { blocked: true, reason: `Rede privada RFC1918 bloqueada (${ip}).` }; // NOSONAR (typescript:S1313): range privado bloqueado intencionalmente pela proteção SSRF
@@ -75,26 +115,71 @@ export function isDisallowedIpAddress(rawIp: string, allowLoopbackExplicit = fal
     return { blocked: false };
   }
 
-  if (net.isIPv6(ip)) {
-    const bare = ip.split('%')[0]!;
-    if (bare === '::1' || bare === '0:0:0:0:0:0:0:1') {
-      return allowLoopbackExplicit ? { blocked: false } : { blocked: true, reason: `Loopback IPv6 bloqueado (${ip}).` };
+  if (ip.includes(':')) {
+    const h = parseIpv6ToHextets(ip);
+    if (!h) {
+      return { blocked: true, reason: `Formato de IPv6 inválido ou malformado (${ip}).` };
     }
-    if (bare === '::' || bare === '0:0:0:0:0:0:0:0') {
+
+    const prefixZero0to3 = h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0;
+    const prefixZero0to4 = prefixZero0to3 && h[4] === 0;
+    const prefixZero0to5 = prefixZero0to4 && h[5] === 0;
+
+    // Unspecified (::)
+    if (prefixZero0to5 && h[6] === 0 && h[7] === 0) {
       return { blocked: true, reason: `Unspecified IPv6 bloqueado (${ip}).` };
     }
-    if (/^fe[89ab][0-9a-f]:/i.test(bare) || bare.startsWith('fe80')) {
-      return { blocked: true, reason: `Link-local IPv6 bloqueado (${ip}).` };
+
+    // Loopback (::1 or 0:0:0:0:0:0:0:1)
+    if (prefixZero0to5 && h[6] === 0 && h[7] === 1) {
+      return allowLoopbackExplicit
+        ? { blocked: false }
+        : { blocked: true, reason: `Loopback IPv6 bloqueado (${ip}).` };
     }
-    if (/^f[cd][0-9a-f]{2}:/i.test(bare)) {
-      return { blocked: true, reason: `Unique-Local IPv6 (fc00::/7) bloqueado (${ip}).` };
+
+    // IPv4-mapped IPv6 (::ffff:0:0/96, including expanded 0:0:0:0:0:ffff:...)
+    if (prefixZero0to4 && h[5] === 0xffff) {
+      const mappedV4 = hextetsToIpv4(h[6]!, h[7]!);
+      return isDisallowedIpAddress(mappedV4, allowLoopbackExplicit);
     }
-    if (bare.startsWith('ff')) {
-      return { blocked: true, reason: `Multicast IPv6 bloqueado (${ip}).` };
+
+    // IPv4-translated IPv6 (::ffff:0:0:0/96, RFC 2765)
+    if (prefixZero0to3 && h[4] === 0xffff && h[5] === 0) {
+      const translatedV4 = hextetsToIpv4(h[6]!, h[7]!);
+      return isDisallowedIpAddress(translatedV4, allowLoopbackExplicit);
     }
-    if (bare.startsWith('64:ff9b:')) {
+
+    // IPv4-compatible IPv6 (::/96, deprecated RFC 4291 — e.g., ::127.0.0.1, ::169.254.169.254, 0:0:0:0:0:0:7f00:1)
+    if (prefixZero0to5) {
+      const compatibleV4 = hextetsToIpv4(h[6]!, h[7]!);
+      return isDisallowedIpAddress(compatibleV4, allowLoopbackExplicit);
+    }
+
+    // NAT64 Well-Known Prefix (64:ff9b::/96) and Local-Use (64:ff9b:1::/48)
+    if (h[0] === 0x0064 && h[1] === 0xff9b) {
       return { blocked: true, reason: `NAT64 prefix bloqueado (${ip}).` };
     }
+
+    // Link-local IPv6 (fe80::/10)
+    if ((h[0]! & 0xffc0) === 0xfe80) {
+      return { blocked: true, reason: `Link-local IPv6 bloqueado (${ip}).` };
+    }
+
+    // Unique-Local IPv6 (fc00::/7)
+    if ((h[0]! & 0xfe00) === 0xfc00) {
+      return { blocked: true, reason: `Unique-Local IPv6 (fc00::/7) bloqueado (${ip}).` };
+    }
+
+    // Multicast IPv6 (ff00::/8)
+    if ((h[0]! & 0xff00) === 0xff00) {
+      return { blocked: true, reason: `Multicast IPv6 bloqueado (${ip}).` };
+    }
+
+    // Documentation IPv6 (2001:db8::/32)
+    if (h[0] === 0x2001 && h[1] === 0x0db8) {
+      return { blocked: true, reason: `Documentação IPv6 (2001:db8::/32) bloqueado (${ip}).` };
+    }
+
     return { blocked: false };
   }
 
@@ -106,6 +191,31 @@ export type DnsResolverFn = (hostname: string) => Promise<Array<{ address: strin
 const defaultDnsResolver: DnsResolverFn = async (hostname: string) => {
   return await dns.promises.lookup(hostname, { all: true, verbatim: true });
 };
+
+export interface PinnedSafeRequestOptions {
+  targetUrl: string;
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string | Buffer;
+  authorizedTargets?: AuthorizedPerfTarget[];
+  requireRegisteredTarget?: boolean;
+  allowExplicitLoopback?: boolean;
+  dnsResolver?: DnsResolverFn;
+  timeoutMs?: number;
+  maxRedirects?: number;
+  followRedirects?: boolean;
+  maxResponseBytes?: number;
+}
+
+export interface PinnedSafeResponse {
+  ok: boolean;
+  statusCode: number;
+  latencyMs: number;
+  finalUrl: string;
+  headers: Record<string, string>;
+  bodyText: string;
+  json: <T = unknown>() => T;
+}
 
 export class SsrfGuard {
   public static isExplicitLoopbackUrl(rawUrl: string): boolean {
@@ -182,8 +292,8 @@ export class SsrfGuard {
       };
     }
 
-    // If literal IP, validate directly
-    if (net.isIP(hostname) !== 0) {
+    // If literal IP, validate directly (including canonical IPv6 forms)
+    if (net.isIP(hostname) !== 0 || hostname.includes(':')) {
       const check = isDisallowedIpAddress(hostname, allowLoopback);
       if (check.blocked) {
         return { allowed: false, reason: check.reason || 'IP bloqueado.', resolvedIps: [hostname] };
@@ -202,10 +312,11 @@ export class SsrfGuard {
     let records: Array<{ address: string; family: number }>;
     try {
       records = await resolver(hostname);
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'NXDOMAIN';
       return {
         allowed: false,
-        reason: `Falha na resolução DNS para ${hostname}: ${err?.message || 'NXDOMAIN'}.`,
+        reason: `Falha na resolução DNS para ${hostname}: ${msg}.`,
         resolvedIps: [],
       };
     }
@@ -236,21 +347,27 @@ export class SsrfGuard {
   }
 
   /**
-   * Executa requisição HTTP(S) com IP pinado (proteção contra DNS rebinding)
-   * e revalidação de cada salto de redirecionamento HTTP (máximo 3 redirects).
+   * Executa requisição HTTP(S) com IP pinado (proteção contra DNS rebinding TOCTOU)
+   * e revalidação de cada salto de redirecionamento HTTP (ou bloqueio estrito quando followRedirects=false).
    */
-  public static async pinnedSafeRequest(params: {
-    targetUrl: string;
-    authorizedTargets?: AuthorizedPerfTarget[];
-    requireRegisteredTarget?: boolean;
-    allowExplicitLoopback?: boolean;
-    dnsResolver?: DnsResolverFn;
-    timeoutMs?: number;
-    maxRedirects?: number;
-  }): Promise<{ ok: boolean; statusCode: number; latencyMs: number; finalUrl: string }> {
-    const maxRedirects = params.maxRedirects ?? 3;
+  public static async pinnedSafeRequest(
+    params: PinnedSafeRequestOptions
+  ): Promise<PinnedSafeResponse> {
+    const followRedirects = params.followRedirects ?? true;
+    const maxRedirects = followRedirects ? (params.maxRedirects ?? 3) : 0;
     const timeoutMs = params.timeoutMs ?? 4000;
+    const maxResponseBytes = params.maxResponseBytes ?? 5 * 1024 * 1024;
+    const initialOrigin = (() => {
+      try {
+        return new URL(params.targetUrl).origin;
+      } catch {
+        return '';
+      }
+    })();
+
     let currentUrl = params.targetUrl;
+    let currentMethod = (params.method || 'GET').toUpperCase();
+    let currentBody = params.body;
 
     for (let hop = 0; hop <= maxRedirects; hop++) {
       const validation = await SsrfGuard.validateUrl({
@@ -270,51 +387,140 @@ export class SsrfGuard {
       const family = net.isIPv6(pinnedIp) ? 6 : 4;
       const start = performance.now();
 
-      const resp = await new Promise<{ statusCode: number; location?: string }>((resolve, reject) => {
-        const transport = parsed.protocol === 'https:' ? https : http;
-        const req = transport.request(
-          {
-            hostname: parsed.hostname,
-            port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
-            path: `${parsed.pathname}${parsed.search}`,
-            method: 'GET',
-            timeout: timeoutMs,
-            lookup: (_host, _opts, cb) => {
-              cb(null, pinnedIp, family);
-            },
-            headers: {
-              Host: parsed.host,
-              'User-Agent': 'WinHood-Perf-Validator/4.2',
-            },
-          },
-          (res) => {
-            const loc = typeof res.headers.location === 'string' ? res.headers.location : undefined;
-            res.on('data', () => {});
-            res.on('end', () => resolve({ statusCode: res.statusCode || 0, location: loc }));
+      const requestHeaders: Record<string, string> = {
+        Host: parsed.host,
+        'User-Agent': 'WinHood-Perf-Validator/4.4',
+      };
+      if (params.headers) {
+        for (const [k, v] of Object.entries(params.headers)) {
+          if (v === undefined) continue;
+          // Strip sensitive credentials if following a cross-origin redirect
+          if (hop > 0 && parsed.origin !== initialOrigin && k.toLowerCase() === 'authorization') {
+            continue;
           }
-        );
+          requestHeaders[k] = v;
+        }
+      }
+
+      const bodyBuffer =
+        currentBody === undefined
+          ? undefined
+          : Buffer.isBuffer(currentBody)
+            ? currentBody
+            : Buffer.from(currentBody, 'utf8');
+      if (bodyBuffer && !Object.keys(requestHeaders).some((k) => k.toLowerCase() === 'content-length')) {
+        requestHeaders['Content-Length'] = String(bodyBuffer.byteLength);
+      }
+
+      const resp = await new Promise<{
+        statusCode: number;
+        location?: string;
+        headers: Record<string, string>;
+        bodyText: string;
+      }>((resolve, reject) => {
+        const transport = parsed.protocol === 'https:' ? https : http;
+        const cleanHost = parsed.hostname.replace(/^\[|\]$/g, '');
+        const reqOptions: https.RequestOptions = {
+          hostname: cleanHost,
+          port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+          path: `${parsed.pathname}${parsed.search}`,
+          method: currentMethod,
+          timeout: timeoutMs,
+          lookup: (_host, opts, cb) => {
+            if (typeof opts === 'object' && opts !== null && opts.all) {
+              (
+                cb as unknown as (
+                  err: NodeJS.ErrnoException | null,
+                  addresses: dns.LookupAddress[]
+                ) => void
+              )(null, [{ address: pinnedIp, family }]);
+            } else {
+              cb(null, pinnedIp, family);
+            }
+          },
+          headers: requestHeaders,
+        };
+        if (parsed.protocol === 'https:' && net.isIP(cleanHost) === 0) {
+          reqOptions.servername = cleanHost;
+        }
+
+        const req = transport.request(reqOptions, (res) => {
+          const loc = typeof res.headers.location === 'string' ? res.headers.location : undefined;
+          const normalizedHeaders: Record<string, string> = {};
+          for (const [hk, hv] of Object.entries(res.headers)) {
+            if (typeof hv === 'string') {
+              normalizedHeaders[hk.toLowerCase()] = hv;
+            } else if (Array.isArray(hv)) {
+              normalizedHeaders[hk.toLowerCase()] = hv.join(', ');
+            }
+          }
+          const chunks: Buffer[] = [];
+          let totalBytes = 0;
+          let abortedForSize = false;
+
+          res.on('data', (chunk: Buffer | string) => {
+            if (abortedForSize) return;
+            const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            totalBytes += buf.byteLength;
+            if (totalBytes > maxResponseBytes) {
+              abortedForSize = true;
+              res.destroy();
+              reject(new Error(`RESPONSE_TOO_LARGE: Resposta excedeu limite de ${maxResponseBytes} bytes.`));
+              return;
+            }
+            chunks.push(buf);
+          });
+          res.on('end', () => {
+            if (abortedForSize) return;
+            resolve({
+              statusCode: res.statusCode || 0,
+              location: loc,
+              headers: normalizedHeaders,
+              bodyText: Buffer.concat(chunks).toString('utf8'),
+            });
+          });
+          res.on('error', reject);
+        });
         req.on('timeout', () => {
           req.destroy(new Error(`Timeout after ${timeoutMs}ms`));
         });
         req.on('error', reject);
+        if (bodyBuffer) {
+          req.write(bodyBuffer);
+        }
         req.end();
       });
 
       const latencyMs = performance.now() - start;
 
-      if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.location) {
-        if (hop >= maxRedirects) {
-          throw new Error('SSRF_BLOCKED: Limite máximo de redirecionamentos excedido.');
+      if (resp.statusCode >= 300 && resp.statusCode < 400) {
+        if (!followRedirects || maxRedirects === 0) {
+          throw new Error(
+            `SSRF_REDIRECT_BLOCKED: Redirecionamento HTTP ${resp.statusCode} bloqueado.`
+          );
         }
-        currentUrl = new URL(resp.location, parsed.toString()).toString();
-        continue;
+        if (resp.location) {
+          if (hop >= maxRedirects) {
+            throw new Error('SSRF_BLOCKED: Limite máximo de redirecionamentos excedido.');
+          }
+          currentUrl = new URL(resp.location, parsed.toString()).toString();
+          if (resp.statusCode === 303 || ((resp.statusCode === 301 || resp.statusCode === 302) && currentMethod === 'POST')) {
+            currentMethod = 'GET';
+            currentBody = undefined;
+          }
+          continue;
+        }
       }
 
+      const bodyText = resp.bodyText;
       return {
         ok: resp.statusCode >= 200 && resp.statusCode < 300,
         statusCode: resp.statusCode,
         latencyMs,
         finalUrl: currentUrl,
+        headers: resp.headers,
+        bodyText,
+        json: <T = unknown>() => JSON.parse(bodyText) as T,
       };
     }
 

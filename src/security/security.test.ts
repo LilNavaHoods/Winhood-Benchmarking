@@ -33,6 +33,7 @@ import {
   verifyEvidenceChainAndManifest,
 } from '../engine/evidenceProvenanceEngine';
 import { MqrBridgeConnection } from '../integrations/mqr-bridge/SonarConnection';
+import { GitarInstallationHealth } from '../integrations/gitar/GitarInstallationHealth';
 import { MqrBridgeApiClient } from '../integrations/mqr-bridge/SonarApiClient';
 import { SonarScannerExecutor } from '../integrations/mqr-bridge/SonarScannerExecutor';
 import { GitarApiClient } from '../integrations/gitar/GitarApiClient';
@@ -1513,3 +1514,92 @@ test('Static Bundle & Production Config Audit: zero VITE_ secret exposure, zero 
     }
   });
 });
+
+test('WH-AUD-002: GitarInstallationHealth blocks SSRF targets (169.254.169.254, 10.0.0.1) and HTTP 302 redirects without leaking Bearer tokens', async () => {
+  // 1. Cloud metadata IP must be blocked before any network request
+  const metaRes = await GitarInstallationHealth.checkInstallationHealth({
+    apiBaseUrl: 'http://169.254.169.254',
+    token: 'gitar_secret_bearer_token_must_not_leak',
+    provider: 'GITHUB',
+    explicitConsent: true,
+  });
+  assert.equal(metaRes.healthy, false);
+  assert.equal(metaRes.state, 'PROVIDER_UNAVAILABLE');
+  assert.ok(
+    metaRes.message.startsWith('SSRF_BLOCKED:'),
+    `Expected SSRF_BLOCKED message for 169.254.169.254, got: ${metaRes.message}`
+  );
+
+  // 2. Private RFC1918 IP (10.0.0.1) must be blocked before any network request
+  const rfc1918Res = await GitarInstallationHealth.checkInstallationHealth({
+    apiBaseUrl: 'http://10.0.0.1',
+    token: 'gitar_secret_bearer_token_must_not_leak',
+    provider: 'GITHUB',
+    explicitConsent: true,
+  });
+  assert.equal(rfc1918Res.healthy, false);
+  assert.equal(rfc1918Res.state, 'PROVIDER_UNAVAILABLE');
+  assert.ok(
+    rfc1918Res.message.startsWith('SSRF_BLOCKED:'),
+    `Expected SSRF_BLOCKED message for 10.0.0.1, got: ${rfc1918Res.message}`
+  );
+
+  // 3. HTTP 302 redirect on loopback endpoint must be rejected with SSRF_REDIRECT_BLOCKED
+  let receivedAuthHeader: string | undefined;
+  let redirectTargetHit = false;
+  const targetSrv = http.createServer((_req, res) => {
+    redirectTargetHit = true;
+    res.statusCode = 200;
+    res.end('should never be reached');
+  });
+  await new Promise<void>((resolve) => targetSrv.listen(0, '127.0.0.1', () => resolve()));
+  const targetPort = (targetSrv.address() as AddressInfo).port;
+
+  let respondMode: 'REDIRECT' | 'OK' = 'REDIRECT';
+  const proxySrv = http.createServer((req, res) => {
+    receivedAuthHeader = req.headers.authorization;
+    if (respondMode === 'REDIRECT') {
+      res.statusCode = 302;
+      res.setHeader('Location', `http://127.0.0.1:${targetPort}/steal`);
+      res.end();
+      return;
+    }
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ status: 'ok' }));
+  });
+  await new Promise<void>((resolve) => proxySrv.listen(0, '127.0.0.1', () => resolve()));
+  const proxyPort = (proxySrv.address() as AddressInfo).port;
+
+  try {
+    const redirectRes = await GitarInstallationHealth.checkInstallationHealth({
+      apiBaseUrl: `http://127.0.0.1:${proxyPort}`,
+      token: 'gitar_test_loopback_token',
+      provider: 'GITHUB',
+      explicitConsent: true,
+    });
+    assert.equal(redirectRes.healthy, false);
+    assert.equal(redirectRes.state, 'PROVIDER_UNAVAILABLE');
+    assert.ok(
+      redirectRes.message.startsWith('SSRF_REDIRECT_BLOCKED:'),
+      `Expected SSRF_REDIRECT_BLOCKED on HTTP 302, got: ${redirectRes.message}`
+    );
+    assert.equal(redirectTargetHit, false, 'Redirect target must never be contacted');
+
+    // 4. Legitimate loopback 200 OK still connects cleanly
+    respondMode = 'OK';
+    const okRes = await GitarInstallationHealth.checkInstallationHealth({
+      apiBaseUrl: `http://127.0.0.1:${proxyPort}`,
+      token: 'gitar_test_loopback_token',
+      provider: 'GITHUB',
+      explicitConsent: true,
+    });
+    assert.equal(okRes.healthy, true);
+    assert.equal(okRes.state, 'CONNECTED');
+    assert.equal(receivedAuthHeader, 'Bearer gitar_test_loopback_token');
+  } finally {
+    await new Promise<void>((resolve) => proxySrv.close(() => resolve()));
+    await new Promise<void>((resolve) => targetSrv.close(() => resolve()));
+  }
+});
+
