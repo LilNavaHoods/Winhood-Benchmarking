@@ -1,6 +1,6 @@
-# WinHood Benchmarking — Modo Docker Local-Web & Scanner Worker Isolado
+# WinHood Benchmarking — Guia Técnico Docker Local-Web & Scanner Worker Isolado
 
-Execute a plataforma completa do **WinHood Benchmarking** (frontend React 19 + backend Express + cofre cifrado `WINHOOD-ENVELOPE-V2` + armazenamento persistente 100% criptografado + **container dedicado `winhood-scanner-worker`** + motores SAST/Taint/SCA/IaC/SBOM/Benchmarking + TOTP 2FA opcional) diretamente no navegador em **`http://localhost:3000`**, sem precisar de instalador `.exe`.
+Execute a plataforma completa do **WinHood Benchmarking v4.4.0** (frontend React 19 + backend Express + cofre cifrado `AES-256-GCM` + armazenamento persistente auditável + **container dedicado `winhood-scanner-worker`** + motores nativos SAST/Taint/SCA/IaC/SBOM/Benchmarking + TOTP 2FA opcional) diretamente no navegador em **`http://localhost:3000`**.
 
 ---
 
@@ -11,85 +11,73 @@ Execute a plataforma completa do **WinHood Benchmarking** (frontend React 19 + b
 
 ---
 
-## 2. Topologia de Containers e Isolamento (Zero `:latest`, Zero `docker.sock`)
+## 2. Topologia de Containers e Isolamento (Zero tags mutáveis, Zero `docker.sock`)
 
-O `docker-compose.yml` provisiona dois serviços principais (mais o serviço opcional `sonar-local` isolado no perfil `--profile sonar`):
+O `docker-compose.yml` provisiona dois serviços principais (mais o serviço opcional `sonar-local` no perfil `--profile sonar`):
 
 1. **`winhood` (`Dockerfile`, base fixada `node:22.14.0-bookworm-slim`):**
-   - Publicado exclusivamente em `127.0.0.1:${WINHOOD_PORT:-3000}:3000` (nunca exposto na LAN por padrão).
-   - Usuário não-root `winhood` (`UID/GID 1001`), `cap_drop: ["ALL"]`, `security_opt: ["no-new-privileges:true"]`, `init: true`.
-   - Volume persistente `/data/winhood` (`winhood_data`, `0700`) contendo **exclusivamente dados cifrados** (`vault_bundle.whenc` + `vault_manifest.json` não secreto; zero código-fonte em texto puro em disco).
-   - Diretório efêmero `/tmp/winhood-workspaces` montado em **`tmpfs`** (`noexec,nosuid,nodev`) separado do volume persistente.
+   - Publicado exclusivamente em `127.0.0.1:${WINHOOD_PORT:-3000}:3000` (loopback local).
+   - Usuário não-root `winhood` (`UID/GID 1001`), `cap_drop: ["ALL"]`, `security_opt: ["no-new-privileges:true"]`, `init: true`, `stop_grace_period: 20s`.
+   - Volume persistente `/data/winhood` (`winhood_data`, `0700`) com artefatos cifrados (`vault_bundle.whenc`, `scanner_jobs_payloads.whenc`) e metadados não confidenciais auditáveis em `GET /api/storage/plaintext-audit`.
+   - Diretório efêmero `/tmp/winhood-workspaces` montado em **`tmpfs`** (`noexec,nosuid`).
 2. **`winhood-scanner-worker` (`Dockerfile.scanner-worker`, base fixada `node:22.14.0-bookworm-slim`):**
-   - Container dedicado para execução isolada de analisadores externos com **versões explicitamente fixadas**: Ruff `0.9.6`, Bandit `1.8.3`, Semgrep `1.109.0`, Gitleaks `8.24.0`, OSV-Scanner `1.9.2`, Syft `1.20.0`, Grype `0.89.0`.
-   - **Sem portas expostas no host**, conectado apenas à rede interna `winhood_scanner_internal` (`internal: true`, sem saída para internet).
-   - **Filesystem raiz somente leitura (`read_only: true`)**, `cap_drop: ["ALL"]`, `no-new-privileges:true`, limites explícitos (`mem_limit: 1536m`, `cpus: "2.0"`, `pids_limit: 128`) e workspaces efêmeros por job em `tmpfs`.
-   - Autenticação mútua interna obrigatória via Bearer token de alta entropia (`WINHOOD_SCANNER_WORKER_TOKEN`) comparado em tempo constante (`crypto.timingSafeEqual`).
-   - **Sem montagem de `/var/run/docker.sock`** e **sem fallback silencioso para execução no host**: se o worker não estiver disponível, os jobs externos retornam estado explícito `BLOCKED`.
+   - Estágio dedicado `worker-deps` para `node_modules` de produção (`express`) + autoteste em build (`import('express')` e checagem de binários).
+   - Ferramentas com **versões explicitamente fixadas**: Ruff `0.9.6`, Bandit `1.8.3`, Semgrep `1.109.0` (em `/opt/winhood-pytools/bin` + regras offline em `/opt/winhood-scanner-rules/winhood-core.yaml`), Gitleaks `8.24.0`, OSV-Scanner `1.9.2`, Syft `1.20.0`, Grype `0.89.0` (em `/usr/local/bin`).
+   - **Sem portas expostas no host**, conectado apenas à rede interna `winhood_scanner_internal` (`internal: true`, sem internet).
+   - **Filesystem raiz somente leitura (`read_only: true`)**, `cap_drop: ["ALL"]`, `no-new-privileges:true`, limites explícitos (`mem_limit: 1536m`, `cpus: "2.0"`, `pids_limit: 128`), workspaces efêmeros em `tmpfs` e volume `winhood_scanner_cache:/data/scanner-cache` para bases offline do Grype e OSV-Scanner.
+   - Autenticação mútua interna obrigatória via Bearer token (`WINHOOD_SCANNER_WORKER_TOKEN`, comparado com `crypto.timingSafeEqual`).
+   - Execução assíncrona com grupos de processos destacáveis e cancelamento real via `POST /worker/jobs/:jobId/cancel` (`SIGTERM` → `SIGKILL` + limpeza do workspace).
+   - **Sem montagem de `/var/run/docker.sock`** e **sem fallback silencioso no host**: se o worker estiver indisponível, jobs retornam `BLOCKED`.
 
 ---
 
-## 3. Início Rápido em 1 Clique
+## 3. Comandos Oficiais de Ciclo de Vida
 
-### Windows (PowerShell)
+### Iniciar (primeiro build ou atualização)
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\docker-up.ps1
-```
+- **Windows (PowerShell):** `powershell -ExecutionPolicy Bypass -File .\scripts\docker-up.ps1`
+- **Linux / macOS (Bash):** `./scripts/docker-up.sh`
 
-### Linux / macOS (Bash)
+Opções:
+- `--no-build` / `-NoBuild`: sobe rapidamente sem reconstruir imagens.
+- `--with-sonar` / `-WithSonar`: inicia também o SonarQube Community local (`http://localhost:9000`).
 
-```bash
-./scripts/docker-up.sh
-```
+### Atualizar base offline do Grype (opcional)
 
-O script executa automaticamente:
-1. Cria `.env.docker` (nunca versionado no Git) a partir de `.env.docker.example` gerando dois segredos CSPRNG de 32 bytes distintos: `WINHOOD_KEYSTORE_MASTER_SECRET` e `WINHOOD_SCANNER_WORKER_TOKEN` (permissão `0600` em Linux/macOS).
-2. Executa `docker compose --env-file .env.docker up -d --build`.
-3. Aguarda o healthcheck real (`GET /api/health`) ficar saudável.
-4. Exibe o endereço pronto de acesso: `http://localhost:3000` (ou a porta configurada em `WINHOOD_PORT`).
+Como o `winhood-scanner-worker` não possui acesso à internet, utilize o script de atualização sob demanda para popular o volume `winhood_scanner_cache` via container efêmero:
 
-> Para iniciar também a instância opcional do SonarQube Community local (`http://localhost:9000`), acrescente `--with-sonar` (Linux/macOS) ou `-WithSonar` (PowerShell).
+- **Linux / macOS:** `./scripts/docker-update-scanner-dbs.sh`
+- **Windows (PowerShell):** `powershell -ExecutionPolicy Bypass -File .\scripts\docker-update-scanner-dbs.ps1`
 
----
+Enquanto o cache offline do Grype ou OSV-Scanner estiver vazio, os respectivos scanners reportam explicitamente **`DATABASE_UNAVAILABLE`** (nunca "0 vulnerabilidades").
 
-## 4. Início Manual com Docker Compose
+### Encerrar (preservando dados por padrão)
 
-```bash
-cp .env.docker.example .env.docker
-# Edite .env.docker e defina segredos distintos (>= 32 bytes hex cada):
-#   WINHOOD_KEYSTORE_MASTER_SECRET=$(openssl rand -hex 32)
-#   WINHOOD_SCANNER_WORKER_TOKEN=$(openssl rand -hex 32)
-docker compose --env-file .env.docker up -d --build
-```
+- **Linux / macOS:** `./scripts/docker-down.sh`
+- **Windows (PowerShell):** `powershell -ExecutionPolicy Bypass -File .\scripts\docker-down.ps1`
 
-Com o perfil opcional do SonarQube local:
+### Remoção destrutiva de volumes (apaga projetos, keystore e cache)
 
-```bash
-docker compose --env-file .env.docker --profile sonar up -d --build
-```
+- **Linux / macOS:** `./scripts/docker-down.sh --purge-volumes --confirm-data-loss`
+- **Windows (PowerShell):** `powershell -ExecutionPolicy Bypass -File .\scripts\docker-down.ps1 -PurgeVolumes -ConfirmDataLoss`
 
----
-
-## 5. Persistência Cifrada, Migração de Legado e Encerramento Gracioso
-
-- **Armazenamento Persistente Sem Plaintext**: O `EncryptedArtifactStore` grava todo código ingerido exclusivamente em `vault_bundle.whenc` (AES-256-GCM + ZLIB) acompanhado de `vault_manifest.json` (hashes SHA-256 não secretos). Ao inicializar, o servidor executa automaticamente migração atômica, verificada por round-trip e idempotente de eventuais arquivos em texto puro legados (`GET /api/storage/plaintext-audit` permite auditar a qualquer momento).
-- **Encerramento Multiplataforma**: O servidor intercepta `SIGTERM`/`SIGINT` (Linux/macOS/Docker) e mensagens IPC controladas (`WINHOOD_GRACEFUL_SHUTDOWN`, Windows), drena conexões keep-alive, cancela jobs pendentes, executa flush atômico do banco, remove workspaces efêmeros ativos e encerra com código de saída `0`.
-- **Backup do volume persistente**:
-
-```bash
-docker run --rm -v winhood_data:/data:ro -v "$(pwd)":/backup alpine:3.21.3 \
-  tar czf /backup/winhood-data-backup.tar.gz -C /data .
-```
-
-- **Diagnóstico e encerramento**:
+### Diagnóstico direto com Docker Compose
 
 ```bash
 docker compose ps
 docker compose logs -f winhood winhood-scanner-worker
-docker compose down
+docker compose restart
 ```
 
-- **Validação E2E automatizada**:
-  - Contra container em execução: `node scripts/verify-docker-local-web.mjs --base-url http://127.0.0.1:3000`
-  - Standalone (sem daemon Docker): `node scripts/verify-docker-local-web.mjs --self-hosted`
+---
+
+## 4. Verificação E2E Automatizada
+
+- **Contra containers Docker em execução:**
+  ```bash
+  node scripts/verify-docker-local-web.mjs --base-url http://127.0.0.1:3000
+  ```
+- **Simulação standalone de produção (sobe `dist-server/server.mjs` + `dist-server/scanner-worker.mjs` com token Bearer, sem daemon Docker):**
+  ```bash
+  node scripts/verify-docker-local-web.mjs --self-hosted
+  ```

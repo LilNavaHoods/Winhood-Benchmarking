@@ -18,6 +18,21 @@ COPY src ./src
 RUN npm run build:server \
   && test -s dist-server/scanner-worker.mjs
 
+# ==============================================================================
+# Stage 2 — Production Runtime Dependencies (somente runtime, sem devDependencies)
+# Necessário pois dist-server/scanner-worker.mjs usa packages: 'external' (express)
+# ==============================================================================
+FROM node:22.14.0-bookworm-slim AS worker-deps
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts \
+  && npm cache clean --force
+
+# ==============================================================================
+# Stage 3 — Runtime Endurecido (não-root, offline rules, cache volume isolado)
+# ==============================================================================
 FROM node:22.14.0-bookworm-slim AS worker-runtime
 
 ARG RUFF_VERSION=0.9.6
@@ -60,20 +75,38 @@ RUN apt-get update \
   && chmod 755 /usr/local/bin/syft /usr/local/bin/grype \
   && groupadd --gid 1001 winhood \
   && useradd --uid 1001 --gid 1001 --create-home --shell /usr/sbin/nologin winhood \
-  && mkdir -p /tmp/winhood-workspaces /app \
-  && chown -R winhood:winhood /tmp/winhood-workspaces /app \
-  && chmod 700 /tmp/winhood-workspaces
+  && mkdir -p /tmp/winhood-workspaces /opt/winhood-scanner-rules /data/scanner-cache/grype /data/scanner-cache/osv /app \
+  && chown -R winhood:winhood /tmp/winhood-workspaces /opt/winhood-scanner-rules /data/scanner-cache /app \
+  && chmod 700 /tmp/winhood-workspaces /data/scanner-cache
 
 WORKDIR /app
 
+COPY --from=worker-deps --chown=winhood:winhood /app/node_modules ./node_modules
 COPY --from=worker-builder --chown=winhood:winhood /app/dist-server/scanner-worker.mjs ./dist-server/scanner-worker.mjs
+COPY --chown=winhood:winhood security/semgrep-offline-rules /opt/winhood-scanner-rules
 COPY --chown=winhood:winhood package.json LICENSE SECURITY.md ./
+
+RUN node -e "import('express').then(() => process.exit(0))" \
+  && test -s /app/dist-server/scanner-worker.mjs \
+  && test -s /opt/winhood-scanner-rules/winhood-core.yaml \
+  && test -x /opt/winhood-pytools/bin/ruff \
+  && test -x /opt/winhood-pytools/bin/bandit \
+  && test -x /opt/winhood-pytools/bin/semgrep \
+  && test -x /usr/local/bin/gitleaks \
+  && test -x /usr/local/bin/osv-scanner \
+  && test -x /usr/local/bin/syft \
+  && test -x /usr/local/bin/grype
 
 ENV NODE_ENV=production \
     PATH="/opt/winhood-pytools/bin:/usr/local/bin:/usr/bin:/bin" \
+    WINHOOD_SCANNER_WORKER_CONTAINER=true \
     WINHOOD_SCANNER_WORKER_HOST=0.0.0.0 \
     WINHOOD_SCANNER_WORKER_PORT=4100 \
     WINHOOD_TEMP_WORKSPACE_DIR=/tmp/winhood-workspaces \
+    WINHOOD_SEMGREP_RULES_DIR=/opt/winhood-scanner-rules \
+    GRYPE_DB_CACHE_DIR=/data/scanner-cache/grype \
+    GRYPE_DB_AUTO_UPDATE=false \
+    WINHOOD_OSV_DB_DIR=/data/scanner-cache/osv \
     WINHOOD_SCANNER_WORKER_IMAGE="winhood-scanner-worker:4.4.0"
 
 USER winhood

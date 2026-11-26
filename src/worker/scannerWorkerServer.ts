@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -18,29 +18,72 @@ interface PinnedScannerRunnerSpec {
   toolId: ScannerToolId;
   binaryNames: string[];
   versionArgs: string[];
-  buildArgs: (workspaceDir: string, outFilePath: string) => string[];
+  buildArgs: (workspaceDir: string, outFilePath: string, prereqPath?: string) => string[];
   outputFormat: 'JSON' | 'SARIF';
   readsFromFile?: boolean;
   validateParsedOutput: (parsed: unknown) => { valid: boolean; findingsCount: number };
   selfTestFiles: Record<string, string>;
 }
 
-const SAFE_WORKER_PATH =
+export interface OfflinePrerequisiteResult {
+  ready: boolean;
+  state?: 'DATABASE_UNAVAILABLE' | 'RULES_UNAVAILABLE' | 'NOT_CONFIGURED';
+  resolvedPath?: string;
+  reason?: string;
+}
+
+export interface ActiveWorkerProcessEntry {
+  jobId: string;
+  toolId: ScannerToolId;
+  child: ChildProcess;
+  pid: number | undefined;
+  cancelled: boolean;
+  startedAt: number;
+}
+
+const ACTIVE_JOB_PROCESSES = new Map<string, Set<ActiveWorkerProcessEntry>>();
+const CANCELLED_JOB_IDS = new Set<string>();
+const MAX_CANCELLED_JOB_HISTORY = 500;
+const MAX_STDIO_CAPTURE_BYTES = 12 * 1024 * 1024;
+
+export const SAFE_WORKER_PATH =
   process.platform === 'win32'
     ? `${process.env.SystemRoot || 'C:\\Windows'}\\System32;${process.env.SystemRoot || 'C:\\Windows'}`
-    : '/usr/local/bin:/usr/bin:/bin:/opt/winhood-scanners/bin';
+    : '/opt/winhood-pytools/bin:/opt/winhood-scanners/bin:/usr/local/bin:/usr/bin:/bin';
 
-function resolveAllowedBinary(binaryNames: string[]): string | null {
-  const searchDirs =
-    process.platform === 'win32'
-      ? SAFE_WORKER_PATH.split(';')
-      : [
-          '/opt/winhood-scanners/bin',
-          '/usr/local/bin',
-          '/usr/bin',
-          '/bin',
-          path.join(process.cwd(), 'node_modules', '.bin'),
-        ];
+export function resolveWorkerBindHost(explicitHost?: string, defaultHost = '127.0.0.1'): string {
+  return (
+    explicitHost ||
+    process.env.WINHOOD_SCANNER_WORKER_HOST ||
+    process.env.WINHOOD_WORKER_BIND_HOST ||
+    defaultHost
+  ).trim();
+}
+
+export function resolveWorkerPort(explicitPort?: number): number {
+  if (typeof explicitPort === 'number' && Number.isFinite(explicitPort)) {
+    return explicitPort;
+  }
+  const raw = process.env.WINHOOD_SCANNER_WORKER_PORT || process.env.WINHOOD_WORKER_PORT || '4100';
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 4100;
+}
+
+export function getAllowedBinarySearchDirs(): string[] {
+  return process.platform === 'win32'
+    ? SAFE_WORKER_PATH.split(';')
+    : [
+        '/opt/winhood-pytools/bin',
+        '/opt/winhood-scanners/bin',
+        '/usr/local/bin',
+        '/usr/bin',
+        '/bin',
+        path.join(process.cwd(), 'node_modules', '.bin'),
+      ];
+}
+
+export function resolveAllowedBinary(binaryNames: string[]): string | null {
+  const searchDirs = getAllowedBinarySearchDirs();
 
   for (const binName of binaryNames) {
     if (!/^[a-zA-Z0-9._-]+$/.test(binName)) continue;
@@ -58,7 +101,140 @@ function resolveAllowedBinary(binaryNames: string[]): string | null {
   return null;
 }
 
+function directoryHasMatchingFile(
+  rootDir: string,
+  predicate: (fileName: string, fullPath: string) => boolean,
+  maxDepth = 4,
+  depth = 0
+): boolean {
+  if (depth > maxDepth || !rootDir || !fs.existsSync(rootDir)) return false;
+  try {
+    const stat = fs.statSync(rootDir);
+    if (stat.isFile()) {
+      return predicate(path.basename(rootDir), rootDir);
+    }
+    if (!stat.isDirectory()) return false;
+    const entries = fs.readdirSync(rootDir, { withFileTypes: true });
+    for (const entry of entries) {
+      const full = path.join(rootDir, entry.name);
+      if (entry.isFile() && predicate(entry.name, full)) {
+        return true;
+      }
+      if (entry.isDirectory() && directoryHasMatchingFile(full, predicate, maxDepth, depth + 1)) {
+        return true;
+      }
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+/**
+ * Verifies offline rule packs or vulnerability databases required for air-gapped execution.
+ * Tools requiring offline rules/databases NEVER report `OPERATIONAL` or "0 vulnerabilities"
+ * when their local ruleset or vulnerability DB cache is missing.
+ */
+export function checkToolOfflinePrerequisites(toolId: ScannerToolId): OfflinePrerequisiteResult {
+  if (toolId === 'semgrep') {
+    const candidates = [
+      process.env.WINHOOD_SEMGREP_RULES_DIR,
+      '/opt/winhood-scanner-rules',
+      path.join(process.cwd(), 'security', 'semgrep-offline-rules'),
+    ].filter((p): p is string => Boolean(p && p.trim()));
+
+    for (const dir of candidates) {
+      const resolved = path.resolve(dir);
+      if (
+        directoryHasMatchingFile(resolved, (name, full) => {
+          if (!/\.ya?ml$/i.test(name)) return false;
+          try {
+            return fs.statSync(full).size > 20;
+          } catch {
+            return false;
+          }
+        })
+      ) {
+        return { ready: true, resolvedPath: resolved };
+      }
+    }
+    return {
+      ready: false,
+      state: 'RULES_UNAVAILABLE',
+      reason:
+        'Regras offline do Semgrep ausentes em WINHOOD_SEMGREP_RULES_DIR (/opt/winhood-scanner-rules). O worker opera sem acesso à internet; resultado não pode ser tratado como zero achados.',
+    };
+  }
+
+  if (toolId === 'grype') {
+    const grypeDir = path.resolve(process.env.GRYPE_DB_CACHE_DIR || '/data/scanner-cache/grype');
+    const hasDb = directoryHasMatchingFile(grypeDir, (name, full) => {
+      if (!/^(vulnerability\.db|metadata\.json)$/i.test(name)) return false;
+      try {
+        return fs.statSync(full).size > 32;
+      } catch {
+        return false;
+      }
+    });
+    if (!hasDb) {
+      return {
+        ready: false,
+        state: 'DATABASE_UNAVAILABLE',
+        reason:
+          'Base offline de vulnerabilidades do Grype ausente em GRYPE_DB_CACHE_DIR (/data/scanner-cache/grype). Execute ./scripts/docker-update-scanner-dbs.sh (ou .\\scripts\\docker-update-scanner-dbs.ps1) para popular o cache offline.',
+      };
+    }
+    return { ready: true, resolvedPath: grypeDir };
+  }
+
+  if (toolId === 'osv-scanner') {
+    const osvDir = path.resolve(process.env.WINHOOD_OSV_DB_DIR || '/data/scanner-cache/osv');
+    const hasDb = directoryHasMatchingFile(osvDir, (name, full) => {
+      if (!/\.(zip|json|db|sqlite)$/i.test(name)) return false;
+      try {
+        return fs.statSync(full).size > 32;
+      } catch {
+        return false;
+      }
+    });
+    if (!hasDb) {
+      return {
+        ready: false,
+        state: 'DATABASE_UNAVAILABLE',
+        reason:
+          'Base offline do OSV-Scanner ausente em WINHOOD_OSV_DB_DIR (/data/scanner-cache/osv). Como o container worker opera em rede interna sem internet, a varredura SCA offline exige cache local pré-populado.',
+      };
+    }
+    return { ready: true, resolvedPath: osvDir };
+  }
+
+  if (toolId === 'trivy') {
+    const trivyDir = path.resolve(process.env.TRIVY_CACHE_DIR || '/data/scanner-cache/trivy');
+    const hasDb = directoryHasMatchingFile(trivyDir, (name, full) => {
+      if (!/^(trivy\.db|metadata\.json)$/i.test(name)) return false;
+      try {
+        return fs.statSync(full).size > 32;
+      } catch {
+        return false;
+      }
+    });
+    if (!hasDb) {
+      return {
+        ready: false,
+        state: 'DATABASE_UNAVAILABLE',
+        reason:
+          'Base offline do Trivy ausente em TRIVY_CACHE_DIR (/data/scanner-cache/trivy).',
+      };
+    }
+    return { ready: true, resolvedPath: trivyDir };
+  }
+
+  return { ready: true };
+}
+
 function buildSanitizedScannerEnv(workspaceDir: string): NodeJS.ProcessEnv {
+  const grypeCacheDir = process.env.GRYPE_DB_CACHE_DIR || '/data/scanner-cache/grype';
+  const osvDbDir = process.env.WINHOOD_OSV_DB_DIR || '/data/scanner-cache/osv';
   return {
     PATH: `${SAFE_WORKER_PATH}:${path.join(process.cwd(), 'node_modules', '.bin')}`,
     HOME: workspaceDir,
@@ -70,6 +246,11 @@ function buildSanitizedScannerEnv(workspaceDir: string): NodeJS.ProcessEnv {
     NO_COLOR: '1',
     SEMGREP_SEND_METRICS: 'off',
     SEMGREP_ENABLE_VERSION_CHECK: '0',
+    GRYPE_DB_CACHE_DIR: grypeCacheDir,
+    GRYPE_DB_AUTO_UPDATE: 'false',
+    GRYPE_CHECK_FOR_APP_UPDATE: 'false',
+    SYFT_CHECK_FOR_APP_UPDATE: 'false',
+    WINHOOD_OSV_DB_DIR: osvDbDir,
     DO_NOT_TRACK: '1',
   };
 }
@@ -79,7 +260,17 @@ const PINNED_SCANNER_SPECS: Record<ScannerToolId, PinnedScannerRunnerSpec> = {
     toolId: 'semgrep',
     binaryNames: ['semgrep', 'opengrep'],
     versionArgs: ['--version'],
-    buildArgs: (ws) => ['scan', '--json', '--quiet', '--metrics=off', '--no-git-ignore', ws],
+    buildArgs: (ws, _outFile, rulesDir) => [
+      'scan',
+      '--config',
+      rulesDir || '/opt/winhood-scanner-rules',
+      '--offline',
+      '--json',
+      '--quiet',
+      '--metrics=off',
+      '--no-git-ignore',
+      ws,
+    ],
     outputFormat: 'JSON',
     validateParsedOutput: (p) => {
       const obj = p as { results?: unknown[] };
@@ -220,7 +411,15 @@ const PINNED_SCANNER_SPECS: Record<ScannerToolId, PinnedScannerRunnerSpec> = {
     toolId: 'osv-scanner',
     binaryNames: ['osv-scanner'],
     versionArgs: ['--version'],
-    buildArgs: (ws) => ['scan', '--format=json', '--offline', '-r', ws],
+    buildArgs: (ws, _outFile, dbDir) => [
+      'scan',
+      '--format=json',
+      '--offline',
+      '--download-offline-databases=false',
+      ...(dbDir ? ['--local-db-path', dbDir] : []),
+      '-r',
+      ws,
+    ],
     outputFormat: 'JSON',
     validateParsedOutput: (p) => {
       const obj = p as { results?: unknown[] };
@@ -284,6 +483,254 @@ function detectBinaryVersion(binaryPath: string, versionArgs: string[]): string 
   }
 }
 
+function sendSignalToProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  try {
+    if (process.platform !== 'win32' && typeof child.pid === 'number' && child.pid > 0) {
+      process.kill(-child.pid, signal);
+    } else {
+      child.kill(signal);
+    }
+  } catch {
+    try {
+      child.kill(signal);
+    } catch {
+      // Process already exited
+    }
+  }
+}
+
+export async function terminateProcessGroup(child: ChildProcess, graceMs = 1_500): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return true;
+  }
+
+  return await new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (terminated: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(escalateTimer);
+      clearTimeout(finalTimer);
+      child.off('exit', onExit);
+      child.off('close', onExit);
+      resolve(terminated);
+    };
+    const onExit = (): void => finish(true);
+
+    child.once('exit', onExit);
+    child.once('close', onExit);
+
+    sendSignalToProcessGroup(child, 'SIGTERM');
+
+    const escalateTimer = setTimeout(() => {
+      sendSignalToProcessGroup(child, 'SIGKILL');
+    }, Math.max(100, graceMs));
+    escalateTimer.unref();
+
+    const finalTimer = setTimeout(() => {
+      finish(child.exitCode !== null || child.signalCode !== null);
+    }, Math.max(400, graceMs + 1_500));
+    finalTimer.unref();
+  });
+}
+
+function registerActiveProcess(entry: ActiveWorkerProcessEntry): void {
+  let set = ACTIVE_JOB_PROCESSES.get(entry.jobId);
+  if (!set) {
+    set = new Set<ActiveWorkerProcessEntry>();
+    ACTIVE_JOB_PROCESSES.set(entry.jobId, set);
+  }
+  set.add(entry);
+}
+
+function unregisterActiveProcess(entry: ActiveWorkerProcessEntry): void {
+  const set = ACTIVE_JOB_PROCESSES.get(entry.jobId);
+  if (!set) return;
+  set.delete(entry);
+  if (set.size === 0) {
+    ACTIVE_JOB_PROCESSES.delete(entry.jobId);
+  }
+}
+
+export function getActiveScannerProcessCount(): number {
+  let count = 0;
+  for (const set of ACTIVE_JOB_PROCESSES.values()) {
+    count += set.size;
+  }
+  return count;
+}
+
+function markJobCancelled(jobId: string): void {
+  CANCELLED_JOB_IDS.add(jobId);
+  if (CANCELLED_JOB_IDS.size > MAX_CANCELLED_JOB_HISTORY) {
+    const oldest = CANCELLED_JOB_IDS.values().next().value;
+    if (oldest) CANCELLED_JOB_IDS.delete(oldest);
+  }
+}
+
+export async function cancelActiveWorkerJob(jobId: string): Promise<{
+  jobId: string;
+  terminated: boolean;
+  activeProcessesKilled: number;
+}> {
+  markJobCancelled(jobId);
+  const set = ACTIVE_JOB_PROCESSES.get(jobId);
+  if (!set || set.size === 0) {
+    return { jobId, terminated: true, activeProcessesKilled: 0 };
+  }
+
+  const entries = Array.from(set);
+  let killed = 0;
+  let allTerminated = true;
+  await Promise.all(
+    entries.map(async (entry) => {
+      entry.cancelled = true;
+      const ok = await terminateProcessGroup(entry.child, 1_200);
+      if (ok) {
+        killed += 1;
+      } else {
+        allTerminated = false;
+      }
+      unregisterActiveProcess(entry);
+    })
+  );
+
+  return {
+    jobId,
+    terminated: allTerminated,
+    activeProcessesKilled: killed,
+  };
+}
+
+export async function terminateAllActiveScannerProcesses(): Promise<number> {
+  const jobIds = Array.from(ACTIVE_JOB_PROCESSES.keys());
+  let total = 0;
+  for (const jobId of jobIds) {
+    const res = await cancelActiveWorkerJob(jobId);
+    total += res.activeProcessesKilled;
+  }
+  return total;
+}
+
+export interface SpawnManagedProcessResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  timedOut: boolean;
+  cancelled: boolean;
+  spawnError?: string;
+}
+
+export async function spawnManagedScannerProcess(params: {
+  jobId: string;
+  toolId: ScannerToolId;
+  command: string;
+  args: string[];
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  timeoutMs: number;
+}): Promise<SpawnManagedProcessResult> {
+  if (CANCELLED_JOB_IDS.has(params.jobId)) {
+    return {
+      stdout: '',
+      stderr: '',
+      exitCode: null,
+      signal: 'SIGTERM',
+      timedOut: false,
+      cancelled: true,
+    };
+  }
+
+  return await new Promise<SpawnManagedProcessResult>((resolve) => {
+    const child = spawn(params.command, params.args, {
+      cwd: params.cwd,
+      shell: false,
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: params.env,
+    });
+
+    const entry: ActiveWorkerProcessEntry = {
+      jobId: params.jobId,
+      toolId: params.toolId,
+      child,
+      pid: child.pid,
+      cancelled: false,
+      startedAt: Date.now(),
+    };
+    registerActiveProcess(entry);
+
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let timedOut = false;
+    let settled = false;
+
+    const finalize = (result: SpawnManagedProcessResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutHandle);
+      unregisterActiveProcess(entry);
+      resolve(result);
+    };
+
+    const effectiveTimeout = Math.max(500, Math.min(180_000, params.timeoutMs));
+    const timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      void terminateProcessGroup(child, 1_000);
+    }, effectiveTimeout);
+    timeoutHandle.unref();
+
+    child.stdout?.on('data', (chunk: Buffer) => {
+      if (stdoutBytes >= MAX_STDIO_CAPTURE_BYTES) return;
+      const remaining = MAX_STDIO_CAPTURE_BYTES - stdoutBytes;
+      const slice = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
+      stdoutChunks.push(slice);
+      stdoutBytes += slice.length;
+    });
+
+    child.stderr?.on('data', (chunk: Buffer) => {
+      if (stderrBytes >= MAX_STDIO_CAPTURE_BYTES) return;
+      const remaining = MAX_STDIO_CAPTURE_BYTES - stderrBytes;
+      const slice = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
+      stderrChunks.push(slice);
+      stderrBytes += slice.length;
+    });
+
+    child.once('error', (err) => {
+      finalize({
+        stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+        stderr: Buffer.concat(stderrChunks).toString('utf8'),
+        exitCode: null,
+        signal: null,
+        timedOut,
+        cancelled: entry.cancelled || CANCELLED_JOB_IDS.has(params.jobId),
+        spawnError: err.message,
+      });
+    });
+
+    child.once('close', (code, signal) => {
+      finalize({
+        stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+        stderr: Buffer.concat(stderrChunks).toString('utf8'),
+        exitCode: code,
+        signal,
+        timedOut,
+        cancelled: entry.cancelled || CANCELLED_JOB_IDS.has(params.jobId),
+      });
+    });
+
+    // Guard against race where cancel arrived right as spawn completed
+    if (CANCELLED_JOB_IDS.has(params.jobId)) {
+      entry.cancelled = true;
+      void terminateProcessGroup(child, 500);
+    }
+  });
+}
+
 export async function runIsolatedScannerTool(params: {
   jobId: string;
   toolId: ScannerToolId;
@@ -292,6 +739,21 @@ export async function runIsolatedScannerTool(params: {
   baseWorkspaceDir?: string;
 }): Promise<ScannerToolJobOutput> {
   const spec = PINNED_SCANNER_SPECS[params.toolId];
+  if (CANCELLED_JOB_IDS.has(params.jobId)) {
+    return {
+      toolId: params.toolId,
+      state: 'CANCELLED',
+      version: null,
+      exitCode: null,
+      durationMs: 0,
+      outputFormat: spec.outputFormat,
+      outputValidated: false,
+      findingsCount: 0,
+      rawOutputSha256: crypto.createHash('sha256').update(`CANCELLED:${params.toolId}`).digest('hex'),
+      limitations: ['Execução cancelada antes do disparo da ferramenta.'],
+    };
+  }
+
   const binPath = resolveAllowedBinary(spec.binaryNames);
   if (!binPath) {
     return {
@@ -309,6 +771,24 @@ export async function runIsolatedScannerTool(params: {
   }
 
   const version = detectBinaryVersion(binPath, spec.versionArgs);
+  const prereq = checkToolOfflinePrerequisites(params.toolId);
+  if (!prereq.ready) {
+    const state = prereq.state || 'NOT_CONFIGURED';
+    return {
+      toolId: params.toolId,
+      state,
+      version,
+      exitCode: null,
+      durationMs: 0,
+      outputFormat: spec.outputFormat,
+      outputValidated: false,
+      findingsCount: 0,
+      rawOutputSha256: crypto.createHash('sha256').update(`${state}:${params.toolId}`).digest('hex'),
+      limitations: [prereq.reason || `Pré-requisito offline ausente para ${params.toolId}.`],
+      errorMessage: state,
+    };
+  }
+
   const startMs = performance.now();
 
   const { result } = await EphemeralWorkspaceManager.withWorkspace(
@@ -317,34 +797,51 @@ export async function runIsolatedScannerTool(params: {
       filesMap: params.filesMap,
       baseDir: params.baseWorkspaceDir,
     },
-    (ws) => {
+    async (ws) => {
       const outFilePath = path.join(ws.rootPath, `.winhood_${params.toolId}_out.json`);
-      const args = spec.buildArgs(ws.rootPath, outFilePath);
+      const args = spec.buildArgs(ws.rootPath, outFilePath, prereq.resolvedPath);
       const env = buildSanitizedScannerEnv(ws.rootPath);
 
-      const proc = spawnSync(binPath, args, {
+      const proc = await spawnManagedScannerProcess({
+        jobId: params.jobId,
+        toolId: params.toolId,
+        command: binPath,
+        args,
         cwd: ws.rootPath,
-        shell: false,
-        encoding: 'utf8',
-        timeout: Math.max(2_000, Math.min(180_000, params.timeoutMs)),
-        maxBuffer: 12 * 1024 * 1024,
         env,
+        timeoutMs: Math.max(2_000, Math.min(180_000, params.timeoutMs)),
       });
 
       const durationMs = Math.max(1, Math.round(performance.now() - startMs));
-      const timedOut = Boolean(proc.error && (proc.error as NodeJS.ErrnoException).code === 'ETIMEDOUT');
-      if (timedOut) {
+
+      if (proc.cancelled) {
+        return {
+          toolId: params.toolId,
+          state: 'CANCELLED' as const,
+          version,
+          exitCode: proc.exitCode,
+          durationMs,
+          outputFormat: spec.outputFormat,
+          outputValidated: false,
+          findingsCount: 0,
+          rawOutputSha256: crypto.createHash('sha256').update('CANCELLED').digest('hex'),
+          limitations: ['Processo do analisador encerrado por solicitação de cancelamento.'],
+          errorMessage: 'SCANNER_EXECUTION_CANCELLED',
+        };
+      }
+
+      if (proc.timedOut) {
         return {
           toolId: params.toolId,
           state: 'TIMED_OUT' as const,
           version,
-          exitCode: proc.status,
+          exitCode: proc.exitCode,
           durationMs,
           outputFormat: spec.outputFormat,
           outputValidated: false,
           findingsCount: 0,
           rawOutputSha256: crypto.createHash('sha256').update('TIMED_OUT').digest('hex'),
-          limitations: [`Execução excedeu timeout de ${params.timeoutMs}ms.`],
+          limitations: [`Execução excedeu timeout de ${params.timeoutMs}ms e o grupo de processos foi encerrado.`],
           errorMessage: 'SCANNER_EXECUTION_TIMED_OUT',
         };
       }
@@ -358,16 +855,16 @@ export async function runIsolatedScannerTool(params: {
       if (!rawOutput.trim()) {
         return {
           toolId: params.toolId,
-          state: proc.status === 0 ? ('COMPLETED' as const) : ('FAILED' as const),
+          state: 'INCONCLUSIVE' as const,
           version,
-          exitCode: proc.status,
+          exitCode: proc.exitCode,
           durationMs,
           outputFormat: spec.outputFormat,
           outputValidated: false,
           findingsCount: 0,
           rawOutputSha256,
           limitations: ['Saída vazia do analisador; resultado não pôde ser validado estruturalmente.'],
-          errorMessage: proc.stderr?.slice(0, 400) || undefined,
+          errorMessage: (proc.stderr || proc.spawnError || '').slice(0, 400) || undefined,
         };
       }
 
@@ -378,7 +875,7 @@ export async function runIsolatedScannerTool(params: {
           toolId: params.toolId,
           state: validation.valid ? ('COMPLETED' as const) : ('FAILED' as const),
           version,
-          exitCode: proc.status,
+          exitCode: proc.exitCode,
           durationMs,
           outputFormat: spec.outputFormat,
           outputValidated: validation.valid,
@@ -394,7 +891,7 @@ export async function runIsolatedScannerTool(params: {
           toolId: params.toolId,
           state: 'FAILED' as const,
           version,
-          exitCode: proc.status,
+          exitCode: proc.exitCode,
           durationMs,
           outputFormat: spec.outputFormat,
           outputValidated: false,
@@ -412,7 +909,8 @@ export async function runIsolatedScannerTool(params: {
 
 /**
  * Probes every cataloged tool by actually executing it on a minimal ephemeral self-test file.
- * A tool is NEVER marked `OPERATIONAL` solely because its binary exists on PATH.
+ * A tool is NEVER marked `OPERATIONAL` solely because its binary exists on PATH or when its
+ * offline vulnerability database / ruleset is missing.
  */
 export async function probeVerifiedWorkerCapabilities(
   baseWorkspaceDir?: string
@@ -446,6 +944,26 @@ export async function probeVerifiedWorkerCapabilities(
     }
 
     const version = detectBinaryVersion(binPath, spec.versionArgs);
+    const prereq = checkToolOfflinePrerequisites(catalogEntry.toolId);
+    if (!prereq.ready) {
+      results.push({
+        toolId: catalogEntry.toolId,
+        displayName: catalogEntry.displayName,
+        purpose: catalogEntry.purpose,
+        binaryNames: [...catalogEntry.binaryNames],
+        installed: true,
+        version,
+        executionEnvironment: isContainerizedWorker ? 'DOCKER_SCANNER_WORKER' : 'UNAVAILABLE',
+        isolationAvailable: isContainerizedWorker,
+        executionPerformed: false,
+        outputValidated: false,
+        limitations: [prereq.reason || 'Pré-requisito offline ausente.'],
+        finalState: prereq.state || 'NOT_CONFIGURED',
+        checkedAt,
+      });
+      continue;
+    }
+
     if (!isContainerizedWorker && process.env.WINHOOD_ALLOW_WORKER_SELFTEST_HOST !== 'true') {
       results.push({
         toolId: catalogEntry.toolId,
@@ -476,6 +994,16 @@ export async function probeVerifiedWorkerCapabilities(
     });
 
     const operational = probeRun.state === 'COMPLETED' && probeRun.outputValidated;
+    const mappedState = operational
+      ? 'OPERATIONAL'
+      : probeRun.state === 'DATABASE_UNAVAILABLE' ||
+          probeRun.state === 'RULES_UNAVAILABLE' ||
+          probeRun.state === 'NOT_CONFIGURED' ||
+          probeRun.state === 'INCONCLUSIVE' ||
+          probeRun.state === 'BLOCKED'
+        ? probeRun.state
+        : 'EXECUTION_FAILED';
+
     results.push({
       toolId: catalogEntry.toolId,
       displayName: catalogEntry.displayName,
@@ -488,7 +1016,7 @@ export async function probeVerifiedWorkerCapabilities(
       executionPerformed: true,
       outputValidated: probeRun.outputValidated,
       limitations: probeRun.limitations,
-      finalState: operational ? 'OPERATIONAL' : 'EXECUTION_FAILED',
+      finalState: mappedState,
       checkedAt,
     });
   }
@@ -496,9 +1024,18 @@ export async function probeVerifiedWorkerCapabilities(
   return results;
 }
 
+export type WorkerToolExecutionOverride = (params: {
+  jobId: string;
+  toolId: ScannerToolId;
+  filesMap: Record<string, string>;
+  timeoutMs: number;
+  baseWorkspaceDir?: string;
+}) => Promise<ScannerToolJobOutput>;
+
 export function createScannerWorkerApp(options?: {
   workerToken?: string;
   baseWorkspaceDir?: string;
+  toolRunnerOverride?: WorkerToolExecutionOverride;
 }): express.Express {
   const app = express();
   const expectedToken = (
@@ -523,6 +1060,9 @@ export function createScannerWorkerApp(options?: {
       service: 'winhood-scanner-worker',
       nonRootUid: typeof process.getuid === 'function' ? process.getuid() : null,
       activeWorkspaces: EphemeralWorkspaceManager.getActiveWorkspaceCount(),
+      activeScannerProcesses: getActiveScannerProcessCount(),
+      containerIsolated:
+        process.env.WINHOOD_SCANNER_WORKER_CONTAINER === 'true' || fs.existsSync('/.dockerenv'),
       timestamp: new Date().toISOString(),
     });
   });
@@ -549,6 +1089,19 @@ export function createScannerWorkerApp(options?: {
     });
   });
 
+  app.post('/worker/jobs/:jobId/cancel', async (req, res) => {
+    const safeJobId = String(req.params.jobId || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+    if (!safeJobId) {
+      return res.status(400).json({ error: 'INVALID_JOB_ID' });
+    }
+    const outcome = await cancelActiveWorkerJob(safeJobId);
+    return res.json({
+      ...outcome,
+      activeWorkspaces: EphemeralWorkspaceManager.getActiveWorkspaceCount(),
+      activeScannerProcesses: getActiveScannerProcessCount(),
+    });
+  });
+
   app.post('/worker/execute', async (req, res) => {
     const body = req.body as {
       jobId?: string;
@@ -568,10 +1121,11 @@ export function createScannerWorkerApp(options?: {
       return res.status(400).json({ error: 'INVALID_FILES_MAP' });
     }
     const timeoutMs = Math.max(2_000, Math.min(180_000, Number(body.timeoutMs) || 30_000));
+    const runner = options?.toolRunnerOverride || runIsolatedScannerTool;
 
     const results: ScannerToolJobOutput[] = [];
     for (const toolId of validToolIds) {
-      const out = await runIsolatedScannerTool({
+      const out = await runner({
         jobId,
         toolId,
         filesMap: body.filesMap,
@@ -579,6 +1133,9 @@ export function createScannerWorkerApp(options?: {
         baseWorkspaceDir: options?.baseWorkspaceDir,
       });
       results.push(out);
+      if (CANCELLED_JOB_IDS.has(jobId)) {
+        break;
+      }
     }
 
     return res.json({
@@ -596,13 +1153,15 @@ export async function startScannerWorkerServer(options?: {
   port?: number;
   workerToken?: string;
   baseWorkspaceDir?: string;
+  toolRunnerOverride?: WorkerToolExecutionOverride;
 }): Promise<{ server: http.Server; port: number; url: string; close: () => Promise<void> }> {
   const app = createScannerWorkerApp({
     workerToken: options?.workerToken,
     baseWorkspaceDir: options?.baseWorkspaceDir,
+    toolRunnerOverride: options?.toolRunnerOverride,
   });
-  const host = options?.host || process.env.WINHOOD_WORKER_BIND_HOST || '127.0.0.1';
-  const port = options?.port ?? Number(process.env.WINHOOD_WORKER_PORT || 4100);
+  const host = resolveWorkerBindHost(options?.host, '127.0.0.1');
+  const port = resolveWorkerPort(options?.port);
 
   const server = await new Promise<http.Server>((resolve, reject) => {
     const srv = app.listen(port, host, () => resolve(srv));
@@ -619,6 +1178,9 @@ export async function startScannerWorkerServer(options?: {
 
   const shutdownController = registerGracefulShutdown({
     server,
+    onBeforeClose: async () => {
+      await terminateAllActiveScannerProcesses();
+    },
     onAfterClose: () => {
       EphemeralWorkspaceManager.cleanupAllActiveWorkspaces();
     },
@@ -646,8 +1208,8 @@ const isWorkerEntrypoint =
 
 if (isWorkerEntrypoint) {
   startScannerWorkerServer({
-    host: process.env.WINHOOD_WORKER_BIND_HOST || '0.0.0.0',
-    port: Number(process.env.WINHOOD_WORKER_PORT || 4100),
+    host: resolveWorkerBindHost(undefined, '0.0.0.0'),
+    port: resolveWorkerPort(),
   })
     .then(({ port }) => {
       console.log(`[WinHood Scanner Worker] Listening on internal port ${port}`);

@@ -1162,8 +1162,14 @@ test('Módulo 03: Docker Local-Web runtime detection, dynamic CORS, SPA fallback
 
   const workerDockerfile = fs.readFileSync(path.join(rootDir, 'Dockerfile.scanner-worker'), 'utf8');
   assert.match(workerDockerfile, /FROM node:22\.\d+\.\d+-bookworm-slim AS worker-builder/);
+  assert.match(workerDockerfile, /FROM node:22\.\d+\.\d+-bookworm-slim AS worker-deps/);
   assert.match(workerDockerfile, /FROM node:22\.\d+\.\d+-bookworm-slim AS worker-runtime/);
   assert.equal(workerDockerfile.includes(':latest'), false, 'Dockerfile.scanner-worker must never use :latest');
+  assert.match(workerDockerfile, /COPY --from=worker-deps --chown=winhood:winhood \/app\/node_modules \.\/node_modules/);
+  assert.match(workerDockerfile, /COPY --chown=winhood:winhood security\/semgrep-offline-rules \/opt\/winhood-scanner-rules/);
+  assert.match(workerDockerfile, /WINHOOD_SCANNER_WORKER_CONTAINER=true/);
+  assert.match(workerDockerfile, /GRYPE_DB_AUTO_UPDATE=false/);
+  assert.match(workerDockerfile, /import\('express'\)/);
   assert.match(workerDockerfile, /USER winhood/);
   assert.match(workerDockerfile, /HEALTHCHECK/);
   assert.match(workerDockerfile, /CMD \["node", "dist-server\/scanner-worker\.mjs"\]/);
@@ -1180,11 +1186,24 @@ test('Módulo 03: Docker Local-Web runtime detection, dynamic CORS, SPA fallback
   assert.match(compose, /cap_drop:\s*\n\s*-\s*ALL/);
   assert.match(compose, /no-new-privileges:true/);
   assert.match(compose, /winhood_data:\/data\/winhood/);
+  assert.match(compose, /winhood_scanner_cache:\/data\/scanner-cache/);
   assert.match(compose, /winhood-scanner-worker:/);
+  assert.match(compose, /WINHOOD_SCANNER_WORKER_CONTAINER:\s*"true"/);
+  assert.match(compose, /stop_grace_period:\s*20s/);
   assert.match(compose, /read_only: true/);
   assert.match(compose, /internal: true/);
   assert.match(compose, /WINHOOD_KEYSTORE_MASTER_SECRET/);
   assert.match(compose, /WINHOOD_SCANNER_WORKER_TOKEN/);
+  assert.equal(
+    compose.includes('${WINHOOD_KEYSTORE_MASTER_SECRET:?'),
+    false,
+    'docker-compose.yml must not block bare docker compose ps/logs/down with :? error interpolation'
+  );
+  assert.equal(
+    compose.includes('${WINHOOD_SCANNER_WORKER_TOKEN:?'),
+    false,
+    'docker-compose.yml must not block bare docker compose ps/logs/down with :? error interpolation'
+  );
   assert.equal(compose.includes('docker.sock'), false, 'docker-compose.yml must never mount docker.sock');
   assert.equal(compose.includes(':latest'), false, 'docker-compose.yml must never pin :latest');
 
@@ -1210,6 +1229,11 @@ test('Módulo 03: Docker Local-Web runtime detection, dynamic CORS, SPA fallback
 
   assert.equal(fs.existsSync(path.join(rootDir, 'scripts', 'docker-up.sh')), true);
   assert.equal(fs.existsSync(path.join(rootDir, 'scripts', 'docker-up.ps1')), true);
+  assert.equal(fs.existsSync(path.join(rootDir, 'scripts', 'docker-down.sh')), true);
+  assert.equal(fs.existsSync(path.join(rootDir, 'scripts', 'docker-down.ps1')), true);
+  assert.equal(fs.existsSync(path.join(rootDir, 'scripts', 'docker-update-scanner-dbs.sh')), true);
+  assert.equal(fs.existsSync(path.join(rootDir, 'scripts', 'docker-update-scanner-dbs.ps1')), true);
+  assert.equal(fs.existsSync(path.join(rootDir, 'security', 'semgrep-offline-rules', 'winhood-core.yaml')), true);
   assert.equal(fs.existsSync(path.join(rootDir, 'scripts', 'verify-docker-local-web.mjs')), true);
   assert.equal(fs.existsSync(path.join(rootDir, 'DOCKER_LOCAL_WEB.md')), true);
 });

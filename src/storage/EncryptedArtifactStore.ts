@@ -493,4 +493,143 @@ export class EncryptedArtifactStore {
       scannedAt: new Date().toISOString(),
     };
   }
+
+  /**
+   * Audits ALL persistent subdirectories under `WINHOOD_DATA_DIR` (`isolated_artifacts`,
+   * `database`, `logs`, `reports`, `cache`, `scanner_jobs`) for:
+   * - plaintext source files in `isolated_artifacts` or `scanner_jobs`
+   * - unencrypted `normalizedPayload` or `sourceFilesContent` keys in JSON metadata stores
+   * - leaked high-signal secret patterns (private keys, AWS keys, GitHub/API tokens)
+   */
+  public static auditPersistentDataDir(dataDir: string): {
+    dataDir: string;
+    clean: boolean;
+    scannedDirectories: string[];
+    scannedFilesCount: number;
+    findings: Array<{
+      directory: string;
+      relativePath: string;
+      category:
+        | 'PLAINTEXT_SOURCE_ARTIFACT'
+        | 'UNENCRYPTED_PAYLOAD_IN_METADATA'
+        | 'SENSITIVE_SECRET_PATTERN';
+      detail: string;
+    }>;
+    scannedAt: string;
+  } {
+    const resolvedRoot = path.resolve(dataDir);
+    const targetDirs = [
+      'isolated_artifacts',
+      'database',
+      'logs',
+      'reports',
+      'cache',
+      'scanner_jobs',
+    ];
+    const findings: Array<{
+      directory: string;
+      relativePath: string;
+      category:
+        | 'PLAINTEXT_SOURCE_ARTIFACT'
+        | 'UNENCRYPTED_PAYLOAD_IN_METADATA'
+        | 'SENSITIVE_SECRET_PATTERN';
+      detail: string;
+    }> = [];
+    let scannedFilesCount = 0;
+
+    const secretPatterns: Array<{ label: string; regex: RegExp }> = [
+      { label: 'PEM Private Key', regex: /-----BEGIN [A-Z0-9 ]+PRIVATE KEY-----/ },
+      { label: 'AWS Access Key ID', regex: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/ },
+      { label: 'GitHub Personal Access Token', regex: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b/ },
+      { label: 'GitHub Fine-Grained Token', regex: /\bgithub_pat_[A-Za-z0-9_]{20,}\b/ },
+    ];
+
+    const artifactsAudit = EncryptedArtifactStore.auditNoPlaintextOnDisk(
+      path.join(resolvedRoot, 'isolated_artifacts')
+    );
+    for (const rel of artifactsAudit.plaintextFilePaths) {
+      findings.push({
+        directory: 'isolated_artifacts',
+        relativePath: `isolated_artifacts/${rel}`,
+        category: 'PLAINTEXT_SOURCE_ARTIFACT',
+        detail: 'Arquivo em texto plano encontrado fora de vault_bundle.whenc.',
+      });
+    }
+
+    const inspectTextFile = (dirLabel: string, fullPath: string): void => {
+      const rel = path.relative(resolvedRoot, fullPath).replace(/\\/g, '/');
+      if (fullPath.endsWith('.whenc') || fullPath.endsWith('.enc')) {
+        scannedFilesCount += 1;
+        return;
+      }
+      scannedFilesCount += 1;
+      try {
+        const stat = fs.statSync(fullPath);
+        if (stat.size > 8 * 1024 * 1024) return;
+        const content = fs.readFileSync(fullPath, 'utf8');
+
+        if (dirLabel === 'database' && path.basename(fullPath) === 'scanner_jobs.json') {
+          if (/"normalizedPayload"\s*:/.test(content)) {
+            findings.push({
+              directory: dirLabel,
+              relativePath: rel,
+              category: 'UNENCRYPTED_PAYLOAD_IN_METADATA',
+              detail: 'Campo normalizedPayload encontrado em texto plano em scanner_jobs.json.',
+            });
+          }
+        }
+
+        if (dirLabel === 'database' && path.basename(fullPath) === 'winhood_db.json') {
+          if (/"sourceFilesContent"\s*:\s*\{[^}]+\}/.test(content)) {
+            findings.push({
+              directory: dirLabel,
+              relativePath: rel,
+              category: 'UNENCRYPTED_PAYLOAD_IN_METADATA',
+              detail: 'Campo sourceFilesContent em texto plano encontrado em winhood_db.json.',
+            });
+          }
+        }
+
+        for (const sp of secretPatterns) {
+          if (sp.regex.test(content)) {
+            findings.push({
+              directory: dirLabel,
+              relativePath: rel,
+              category: 'SENSITIVE_SECRET_PATTERN',
+              detail: `Padrão sensível detectado (${sp.label}) em arquivo persistente não cifrado.`,
+            });
+          }
+        }
+      } catch {
+        // Ignore unreadable binary/transient file
+      }
+    };
+
+    const walkDir = (dirLabel: string, currentDir: string): void => {
+      if (!fs.existsSync(currentDir)) return;
+      for (const entry of fs.readdirSync(currentDir, { withFileTypes: true })) {
+        if (entry.isSymbolicLink()) continue;
+        const full = path.join(currentDir, entry.name);
+        if (entry.isDirectory()) {
+          walkDir(dirLabel, full);
+        } else if (entry.isFile()) {
+          inspectTextFile(dirLabel, full);
+        }
+      }
+    };
+
+    for (const dirName of targetDirs) {
+      if (dirName === 'isolated_artifacts') continue;
+      walkDir(dirName, path.join(resolvedRoot, dirName));
+    }
+
+    return {
+      dataDir: resolvedRoot,
+      clean: findings.length === 0,
+      scannedDirectories: targetDirs,
+      scannedFilesCount: scannedFilesCount + artifactsAudit.encryptedBundleCount,
+      findings,
+      scannedAt: new Date().toISOString(),
+    };
+  }
 }

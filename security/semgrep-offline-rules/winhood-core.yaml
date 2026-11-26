@@ -1,0 +1,90 @@
+rules:
+  - id: winhood.js.security.dangerous-eval
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: "Uso de eval() detectado; pode permitir execução arbitrária de código (CWE-95)."
+    metadata:
+      cwe: "CWE-95"
+      owasp: "A03:2021 - Injection"
+      category: security
+    patterns:
+      - pattern: eval($X)
+
+  - id: winhood.js.security.child-process-shell-exec
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: "Execução de comando de sistema via exec/execSync com entrada dinâmica (CWE-78)."
+    metadata:
+      cwe: "CWE-78"
+      owasp: "A03:2021 - Injection"
+      category: security
+    pattern-either:
+      - pattern: child_process.exec($CMD, ...)
+      - pattern: child_process.execSync($CMD, ...)
+
+  - id: winhood.js.security.innerhtml-sink
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: "Atribuição direta a innerHTML pode introduzir XSS se o valor não for sanitizado (CWE-79)."
+    metadata:
+      cwe: "CWE-79"
+      owasp: "A03:2021 - Injection"
+      category: security
+    pattern: $EL.innerHTML = $VAL
+
+  - id: winhood.python.security.subprocess-shell-true
+    languages: [python]
+    severity: ERROR
+    message: "subprocess chamado com shell=True pode habilitar Command Injection (CWE-78)."
+    metadata:
+      cwe: "CWE-78"
+      owasp: "A03:2021 - Injection"
+      category: security
+    pattern-either:
+      - pattern: subprocess.run(..., shell=True, ...)
+      - pattern: subprocess.Popen(..., shell=True, ...)
+      - pattern: subprocess.call(..., shell=True, ...)
+
+  - id: winhood.python.security.pickle-loads
+    languages: [python]
+    severity: ERROR
+    message: "Desserialização insegura via pickle.loads()/load() pode executar código arbitrário (CWE-502)."
+    metadata:
+      cwe: "CWE-502"
+      owasp: "A08:2021 - Software and Data Integrity Failures"
+      category: security
+    pattern-either:
+      - pattern: pickle.loads($X)
+      - pattern: pickle.load($X)
+
+  - id: winhood.python.security.weak-hash-md5-sha1
+    languages: [python]
+    severity: WARNING
+    message: "Algoritmo de hash fraco (MD5/SHA1) inadequado para integridade criptográfica ou senhas (CWE-328)."
+    metadata:
+      cwe: "CWE-328"
+      owasp: "A02:2021 - Cryptographic Failures"
+      category: security
+    pattern-either:
+      - pattern: hashlib.md5(...)
+      - pattern: hashlib.sha1(...)
+
+  - id: winhood.java.security.runtime-exec
+    languages: [java]
+    severity: ERROR
+    message: "Runtime.getRuntime().exec() com entrada potencialmente controlada pelo usuário (CWE-78)."
+    metadata:
+      cwe: "CWE-78"
+      owasp: "A03:2021 - Injection"
+      category: security
+    pattern: Runtime.getRuntime().exec($CMD)
+
+  - id: winhood.go.security.exec-command-shell
+    languages: [go]
+    severity: WARNING
+    message: "Invocação de shell via exec.Command('sh', '-c', ...) requer validação estrita de argumentos (CWE-78)."
+    metadata:
+      cwe: "CWE-78"
+      owasp: "A03:2021 - Injection"
+      category: security
+    pattern: exec.Command("sh", "-c", $CMD)

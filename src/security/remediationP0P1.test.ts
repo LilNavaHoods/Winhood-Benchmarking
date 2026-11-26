@@ -24,6 +24,12 @@ import { ScannerJobOrchestrator } from '../worker/ScannerJobOrchestrator';
 import {
   startScannerWorkerServer,
   probeVerifiedWorkerCapabilities,
+  checkToolOfflinePrerequisites,
+  getAllowedBinarySearchDirs,
+  resolveWorkerBindHost,
+  resolveWorkerPort,
+  spawnManagedScannerProcess,
+  getActiveScannerProcessCount,
 } from '../worker/scannerWorkerServer';
 import { ParserRegistry } from '../analyzers/ParserRegistry';
 import { TaintAnalyzer } from '../analyzers/TaintAnalyzer';
@@ -1010,5 +1016,250 @@ test('P0-WorkerCapabilities: probeVerifiedWorkerCapabilities never fabricates OP
   } finally {
     if (prevContainer !== undefined) process.env.WINHOOD_SCANNER_WORKER_CONTAINER = prevContainer;
     if (prevAllowHost !== undefined) process.env.WINHOOD_ALLOW_WORKER_SELFTEST_HOST = prevAllowHost;
+  }
+});
+
+// ============================================================================
+// 10. Docker-First Hardening — Worker PATH, Env Alignment & Offline Prerequisites
+// ============================================================================
+test('DockerFirst-WorkerPrereqs: includes /opt/winhood-pytools/bin, aligns env vars, and returns DATABASE_UNAVAILABLE / RULES_UNAVAILABLE honestly', () => {
+  if (process.platform !== 'win32') {
+    const dirs = getAllowedBinarySearchDirs();
+    assert.ok(
+      dirs.includes('/opt/winhood-pytools/bin'),
+      'Worker binary search path MUST include /opt/winhood-pytools/bin for ruff/bandit/semgrep'
+    );
+  }
+
+  const prevHost = process.env.WINHOOD_SCANNER_WORKER_HOST;
+  const prevPort = process.env.WINHOOD_SCANNER_WORKER_PORT;
+  const prevGrype = process.env.GRYPE_DB_CACHE_DIR;
+  const prevOsv = process.env.WINHOOD_OSV_DB_DIR;
+  const prevSemgrep = process.env.WINHOOD_SEMGREP_RULES_DIR;
+  const emptyDir = createTempDir('wh-empty-prereq-');
+  const populatedDir = createTempDir('wh-pop-prereq-');
+
+  try {
+    process.env.WINHOOD_SCANNER_WORKER_HOST = '0.0.0.0';
+    process.env.WINHOOD_SCANNER_WORKER_PORT = '4199';
+    assert.equal(resolveWorkerBindHost(), '0.0.0.0');
+    assert.equal(resolveWorkerPort(), 4199);
+
+    // Missing Grype / OSV DB -> DATABASE_UNAVAILABLE (NEVER ready / 0 vulnerabilities)
+    process.env.GRYPE_DB_CACHE_DIR = emptyDir;
+    process.env.WINHOOD_OSV_DB_DIR = emptyDir;
+    assert.equal(checkToolOfflinePrerequisites('grype').ready, false);
+    assert.equal(checkToolOfflinePrerequisites('grype').state, 'DATABASE_UNAVAILABLE');
+    assert.equal(checkToolOfflinePrerequisites('osv-scanner').ready, false);
+    assert.equal(checkToolOfflinePrerequisites('osv-scanner').state, 'DATABASE_UNAVAILABLE');
+
+    // Missing Semgrep rules -> RULES_UNAVAILABLE
+    const prevCwd = process.cwd();
+    process.env.WINHOOD_SEMGREP_RULES_DIR = emptyDir;
+    // Note: bundled fallback under repo security/semgrep-offline-rules exists; verify bundled rules pass
+    const bundledSemgrep = checkToolOfflinePrerequisites('semgrep');
+    assert.equal(bundledSemgrep.ready, true, 'Bundled offline Semgrep rules must be detected');
+    assert.ok(bundledSemgrep.resolvedPath?.includes('semgrep-offline-rules'));
+
+    // Populated Grype & OSV DB caches -> ready: true
+    fs.writeFileSync(
+      path.join(populatedDir, 'vulnerability.db'),
+      'SQLite format 3 synthetic test cache content over 32 bytes!',
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(populatedDir, 'osv-cache.json'),
+      JSON.stringify({ schema_version: '1.6.0', vulns: [] }),
+      'utf8'
+    );
+    process.env.GRYPE_DB_CACHE_DIR = populatedDir;
+    process.env.WINHOOD_OSV_DB_DIR = populatedDir;
+    assert.equal(checkToolOfflinePrerequisites('grype').ready, true);
+    assert.equal(checkToolOfflinePrerequisites('osv-scanner').ready, true);
+    assert.equal(prevCwd, process.cwd());
+  } finally {
+    if (prevHost === undefined) delete process.env.WINHOOD_SCANNER_WORKER_HOST;
+    else process.env.WINHOOD_SCANNER_WORKER_HOST = prevHost;
+    if (prevPort === undefined) delete process.env.WINHOOD_SCANNER_WORKER_PORT;
+    else process.env.WINHOOD_SCANNER_WORKER_PORT = prevPort;
+    if (prevGrype === undefined) delete process.env.GRYPE_DB_CACHE_DIR;
+    else process.env.GRYPE_DB_CACHE_DIR = prevGrype;
+    if (prevOsv === undefined) delete process.env.WINHOOD_OSV_DB_DIR;
+    else process.env.WINHOOD_OSV_DB_DIR = prevOsv;
+    if (prevSemgrep === undefined) delete process.env.WINHOOD_SEMGREP_RULES_DIR;
+    else process.env.WINHOOD_SEMGREP_RULES_DIR = prevSemgrep;
+    fs.rmSync(emptyDir, { recursive: true, force: true });
+    fs.rmSync(populatedDir, { recursive: true, force: true });
+  }
+});
+
+// ============================================================================
+// 11. Docker-First Hardening — scanner_jobs.json Confidentiality & Full Volume Audit
+// ============================================================================
+test('DockerFirst-JobConfidentiality: strips normalizedPayload from scanner_jobs.json, encrypts payloads at rest, and detects leaks via auditPersistentDataDir', async () => {
+  const prevDataDir = process.env.WINHOOD_DATA_DIR;
+  const tmpData = createTempDir('wh-job-confid-');
+  process.env.WINHOOD_DATA_DIR = tmpData;
+
+  try {
+    const secretCanary = `CANARY_RAW_SNIPPET_${crypto.randomBytes(6).toString('hex')}`;
+    const syntheticBearer = `Bearer tok_${crypto.randomBytes(12).toString('hex')}`;
+
+    const orch = new ScannerJobOrchestrator({
+      dataDir: tmpData,
+      remoteExecutor: {
+        fetchCapabilities: async () => [],
+        executeJob: async () => [
+          {
+            toolId: 'gitleaks',
+            state: 'COMPLETED',
+            version: '8.24.0',
+            exitCode: 0,
+            durationMs: 12,
+            outputFormat: 'JSON',
+            outputValidated: true,
+            findingsCount: 1,
+            rawOutputSha256: 'a'.repeat(64),
+            normalizedPayload: [{ secret: secretCanary, file: 'src/config.ts', line: 3 }],
+            limitations: [`Header leak test ${syntheticBearer}`],
+          },
+        ],
+      },
+    });
+
+    const job = orch.enqueueJob({
+      toolIds: ['gitleaks'],
+      filesMap: { 'src/config.ts': `export const k = "${secretCanary}";\n` },
+    });
+    const done = await orch.waitForJob(job.jobId, 5_000);
+    assert.equal(done?.state, 'COMPLETED');
+    assert.equal(done?.analysisVerdict, 'VERIFIED');
+    assert.equal(done?.encryptedPayloadRef, 'scanner_jobs_payloads.whenc');
+
+    // 1. Plaintext scanner_jobs.json MUST NOT contain normalizedPayload, canary snippet, or Bearer token
+    const jobsJsonPath = path.join(tmpData, 'database', 'scanner_jobs.json');
+    const rawJobsJson = fs.readFileSync(jobsJsonPath, 'utf8');
+    assert.equal(rawJobsJson.includes('normalizedPayload'), false, 'scanner_jobs.json must NEVER store normalizedPayload');
+    assert.equal(rawJobsJson.includes(secretCanary), false, 'Canary snippet must NEVER appear in scanner_jobs.json');
+    assert.equal(rawJobsJson.includes(syntheticBearer), false, 'Bearer token must be redacted from scanner_jobs.json');
+
+    // 2. Encrypted payload vault exists, does NOT contain plaintext canary, and decrypts cleanly
+    const encPayloadsPath = path.join(tmpData, 'database', 'scanner_jobs_payloads.whenc');
+    assert.ok(fs.existsSync(encPayloadsPath), 'scanner_jobs_payloads.whenc must exist');
+    const rawEnc = fs.readFileSync(encPayloadsPath, 'utf8');
+    assert.equal(rawEnc.includes(secretCanary), false, 'Encrypted payload file must not contain plaintext canary');
+
+    const freshOrch = new ScannerJobOrchestrator({ dataDir: tmpData });
+    const decrypted = freshOrch.getDecryptedJobPayloads(job.jobId);
+    assert.ok(decrypted);
+    assert.ok(JSON.stringify(decrypted['gitleaks']).includes(secretCanary));
+
+    // 3. Full persistent volume audit reports clean=true
+    const cleanAudit = EncryptedArtifactStore.auditPersistentDataDir(tmpData);
+    assert.equal(cleanAudit.clean, true, `Expected clean volume audit, got: ${JSON.stringify(cleanAudit.findings)}`);
+
+    // 4. Injecting a rogue plaintext secret into logs/ is caught immediately
+    const logsDir = path.join(tmpData, 'logs');
+    fs.mkdirSync(logsDir, { recursive: true });
+    fs.writeFileSync(path.join(logsDir, 'leak.log'), 'aws_key=AKIAIOSFODNN7EXAMPLE\n', 'utf8');
+    const dirtyAudit = EncryptedArtifactStore.auditPersistentDataDir(tmpData);
+    assert.equal(dirtyAudit.clean, false);
+    assert.ok(dirtyAudit.findings.some((f) => f.category === 'SENSITIVE_SECRET_PATTERN'));
+  } finally {
+    if (prevDataDir === undefined) delete process.env.WINHOOD_DATA_DIR;
+    else process.env.WINHOOD_DATA_DIR = prevDataDir;
+    fs.rmSync(tmpData, { recursive: true, force: true });
+  }
+});
+
+// ============================================================================
+// 12. Docker-First Hardening — Real Async Subprocess Cancellation (Zero Orphans)
+// ============================================================================
+test('DockerFirst-RealCancellation: POST /worker/jobs/:jobId/cancel terminates real running child process and cleans up ephemeral workspace', async () => {
+  const tmpData = createTempDir('wh-cancel-orch-');
+  const tmpWs = createTempDir('wh-cancel-ws-');
+  const workerToken = crypto.randomBytes(24).toString('hex');
+
+  const worker = await startScannerWorkerServer({
+    host: '127.0.0.1',
+    port: 0,
+    workerToken,
+    baseWorkspaceDir: tmpWs,
+    toolRunnerOverride: async ({ jobId, toolId, filesMap, timeoutMs, baseWorkspaceDir }) => {
+      const { result } = await EphemeralWorkspaceManager.withWorkspace(
+        { jobId: `${jobId}-${toolId}`, filesMap, baseDir: baseWorkspaceDir },
+        async (ws) => {
+          const proc = await spawnManagedScannerProcess({
+            jobId,
+            toolId,
+            command: process.execPath,
+            args: ['-e', 'setInterval(() => {}, 1000);'],
+            cwd: ws.rootPath,
+            env: { PATH: process.env.PATH || '' },
+            timeoutMs,
+          });
+          return {
+            toolId,
+            state: proc.cancelled ? ('CANCELLED' as const) : ('COMPLETED' as const),
+            version: 'node-test',
+            exitCode: proc.exitCode,
+            durationMs: 10,
+            outputFormat: 'JSON' as const,
+            outputValidated: false,
+            findingsCount: 0,
+            rawOutputSha256: 'b'.repeat(64),
+            limitations: [],
+          };
+        }
+      );
+      return result;
+    },
+  });
+
+  try {
+    const orch = new ScannerJobOrchestrator({
+      dataDir: tmpData,
+      workerUrl: worker.url,
+      workerToken,
+      maxConcurrency: 1,
+    });
+
+    const job = orch.enqueueJob({
+      toolIds: ['semgrep'],
+      filesMap: { 'src/slow.ts': 'export const slow = true;\n' },
+      timeoutMs: 30_000,
+      maxRetries: 0,
+    });
+
+    // Wait until the real child process is spawned and registered inside the worker
+    const waitDeadline = Date.now() + 5_000;
+    while (getActiveScannerProcessCount() === 0 && Date.now() < waitDeadline) {
+      await new Promise((r) => setTimeout(r, 30));
+    }
+    assert.ok(
+      getActiveScannerProcessCount() >= 1,
+      'Expected an active child process to be running inside the worker'
+    );
+
+    const cancelOutcome = await orch.cancelJobConfirmed(job.jobId);
+    assert.equal(cancelOutcome.workerCancellationConfirmed, true);
+    assert.ok(cancelOutcome.activeProcessesKilled >= 1, 'Expected real worker child process to be killed');
+    assert.equal(cancelOutcome.job?.state, 'CANCELLED');
+    assert.equal(cancelOutcome.job?.analysisVerdict, 'CANCELLED');
+
+    // Allow workspace finally block to settle and confirm zero orphans
+    const settleDeadline = Date.now() + 3_000;
+    while (
+      (getActiveScannerProcessCount() > 0 || EphemeralWorkspaceManager.getActiveWorkspaceCount() > 0) &&
+      Date.now() < settleDeadline
+    ) {
+      await new Promise((r) => setTimeout(r, 30));
+    }
+    assert.equal(getActiveScannerProcessCount(), 0, 'Zero active scanner processes may remain');
+    assert.equal(EphemeralWorkspaceManager.getActiveWorkspaceCount(), 0, 'Zero ephemeral workspaces may remain');
+  } finally {
+    await worker.close();
+    fs.rmSync(tmpData, { recursive: true, force: true });
+    fs.rmSync(tmpWs, { recursive: true, force: true });
   }
 });

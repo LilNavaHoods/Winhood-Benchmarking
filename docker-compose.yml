@@ -1,3 +1,9 @@
+# WinHood Benchmarking v4.4.0 — Orquestração Docker-First (Local-Web)
+# Segredos obrigatórios (injetados exclusivamente via env_file .env.docker):
+#   - WINHOOD_KEYSTORE_MASTER_SECRET (>= 32 bytes hex; fail-closed no backend)
+#   - WINHOOD_SCANNER_WORKER_TOKEN   (>= 32 bytes hex; fail-closed no worker)
+# Execute ./scripts/docker-up.sh (Linux/macOS) ou .\scripts\docker-up.ps1 (Windows).
+
 services:
   winhood:
     build:
@@ -7,6 +13,7 @@ services:
     container_name: winhood-benchmarking
     restart: unless-stopped
     init: true
+    stop_grace_period: 20s
     ports:
       - "127.0.0.1:${WINHOOD_PORT:-3000}:3000"
     volumes:
@@ -32,9 +39,7 @@ services:
       WINHOOD_DATA_DIR: /data/winhood
       WINHOOD_TEMP_WORKSPACE_DIR: /tmp/winhood-workspaces
       WINHOOD_PORT: "${WINHOOD_PORT:-3000}"
-      WINHOOD_KEYSTORE_MASTER_SECRET: "${WINHOOD_KEYSTORE_MASTER_SECRET:?Defina WINHOOD_KEYSTORE_MASTER_SECRET (>= 32 bytes) em .env.docker e execute ./scripts/docker-up.sh ou docker compose --env-file .env.docker up -d --build}"
       WINHOOD_SCANNER_WORKER_URL: "http://winhood-scanner-worker:4100"
-      WINHOOD_SCANNER_WORKER_TOKEN: "${WINHOOD_SCANNER_WORKER_TOKEN:?Defina WINHOOD_SCANNER_WORKER_TOKEN (>= 32 bytes) em .env.docker}"
     cap_drop:
       - ALL
     security_opt:
@@ -50,7 +55,10 @@ services:
     container_name: winhood-scanner-worker
     restart: unless-stopped
     init: true
+    stop_grace_period: 20s
     read_only: true
+    volumes:
+      - winhood_scanner_cache:/data/scanner-cache
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=256m
       - /tmp/winhood-workspaces:rw,noexec,nosuid,size=512m
@@ -61,10 +69,14 @@ services:
         required: false
     environment:
       NODE_ENV: production
+      WINHOOD_SCANNER_WORKER_CONTAINER: "true"
       WINHOOD_SCANNER_WORKER_HOST: 0.0.0.0
       WINHOOD_SCANNER_WORKER_PORT: "4100"
       WINHOOD_TEMP_WORKSPACE_DIR: /tmp/winhood-workspaces
-      WINHOOD_SCANNER_WORKER_TOKEN: "${WINHOOD_SCANNER_WORKER_TOKEN:?Defina WINHOOD_SCANNER_WORKER_TOKEN (>= 32 bytes) em .env.docker}"
+      WINHOOD_SEMGREP_RULES_DIR: /opt/winhood-scanner-rules
+      GRYPE_DB_CACHE_DIR: /data/scanner-cache/grype
+      GRYPE_DB_AUTO_UPDATE: "false"
+      WINHOOD_OSV_DB_DIR: /data/scanner-cache/osv
     cap_drop:
       - ALL
     security_opt:
@@ -108,6 +120,7 @@ networks:
 
 volumes:
   winhood_data:
+  winhood_scanner_cache:
   sonarqube_data:
   sonarqube_extensions:
   sonarqube_logs:

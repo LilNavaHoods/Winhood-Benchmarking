@@ -1,10 +1,17 @@
-name: WinHood Multiplatform CI, Coverage Gate & Dogfooding Verification
+name: WinHood Docker-First CI, Security Hardening & Coverage Gate
 
 on:
   push:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      run_windows_desktop:
+        description: 'Executar empacotamento opcional Windows Desktop / Inno Setup (legado)'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -185,8 +192,50 @@ jobs:
             fs.appendFileSync(process.env.GITHUB_OUTPUT, out.join("\n") + "\n");
           '
 
+  docker-first-validation:
+    name: Docker-First Build, Isolated Scanner Worker & E2E Persistence Verification
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6.4.0 (node24)
+        with:
+          node-version: '22'
+
+      - name: Boot full Docker Compose stack via ./scripts/docker-up.sh
+        run: |
+          ./scripts/docker-up.sh
+          docker compose ps
+
+      - name: Verify real Docker E2E (SPA, API, ZIP Bomb, SSRF, Encrypted Storage, Scanner Worker & Restart Persistence)
+        run: |
+          node scripts/verify-docker-local-web.mjs --base-url http://127.0.0.1:3000
+
+      - name: Inspect verified scanner availability inside winhood-scanner-worker
+        run: |
+          curl -fsS http://127.0.0.1:3000/api/scanner-worker/capabilities | node -e "
+            const fs = require('fs');
+            const data = JSON.parse(fs.readFileSync(0, 'utf8'));
+            console.log('workerReachable:', data.workerReachable);
+            for (const c of data.capabilities || []) {
+              console.log('-', c.toolId, '| installed:', c.installed, '| state:', c.finalState, '| version:', c.version || 'N/A');
+            }
+            if (!data.workerReachable) process.exit(1);
+          "
+
+      - name: Graceful shutdown via ./scripts/docker-down.sh
+        if: always()
+        run: |
+          docker compose logs --tail=80 || true
+          ./scripts/docker-down.sh
+
   windows-desktop-validation:
-    name: Windows Desktop Lifecycle, userData & Inno Setup E2E Verification
+    name: Windows Desktop Lifecycle, userData & Inno Setup E2E Verification (Optional Legacy)
+    if: github.event_name == 'workflow_dispatch' && inputs.run_windows_desktop == true
     runs-on: windows-latest
     permissions:
       contents: read

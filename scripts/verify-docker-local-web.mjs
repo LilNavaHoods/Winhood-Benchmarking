@@ -158,7 +158,22 @@ function parseCliArgs(argv) {
   return opts;
 }
 
-function spawnProductionServer({ bundlePath, port, dataDir, masterSecret }) {
+function spawnProductionWorker({ workerBundlePath, port, workerToken, tempWorkspaceDir }) {
+  return spawn(process.execPath, [workerBundlePath], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: 'production',
+      WINHOOD_SCANNER_WORKER_HOST: '127.0.0.1',
+      WINHOOD_SCANNER_WORKER_PORT: String(port),
+      WINHOOD_SCANNER_WORKER_TOKEN: workerToken,
+      WINHOOD_TEMP_WORKSPACE_DIR: tempWorkspaceDir,
+    },
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+  });
+}
+
+function spawnProductionServer({ bundlePath, port, dataDir, masterSecret, workerUrl, workerToken }) {
   return spawn(process.execPath, [bundlePath], {
     cwd: process.cwd(),
     env: {
@@ -172,9 +187,28 @@ function spawnProductionServer({ bundlePath, port, dataDir, masterSecret }) {
       WINHOOD_BIND_HOST: '127.0.0.1',
       WINHOOD_DATA_DIR: dataDir,
       WINHOOD_KEYSTORE_MASTER_SECRET: masterSecret,
+      ...(workerUrl ? { WINHOOD_SCANNER_WORKER_URL: workerUrl } : {}),
+      ...(workerToken ? { WINHOOD_SCANNER_WORKER_TOKEN: workerToken } : {}),
     },
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
+}
+
+async function waitForWorkerHealth(workerUrl, timeoutMs = 20_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${workerUrl}/worker/health`);
+      if (res.ok) {
+        const body = await res.json();
+        if (body.status === 'ONLINE') return body;
+      }
+    } catch {
+      // Retry
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  throw new Error(`Worker healthcheck timed out at ${workerUrl}/worker/health`);
 }
 
 async function stopProcessGracefully(child) {
@@ -215,10 +249,15 @@ async function runVerification() {
 
   let baseUrl = opts.baseUrl;
   let selfHostedChild = null;
+  let selfHostedWorkerChild = null;
   let selfHostedDir = null;
+  let selfHostedWorkerWsDir = null;
   let selfHostedPort = null;
   let selfHostedSecret = null;
+  let selfHostedWorkerUrl = null;
+  let selfHostedWorkerToken = null;
   const bundlePath = path.join(process.cwd(), 'dist-server', 'server.mjs');
+  const workerBundlePath = path.join(process.cwd(), 'dist-server', 'scanner-worker.mjs');
 
   try {
     if (opts.selfHosted) {
@@ -228,15 +267,33 @@ async function runVerification() {
       if (!fs.existsSync(bundlePath)) {
         throw new Error('dist-server/server.mjs missing. Run `npm run build:server` first.');
       }
+      if (!fs.existsSync(workerBundlePath)) {
+        throw new Error('dist-server/scanner-worker.mjs missing. Run `npm run build:server` first.');
+      }
       selfHostedPort = await getFreeLoopbackPort();
+      const selfHostedWorkerPort = await getFreeLoopbackPort();
       selfHostedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'winhood-verify-docker-web-'));
+      selfHostedWorkerWsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'winhood-verify-worker-ws-'));
       selfHostedSecret = crypto.randomBytes(32).toString('hex');
+      selfHostedWorkerToken = crypto.randomBytes(32).toString('hex');
+      selfHostedWorkerUrl = `http://127.0.0.1:${selfHostedWorkerPort}`;
       baseUrl = `http://127.0.0.1:${selfHostedPort}`;
+
+      selfHostedWorkerChild = spawnProductionWorker({
+        workerBundlePath,
+        port: selfHostedWorkerPort,
+        workerToken: selfHostedWorkerToken,
+        tempWorkspaceDir: selfHostedWorkerWsDir,
+      });
+      await waitForWorkerHealth(selfHostedWorkerUrl, 20_000);
+
       selfHostedChild = spawnProductionServer({
         bundlePath,
         port: selfHostedPort,
         dataDir: selfHostedDir,
         masterSecret: selfHostedSecret,
+        workerUrl: selfHostedWorkerUrl,
+        workerToken: selfHostedWorkerToken,
       });
       await waitForHealth(baseUrl, 20_000);
     }
@@ -478,22 +535,69 @@ async function runVerification() {
       `run=${run.id} (${run.status}), jsonSha256=${jsonExportSha256.slice(0, 12)}, sarifSha256=${sarifSha256.slice(0, 12)}, sbomSha256=${String(sbomJson.documentSha256).slice(0, 12)}`
     );
 
-    // 6b. Verify encrypted-only storage at rest (zero plaintext source files under isolated_artifacts)
+    // 6b. Verify encrypted-only storage at rest (zero plaintext source files or secret leaks across WINHOOD_DATA_DIR)
     const plaintextAuditRes = await fetch(`${baseUrl}/api/storage/plaintext-audit`);
     assert.equal(plaintextAuditRes.status, 200);
     const plaintextAudit = await plaintextAuditRes.json();
     assert.equal(
       plaintextAudit.clean,
       true,
-      `Plaintext source files detected in persistent storage: ${JSON.stringify(plaintextAudit.plaintextFilePaths)}`
+      `Plaintext source files or secret leaks detected: ${JSON.stringify(plaintextAudit)}`
     );
     assert.ok(
       plaintextAudit.encryptedBundleCount >= 2,
       'Encrypted vault_bundle.whenc bundles must exist for ingested softwares'
     );
+    assert.equal(
+      plaintextAudit.persistentVolumeAudit?.clean,
+      true,
+      `Persistent volume audit reported findings: ${JSON.stringify(plaintextAudit.persistentVolumeAudit?.findings)}`
+    );
     record(
-      'Encrypted-Only Persistent Storage',
-      `clean=${plaintextAudit.clean}, encryptedBundles=${plaintextAudit.encryptedBundleCount}, plaintextFiles=0`
+      'Encrypted-Only Persistent Storage & Volume Audit',
+      `clean=${plaintextAudit.clean}, encryptedBundles=${plaintextAudit.encryptedBundleCount}, scannedDirs=${(plaintextAudit.persistentVolumeAudit?.scannedDirectories || []).length}`
+    );
+
+    // 6c. Verify authenticated API <-> Scanner Worker communication & async job orchestration
+    const capsRes = await fetch(`${baseUrl}/api/scanner-worker/capabilities`);
+    assert.equal(capsRes.status, 200);
+    const capsBody = await capsRes.json();
+    assert.equal(capsBody.workerConfigured, true, 'Scanner worker must be configured');
+    assert.equal(capsBody.workerReachable, true, 'Scanner worker must be reachable via Bearer token auth');
+    assert.ok(Array.isArray(capsBody.capabilities) && capsBody.capabilities.length >= 10);
+
+    const jobCreateRes = await fetch(`${baseUrl}/api/scanner-worker/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        projectId: project.id,
+        softwareId: swA.id,
+        toolIds: ['semgrep', 'gitleaks', 'grype'],
+        timeoutMs: 15_000,
+      }),
+    });
+    assert.equal(jobCreateRes.status, 202);
+    let workerJob = (await jobCreateRes.json()).job;
+    assert.ok(workerJob?.jobId);
+    const jobDeadline = Date.now() + 20_000;
+    while (
+      (workerJob.state === 'QUEUED' || workerJob.state === 'RUNNING' || workerJob.state === 'CANCELLING') &&
+      Date.now() < jobDeadline
+    ) {
+      await new Promise((r) => setTimeout(r, 100));
+      const jRes = await fetch(`${baseUrl}/api/scanner-worker/jobs/${encodeURIComponent(workerJob.jobId)}`);
+      if (jRes.ok) {
+        workerJob = (await jRes.json()).job;
+      }
+    }
+    assert.ok(
+      workerJob.state !== 'QUEUED' && workerJob.state !== 'RUNNING',
+      `Scanner worker job did not settle: ${workerJob.state}`
+    );
+    const operationalCount = capsBody.capabilities.filter((c) => c.finalState === 'OPERATIONAL').length;
+    record(
+      'Isolated Scanner Worker Auth & Job Orchestration',
+      `workerReachable=true, operationalTools=${operationalCount}/${capsBody.capabilities.length}, job=${workerJob.jobId} (${workerJob.state}, verdict=${workerJob.analysisVerdict})`
     );
 
     // 7. Persistence across restart
@@ -511,6 +615,8 @@ async function runVerification() {
           port: selfHostedPort,
           dataDir: selfHostedDir,
           masterSecret: selfHostedSecret,
+          workerUrl: selfHostedWorkerUrl,
+          workerToken: selfHostedWorkerToken,
         });
         await waitForHealth(baseUrl, 20_000);
       } else {
@@ -543,8 +649,14 @@ async function runVerification() {
     if (selfHostedChild) {
       await stopProcessGracefully(selfHostedChild);
     }
+    if (selfHostedWorkerChild) {
+      await stopProcessGracefully(selfHostedWorkerChild);
+    }
     if (selfHostedDir) {
       fs.rmSync(selfHostedDir, { recursive: true, force: true });
+    }
+    if (selfHostedWorkerWsDir) {
+      fs.rmSync(selfHostedWorkerWsDir, { recursive: true, force: true });
     }
   }
 }

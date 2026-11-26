@@ -9449,7 +9449,12 @@ export async function createWinHoodApp(options?: {
   // Storage plaintext audit & atomic legacy migration endpoints
   app.get('/api/storage/plaintext-audit', (_req, res) => {
     const scan = EncryptedArtifactStore.auditNoPlaintextOnDisk(isolatedArtifactsDir);
-    return res.json(scan);
+    const persistentVolumeAudit = EncryptedArtifactStore.auditPersistentDataDir(dataDir);
+    return res.json({
+      ...scan,
+      clean: scan.clean && persistentVolumeAudit.clean,
+      persistentVolumeAudit,
+    });
   });
 
   app.post('/api/storage/migrate-legacy-plaintext', (req, res) => {
@@ -9540,13 +9545,13 @@ export async function createWinHoodApp(options?: {
     return res.json({ job });
   });
 
-  app.post('/api/scanner-worker/jobs/:jobId/cancel', (req, res) => {
+  app.post('/api/scanner-worker/jobs/:jobId/cancel', async (req, res) => {
     if (!requireWritePermission(res, req, 'scanner-worker:cancel')) return;
-    const job = scannerJobOrchestrator.cancelJob(req.params.jobId);
-    if (!job) {
+    const outcome = await scannerJobOrchestrator.cancelJobConfirmed(req.params.jobId);
+    if (!outcome.job) {
       return res.status(404).json({ error: 'SCANNER_JOB_NOT_FOUND' });
     }
-    return res.json({ job });
+    return res.json(outcome);
   });
 
   // Safe API JSON fallback & error handler

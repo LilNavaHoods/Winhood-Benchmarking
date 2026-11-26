@@ -1,180 +1,365 @@
-# WinHood — Independent Software Audit & Comparative Benchmarking Platform
+# WinHood Benchmarking
 
-![Core Audited Coverage](https://img.shields.io/badge/core%20audited%20(6%20domains)-89.34%25%20L%20%7C%2094.70%25%20F%20%7C%2094.88%25%20B-brightgreen)
-![All 13 Domains Coverage](https://img.shields.io/badge/all%2013%20domains%20(all%3Atrue)-72.70%25%20L%20%7C%2086.40%25%20B-blue)
-![Critical Motors Coverage](https://img.shields.io/badge/scoring%20%7C%20evidence%20%7C%20comparability-%E2%89%A595%25-success)
-![Open Standards](https://img.shields.io/badge/standards-SARIF%202.1.0%20%7C%20CWE%20%7C%20OWASP%20%7C%20CVSS%20%7C%20CycloneDX%20%7C%20SPDX-blue)
-![Version](https://img.shields.io/badge/version-4.4.0-0ea5e9)
+![Versão](https://img.shields.io/badge/vers%C3%A3o-4.4.0-0ea5e9)
+![Modo](https://img.shields.io/badge/distribui%C3%A7%C3%A3o-Docker--First%20%7C%20Local--Web-2563eb)
+![Runtime](https://img.shields.io/badge/node.js-22.x%20LTS-16a34a)
+![Padrões Abertos](https://img.shields.io/badge/padr%C3%B5es-SARIF%202.1.0%20%7C%20CWE%20%7C%20OWASP%20%7C%20CycloneDX%20%7C%20SPDX-4f46e5)
+![Licença](https://img.shields.io/badge/licen%C3%A7a-MIT-slate)
 
-WinHood Benchmarking is an autonomous, deterministic, full-stack platform for independent software quality auditing, security verification, cryptographic evidence provenance, and comparative A/B benchmarking.
+**Plataforma independente, Local-First e acessível via navegador para auditoria estática de qualidade e segurança de código, geração de SBOM, Quality Gates versionados, trilha de evidências verificáveis e benchmarking comparativo A/B de softwares.**
 
-WinHood operates strictly as an **independent audit, evidence, and comparative benchmarking category** built around open standards (**SARIF 2.1.0, CWE, OWASP Top 10, CVSS, CycloneDX 1.5, SPDX 2.3**). All static AST, dataflow/taint, secrets, IaC, SCA, Quality Gate, and reporting pipelines execute natively without anchoring on third-party products, while remaining fully interoperable with any **ferramentas que exportam SARIF 2.1.0**.
+O WinHood Benchmarking foi projetado para rodar integralmente na sua máquina por meio de **Docker**, em `http://localhost:3000`, sem exigir instalação manual de Node.js, Python ou ferramentas de análise no sistema operacional hospedeiro, e sem exigir cadastro, conta em nuvem ou login obrigatório.
 
----
-
-## 1. Core Capabilities
-
-1. **Autonomous Analysis Engine in Modo MQR (`src/analyzers/`):**
-   - Pipeline: `ParserRegistry` (TypeScript/JavaScript `FULL_AST` via `@babel/parser`, Python/Java/Go/C#/Rust/SQL `STRUCTURAL_AST` parsers with explicit per-language limitation metadata) → `RuleRegistry` (`4.4.0`, versioned rule governance metadata) → `TaintAnalyzer` (Call-Graph + Multi-Hop interprocedural Source → Sink → Context-Sensitive Sanitizer tracking with cycle detection, dynamic dispatch `INCONCLUSIVE` tracking, and bounded depth/budget) → `AnalyzerPluginManager` (IaC Terraform/Kubernetes/Dockerfile/CI workflows, versioned `SecretsCatalog` with Shannon entropy & redaction) → `SarifCodec` (SARIF 2.1.0 import/export).
-   - Evaluates findings under **Modo MQR (Modern Quality Regime)** and **Perfil de Qualidade Estrita**, classifying impacts across Security, Reliability, and Maintainability with bit-for-bit deterministic digests (`deterministicDigestSha256`).
-2. **Encrypted-Only Persistence & Isolated Scanner Worker (`src/storage/`, `src/execution/`, `src/worker/`):**
-   - Zero plaintext source files at rest in `WINHOOD_DATA_DIR/isolated_artifacts` (`EncryptedArtifactStore`: `AES-256-GCM + ZLIB` envelopes, atomic idempotent legacy migration, key-rotation re-encryption, `/api/storage/plaintext-audit`).
-   - Per-job ephemeral workspaces (`EphemeralWorkspaceManager` on `tmpfs`, strictly outside `WINHOOD_DATA_DIR`) and dedicated non-root `winhood-scanner-worker` container (`Dockerfile.scanner-worker`, pinned versions, `read_only: true`, internal Docker network, zero `docker.sock`, fail-closed `BLOCKED` without host fallback).
-3. **Versioned Actionable Quality Gates & Controlled Validation Harness (`src/gate/`, `src/validation/`):**
-   - Boolean condition gates (`APPROVED`, `APPROVED_WITH_RESERVATIONS`, `BLOCKED`, `INCONCLUSIVE`, `REJECTED`) with gate versioning, SHA-256 gate hashes, canonical CI exit codes (`0/1/2/3/4`), SSRF-guarded `HMAC-SHA256` webhooks, and objective SARIF 2.1.0 cross-tool comparison (`CrossToolBenchmarkHarness`).
-4. **Signed SBOM & Ecosystem-Aware SCA (`src/analyzers/sca/`):**
-   - Deterministic **CycloneDX 1.5/1.7** and **SPDX 2.3/3.0.1** SBOM generation across npm, Yarn, pnpm, Poetry, Pipfile, Gradle, NuGet (`packages.lock.json`), Go (`go.mod`/`go.sum`), Cargo, and Maven, with `dependencyPath`, `unresolvedDependenciesCount`, `unknownLicenseCount`, `HMAC-SHA256` + `Ed25519` signing, ecosystem-aware comparators (SemVer 2.0, PEP 440, Maven, NuGet), and honest SCA `freshnessStatus`.
-5. **Cryptographic Evidence Chain & Multi-Format Signed Reports (`src/evidence/`, `src/reports/ReportExporter.ts`):**
-   - Append-only SHA-256 chain + `HMAC-SHA256`/`Ed25519` signed manifest binding `engineVersion`, `ruleCatalogVersion`, `ruleCatalogSha256`, `provenanceMetadata` (with explicit tamper-evidence scope disclaimer), `artifactHashes`, and applied Quality Gate version/hash.
-   - Multi-format CLI and API exports (`winhood report --format=pdf|html|sarif|json`): **SARIF 2.1.0**, **JSON**, **Self-Contained HTML5** (inline CSS, zero external requests), and **Signed Binary PDF (`%PDF-1.4`)** with embedded `Report-SHA256` and `Report-HMAC-SHA256` verification.
-   - Reference report artifacts published in [`examples/reports/`](./examples/reports/).
-6. **Developer Daily Workflow — VS Code Extension MVP (`packages/vscode-extension/`):**
-   - Commands `Winhood: Analisar arquivo atual` and `Winhood: Analisar workspace`, inline Problems diagnostics (`CWE`, `OWASP Top 10`, line/column), contextual Hover with remediation & rule catalog links, deterministic `Quick Fix` Code Actions, semantic Status Bar item (green/yellow/red/gray), and automatic offline CLI fallback.
-   - Visual demonstration of inline finding, Hover remediation, Quick Fix, and Quality Gate status bar:
-   
-   ![WinHood VS Code Extension Demo](./packages/vscode-extension/demo-vscode-gate.svg)
-
-7. **Plug-and-Play CI/CD Connectors (`integrations/`, `templates/`, `examples/`):**
-   - Official GitHub Action ([`integrations/github-action/action.yml`](./integrations/github-action/action.yml)), GitLab CI Component ([`templates/winhood.gitlab-ci.yml`](./templates/winhood.gitlab-ci.yml)), Jenkins Shared Library (`winhoodAnalyze()` & `winhoodGate()` in [`integrations/jenkins/vars/`](./integrations/jenkins/vars/)), and ready-to-use pipeline examples in [`examples/`](./examples/).
+> **Posicionamento independente:** O WinHood é uma plataforma autônoma baseada em padrões abertos (**SARIF 2.1.0**, **CWE**, **OWASP Top 10**, **CVSS**, **CycloneDX 1.5/1.7**, **SPDX 2.3/3.0.1**). Ele não é afiliado nem representa resultados oficiais de fornecedores externos, embora suporte importação/exportação SARIF e integração opcional autorizada pelo usuário com instâncias compatíveis de SonarQube/SonarCloud ou GitHub.
 
 ---
 
-## 2. Documentation & Active Transparency Index
+## Sumário
 
-- **Identity & Terminology:**
-  - [`GLOSSARY.md`](./GLOSSARY.md) — Canonical definitions of **Modo MQR (Modern Quality Regime)**, **Perfil de Qualidade Estrita**, **Motor de Veracidade**, **Comparabilidade**, **Confiança da Evidência**, and **Quality Gate States**.
-  - [`MQR_METHODOLOGY.md`](./MQR_METHODOLOGY.md) — Multi-attribute quality evaluation, Overall vs. New Code, and separated coverage methodology.
-- **Transparency, Limitations, Biases & Confidence Model:**
-  - [`docs/LIMITATIONS.md`](./docs/LIMITATIONS.md) — Explicit technical boundaries per analysis mode (SAST/Taint, Secrets, SCA, SBOM, IaC, Comparability, and Cryptographic Evidence guarantees).
-  - [`docs/BIASES.md`](./docs/BIASES.md) — Known scoring biases (repository scale, language depth, missing data, single-rule flooding) and mathematical mitigations.
-  - [`docs/CONFIDENCE_MODEL.md`](./docs/CONFIDENCE_MODEL.md) — Formal mathematical formula and interpretation guide for **Confiança da Evidência (`HIGH`, `MEDIUM`, `LOW`)**.
-  - [`LIMITATIONS_AND_BIAS.md`](./LIMITATIONS_AND_BIAS.md) — Operational SLAs and reachability bounds.
-- **Contracts, Integrations & Governance:**
-  - [`API_REFERENCE.md`](./API_REFERENCE.md) & [`docs/OPENAPI_AND_CLI.md`](./docs/OPENAPI_AND_CLI.md) — OpenAPI 3.0.3 specification, CLI subcommands, and SARIF 2.1.0 contract.
-  - [`IDE_INTEGRATION.md`](./IDE_INTEGRATION.md) — VS Code extension (`packages/vscode-extension`) and IDE integration guide.
-  - [`EXTERNAL_INTEGRATION.md`](./EXTERNAL_INTEGRATION.md) & [`EXTERNAL_TOOLS.md`](./EXTERNAL_TOOLS.md) — Open-standard interoperability with ferramentas que exportam SARIF 2.1.0, CycloneDX 1.5, SPDX 2.3, and LCOV/Cobertura.
-  - [`docs/CI_INTEGRATION.md`](./docs/CI_INTEGRATION.md) — Canonical CI exit codes (`0..4`), GitHub Action, GitLab Component, Jenkins Shared Library, and signed webhook validation in Node.js, Python, and Go.
-  - [`RULE_CATALOG.md`](./RULE_CATALOG.md) & [`CHANGELOG_RULES.md`](./CHANGELOG_RULES.md) — Public catalog of rules and SemVer policy.
-  - [`CHANGELOG.md`](./CHANGELOG.md) & [`docs/MIGRATION.md`](./docs/MIGRATION.md) — Iteration changelog and configuration migration guide.
-  - [`SECURITY_ARCHITECTURE.md`](./SECURITY_ARCHITECTURE.md) — Local-First access model, optional TOTP 2FA, explicit remote deployment guard, DPAPI/KMS envelope keystore, SSRF guard, upload safety, and sandbox isolation.
-  - [`DOCKER_LOCAL_WEB.md`](./DOCKER_LOCAL_WEB.md) — Execução completa em Docker no modo Local-Web (`http://localhost:3000`) sem instalador `.exe`, com persistência cifrada em volume e confinamento em `127.0.0.1`.
-  - [`ISSUE_REMEDIATION_REPORT.md`](./ISSUE_REMEDIATION_REPORT.md) — Complete issue remediation audit trail, real per-domain coverage table, SonarCloud baseline/remediation matrix, and CI/CD verification status.
+1. [Principais Funcionalidades](#1-principais-funcionalidades)
+2. [Matriz de Linguagens Suportadas](#2-matriz-de-linguagens-suportadas)
+3. [Matriz de Scanners e Analisadores](#3-matriz-de-scanners-e-analisadores)
+4. [Instalação com Docker (Passo a Passo)](#4-instalação-com-docker-passo-a-passo)
+5. [Arquitetura Docker](#5-arquitetura-docker)
+6. [Como Utilizar a Plataforma](#6-como-utilizar-a-plataforma)
+7. [Relatórios, Padrões e Integrações](#7-relatórios-padrões-e-integrações)
+8. [Segurança e Privacidade](#8-segurança-e-privacidade)
+9. [Limitações Conhecidas e Escopo](#9-limitações-conhecidas-e-escopo)
+10. [Documentação Complementar](#10-documentação-complementar)
 
 ---
 
-## 3. Running, Verifying & Measured Coverage
+## 1. Principais Funcionalidades
+
+Para manter transparência operacional, as capacidades do WinHood estão organizadas conforme seu nível real de maturidade e pré-requisitos:
+
+### Operacionais fora da caixa (Docker padrão)
+- **Motor Estático Nativo em Modo MQR (`src/analyzers/`):** pipeline determinístico com classificação por **Segurança, Confiabilidade e Manutenibilidade**, regras versionadas (`RuleRegistry 4.4.0`), detecção de segredos com entropia de Shannon e redação (`SecretsCatalog`), análise de Infraestrutura como Código (Dockerfile, Terraform, Kubernetes e workflows CI) e digest determinístico `SHA-256`.
+- **Análise de Fluxo de Dados / Taint Interprocedural (`TaintAnalyzer`):** rastreamento *Source → Sink → Sanitizer* sensível ao contexto com grafo de chamadas, detecção de ciclos, orçamento de profundidade e sinalização explícita de casos `INCONCLUSIVE` em despacho dinâmico.
+- **SBOM e SCA Determinísticos (`src/analyzers/sca/`):** geração assinada em **CycloneDX 1.5/1.7** e **SPDX 2.3/3.0.1** para ecossistemas npm, Yarn, pnpm, Poetry, Pipfile, Maven, Gradle, NuGet, Go e Cargo, com comparadores de versão por ecossistema (SemVer 2.0, PEP 440, Maven, NuGet) e métricas honestas de dependências não resolvidas ou licenças desconhecidas.
+- **Quality Gates Versionados (`QualityGateEngine`):** avaliação booleana com estados explícitos (`APPROVED`, `APPROVED_WITH_RESERVATIONS`, `BLOCKED`, `INCONCLUSIVE`, `REJECTED`), hash `SHA-256` do gate aplicado e códigos de saída padronizados para CI.
+- **Benchmarking Comparativo A/B e Ranking:** ingestão de projetos via upload de pasta, arquivo `.zip` (com proteção contra ZIP Bomb e Path Traversal) ou snippets/arquivos, execução paralela controlada e comparação objetiva lado a lado entre versões ou candidatos.
+- **Trilha de Evidências Verificável e Exportação Multiformato:** cadeia encadeada `SHA-256` + manifesto assinado (`HMAC-SHA256` / `Ed25519`) e relatórios em **JSON**, **SARIF 2.1.0**, **HTML5 autocontido** e **PDF binário assinado**.
+- **Orquestração Assíncrona com Container Worker Isolado:** execução de scanners externos em container separado (`winhood-scanner-worker`) sem acesso à internet, com cancelamento real de grupo de processos e armazenamento cifrado em repouso (`AES-256-GCM`).
+
+### Dependentes de configuração adicional ou cache offline
+- **Scanners SCA com Base de Vulnerabilidades Offline (Grype / OSV-Scanner):** os binários já vêm instalados no container `winhood-scanner-worker`, porém, como o worker roda em rede interna sem internet, exigem preenchimento prévio do volume de cache offline (`winhood_scanner_cache`). Enquanto a base estiver ausente, o sistema retorna explicitamente `DATABASE_UNAVAILABLE` (nunca simula "0 vulnerabilidades").
+- **SonarQube Local (Opcional):** disponível via perfil `--with-sonar` / `-WithSonar` (`--profile sonar`) em `http://localhost:9000`.
+- **Proteção Local Opcional com TOTP 2FA:** desabilitada por padrão para manter o fluxo Local-First imediato; pode ser ativada na barra superior para proteger alterações locais sensíveis.
+- **Webhooks e Integrações Git/AI Externas (Opcional):** bloqueados contra SSRF e desativados por padrão; só enviam dados externos quando explicitamente configurados e autorizados pelo usuário.
+
+### Parciais ou em evolução (MVP)
+- **Análise Estrutural em Linguagens Não-JS/TS:** Python, Java, Go, C#, Rust e SQL utilizam parser estrutural próprio com metadados explícitos de limitação (sem resolução completa de tipos/compilador nativo); para maior profundidade em Python e multi-linguagem, utilize os scanners do worker (Ruff, Bandit e Semgrep).
+- **Extensão VS Code (`packages/vscode-extension/`):** distribuída como MVP funcional com diagnósticos inline, Hover, Quick Fix e barra de status via CLI/API local.
+- **Empacotamento Desktop Windows (Electron / Inno Setup):** mantido no repositório como legado opcional; o fluxo principal recomendado e priorizado é o **Docker Local-Web**.
+
+---
+
+## 2. Matriz de Linguagens Suportadas
+
+| Linguagem | Motor Nativo WinHood | Profundidade da Análise Nativa | Cobertura Adicional no Worker Docker | Limitações Principais |
+| :--- | :--- | :--- | :--- | :--- |
+| **TypeScript / JavaScript** | `FULL_AST` (`@babel/parser`) | AST completa, métricas estruturais, taint interprocedural, regras SAST e segredos | Semgrep (regras offline), Gitleaks, Syft, Grype*, OSV-Scanner* | Não executa *type-checking* completo do `tsc` em tempo de análise. |
+| **Python** | `STRUCTURAL_AST` | Parser estrutural, padrões SAST/taint básicos e segredos | **Ruff** (lint/qualidade), **Bandit** (SAST Python), **Semgrep**, Gitleaks, Syft, Grype*, OSV-Scanner* | Sem resolução semântica completa de imports dinâmicos no motor nativo. |
+| **Java** | `STRUCTURAL_AST` | Parser estrutural, padrões SAST/taint básicos e segredos | Semgrep (regras offline), Gitleaks, Syft, Grype*, OSV-Scanner* | SpotBugs e Checkstyle **não** estão incluídos na imagem padrão. |
+| **Go** | `STRUCTURAL_AST` | Parser estrutural, padrões SAST básicos e segredos | Semgrep (regras offline), Gitleaks, Syft, Grype*, OSV-Scanner* | Sem análise de pacotes compilados (`go vet` / `staticcheck` não inclusos). |
+| **C# (.NET)** | `STRUCTURAL_AST` | Parser estrutural, padrões SAST básicos e segredos | Gitleaks, Syft, Grype*, OSV-Scanner* | Roslyn / .NET SDK **não** está incluído na imagem padrão. |
+| **Rust** | `STRUCTURAL_AST` | Parser estrutural e padrões básicos | Gitleaks, Syft, Grype*, OSV-Scanner* | Sem compilador `rustc` / `clippy` na imagem padrão. |
+| **SQL** | `STRUCTURAL_AST` | Detecção estrutural de padrões de risco e injeção | — | Focado em consultas embutidas e padrões estáticos comuns. |
+| **IaC / Config (Dockerfile, Terraform, Kubernetes, YAML/CI)** | `AnalyzerPluginManager` | Regras dedicadas de endurecimento, permissões e segredos | Gitleaks | Não substitui validação de plano vivo (`terraform plan`) ou políticas OPA customizadas. |
+
+*\*Grype e OSV-Scanner exigem base offline populada no volume `winhood_scanner_cache` para produzir veredicto de vulnerabilidades; sem base, reportam `DATABASE_UNAVAILABLE`.*
+
+---
+
+## 3. Matriz de Scanners e Analisadores
+
+O WinHood diferencia de forma estrita entre binários **instalados na imagem `winhood-scanner-worker:4.4.0`** e ferramentas catalogadas mas **ausentes na imagem padrão**. Nenhum scanner é marcado como `OPERATIONAL` apenas por existir no `PATH`: o worker valida pré-requisitos offline e executa autoteste isolado antes de reportar disponibilidade.
+
+| Scanner | Finalidade | Versão Fixada na Imagem Docker | Disponibilidade no Docker Padrão | Pré-requisitos | Estado Esperado no Boot Padrão |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Motor Nativo WinHood** | SAST, Taint, IaC, Segredos, SBOM, MQR e Quality Gates | `4.4.0` (embutido no backend) | **Incluído** (`winhood`) | Nenhum | `OPERATIONAL` |
+| **Ruff** | Qualidade e lint para Python | `0.9.6` | **Incluído** (`winhood-scanner-worker`) | Nenhum (100% offline) | `OPERATIONAL` |
+| **Bandit** | SAST de segurança para Python | `1.8.3` | **Incluído** (`winhood-scanner-worker`) | Nenhum (100% offline) | `OPERATIONAL` |
+| **Semgrep** | SAST multi-linguagem baseado em regras | `1.109.0` | **Incluído** (`winhood-scanner-worker`) | Pacote de regras offline em `/opt/winhood-scanner-rules` (já embutido: `winhood-core.yaml`) | `OPERATIONAL` (regras starter offline; `RULES_UNAVAILABLE` se pasta vazia) |
+| **Gitleaks** | Detecção de credenciais e segredos | `8.24.0` | **Incluído** (`winhood-scanner-worker`) | Nenhum (100% offline) | `OPERATIONAL` |
+| **Syft** | Geração de SBOM (CycloneDX) | `1.20.0` | **Incluído** (`winhood-scanner-worker`) | Nenhum (100% offline) | `OPERATIONAL` |
+| **Grype** | Correlação SCA de vulnerabilidades | `0.89.0` | **Incluído** (`winhood-scanner-worker`) | Base offline em `winhood_scanner_cache` (`./scripts/docker-update-scanner-dbs.sh`) | `DATABASE_UNAVAILABLE` até popular o cache; `OPERATIONAL` após atualização |
+| **OSV-Scanner** | Varredura SCA em lockfiles | `1.9.2` | **Incluído** (`winhood-scanner-worker`) | Dumps OSV offline em `/data/scanner-cache/osv` | `DATABASE_UNAVAILABLE` até popular cache OSV offline |
+| **CodeQL CLI** | Taint e dataflow semântico avançado | — | **Não incluído** | Instalação externa / importação SARIF | `NOT_INSTALLED` |
+| **ESLint** | Lint JS/TS externo | — | **Não incluído no worker** | Coberto pelo motor nativo AST ou importação SARIF | `NOT_INSTALLED` |
+| **Roslyn (.NET)** | Análise estática C#/.NET | — | **Não incluído** | SDK .NET externo / importação SARIF | `NOT_INSTALLED` |
+| **SpotBugs** | SAST/bugs Java bytecode | — | **Não incluído** | JDK/bytecode externo / importação SARIF | `NOT_INSTALLED` |
+| **Checkstyle** | Estilo e qualidade Java | — | **Não incluído** | JRE externo / importação SARIF | `NOT_INSTALLED` |
+| **Trivy** | SCA / IaC / containers | — | **Não incluído** | Instalação externa / importação SARIF | `NOT_INSTALLED` |
+
+> **Regra de honestidade operacional:** Quando uma ferramenta retorna `NOT_INSTALLED`, `DATABASE_UNAVAILABLE`, `RULES_UNAVAILABLE` ou `BLOCKED`, o orquestrador registra `analysisVerdict: "INCONCLUSIVE"` (ou `"PARTIAL"` / `"BLOCKED"`) e **jamais** converte ausência de ferramenta ou base em "0 vulnerabilidades".
+
+---
+
+## 4. Instalação com Docker (Passo a Passo)
+
+### 4.1. Pré-requisitos
+
+Você precisa apenas de:
+- **Git** (para clonar o repositório).
+- **Docker Desktop** (Windows 10/11 ou macOS) ou **Docker Engine + Docker Compose v2** (Linux).
+- **Recursos recomendados:** mínimo 4 GB de RAM livres (6 GB+ se ativar o perfil opcional `--with-sonar`) e 4 GB de espaço em disco para imagens e cache.
+
+Não é necessário instalar Node.js, npm, Python, Ruff, Semgrep ou Gitleaks na sua máquina.
+
+### 4.2. Clonar o repositório
 
 ```bash
-# Install dependencies deterministically
-npm ci --ignore-scripts
-
-# Verify browser-safe frontend dependency graph (zero Node.js imports)
-npm run check:browser-imports
-
-# TypeScript strict type checking (strict: true)
-npm run typecheck
-
-# ESLint static quality & security rules
-npm run lint
-
-# Dependency vulnerability governance audit
-node scripts/verify-npm-audit.mjs
-
-# Run all unit, security, analyzer, gate, CLI, API & IDE extension tests
-npm test
-
-# Run full test suite with official 13-domain c8 Coverage Gate (all: true) & LCOV generation
-npm run test:coverage
-
-# Generate audit reports in all 4 formats (PDF, HTML, SARIF, JSON)
-npx tsx cli/winhood-cli.ts report --format=pdf --path ./src/gate --out report.pdf
-npx tsx cli/winhood-cli.ts report --format=html --path ./src/gate --out report.html
-npx tsx cli/winhood-cli.ts report --format=sarif --path ./src/gate --out report.sarif
-npx tsx cli/winhood-cli.ts report --format=json --path ./src/gate --out report.json
-
-# Build standalone production server bundle (dist-server/server.mjs)
-npm run build && npm run build:server
-
-# Run 100% in Docker Local-Web (http://localhost:3000, no .exe required — see DOCKER_LOCAL_WEB.md)
-./scripts/docker-up.sh
-# Windows PowerShell: powershell -ExecutionPolicy Bypass -File .\scripts\docker-up.ps1
-
-# Start fullstack server (Express API + Vite frontend on port 3000)
-npm run dev
+git clone https://github.com/LilNavaHoods/Winhood-Benchmarking.git
+cd Winhood-Benchmarking
 ```
 
-### Official Measured Coverage Scope (`npm run test:coverage`, `c8 + v8-to-istanbul`, `all: true`)
+### 4.3. Primeira inicialização (comando único)
 
-| Scope | Eligible Files | Lines | Functions | Branches | Gate Threshold | Status |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Core Audited Engine (6 domains)** | 19 | **89.34%** | **94.70%** | **94.88%** | ≥80% L / ≥80% F / ≥75% B | **PASSED** |
-| **Critical Motors (`src/scoring`, `src/evidence`, `src/comparability`)** | 4 | **100.00%** | **100.00%** | **98.08%–100%** | ≥95% L / ≥95% F / ≥95% B | **PASSED** |
-| **All 13 Official Domains Aggregate** | 85 | **72.70%** | **61.77%** | **86.40%** | 12/13 domains meet domain targets (`src/components/` interactive DOM handlers tracked honestly in `coverage/coverage-summary.json`) | **REPORTED** |
+O script de inicialização verifica automaticamente se o Docker está instalado e em execução, valida o Docker Compose v2, gera o arquivo local `.env.docker` com dois segredos criptográficos aleatórios de 32 bytes (sem sobrescrever customizações existentes), constrói as imagens, aguarda os healthchecks e confirma a conexão autenticada entre o backend e o scanner worker.
 
-> All eligible source files remain in the coverage denominator (`all: true`, 0 unexecuted files). Non-empty `coverage/lcov.info` and `coverage/index.html` artifacts are enforced before gate approval.
+#### Windows (PowerShell)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\docker-up.ps1
+```
+
+#### Linux / macOS (Bash)
+
+```bash
+./scripts/docker-up.sh
+```
+
+> **Tempo esperado no primeiro build:** entre 2 e 6 minutos dependendo da conexão, pois a imagem `winhood-scanner-worker` instala Python + Ruff + Bandit + Semgrep e os binários fixados de Gitleaks, Syft, Grype e OSV-Scanner. Inicializações posteriores com cache levam poucos segundos.
+
+### 4.4. Primeiro acesso
+
+Assim que o script exibir a confirmação de pronto, abra o navegador em:
+
+```text
+http://localhost:3000
+```
+
+O ambiente abre diretamente em modo **Local-First** (sem login ou cadastro obrigatório).
+
+### 4.5. Popular a base offline do Grype (opcional, recomendado para SCA externo)
+
+Como o `winhood-scanner-worker` opera sem acesso à internet, execute o script abaixo quando desejar baixar ou atualizar a base de vulnerabilidades do Grype no volume persistente `winhood_scanner_cache`:
+
+- **Linux / macOS:** `./scripts/docker-update-scanner-dbs.sh`
+- **Windows (PowerShell):** `powershell -ExecutionPolicy Bypass -File .\scripts\docker-update-scanner-dbs.ps1`
+
+### 4.6. Perfil opcional com SonarQube Local
+
+Para subir também uma instância local isolada do SonarQube Community em `http://localhost:9000`:
+
+- **Linux / macOS:** `./scripts/docker-up.sh --with-sonar`
+- **Windows (PowerShell):** `powershell -ExecutionPolicy Bypass -File .\scripts\docker-up.ps1 -WithSonar`
+
+### 4.7. Operações do dia a dia
+
+| Tarefa | Linux / macOS | Windows (PowerShell) |
+| :--- | :--- | :--- |
+| **Iniciar novamente (rápido, sem rebuild)** | `./scripts/docker-up.sh --no-build` | `.\scripts\docker-up.ps1 -NoBuild` |
+| **Verificar status e healthchecks** | `docker compose ps` | `docker compose ps` |
+| **Acompanhar logs em tempo real** | `docker compose logs -f` | `docker compose logs -f` |
+| **Reiniciar serviços** | `docker compose restart` | `docker compose restart` |
+| **Atualizar após `git pull`** | `./scripts/docker-up.sh` | `.\scripts\docker-up.ps1` |
+| **Encerrar preservando todos os dados** | `./scripts/docker-down.sh` | `.\scripts\docker-down.ps1` |
+| **Encerrar direto via Compose** | `docker compose down` | `docker compose down` |
+
+### 4.8. Variáveis de ambiente (`.env.docker`)
+
+O arquivo `.env.docker` é criado automaticamente a partir do modelo [`.env.docker.example`](./.env.docker.example) e está protegido no `.gitignore` e `.dockerignore`:
+
+- **Obrigatórias** (geradas automaticamente, mínimo 32 caracteres):
+  - `WINHOOD_KEYSTORE_MASTER_SECRET`: segredo mestre criptográfico utilizado pelo `KeyManagementService` (AES-256-GCM / KDF) em produção.
+  - `WINHOOD_SCANNER_WORKER_TOKEN`: token Bearer de autenticação interna entre `winhood` e `winhood-scanner-worker`.
+- **Opcionais**:
+  - `WINHOOD_PORT` (padrão `3000`): porta local publicada exclusivamente em `127.0.0.1:<WINHOOD_PORT>`.
+  - `WINHOOD_SONAR_DOCKER_IMAGE` (padrão `sonarqube:25.1.0.102122-community`): imagem fixada do perfil opcional `--profile sonar`.
+
+### 4.9. Backup, restauração e remoção total de dados
+
+**Backup do volume persistente (`winhood_data`):**
+
+> Importante: faça backup também do arquivo `.env.docker` em local seguro e criptografado. Sem `WINHOOD_KEYSTORE_MASTER_SECRET`, os envelopes cifrados (`vault_bundle.whenc`, banco e payloads) não podem ser decifrados.
+
+```bash
+docker run --rm \
+  -v winhood-benchmarking_winhood_data:/data:ro \
+  -v "$(pwd)":/backup \
+  alpine:3.21.3 \
+  tar czf /backup/winhood-data-backup.tar.gz -C /data .
+```
+
+*(Confirme o nome exato do volume com `docker volume ls | grep winhood_data`.)*
+
+**Restauração:**
+
+```bash
+./scripts/docker-down.sh
+docker run --rm \
+  -v winhood-benchmarking_winhood_data:/data \
+  -v "$(pwd)":/backup:ro \
+  alpine:3.21.3 \
+  tar xzf /backup/winhood-data-backup.tar.gz -C /data
+./scripts/docker-up.sh --no-build
+```
+
+**ATENÇÃO — Ação destrutiva (apagar todos os projetos, histórico, cofre e cache):**
+
+```bash
+# Linux / macOS (exige confirmação explícita)
+./scripts/docker-down.sh --purge-volumes --confirm-data-loss
+
+# Windows (PowerShell)
+.\scripts\docker-down.ps1 -PurgeVolumes -ConfirmDataLoss
+```
 
 ---
 
-## 4. Access Model: Unrestricted Local-First + Optional TOTP 2FA & Explicit Remote Deployment
+## 5. Arquitetura Docker
 
-### Local-First Mode (`LOCAL_DESKTOP` / `LOCAL_WEB`, Default)
-WinHood opens directly into the full workspace with **unrestricted local access**:
-- No account registration, login screen, password, PIN, OAuth, PAT, Device Flow, WebAuthn, or Windows Hello is required.
-- **Optional TOTP 2FA (RFC-6238)** can be enabled or disabled directly from the top bar whenever the local operator wants an extra session lock.
+```mermaid
+flowchart LR
+    Browser["Navegador do Usuário<br/>http://localhost:3000"]
 
-### Explicit Remote Deployment Mode (`REMOTE_DEPLOYMENT`)
-When hosting WinHood outside a local workstation, configure explicit fail-closed protection via environment variables (see [`.env.example`](./.env.example)):
-1. Set `WINHOOD_DEPLOYMENT_MODE=REMOTE_DEPLOYMENT`.
-2. Set `WINHOOD_REMOTE_API_TOKEN` to a high-entropy secret (`>= 32` characters). The server refuses to start in `REMOTE_DEPLOYMENT` if this token is absent or weak.
-3. Clients authenticate with `Authorization: Bearer <WINHOOD_REMOTE_API_TOKEN>` (validated in constant time via SHA-256 + `crypto.timingSafeEqual`, with per-IP brute-force lockout after 5 failed attempts).
-4. Set `WINHOOD_TRUST_PROXY=false` by default; only enable an explicit hop count (e.g. `1`), `loopback`, or trusted IP/CIDR list when behind a verified reverse proxy.
-5. Set `WINHOOD_KEYSTORE_MASTER_SECRET` (`>= 32` bytes) in server/container environments without native OS keystore integration.
+    subgraph HostLoopback["Host Local (somente 127.0.0.1)"]
+        Port3000["127.0.0.1:3000"]
+        Port9000["127.0.0.1:9000 (opcional)"]
+    end
 
----
+    subgraph PublicNet["Rede Docker: winhood_public (bridge)"]
+        WinHood["Container: winhood<br/>React 19 + Express API + Motor Nativo<br/>non-root uid 1001 · cap_drop ALL"]
+        Sonar["Container opcional: sonar-local<br/>profile: sonar · imagem fixada"]
+    end
 
-## 5. Benchmark Wizard & A/B Comparison Guide
+    subgraph InternalNet["Rede Docker: winhood_scanner_internal (internal: true · SEM INTERNET)"]
+        Worker["Container: winhood-scanner-worker<br/>Ruff · Bandit · Semgrep · Gitleaks · Syft · Grype · OSV<br/>read_only · non-root uid 1001 · cap_drop ALL"]
+    end
 
-The **Nova Avaliação (Wizard)** module executes deterministic single-software, comparative **A/B**, and market-benchmark evaluations:
+    VolData[("Volume: winhood_data<br/>/data/winhood<br/>Cofre AES-256-GCM + DB + Metadados")]
+    TmpApi[("tmpfs: /tmp/winhood-workspaces<br/>noexec · nosuid · efêmero")]
+    TmpWorker[("tmpfs: /tmp + /tmp/winhood-workspaces<br/>noexec · nosuid · efêmero por job")]
+    VolCache[("Volume: winhood_scanner_cache<br/>/data/scanner-cache<br/>Bases offline Grype / OSV")]
 
-1. Open **Projetos & Softwares** and ingest the target software(s) via local folder/file upload, Git repository import, or the built-in real A/B pair (`VaultCore Internal` vs `KeeSafe Open`).
-2. Navigate to **Nova Avaliação (Wizard)** in the left sidebar.
-3. **Etapa 1 — Modalidade & Projeto:** select *Avaliação Individual (A)*, *Comparação A/B (B)*, or *Concorrente de Mercado (C)*, give the evaluation a clear title, and optionally attach a project.
-4. **Etapa 2 — Software Principal & Concorrentes:** select Software A (and Software B / additional competitors for A/B).
-5. **Etapa 3 — Categorias & Pesos:** enable/disable from the 12 evaluation categories and adjust weights so enabled weights sum strictly to **`100%`** (use **Normalizar para 100%** whenever toggling categories).
-6. **Etapa 4 — Condições Experimentais & Equivalência:** review hardware/worker parity (`vCPUs`, RAM, concurrency, target OS) and optional DAST authorization.
-7. **Etapa 5 — Pré-Análise & Execução:** review comparability warnings and click **Iniciar Benchmark**. Use **Parar / Cancelar** if you need to abort a running execution (`POST /api/benchmark-runs/:id/cancel`).
+    Browser --> Port3000 --> WinHood
+    Browser -. perfil sonar .-> Port9000 -.-> Sonar
+    WinHood -->|HTTP interno + Bearer Token<br/>tempo constante| Worker
+    WinHood --> VolData
+    WinHood --> TmpApi
+    Worker --> TmpWorker
+    Worker --> VolCache
+```
 
-### Common Wizard Errors & Fixes
-- **`A soma dos pesos das categorias habilitadas deve ser exatamente 100%`**: click **Normalizar para 100%** or manually adjust active sliders until the sum reads `100%`.
-- **`Selecione pelo menos um concorrente para comparação A/B`**: in A/B mode, pick at least one competitor distinct from Software A.
-- **`Software sem arquivos ingeridos`**: return to **Projetos & Softwares** and upload or ingest source files before running the benchmark.
-
----
-
-## 6. Frontend / Backend Browser-Safe Architecture
-
-WinHood enforces a strict compile-time and CI boundary between browser code and Node.js server modules so Node-only APIs (`node:child_process`, `node:fs`, `node:crypto`, `node:net`, `node:dns`, `node:os`, `node:worker_threads`) can never leak into the Vite client bundle:
-
-- **Shared Browser-Safe Layer (`src/shared/`):** pure TypeScript logic compatible with both browser and Node.js (`benchmarkCategories.ts`, `benchmarkWeights.ts`, `benchmarkValidation.ts`, `benchmarkConfig.ts`, `authTypes.ts`, `index.ts`). Zero Node built-in imports.
-- **Frontend Layer (`src/components/`, `src/App.tsx`, `src/utils/csrfFetch.ts`):** imports only browser-safe libraries and `src/shared/`. Never imports `src/engine/`, `src/gate/`, `src/security/`, or `server.ts`.
-- **Backend-Only Layer (`server.ts`, `src/engine/`, `src/analyzers/`, `src/gate/`, `src/security/`, `src/evidence/`, `src/execution/`, `src/reports/`):** executes strictly in Node.js and exposes capabilities to the UI exclusively through authenticated REST API routes (`/api/*`).
-- **Automated Guardrail (`npm run check:browser-imports`):** AST-based dependency-graph verifier (`scripts/check-browser-imports.mjs`) that traverses static imports, dynamic `import()`, re-exports, barrel files, TypeScript/Vite aliases, and transitive dependencies from every frontend entrypoint. It runs automatically before `npm run build`, `npm run build:desktop`, and in every CI job.
+### Garantias estruturais dos containers
+- **Imagens base e binários fixados:** `node:22.14.0-bookworm-slim` e versões explícitas de todos os scanners (zero tags mutáveis `:latest`).
+- **Sem exposição LAN por padrão:** portas publicadas exclusivamente em `127.0.0.1`.
+- **Sem `docker.sock`:** nenhum container acessa o socket do Docker do host.
+- **Privilégio mínimo:** usuário não-root `winhood` (`1001:1001`), `cap_drop: [ALL]`, `no-new-privileges:true`, `init: true`, `stop_grace_period: 20s`, limites de CPU, memória e PIDs.
+- **Isolamento de rede do worker:** `winhood-scanner-worker` não possui portas publicadas no host e fica conectado apenas à rede `internal: true`.
 
 ---
 
-## 7. Installation, Deployment & Troubleshooting
+## 6. Como Utilizar a Plataforma
 
-- **Install & Verify Locally:**
-  ```bash
-  npm ci --ignore-scripts
-  npm run check:browser-imports
-  npm run typecheck
-  npm run lint
-  npm run build
-  npm test
-  npm run test:coverage
-  ```
-- **Server refuses to start with `REMOTE_DEPLOYMENT_TOKEN_REQUIRED`:** `WINHOOD_DEPLOYMENT_MODE=REMOTE_DEPLOYMENT` requires `WINHOOD_REMOTE_API_TOKEN` with at least 32 characters. For local workstation use, keep `WINHOOD_DEPLOYMENT_MODE=LOCAL_WEB` (default) or `LOCAL_DESKTOP`.
-- **HTTP `413 PAYLOAD_TOO_LARGE` on upload:** Standard API endpoints enforce a `2mb` JSON cap, while `/api/projects/upload`, `/api/projects/extract-zip`, and `/api/analyze/sarif` accept up to `50mb`. Ensure uploads stay within the `50mb` JSON / `40mb` ZIP limit and contain valid paths (no path traversal).
-- **Rate limiter sees proxy IP instead of client IP behind a reverse proxy:** `WINHOOD_TRUST_PROXY` defaults to `false` to prevent `X-Forwarded-For` spoofing. Set `WINHOOD_TRUST_PROXY=1` (or your exact trusted proxy hop count / CIDR list) only when deployed behind a trusted reverse proxy.
-- **Node-only import error during `npm run build`:** inspect the exact dependency chain printed by `npm run check:browser-imports`, extract shared pure logic into `src/shared/`, and keep server services behind `/api/*` endpoints.
+1. **Acessar a interface:** abra `http://localhost:3000` após executar `docker-up`.
+2. **Criar um Projeto de Benchmarking:** defina nome, categoria e objetivo no painel de projetos.
+3. **Adicionar Softwares / Candidatos:** importe o código-fonte via upload de pasta local, arquivo `.zip` (validado contra ZIP Bomb e Path Traversal) ou conjunto de arquivos. Todo código enviado é cifrado em disco via `AES-256-GCM` em `vault_bundle.whenc`.
+4. **Executar Análise / Benchmark:** utilize o Wizard rápido ou completo (auditoria individual ou comparação A/B) selecionando o perfil de qualidade e o Quality Gate desejado.
+5. **Acionar Scanners Isolados (opcional):** consulte a matriz de disponibilidade real (`/api/scanner-worker/capabilities`) e execute jobs assíncronos no `winhood-scanner-worker`, com possibilidade de cancelamento real do processo em execução.
+6. **Inspecionar Achados e Métricas:** navegue pelos achados classificados em **Modo MQR** (Segurança, Confiabilidade, Manutenibilidade), CWE, OWASP Top 10, trilha de taint e SBOM/SCA.
+7. **Avaliar o Quality Gate e Evidências:** verifique o parecer (`APPROVED`, `APPROVED_WITH_RESERVATIONS`, `BLOCKED`, `INCONCLUSIVE` ou `REJECTED`) e valide a integridade criptográfica da cadeia de evidências (`POST /api/evidence/:runId/verify`).
+8. **Exportar Relatórios:** baixe os relatórios em **JSON**, **SARIF 2.1.0**, **HTML5** ou **PDF assinado**, além do **SBOM CycloneDX / SPDX**.
+9. **Auditar Persistência e Segredos (opcional):** verifique em `/api/storage/plaintext-audit` se o volume persistente permanece livre de código-fonte em texto plano e padrões sensíveis.
+
+---
+
+## 7. Relatórios, Padrões e Integrações
+
+- **Formatos de Relatório:**
+  - `JSON`: estrutura completa de achados, métricas MQR, Quality Gate e metadados de execução.
+  - `SARIF 2.1.0`: compatível com GitHub Code Scanning, Azure DevOps, GitLab e IDEs.
+  - `HTML5`: relatório visual autocontido (CSS inline, zero requisições externas).
+  - `PDF (%PDF-1.4)`: documento binário com cabeçalhos de integridade `Report-SHA256` e `Report-HMAC-SHA256`.
+  - `SBOM`: **CycloneDX 1.5/1.7** e **SPDX 2.3/3.0.1** com assinatura verificável.
+  - Exemplos de saída disponíveis em [`examples/reports/`](./examples/reports/).
+- **CLI e API REST:**
+  - CLI local (`cli/winhood-cli.ts`) para análise determinística, gates e exportação em pipelines.
+  - Referência completa de endpoints em [`API_REFERENCE.md`](./API_REFERENCE.md) e [`docs/OPENAPI_AND_CLI.md`](./docs/OPENAPI_AND_CLI.md).
+- **Conectores CI/CD e IDE:**
+  - **GitHub Action:** [`integrations/github-action/action.yml`](./integrations/github-action/action.yml)
+  - **GitLab CI:** [`templates/winhood.gitlab-ci.yml`](./templates/winhood.gitlab-ci.yml) e [`integrations/gitlab/`](./integrations/gitlab/)
+  - **Jenkins Shared Library:** [`integrations/jenkins/`](./integrations/jenkins/)
+  - **Extensão VS Code (MVP):** [`packages/vscode-extension/`](./packages/vscode-extension/)
+
+---
+
+## 8. Segurança e Privacidade
+
+O WinHood adota uma postura **Local-First** e **fail-closed** com limites claros e transparentes:
+
+- **Sem conta ou telemetria obrigatória:** nenhum dado de projeto ou código-fonte sai da máquina na configuração padrão. Integrações externas (como APIs Git, webhooks ou LLM opcional) exigem configuração explícita do usuário e respeitam validação anti-SSRF.
+- **O que é cifrado em repouso (`AES-256-GCM` + `ZLIB`):**
+  - Código-fonte ingerido (`isolated_artifacts/<slug>/vault_bundle.whenc`, sem arquivos-fonte em texto puro em disco).
+  - Payloads normalizados retornados pelos scanners (`database/scanner_jobs_payloads.whenc`).
+  - Banco cifrado e segredos de integrações gerenciados pelo `KeyManagementService` (derivação baseada em `WINHOOD_KEYSTORE_MASTER_SECRET`).
+- **O que permanece em metadados não secretos:**
+  - Manifestos estruturais (`vault_manifest.json` com caminhos relativos, tamanhos e hashes `SHA-256`).
+  - Metadados de histórico de jobs (`database/scanner_jobs.json`: IDs, timestamps, contagens, hashes `SHA-256`, estados e mensagens redigidas — nunca `normalizedPayload` ou trechos brutos de código).
+  - Logs operacionais de execução dos containers (`docker compose logs`).
+- **Workspaces efêmeros em memória (`tmpfs`):** arquivos temporários necessários durante a execução de scanners externos são gravados exclusivamente em `/tmp/winhood-workspaces` (`tmpfs`, `noexec,nosuid`) e removidos ao término, erro ou cancelamento do job.
+- **Limitações reais e responsabilidades do usuário:**
+  - Criptografia em repouso protege os arquivos no volume Docker contra leitura casual do disco, mas quem tiver acesso root ao host Docker, ao arquivo `.env.docker` ou à memória do processo em execução poderá acessar os dados em uso.
+  - Proteja o arquivo `.env.docker` (nunca faça commit nem compartilhe o arquivo) e mantenha backups seguros.
+  - Por padrão, a interface web é vinculada apenas a `127.0.0.1`. Se você publicar a porta em rede externa por conta própria, configure proxy reverso com TLS, autenticação adequada e `WINHOOD_DEPLOYMENT_MODE=REMOTE`.
+
+Detalhes completos em [`SECURITY.md`](./SECURITY.md), [`SECURITY_ARCHITECTURE.md`](./SECURITY_ARCHITECTURE.md) e [`PRIVACY.md`](./PRIVACY.md).
+
+---
+
+## 9. Limitações Conhecidas e Escopo
+
+- **Profundidade por linguagem:** TypeScript e JavaScript contam com análise `FULL_AST` no motor nativo. Python, Java, Go, C#, Rust e SQL usam análise estrutural no motor nativo; para projetos Python, combine com Ruff e Bandit no worker Docker.
+- **Scanners não incluídos na imagem padrão:** CodeQL, Roslyn, SpotBugs, Checkstyle, ESLint CLI e Trivy não são empacotados na imagem padrão para manter tamanho, licença e tempo de build viáveis; eles aparecem como `NOT_INSTALLED` e seus resultados externos podem ser importados via **SARIF 2.1.0**.
+- **Bases de vulnerabilidades offline:** o `winhood-scanner-worker` não acessa a internet por segurança. Por isso, Grype e OSV-Scanner retornam `DATABASE_UNAVAILABLE` até que o cache offline seja atualizado em `winhood_scanner_cache`.
+- **Regras offline do Semgrep:** a imagem inclui um conjunto inicial curado de regras de segurança offline (`security/semgrep-offline-rules/winhood-core.yaml`) para JS/TS, Python, Java e Go. Para regras corporativas amplas, monte ou copie pacotes YAML adicionais em `/opt/winhood-scanner-rules`.
+- **Estados inconclusivos:** quando um scanner falha, excede timeout, tem base ausente ou encontra despacho dinâmico não resolúvel estaticamente, o WinHood reporta explicitamente `INCONCLUSIVE`, `DATABASE_UNAVAILABLE`, `RULES_UNAVAILABLE`, `TIMED_OUT` ou `BLOCKED` em vez de inflar notas ou assumir ausência de vulnerabilidades.
+- **Hardware e repositórios grandes:** limites padrão dos containers (`2 GB` no backend e `1.5 GB` / `2 vCPUs` no worker) são adequados para projetos pequenos e médios; monorepos muito extensos podem exigir ajuste desses limites em `docker-compose.yml`.
+
+Consulte também [`LIMITATIONS_AND_BIAS.md`](./LIMITATIONS_AND_BIAS.md) e [`docs/LIMITATIONS.md`](./docs/LIMITATIONS.md).
+
+---
+
+## 10. Documentação Complementar
+
+| Documento | Conteúdo |
+| :--- | :--- |
+| [`DOCKER_LOCAL_WEB.md`](./DOCKER_LOCAL_WEB.md) | Guia técnico detalhado da topologia Docker, volumes e script de verificação E2E |
+| [`ARCHITECTURE.md`](./ARCHITECTURE.md) | Arquitetura interna de módulos (backend, analisadores, storage e worker) |
+| [`API_REFERENCE.md`](./API_REFERENCE.md) | Contratos dos endpoints REST da plataforma |
+| [`GLOSSARY.md`](./GLOSSARY.md) | Definições de Modo MQR, Veracidade, Comparabilidade e Quality Gates |
+| [`MQR_METHODOLOGY.md`](./MQR_METHODOLOGY.md) | Metodologia de classificação de impacto e severidade |
+| [`RULE_CATALOG.md`](./RULE_CATALOG.md) | Catálogo de regras estáticas do motor nativo |
+| [`SECURITY.md`](./SECURITY.md) | Política de segurança, modelo de ameaças e reporte responsável |
+| [`PRIVACY.md`](./PRIVACY.md) | Política de privacidade Local-First e integrações opcionais |
+| [`docs/CI_INTEGRATION.md`](./docs/CI_INTEGRATION.md) | Integração do WinHood em pipelines GitHub Actions, GitLab CI e Jenkins |
+| [`CHANGELOG.md`](./CHANGELOG.md) | Histórico de versões e evoluções |
+
+---
+
+### Desenvolvimento local (opcional, para contribuidores)
+
+Se você pretende modificar o código-fonte do WinHood diretamente no host (requer Node.js 22+):
+
+```bash
+npm ci --ignore-scripts
+npm run typecheck
+npm run lint
+npm test
+npm run test:coverage
+npm run build && npm run build:server
+node scripts/verify-docker-local-web.mjs --self-hosted
+```

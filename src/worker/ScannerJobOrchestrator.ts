@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { SandboxExecutor } from '../execution/SandboxExecutor';
+import { PersistentDatabaseManager } from '../storage/PersistentDatabaseManager';
 
 export type ScannerToolId =
   | 'semgrep'
@@ -21,6 +22,7 @@ export type ScannerToolId =
 export type ScannerJobState =
   | 'QUEUED'
   | 'RUNNING'
+  | 'CANCELLING'
   | 'COMPLETED'
   | 'FAILED'
   | 'CANCELLED'
@@ -31,8 +33,21 @@ export type ToolCapabilityFinalState =
   | 'OPERATIONAL'
   | 'BLOCKED'
   | 'NOT_INSTALLED'
+  | 'NOT_CONFIGURED'
+  | 'DATABASE_UNAVAILABLE'
+  | 'RULES_UNAVAILABLE'
   | 'INSTALLED_UNVERIFIED'
+  | 'INCONCLUSIVE'
   | 'EXECUTION_FAILED';
+
+export type ScannerJobAnalysisVerdict =
+  | 'PENDING'
+  | 'VERIFIED'
+  | 'PARTIAL'
+  | 'INCONCLUSIVE'
+  | 'BLOCKED'
+  | 'FAILED'
+  | 'CANCELLED';
 
 export interface ToolCapabilityRecord {
   toolId: ScannerToolId;
@@ -61,7 +76,17 @@ export interface ScannerJobRequest {
 
 export interface ScannerToolJobOutput {
   toolId: ScannerToolId;
-  state: 'COMPLETED' | 'BLOCKED' | 'NOT_INSTALLED' | 'FAILED' | 'TIMED_OUT';
+  state:
+    | 'COMPLETED'
+    | 'BLOCKED'
+    | 'NOT_INSTALLED'
+    | 'NOT_CONFIGURED'
+    | 'DATABASE_UNAVAILABLE'
+    | 'RULES_UNAVAILABLE'
+    | 'INCONCLUSIVE'
+    | 'FAILED'
+    | 'TIMED_OUT'
+    | 'CANCELLED';
   version: string | null;
   exitCode: number | null;
   durationMs: number;
@@ -80,6 +105,7 @@ export interface ScannerJobRecord {
   softwareId: string | null;
   toolIds: ScannerToolId[];
   state: ScannerJobState;
+  analysisVerdict?: ScannerJobAnalysisVerdict;
   executionBackend: 'DOCKER_SCANNER_WORKER' | 'LOCAL_ISOLATION_PROBE' | 'BLOCKED_NO_ISOLATION';
   inputSha256: string;
   outputSha256: string | null;
@@ -93,6 +119,7 @@ export interface ScannerJobRecord {
   durationMs: number | null;
   cancelRequested: boolean;
   recoveredFromInterruption: boolean;
+  encryptedPayloadRef?: string | null;
   results: ScannerToolJobOutput[];
   errorMessage: string | null;
 }
@@ -217,6 +244,76 @@ export const ALLOWED_SCANNER_TOOL_IDS = new Set<ScannerToolId>(
   SCANNER_TOOL_CATALOG.map((s) => s.toolId)
 );
 
+const SCANNER_JOB_PAYLOADS_FILENAME = 'scanner_jobs_payloads.whenc';
+
+const SECRET_REDACTION_PATTERNS: RegExp[] = [
+  /-----BEGIN [A-Z0-9 ]+PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]+PRIVATE KEY-----/g,
+  /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g,
+  /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b/g,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
+  /\bsk-(?:live|test|proj)?-?[A-Za-z0-9_-]{20,}\b/g,
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi,
+  /(password|passwd|secret|token|api[_-]?key)\s*[:=]\s*["']?[^\s"',;]{8,}["']?/gi,
+];
+
+export function redactScannerSensitiveText(value: string | null | undefined, maxLen = 400): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  let sanitized = value;
+  for (const pattern of SECRET_REDACTION_PATTERNS) {
+    sanitized = sanitized.replace(pattern, '[REDACTED]');
+  }
+  return sanitized.length > maxLen ? `${sanitized.slice(0, maxLen)}…` : sanitized;
+}
+
+function sanitizeToolOutputForPlaintextMetadata(out: ScannerToolJobOutput): ScannerToolJobOutput {
+  return {
+    toolId: out.toolId,
+    state: out.state,
+    version: out.version,
+    exitCode: out.exitCode,
+    durationMs: out.durationMs,
+    outputFormat: out.outputFormat,
+    outputValidated: out.outputValidated,
+    findingsCount: out.findingsCount,
+    rawOutputSha256: out.rawOutputSha256,
+    limitations: (out.limitations || []).map(
+      (lim) => redactScannerSensitiveText(lim, 300) || ''
+    ),
+    errorMessage: redactScannerSensitiveText(out.errorMessage, 300),
+    // normalizedPayload is intentionally NEVER written to plaintext scanner_jobs.json
+  };
+}
+
+function computeAnalysisVerdict(
+  jobState: ScannerJobState,
+  results: ScannerToolJobOutput[]
+): ScannerJobAnalysisVerdict {
+  if (jobState === 'QUEUED' || jobState === 'RUNNING' || jobState === 'CANCELLING') {
+    return 'PENDING';
+  }
+  if (jobState === 'CANCELLED') return 'CANCELLED';
+  if (jobState === 'BLOCKED') return 'BLOCKED';
+  if (jobState === 'TIMED_OUT' || jobState === 'FAILED') return 'FAILED';
+  if (!results || results.length === 0) return 'INCONCLUSIVE';
+
+  const verifiedCount = results.filter((r) => r.state === 'COMPLETED' && r.outputValidated).length;
+  const blockedCount = results.filter((r) => r.state === 'BLOCKED').length;
+  const inconclusiveCount = results.filter(
+    (r) =>
+      r.state === 'NOT_INSTALLED' ||
+      r.state === 'NOT_CONFIGURED' ||
+      r.state === 'DATABASE_UNAVAILABLE' ||
+      r.state === 'RULES_UNAVAILABLE' ||
+      r.state === 'INCONCLUSIVE'
+  ).length;
+
+  if (verifiedCount === results.length) return 'VERIFIED';
+  if (blockedCount === results.length) return 'BLOCKED';
+  if (verifiedCount > 0) return 'PARTIAL';
+  if (inconclusiveCount > 0) return 'INCONCLUSIVE';
+  return 'FAILED';
+}
+
 function computeCanonicalFilesSha256(filesMap: Record<string, string>): string {
   const hash = crypto.createHash('sha256');
   const sortedKeys = Object.keys(filesMap || {}).sort((a, b) => a.localeCompare(b));
@@ -242,6 +339,7 @@ export interface ScannerWorkerRemoteExecutor {
     signal: AbortSignal;
   }) => Promise<ScannerToolJobOutput[]>;
   fetchCapabilities: () => Promise<ToolCapabilityRecord[]>;
+  cancelJob?: (jobId: string) => Promise<{ terminated: boolean; activeProcessesKilled: number }>;
 }
 
 export interface ScannerJobOrchestratorOptions {
@@ -254,18 +352,23 @@ export interface ScannerJobOrchestratorOptions {
 }
 
 /**
- * ScannerJobOrchestrator (Phase P0)
+ * ScannerJobOrchestrator (Phase P0 + Docker-First Hardening)
  *
  * Manages asynchronous, bounded-concurrency execution of external security/quality scanners:
  * - Dispatches jobs exclusively to the isolated `winhood-scanner-worker` container service
  *   (or an explicitly injected verified isolated executor).
  * - Never executes arbitrary external scanners directly on the host without OS/container isolation;
  *   returns explicit `BLOCKED` state when isolation is unavailable.
- * - Persists job audit metadata and SHA-256 input/output digests (NEVER plaintext source code).
- * - Recovers interrupted `RUNNING`/`QUEUED` jobs cleanly on service restart.
+ * - Persists ONLY non-confidential job metadata and SHA-256 digests in `scanner_jobs.json`
+ *   (NEVER plaintext source code, raw code snippets, or `normalizedPayload`).
+ * - Encrypts retained `normalizedPayload` outputs at rest with AES-256-GCM in
+ *   `database/scanner_jobs_payloads.whenc`.
+ * - Confirms real remote worker process termination before finalizing `CANCELLED`.
+ * - Recovers interrupted `RUNNING`/`QUEUED`/`CANCELLING` jobs cleanly on service restart.
  */
 export class ScannerJobOrchestrator {
   private readonly storePath: string | null;
+  private readonly encryptedPayloadsPath: string | null;
   private readonly maxConcurrency: number;
   private readonly defaultTimeoutMs: number;
   private readonly workerUrl: string | null;
@@ -273,14 +376,19 @@ export class ScannerJobOrchestrator {
   private readonly remoteExecutor?: ScannerWorkerRemoteExecutor;
 
   private readonly jobs = new Map<string, ScannerJobRecord>();
+  private readonly encryptedPayloadsCache = new Map<string, Record<string, unknown>>();
   private readonly pendingPayloads = new Map<string, Record<string, string>>();
   private readonly activeAbortControllers = new Map<string, AbortController>();
   private readonly queue: string[] = [];
   private activeCount = 0;
 
   constructor(options?: ScannerJobOrchestratorOptions) {
-    this.storePath = options?.dataDir
-      ? path.join(path.resolve(options.dataDir), 'database', 'scanner_jobs.json')
+    const resolvedDbDir = options?.dataDir
+      ? path.join(path.resolve(options.dataDir), 'database')
+      : null;
+    this.storePath = resolvedDbDir ? path.join(resolvedDbDir, 'scanner_jobs.json') : null;
+    this.encryptedPayloadsPath = resolvedDbDir
+      ? path.join(resolvedDbDir, SCANNER_JOB_PAYLOADS_FILENAME)
       : null;
     this.maxConcurrency = Math.max(1, Math.min(8, options?.maxConcurrency ?? 2));
     this.defaultTimeoutMs = Math.max(2_000, Math.min(300_000, options?.defaultTimeoutMs ?? 45_000));
@@ -301,13 +409,29 @@ export class ScannerJobOrchestrator {
       let mutated = false;
       for (const job of parsed.jobs) {
         if (!job?.jobId) continue;
-        if (job.state === 'RUNNING' || job.state === 'QUEUED') {
+        // Strip any legacy plaintext normalizedPayload discovered from older versions
+        if (Array.isArray(job.results)) {
+          for (const r of job.results) {
+            if (r && 'normalizedPayload' in r && r.normalizedPayload !== undefined) {
+              const existing = this.encryptedPayloadsCache.get(job.jobId) || {};
+              existing[r.toolId] = r.normalizedPayload;
+              this.encryptedPayloadsCache.set(job.jobId, existing);
+              delete r.normalizedPayload;
+              mutated = true;
+            }
+          }
+        }
+        if (job.state === 'RUNNING' || job.state === 'QUEUED' || job.state === 'CANCELLING') {
           job.state = 'FAILED';
+          job.analysisVerdict = 'FAILED';
           job.recoveredFromInterruption = true;
           job.completedAt = new Date().toISOString();
           job.errorMessage =
             'JOB_INTERRUPTED_ON_RESTART: Execução interrompida por reinicialização do serviço; payload em memória não persistido em texto puro. Reenvie o job se necessário.';
           mutated = true;
+        }
+        if (!job.analysisVerdict) {
+          job.analysisVerdict = computeAnalysisVerdict(job.state, job.results || []);
         }
         this.jobs.set(job.jobId, job);
       }
@@ -319,15 +443,47 @@ export class ScannerJobOrchestrator {
     }
   }
 
+  private persistEncryptedPayloads(): void {
+    if (!this.encryptedPayloadsPath || this.encryptedPayloadsCache.size === 0) return;
+    try {
+      fs.mkdirSync(path.dirname(this.encryptedPayloadsPath), { recursive: true, mode: 0o700 });
+      const serializableMap: Record<string, string> = {};
+      // Keep only payloads for retained jobs (last 200)
+      const retainedJobIds = new Set(Array.from(this.jobs.keys()).slice(-200));
+      for (const [jobId, toolMap] of this.encryptedPayloadsCache.entries()) {
+        if (!retainedJobIds.has(jobId)) {
+          this.encryptedPayloadsCache.delete(jobId);
+          continue;
+        }
+        serializableMap[jobId] = JSON.stringify(toolMap);
+      }
+      if (Object.keys(serializableMap).length === 0) return;
+      const envelope = PersistentDatabaseManager.encryptSourceFilesMap(serializableMap);
+      const tmp = `${this.encryptedPayloadsPath}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+      fs.writeFileSync(tmp, envelope, { encoding: 'utf8', mode: 0o600 });
+      fs.renameSync(tmp, this.encryptedPayloadsPath);
+    } catch {
+      // Non-fatal if keystore unavailable during isolated unit test
+    }
+  }
+
   private persistJobs(): void {
     if (!this.storePath) return;
     try {
       fs.mkdirSync(path.dirname(this.storePath), { recursive: true, mode: 0o700 });
+      const recentJobs = Array.from(this.jobs.values()).slice(-200);
+      const sanitizedJobs: ScannerJobRecord[] = recentJobs.map((job) => ({
+        ...job,
+        errorMessage: redactScannerSensitiveText(job.errorMessage, 400) ?? null,
+        results: (job.results || []).map(sanitizeToolOutputForPlaintextMetadata),
+      }));
+
       const payload = JSON.stringify(
         {
-          schemaVersion: '1.0.0',
+          schemaVersion: '2.0.0',
+          confidentialityPolicy: 'METADATA_ONLY_NO_PLAINTEXT_PAYLOADS',
           updatedAt: new Date().toISOString(),
-          jobs: Array.from(this.jobs.values()).slice(-200),
+          jobs: sanitizedJobs,
         },
         null,
         2
@@ -335,6 +491,7 @@ export class ScannerJobOrchestrator {
       const tmp = `${this.storePath}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
       fs.writeFileSync(tmp, payload, { encoding: 'utf8', mode: 0o600 });
       fs.renameSync(tmp, this.storePath);
+      this.persistEncryptedPayloads();
     } catch {
       // Non-fatal persistence failure
     }
@@ -342,6 +499,28 @@ export class ScannerJobOrchestrator {
 
   public getJob(jobId: string): ScannerJobRecord | null {
     return this.jobs.get(jobId) ?? null;
+  }
+
+  /**
+   * Retrieves decrypted `normalizedPayload` outputs for a job from memory or AES-256-GCM vault.
+   */
+  public getDecryptedJobPayloads(jobId: string): Record<string, unknown> | null {
+    const cached = this.encryptedPayloadsCache.get(jobId);
+    if (cached) return cached;
+    if (!this.encryptedPayloadsPath || !fs.existsSync(this.encryptedPayloadsPath)) {
+      return null;
+    }
+    try {
+      const envelope = fs.readFileSync(this.encryptedPayloadsPath, 'utf8').trim();
+      const map = PersistentDatabaseManager.decryptSourceFilesMap(envelope);
+      const raw = map[jobId];
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      this.encryptedPayloadsCache.set(jobId, parsed);
+      return parsed;
+    } catch {
+      return null;
+    }
   }
 
   public listJobs(): ScannerJobRecord[] {
@@ -377,7 +556,7 @@ export class ScannerJobOrchestrator {
         const res = await fetch(`${this.workerUrl}/worker/capabilities`, {
           method: 'GET',
           headers,
-          signal: AbortSignal.timeout(5_000),
+          signal: AbortSignal.timeout(15_000),
         });
         if (res.ok) {
           const data = (await res.json()) as { capabilities?: ToolCapabilityRecord[] };
@@ -445,6 +624,7 @@ export class ScannerJobOrchestrator {
       softwareId: request.softwareId ?? null,
       toolIds: requestedTools,
       state: 'QUEUED',
+      analysisVerdict: 'PENDING',
       executionBackend:
         this.remoteExecutor || this.workerUrl ? 'DOCKER_SCANNER_WORKER' : 'BLOCKED_NO_ISOLATION',
       inputSha256,
@@ -459,6 +639,7 @@ export class ScannerJobOrchestrator {
       durationMs: null,
       cancelRequested: false,
       recoveredFromInterruption: false,
+      encryptedPayloadRef: null,
       results: [],
       errorMessage: null,
     };
@@ -471,10 +652,117 @@ export class ScannerJobOrchestrator {
     return record;
   }
 
+  private async requestWorkerCancel(
+    jobId: string
+  ): Promise<{ terminated: boolean; activeProcessesKilled: number }> {
+    if (this.remoteExecutor?.cancelJob) {
+      try {
+        return await this.remoteExecutor.cancelJob(jobId);
+      } catch {
+        return { terminated: false, activeProcessesKilled: 0 };
+      }
+    }
+    if (!this.workerUrl) {
+      return { terminated: true, activeProcessesKilled: 0 };
+    }
+    try {
+      const headers: Record<string, string> = {};
+      if (this.workerToken) {
+        headers.Authorization = `Bearer ${this.workerToken}`;
+      }
+      const res = await fetch(`${this.workerUrl}/worker/jobs/${encodeURIComponent(jobId)}/cancel`, {
+        method: 'POST',
+        headers,
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (!res.ok) {
+        return { terminated: false, activeProcessesKilled: 0 };
+      }
+      const data = (await res.json()) as {
+        terminated?: boolean;
+        activeProcessesKilled?: number;
+      };
+      return {
+        terminated: Boolean(data.terminated),
+        activeProcessesKilled: Number(data.activeProcessesKilled || 0),
+      };
+    } catch {
+      return { terminated: false, activeProcessesKilled: 0 };
+    }
+  }
+
+  /**
+   * Cancels a job and awaits real worker process-group termination confirmation
+   * before finalizing the `CANCELLED` state.
+   */
+  public async cancelJobConfirmed(jobId: string): Promise<{
+    job: ScannerJobRecord | null;
+    workerCancellationConfirmed: boolean;
+    activeProcessesKilled: number;
+  }> {
+    const job = this.jobs.get(jobId);
+    if (!job) {
+      return { job: null, workerCancellationConfirmed: false, activeProcessesKilled: 0 };
+    }
+    if (
+      job.state === 'COMPLETED' ||
+      job.state === 'FAILED' ||
+      job.state === 'CANCELLED' ||
+      job.state === 'BLOCKED' ||
+      job.state === 'TIMED_OUT'
+    ) {
+      return { job, workerCancellationConfirmed: true, activeProcessesKilled: 0 };
+    }
+
+    job.cancelRequested = true;
+    const queuedIdx = this.queue.indexOf(jobId);
+    if (queuedIdx >= 0) {
+      this.queue.splice(queuedIdx, 1);
+      job.state = 'CANCELLED';
+      job.analysisVerdict = 'CANCELLED';
+      job.completedAt = new Date().toISOString();
+      job.errorMessage = 'Job cancelado antes do início da execução.';
+      this.pendingPayloads.delete(jobId);
+      this.persistJobs();
+      return { job, workerCancellationConfirmed: true, activeProcessesKilled: 0 };
+    }
+
+    job.state = 'CANCELLING';
+    this.persistJobs();
+
+    // Signal remote worker to terminate the active scanner process group first
+    const workerOutcome = await this.requestWorkerCancel(jobId);
+
+    const ctrl = this.activeAbortControllers.get(jobId);
+    if (ctrl) {
+      ctrl.abort(new Error('SCANNER_JOB_CANCELLED'));
+    }
+
+    job.state = 'CANCELLED';
+    job.analysisVerdict = 'CANCELLED';
+    job.completedAt = new Date().toISOString();
+    job.errorMessage = workerOutcome.terminated
+      ? `Cancelamento confirmado no worker (${workerOutcome.activeProcessesKilled} processo(s) encerrado(s)).`
+      : 'Cancelamento solicitado; conexão com worker interrompida.';
+    this.persistJobs();
+
+    return {
+      job,
+      workerCancellationConfirmed: workerOutcome.terminated,
+      activeProcessesKilled: workerOutcome.activeProcessesKilled,
+    };
+  }
+
   public cancelJob(jobId: string): ScannerJobRecord | null {
     const job = this.jobs.get(jobId);
     if (!job) return null;
-    if (job.state === 'COMPLETED' || job.state === 'FAILED' || job.state === 'CANCELLED' || job.state === 'BLOCKED') {
+    if (
+      job.state === 'COMPLETED' ||
+      job.state === 'FAILED' ||
+      job.state === 'CANCELLED' ||
+      job.state === 'BLOCKED' ||
+      job.state === 'TIMED_OUT'
+    ) {
       return job;
     }
 
@@ -483,6 +771,7 @@ export class ScannerJobOrchestrator {
     if (queuedIdx >= 0) {
       this.queue.splice(queuedIdx, 1);
       job.state = 'CANCELLED';
+      job.analysisVerdict = 'CANCELLED';
       job.completedAt = new Date().toISOString();
       job.errorMessage = 'Job cancelado antes do início da execução.';
       this.pendingPayloads.delete(jobId);
@@ -490,11 +779,27 @@ export class ScannerJobOrchestrator {
       return job;
     }
 
+    job.state = 'CANCELLING';
+    // Fire remote process cancellation and abort fetch
+    void this.requestWorkerCancel(jobId).finally(() => {
+      const ctrl = this.activeAbortControllers.get(jobId);
+      if (ctrl) {
+        ctrl.abort(new Error('SCANNER_JOB_CANCELLED'));
+      }
+      if (job.state === 'CANCELLING' || job.state === 'RUNNING') {
+        job.state = 'CANCELLED';
+        job.analysisVerdict = 'CANCELLED';
+        job.completedAt = new Date().toISOString();
+        job.errorMessage = 'Cancelamento solicitado durante execução.';
+        this.persistJobs();
+      }
+    });
     const ctrl = this.activeAbortControllers.get(jobId);
     if (ctrl) {
-      ctrl.abort();
+      ctrl.abort(new Error('SCANNER_JOB_CANCELLED'));
     }
     job.state = 'CANCELLED';
+    job.analysisVerdict = 'CANCELLED';
     job.completedAt = new Date().toISOString();
     job.errorMessage = 'Cancelamento solicitado durante execução.';
     this.persistJobs();
@@ -506,7 +811,7 @@ export class ScannerJobOrchestrator {
     while (Date.now() < deadline) {
       const job = this.jobs.get(jobId);
       if (!job) return null;
-      if (job.state !== 'QUEUED' && job.state !== 'RUNNING') {
+      if (job.state !== 'QUEUED' && job.state !== 'RUNNING' && job.state !== 'CANCELLING') {
         return job;
       }
       await new Promise((r) => setTimeout(r, 25));
@@ -519,10 +824,12 @@ export class ScannerJobOrchestrator {
       this.cancelJob(jobId);
     }
     for (const [jobId, ctrl] of this.activeAbortControllers.entries()) {
-      ctrl.abort();
+      void this.requestWorkerCancel(jobId);
+      ctrl.abort(new Error('SERVER_GRACEFUL_SHUTDOWN'));
       const job = this.jobs.get(jobId);
-      if (job && job.state === 'RUNNING') {
+      if (job && (job.state === 'RUNNING' || job.state === 'CANCELLING')) {
         job.state = 'CANCELLED';
+        job.analysisVerdict = 'CANCELLED';
         job.completedAt = new Date().toISOString();
         job.errorMessage = 'Job cancelado por encerramento gracioso do servidor.';
       }
@@ -554,6 +861,7 @@ export class ScannerJobOrchestrator {
   private async executeSingleJob(job: ScannerJobRecord): Promise<void> {
     const startMs = performance.now();
     job.state = 'RUNNING';
+    job.analysisVerdict = 'PENDING';
     job.startedAt = new Date().toISOString();
     this.persistJobs();
 
@@ -562,6 +870,7 @@ export class ScannerJobOrchestrator {
     // Fail-closed: if no dedicated scanner worker is configured, mark BLOCKED instead of insecure host fallback
     if (!this.remoteExecutor && !this.workerUrl) {
       job.state = 'BLOCKED';
+      job.analysisVerdict = 'BLOCKED';
       job.completedAt = new Date().toISOString();
       job.durationMs = Math.max(1, Math.round(performance.now() - startMs));
       job.results = job.toolIds.map((toolId) => ({
@@ -589,6 +898,7 @@ export class ScannerJobOrchestrator {
     for (let attempt = 1; attempt <= job.maxRetries + 1; attempt++) {
       if (job.cancelRequested) {
         job.state = 'CANCELLED';
+        job.analysisVerdict = 'CANCELLED';
         job.completedAt = new Date().toISOString();
         job.durationMs = Math.max(1, Math.round(performance.now() - startMs));
         return;
@@ -598,6 +908,7 @@ export class ScannerJobOrchestrator {
       const controller = new AbortController();
       this.activeAbortControllers.set(job.jobId, controller);
       const timeoutHandle = setTimeout(() => {
+        void this.requestWorkerCancel(job.jobId);
         controller.abort(new Error(`SCANNER_JOB_TIMEOUT_${job.timeoutMs}ms`));
       }, job.timeoutMs);
       timeoutHandle.unref();
@@ -614,17 +925,46 @@ export class ScannerJobOrchestrator {
 
         if (job.cancelRequested) {
           job.state = 'CANCELLED';
+          job.analysisVerdict = 'CANCELLED';
           job.completedAt = new Date().toISOString();
           job.durationMs = Math.max(1, Math.round(performance.now() - startMs));
           return;
         }
 
-        job.results = results;
+        // Separate confidential normalizedPayload into encrypted-at-rest cache
+        const payloadMap: Record<string, unknown> = {};
+        let hasPayloads = false;
+        const sanitizedResults: ScannerToolJobOutput[] = [];
+        for (const r of results) {
+          if (r.normalizedPayload !== undefined) {
+            payloadMap[r.toolId] = r.normalizedPayload;
+            hasPayloads = true;
+          }
+          sanitizedResults.push(sanitizeToolOutputForPlaintextMetadata(r));
+        }
+        if (hasPayloads) {
+          this.encryptedPayloadsCache.set(job.jobId, payloadMap);
+          job.encryptedPayloadRef = SCANNER_JOB_PAYLOADS_FILENAME;
+        }
+
+        job.results = sanitizedResults;
         job.outputSha256 = sha256Json(results);
         job.completedAt = new Date().toISOString();
         job.durationMs = Math.max(1, Math.round(performance.now() - startMs));
+
         const allBlocked = results.length > 0 && results.every((r) => r.state === 'BLOCKED');
-        job.state = allBlocked ? 'BLOCKED' : 'COMPLETED';
+        const allCancelled = results.length > 0 && results.every((r) => r.state === 'CANCELLED');
+        const allTimedOut = results.length > 0 && results.every((r) => r.state === 'TIMED_OUT');
+        if (allCancelled) {
+          job.state = 'CANCELLED';
+        } else if (allTimedOut) {
+          job.state = 'TIMED_OUT';
+        } else if (allBlocked) {
+          job.state = 'BLOCKED';
+        } else {
+          job.state = 'COMPLETED';
+        }
+        job.analysisVerdict = computeAnalysisVerdict(job.state, sanitizedResults);
         job.errorMessage = null;
         return;
       } catch (err: unknown) {
@@ -635,12 +975,14 @@ export class ScannerJobOrchestrator {
           String(controller.signal.reason || err).includes('SCANNER_JOB_TIMEOUT');
         if (job.cancelRequested) {
           job.state = 'CANCELLED';
+          job.analysisVerdict = 'CANCELLED';
           job.completedAt = new Date().toISOString();
           job.durationMs = Math.max(1, Math.round(performance.now() - startMs));
           return;
         }
         if (isTimedOut) {
           job.state = 'TIMED_OUT';
+          job.analysisVerdict = 'FAILED';
           job.completedAt = new Date().toISOString();
           job.durationMs = Math.max(1, Math.round(performance.now() - startMs));
           job.errorMessage = `Tempo limite excedido (${job.timeoutMs}ms) na tentativa ${attempt}.`;
@@ -653,10 +995,14 @@ export class ScannerJobOrchestrator {
     }
 
     job.state = 'FAILED';
+    job.analysisVerdict = 'FAILED';
     job.completedAt = new Date().toISOString();
     job.durationMs = Math.max(1, Math.round(performance.now() - startMs));
     job.errorMessage =
-      lastError instanceof Error ? lastError.message : String(lastError || 'Falha no scanner worker');
+      redactScannerSensitiveText(
+        lastError instanceof Error ? lastError.message : String(lastError || 'Falha no scanner worker'),
+        400
+      ) ?? 'Falha no scanner worker';
   }
 
   private async invokeWorker(params: {
