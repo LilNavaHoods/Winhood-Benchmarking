@@ -1081,7 +1081,7 @@ test('Módulo 03: Docker Local-Web runtime detection, dynamic CORS, SPA fallback
       WINHOOD_DATA_DIR: tmpStandaloneDir,
       WINHOOD_KEYSTORE_MASTER_SECRET: crypto.randomBytes(32).toString('hex'),
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
 
   try {
@@ -1114,15 +1114,33 @@ test('Módulo 03: Docker Local-Web runtime detection, dynamic CORS, SPA fallback
     assert.equal(preflightRes.status, 204);
     assert.equal(preflightRes.headers.get('access-control-allow-origin'), 'http://localhost:3099');
 
-    const exitCodePromise = new Promise<number | null>((resolve) => {
-      child.once('exit', (code) => resolve(code));
+    const exitResultPromise = new Promise<{
+      exitCode: number | null;
+      signal: NodeJS.Signals | null;
+      timedOut: boolean;
+    }>((resolve) => {
+      child.once('exit', (code, signal) =>
+        resolve({ exitCode: code, signal: signal ?? null, timedOut: false })
+      );
     });
-    child.kill('SIGTERM');
-    const exitCode = await Promise.race([
-      exitCodePromise,
-      new Promise<number | null>((resolve) => setTimeout(() => resolve(-1), 6000)),
+    if (process.platform === 'win32' && typeof child.send === 'function' && child.connected) {
+      child.send({ type: 'WINHOOD_GRACEFUL_SHUTDOWN', reason: 'TEST_WINDOWS_SHUTDOWN' });
+    } else {
+      child.kill('SIGTERM');
+    }
+    const exitResult = await Promise.race([
+      exitResultPromise,
+      new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null; timedOut: boolean }>(
+        (resolve) =>
+          setTimeout(() => resolve({ exitCode: null, signal: null, timedOut: true }), 8000)
+      ),
     ]);
-    assert.equal(exitCode, 0, 'Standalone server must exit cleanly with code 0 on SIGTERM');
+    assert.equal(exitResult.timedOut, false, 'Standalone server graceful shutdown must not time out');
+    assert.equal(
+      exitResult.exitCode,
+      0,
+      `Standalone server must exit cleanly with code 0 (got code=${exitResult.exitCode}, signal=${exitResult.signal})`
+    );
   } finally {
     if (child.exitCode === null) {
       child.kill('SIGKILL');
@@ -1130,15 +1148,25 @@ test('Módulo 03: Docker Local-Web runtime detection, dynamic CORS, SPA fallback
     fs.rmSync(tmpStandaloneDir, { recursive: true, force: true });
   }
 
-  // 4. Hardened Docker & 1-click distribution file contracts
+  // 4. Hardened Docker, Scanner Worker & 1-click distribution file contracts
   const dockerfile = fs.readFileSync(path.join(rootDir, 'Dockerfile'), 'utf8');
-  assert.match(dockerfile, /FROM node:22-bookworm-slim AS builder/);
-  assert.match(dockerfile, /FROM node:22-bookworm-slim AS deps/);
-  assert.match(dockerfile, /FROM node:22-bookworm-slim AS runtime/);
+  assert.match(dockerfile, /FROM node:22\.\d+\.\d+-bookworm-slim AS builder/);
+  assert.match(dockerfile, /FROM node:22\.\d+\.\d+-bookworm-slim AS deps/);
+  assert.match(dockerfile, /FROM node:22\.\d+\.\d+-bookworm-slim AS runtime/);
+  assert.equal(dockerfile.includes(':latest'), false, 'Dockerfile must never use :latest');
   assert.match(dockerfile, /USER winhood/);
   assert.match(dockerfile, /HEALTHCHECK/);
+  assert.match(dockerfile, /WINHOOD_TEMP_WORKSPACE_DIR=\/tmp\/winhood-workspaces/);
   assert.match(dockerfile, /CMD \["node", "dist-server\/server\.mjs"\]/);
   assert.match(dockerfile, /npm ci --omit=dev --ignore-scripts/);
+
+  const workerDockerfile = fs.readFileSync(path.join(rootDir, 'Dockerfile.scanner-worker'), 'utf8');
+  assert.match(workerDockerfile, /FROM node:22\.\d+\.\d+-bookworm-slim AS worker-builder/);
+  assert.match(workerDockerfile, /FROM node:22\.\d+\.\d+-bookworm-slim AS worker-runtime/);
+  assert.equal(workerDockerfile.includes(':latest'), false, 'Dockerfile.scanner-worker must never use :latest');
+  assert.match(workerDockerfile, /USER winhood/);
+  assert.match(workerDockerfile, /HEALTHCHECK/);
+  assert.match(workerDockerfile, /CMD \["node", "dist-server\/scanner-worker\.mjs"\]/);
 
   const dockerignore = fs.readFileSync(path.join(rootDir, '.dockerignore'), 'utf8');
   assert.match(dockerignore, /^\.env\.docker$/m);
@@ -1152,12 +1180,18 @@ test('Módulo 03: Docker Local-Web runtime detection, dynamic CORS, SPA fallback
   assert.match(compose, /cap_drop:\s*\n\s*-\s*ALL/);
   assert.match(compose, /no-new-privileges:true/);
   assert.match(compose, /winhood_data:\/data\/winhood/);
+  assert.match(compose, /winhood-scanner-worker:/);
+  assert.match(compose, /read_only: true/);
+  assert.match(compose, /internal: true/);
   assert.match(compose, /WINHOOD_KEYSTORE_MASTER_SECRET/);
+  assert.match(compose, /WINHOOD_SCANNER_WORKER_TOKEN/);
+  assert.equal(compose.includes('docker.sock'), false, 'docker-compose.yml must never mount docker.sock');
   assert.equal(compose.includes(':latest'), false, 'docker-compose.yml must never pin :latest');
 
   const envExample = fs.readFileSync(path.join(rootDir, '.env.docker.example'), 'utf8');
   assert.match(envExample, /^WINHOOD_PORT=3000$/m);
   assert.match(envExample, /^WINHOOD_KEYSTORE_MASTER_SECRET=$/m);
+  assert.match(envExample, /^WINHOOD_SCANNER_WORKER_TOKEN=$/m);
 
   const gitignore = fs.readFileSync(path.join(rootDir, '.gitignore'), 'utf8');
   assert.match(gitignore, /^!\.env\.docker\.example$/m);

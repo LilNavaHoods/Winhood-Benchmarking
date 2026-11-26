@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "rootAnchorFingerprintSha256": "f744d604eb0405ebd9ff6b76959a252f15b67e3a161c182c1e841366eddc8f68",
+  "monotonicSequence": 4,
+  "updatedAt": "2026-11-26T18:06:00.451Z",
+  "trustedPublicKeys": {
+    "wh-ed25519-20261126-bbf2b832": {
+      "keyId": "wh-ed25519-20261126-bbf2b832",
+      "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA102Bp2NWYNB0Cg9kgifCS/9g6m6K4x/bm6O2qNqjbDA=\n-----END PUBLIC KEY-----\n",
+      "fingerprintSha256": "f744d604eb0405ebd9ff6b76959a252f15b67e3a161c182c1e841366eddc8f68",
+      "validFrom": "2026-11-26T18:04:51.276Z",
+      "validUntil": null,
+      "revokedAt": null,
+      "revocationReason": null,
+      "status": "ACTIVE"
+    }
+  },
+  "integrityMacHex": "38b6ca141541984a787b6cec865f647b35770b90e997b02f9827a8d5c9b8a69d"
+}

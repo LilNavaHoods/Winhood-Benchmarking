@@ -1,7 +1,7 @@
 # WinHood — Independent Software Audit & Comparative Benchmarking Platform
 
-![Core Audited Coverage](https://img.shields.io/badge/core%20audited%20(6%20domains)-83.98%25%20L%20%7C%2090.14%25%20F%20%7C%2095.72%25%20B-brightgreen)
-![All 13 Domains Coverage](https://img.shields.io/badge/all%2013%20domains%20(all%3Atrue)-71.10%25%20L%20%7C%2085.82%25%20B-blue)
+![Core Audited Coverage](https://img.shields.io/badge/core%20audited%20(6%20domains)-89.34%25%20L%20%7C%2094.70%25%20F%20%7C%2094.88%25%20B-brightgreen)
+![All 13 Domains Coverage](https://img.shields.io/badge/all%2013%20domains%20(all%3Atrue)-72.70%25%20L%20%7C%2086.40%25%20B-blue)
 ![Critical Motors Coverage](https://img.shields.io/badge/scoring%20%7C%20evidence%20%7C%20comparability-%E2%89%A595%25-success)
 ![Open Standards](https://img.shields.io/badge/standards-SARIF%202.1.0%20%7C%20CWE%20%7C%20OWASP%20%7C%20CVSS%20%7C%20CycloneDX%20%7C%20SPDX-blue)
 ![Version](https://img.shields.io/badge/version-4.4.0-0ea5e9)
@@ -15,23 +15,26 @@ WinHood operates strictly as an **independent audit, evidence, and comparative b
 ## 1. Core Capabilities
 
 1. **Autonomous Analysis Engine in Modo MQR (`src/analyzers/`):**
-   - Pipeline: `ParserRegistry` (TypeScript/JavaScript AST via `@babel/parser`, Python/Java/Go/C#/Rust/SQL structural parsers) → `RuleRegistry` (`4.4.0`) → `TaintAnalyzer` (interprocedural Source → Sink → Sanitizer tracking for SQLi, CMDi, Code Injection, Path Traversal, SSRF `CWE-918`, XSS, Unsafe Deserialization) → `AnalyzerPluginManager` (IaC Terraform/Kubernetes/Dockerfile/CI workflows, versioned `SecretsCatalog` with Shannon entropy & redaction) → `SarifCodec` (SARIF 2.1.0 import/export).
+   - Pipeline: `ParserRegistry` (TypeScript/JavaScript `FULL_AST` via `@babel/parser`, Python/Java/Go/C#/Rust/SQL `STRUCTURAL_AST` parsers with explicit per-language limitation metadata) → `RuleRegistry` (`4.4.0`, versioned rule governance metadata) → `TaintAnalyzer` (Call-Graph + Multi-Hop interprocedural Source → Sink → Context-Sensitive Sanitizer tracking with cycle detection, dynamic dispatch `INCONCLUSIVE` tracking, and bounded depth/budget) → `AnalyzerPluginManager` (IaC Terraform/Kubernetes/Dockerfile/CI workflows, versioned `SecretsCatalog` with Shannon entropy & redaction) → `SarifCodec` (SARIF 2.1.0 import/export).
    - Evaluates findings under **Modo MQR (Modern Quality Regime)** and **Perfil de Qualidade Estrita**, classifying impacts across Security, Reliability, and Maintainability with bit-for-bit deterministic digests (`deterministicDigestSha256`).
-2. **Versioned Actionable Quality Gates (`src/gate/QualityGateEngine.ts`):**
-   - Boolean condition gates (`APPROVED`, `APPROVED_WITH_RESERVATIONS`, `BLOCKED`, `INCONCLUSIVE`, `REJECTED`) with gate versioning, SHA-256 gate hashes, canonical CI exit codes (`0/1/2/3/4`), SSRF-guarded `HMAC-SHA256` webhooks, and automated PR/MR decoration.
-3. **Signed SBOM & SCA License Policy (`src/analyzers/sca/`):**
-   - Deterministic **CycloneDX 1.5** and **SPDX 2.3** SBOM generation with per-component SHA-256 hashes, `HMAC-SHA256` + `Ed25519` signing/verification, CVE/EPSS/CISA KEV correlation, incremental advisory merging, and license compliance enforcement (`sca:LIC-001`).
-4. **Cryptographic Evidence Chain & Multi-Format Signed Reports (`src/evidence/`, `src/reports/ReportExporter.ts`):**
-   - Append-only SHA-256 chain + `HMAC-SHA256`/`Ed25519` signed manifest binding `engineVersion`, `ruleCatalogVersion`, `ruleCatalogSha256`, `codeHashSha256`, `artifactHashes`, and applied Quality Gate version/hash.
+2. **Encrypted-Only Persistence & Isolated Scanner Worker (`src/storage/`, `src/execution/`, `src/worker/`):**
+   - Zero plaintext source files at rest in `WINHOOD_DATA_DIR/isolated_artifacts` (`EncryptedArtifactStore`: `AES-256-GCM + ZLIB` envelopes, atomic idempotent legacy migration, key-rotation re-encryption, `/api/storage/plaintext-audit`).
+   - Per-job ephemeral workspaces (`EphemeralWorkspaceManager` on `tmpfs`, strictly outside `WINHOOD_DATA_DIR`) and dedicated non-root `winhood-scanner-worker` container (`Dockerfile.scanner-worker`, pinned versions, `read_only: true`, internal Docker network, zero `docker.sock`, fail-closed `BLOCKED` without host fallback).
+3. **Versioned Actionable Quality Gates & Controlled Validation Harness (`src/gate/`, `src/validation/`):**
+   - Boolean condition gates (`APPROVED`, `APPROVED_WITH_RESERVATIONS`, `BLOCKED`, `INCONCLUSIVE`, `REJECTED`) with gate versioning, SHA-256 gate hashes, canonical CI exit codes (`0/1/2/3/4`), SSRF-guarded `HMAC-SHA256` webhooks, and objective SARIF 2.1.0 cross-tool comparison (`CrossToolBenchmarkHarness`).
+4. **Signed SBOM & Ecosystem-Aware SCA (`src/analyzers/sca/`):**
+   - Deterministic **CycloneDX 1.5/1.7** and **SPDX 2.3/3.0.1** SBOM generation across npm, Yarn, pnpm, Poetry, Pipfile, Gradle, NuGet (`packages.lock.json`), Go (`go.mod`/`go.sum`), Cargo, and Maven, with `dependencyPath`, `unresolvedDependenciesCount`, `unknownLicenseCount`, `HMAC-SHA256` + `Ed25519` signing, ecosystem-aware comparators (SemVer 2.0, PEP 440, Maven, NuGet), and honest SCA `freshnessStatus`.
+5. **Cryptographic Evidence Chain & Multi-Format Signed Reports (`src/evidence/`, `src/reports/ReportExporter.ts`):**
+   - Append-only SHA-256 chain + `HMAC-SHA256`/`Ed25519` signed manifest binding `engineVersion`, `ruleCatalogVersion`, `ruleCatalogSha256`, `provenanceMetadata` (with explicit tamper-evidence scope disclaimer), `artifactHashes`, and applied Quality Gate version/hash.
    - Multi-format CLI and API exports (`winhood report --format=pdf|html|sarif|json`): **SARIF 2.1.0**, **JSON**, **Self-Contained HTML5** (inline CSS, zero external requests), and **Signed Binary PDF (`%PDF-1.4`)** with embedded `Report-SHA256` and `Report-HMAC-SHA256` verification.
    - Reference report artifacts published in [`examples/reports/`](./examples/reports/).
-5. **Developer Daily Workflow — VS Code Extension MVP (`packages/vscode-extension/`):**
+6. **Developer Daily Workflow — VS Code Extension MVP (`packages/vscode-extension/`):**
    - Commands `Winhood: Analisar arquivo atual` and `Winhood: Analisar workspace`, inline Problems diagnostics (`CWE`, `OWASP Top 10`, line/column), contextual Hover with remediation & rule catalog links, deterministic `Quick Fix` Code Actions, semantic Status Bar item (green/yellow/red/gray), and automatic offline CLI fallback.
    - Visual demonstration of inline finding, Hover remediation, Quick Fix, and Quality Gate status bar:
    
    ![WinHood VS Code Extension Demo](./packages/vscode-extension/demo-vscode-gate.svg)
 
-6. **Plug-and-Play CI/CD Connectors (`integrations/`, `templates/`, `examples/`):**
+7. **Plug-and-Play CI/CD Connectors (`integrations/`, `templates/`, `examples/`):**
    - Official GitHub Action ([`integrations/github-action/action.yml`](./integrations/github-action/action.yml)), GitLab CI Component ([`templates/winhood.gitlab-ci.yml`](./templates/winhood.gitlab-ci.yml)), Jenkins Shared Library (`winhoodAnalyze()` & `winhoodGate()` in [`integrations/jenkins/vars/`](./integrations/jenkins/vars/)), and ready-to-use pipeline examples in [`examples/`](./examples/).
 
 ---
@@ -104,9 +107,9 @@ npm run dev
 
 | Scope | Eligible Files | Lines | Functions | Branches | Gate Threshold | Status |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Core Audited Engine (6 domains)** | 19 | **83.98%** | **90.14%** | **95.72%** | ≥80% L / ≥80% F / ≥75% B | **PASSED** |
+| **Core Audited Engine (6 domains)** | 19 | **89.34%** | **94.70%** | **94.88%** | ≥80% L / ≥80% F / ≥75% B | **PASSED** |
 | **Critical Motors (`src/scoring`, `src/evidence`, `src/comparability`)** | 4 | **100.00%** | **100.00%** | **98.08%–100%** | ≥95% L / ≥95% F / ≥95% B | **PASSED** |
-| **All 13 Official Domains Aggregate** | 83 | **71.10%** | **59.53%** | **85.82%** | 12/13 domains meet domain targets (`src/components/` interactive DOM handlers tracked honestly in `coverage/coverage-summary.json`) | **REPORTED** |
+| **All 13 Official Domains Aggregate** | 85 | **72.70%** | **61.77%** | **86.40%** | 12/13 domains meet domain targets (`src/components/` interactive DOM handlers tracked honestly in `coverage/coverage-summary.json`) | **REPORTED** |
 
 > All eligible source files remain in the coverage denominator (`all: true`, 0 unexecuted files). Non-empty `coverage/lcov.info` and `coverage/index.html` artifacts are enforced before gate approval.
 

@@ -27,11 +27,13 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
 }
 
 if (-not (Test-Path $EnvFile)) {
-    Write-Host "[WinHood Docker] Gerando .env.docker com segredo mestre criptografico (32 bytes)..." -ForegroundColor Cyan
+    Write-Host "[WinHood Docker] Gerando .env.docker com segredos criptograficos de alta entropia (32 bytes)..." -ForegroundColor Cyan
     $secret = New-CryptographicHexSecret
+    $workerToken = New-CryptographicHexSecret
     $content = @(
         'WINHOOD_PORT=3000'
         "WINHOOD_KEYSTORE_MASTER_SECRET=$secret"
+        "WINHOOD_SCANNER_WORKER_TOKEN=$workerToken"
         'WINHOOD_SONAR_DOCKER_IMAGE=sonarqube:25.1.0.102122-community'
     ) -join "`n"
     [System.IO.File]::WriteAllText($EnvFile, "$content`n", [System.Text.UTF8Encoding]::new($false))
@@ -54,6 +56,12 @@ $masterSecret = if ($envMap.ContainsKey('WINHOOD_KEYSTORE_MASTER_SECRET')) { $en
 if ($masterSecret.Length -lt 32) {
     Write-Error '[WinHood Docker] WINHOOD_KEYSTORE_MASTER_SECRET em .env.docker deve ter no minimo 32 caracteres.'
     exit 1
+}
+$workerTokenVal = if ($envMap.ContainsKey('WINHOOD_SCANNER_WORKER_TOKEN')) { $envMap['WINHOOD_SCANNER_WORKER_TOKEN'] } else { '' }
+if ($workerTokenVal.Length -lt 32) {
+    Write-Host "[WinHood Docker] Adicionando WINHOOD_SCANNER_WORKER_TOKEN (>= 32 bytes) em .env.docker..." -ForegroundColor Cyan
+    $workerTokenVal = New-CryptographicHexSecret
+    Add-Content -Path $EnvFile -Value "`nWINHOOD_SCANNER_WORKER_TOKEN=$workerTokenVal" -Encoding UTF8
 }
 
 $composeArgs = @('compose', '--env-file', $EnvFile)

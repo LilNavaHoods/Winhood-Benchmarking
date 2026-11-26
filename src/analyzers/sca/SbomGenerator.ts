@@ -434,6 +434,15 @@ export class SbomGenerator {
     const transitiveCount = components.filter((c) => c.dependencyScope === 'TRANSITIVE').length;
     const devCount = components.filter((c) => c.dependencyScope === 'DEV').length;
     const optionalCount = components.filter((c) => c.dependencyScope === 'OPTIONAL').length;
+    const unresolvedDependenciesCount = components.filter(
+      (c) =>
+        c.versionResolutionState === 'UNRESOLVED' ||
+        c.version === 'UNPINNED' ||
+        c.version === 'MANAGED'
+    ).length;
+    const unknownLicenseCount = components.filter(
+      (c) => !c.license || c.license === 'UNKNOWN' || c.license === 'NOASSERTION'
+    ).length;
     const serialSeed = JSON.stringify({
       softwareId: software.id,
       version: software.version,
@@ -665,6 +674,8 @@ export class SbomGenerator {
       transitiveCount,
       devCount,
       optionalCount,
+      unresolvedDependenciesCount,
+      unknownLicenseCount,
       transitiveCoverageComplete,
       lockfilesDetected,
       supportedFormats: ['cyclonedx-1.5', 'cyclonedx-1.7', 'spdx-2.3', 'spdx-3.0'],
@@ -1220,6 +1231,187 @@ export class SbomGenerator {
         }
       }
 
+      if (filePath.endsWith('poetry.lock')) {
+        lockfilesDetected.push(filePath);
+        const pkgBlocks = content.split(/\[\[package\]\]/);
+        for (const block of pkgBlocks.slice(1)) {
+          const nameM = block.match(/name\s*=\s*"([^"]+)"/);
+          const verM = block.match(/version\s*=\s*"([^"]+)"/);
+          if (nameM && verM) {
+            const name = nameM[1]!;
+            const ver = verM[1]!;
+            addComponent({
+              bomRef: `pkg:pypi/${name}@${ver}`,
+              name,
+              version: ver,
+              purl: `pkg:pypi/${name}@${ver}`,
+              ecosystem: 'pypi',
+              license: 'NOASSERTION',
+              licenseProvenance: 'UNVERIFIED',
+              dependencyScope: 'TRANSITIVE',
+              dependencyPath: `${filePath} > ${name}@${ver}`,
+              versionResolutionState: 'RESOLVED_LOCKED',
+              manifestFile: filePath,
+              sha256: computeComponentDigest('pypi', name, ver, manifestDigest),
+            });
+          }
+        }
+      }
+
+      if (filePath.endsWith('Pipfile.lock')) {
+        lockfilesDetected.push(filePath);
+        try {
+          const pipLock = JSON.parse(content);
+          for (const section of ['default', 'develop'] as const) {
+            const group = pipLock?.[section];
+            if (!group || typeof group !== 'object') continue;
+            for (const [name, meta] of Object.entries<any>(group)) {
+              const ver = String(meta?.version || 'UNPINNED').replace(/^==/, '');
+              const firstHash = Array.isArray(meta?.hashes) ? String(meta.hashes[0] || '') : undefined;
+              addComponent({
+                bomRef: `pkg:pypi/${name}@${ver}`,
+                name,
+                version: ver,
+                purl: `pkg:pypi/${name}@${ver}`,
+                ecosystem: 'pypi',
+                license: 'NOASSERTION',
+                licenseProvenance: 'UNVERIFIED',
+                dependencyScope: section === 'develop' ? 'DEV' : 'DIRECT',
+                dependencyPath: `${filePath} (${section}) > ${name}@${ver}`,
+                versionResolutionState: ver === 'UNPINNED' ? 'UNRESOLVED' : 'RESOLVED_LOCKED',
+                manifestFile: filePath,
+                sha256: computeComponentDigest('pypi', name, ver, manifestDigest, firstHash),
+              });
+            }
+          }
+        } catch {
+          // Ignore malformed Pipfile.lock
+        }
+      }
+
+      if (filePath.endsWith('go.sum')) {
+        lockfilesDetected.push(filePath);
+        for (const rawLine of content.split(/\r?\n/)) {
+          const line = rawLine.trim();
+          if (!line) continue;
+          const parts = line.split(/\s+/);
+          if (parts.length < 3) continue;
+          const name = parts[0]!;
+          const rawVer = parts[1]!;
+          if (rawVer.endsWith('/go.mod')) continue;
+          const ver = rawVer;
+          addComponent({
+            bomRef: `pkg:golang/${name}@${ver}`,
+            name,
+            version: ver,
+            purl: `pkg:golang/${name}@${ver}`,
+            ecosystem: 'golang',
+            license: 'NOASSERTION',
+            licenseProvenance: 'UNVERIFIED',
+            dependencyScope: 'TRANSITIVE',
+            dependencyPath: `${filePath} > ${name}@${ver}`,
+            versionResolutionState: 'RESOLVED_LOCKED',
+            manifestFile: filePath,
+            sha256: computeComponentDigest('golang', name, ver, manifestDigest, parts[2]),
+          });
+        }
+      }
+
+      if (
+        filePath.endsWith('build.gradle') ||
+        filePath.endsWith('build.gradle.kts') ||
+        filePath.endsWith('gradle.lockfile')
+      ) {
+        const isLockfile = filePath.endsWith('gradle.lockfile');
+        if (isLockfile) {
+          lockfilesDetected.push(filePath);
+          for (const rawLine of content.split(/\r?\n/)) {
+            const line = rawLine.trim();
+            if (!line || line.startsWith('#') || line.startsWith('empty=')) continue;
+            const coord = line.split('=')[0] || '';
+            const segs = coord.split(':');
+            if (segs.length >= 3) {
+              const group = segs[0]!.trim();
+              const artifact = segs[1]!.trim();
+              const ver = segs[2]!.trim();
+              const name = `${group}:${artifact}`;
+              addComponent({
+                bomRef: `pkg:maven/${group}/${artifact}@${ver}`,
+                name,
+                version: ver,
+                purl: `pkg:maven/${group}/${artifact}@${ver}`,
+                ecosystem: 'maven',
+                license: 'NOASSERTION',
+                licenseProvenance: 'UNVERIFIED',
+                dependencyScope: 'TRANSITIVE',
+                dependencyPath: `${filePath} > ${name}@${ver}`,
+                versionResolutionState: 'RESOLVED_LOCKED',
+                manifestFile: filePath,
+                sha256: computeComponentDigest('maven', name, ver, manifestDigest),
+              });
+            }
+          }
+        } else {
+          hasManifestWithoutLockfile = true;
+          const gradleDepRegex =
+            /(?:implementation|api|compileOnly|runtimeOnly|testImplementation)\s*\(?\s*['"]([^:'"]+):([^:'"]+):([^'"]+)['"]\s*\)?/g;
+          for (const m of content.matchAll(gradleDepRegex)) {
+            const group = m[1]!.trim();
+            const artifact = m[2]!.trim();
+            const ver = m[3]!.trim();
+            const name = `${group}:${artifact}`;
+            addComponent({
+              bomRef: `pkg:maven/${group}/${artifact}@${ver}`,
+              name,
+              version: ver,
+              purl: `pkg:maven/${group}/${artifact}@${ver}`,
+              ecosystem: 'maven',
+              license: 'NOASSERTION',
+              licenseProvenance: 'UNVERIFIED',
+              dependencyScope: 'DIRECT',
+              dependencyPath: `${filePath} > ${name}@${ver}`,
+              versionResolutionState: ver.includes('$') ? 'UNRESOLVED' : 'DECLARED_RANGE',
+              manifestFile: filePath,
+              sha256: computeComponentDigest('maven', name, ver, manifestDigest),
+            });
+          }
+        }
+      }
+
+      if (filePath.endsWith('packages.lock.json')) {
+        lockfilesDetected.push(filePath);
+        try {
+          const nugetLock = JSON.parse(content);
+          const depsByTfm = nugetLock?.dependencies;
+          if (depsByTfm && typeof depsByTfm === 'object') {
+            for (const [tfm, pkgs] of Object.entries<any>(depsByTfm)) {
+              if (!pkgs || typeof pkgs !== 'object') continue;
+              for (const [name, meta] of Object.entries<any>(pkgs)) {
+                const ver = String(meta?.resolved || meta?.requested || 'UNPINNED');
+                const scope =
+                  String(meta?.type || '').toLowerCase() === 'direct' ? 'DIRECT' : 'TRANSITIVE';
+                addComponent({
+                  bomRef: `pkg:nuget/${name}@${ver}`,
+                  name,
+                  version: ver,
+                  purl: `pkg:nuget/${name}@${ver}`,
+                  ecosystem: 'nuget',
+                  license: 'NOASSERTION',
+                  licenseProvenance: 'UNVERIFIED',
+                  dependencyScope: scope,
+                  dependencyPath: `${filePath} (${tfm}) > ${name}@${ver}`,
+                  versionResolutionState: meta?.resolved ? 'RESOLVED_LOCKED' : 'UNRESOLVED',
+                  manifestFile: filePath,
+                  sha256: computeComponentDigest('nuget', name, ver, manifestDigest, meta?.contentHash),
+                });
+              }
+            }
+          }
+        } catch {
+          // Ignore malformed packages.lock.json
+        }
+      }
+
       if (filePath.toLowerCase().endsWith('.csproj')) {
         hasManifestWithoutLockfile = true;
         const pkgRef = /<PackageReference\s+Include="([^"]+)"\s+Version="([^"]+)"/g;
@@ -1235,6 +1427,8 @@ export class SbomGenerator {
             license: 'NOASSERTION',
             licenseProvenance: 'UNVERIFIED',
             dependencyScope: 'DIRECT',
+            dependencyPath: `${filePath} > ${name}@${ver}`,
+            versionResolutionState: 'DECLARED_RANGE',
             manifestFile: filePath,
             sha256: computeComponentDigest('nuget', name, ver, manifestDigest),
           });

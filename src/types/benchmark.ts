@@ -426,6 +426,27 @@ export interface SignedEvidenceManifest {
     | 'HMAC_SHA256_AND_ED25519'
     | 'HMAC_SHA256_AND_ED25519_ASYMMETRIC';
   integrityNote: string;
+  provenanceMetadata?: {
+    winhoodVersion: string;
+    inputProjectSha256?: string | null;
+    analyzedFileHashesCount?: number;
+    analyzedFilesRootSha256?: string | null;
+    externalAnalyzers?: Array<{
+      toolId: string;
+      version: string | null;
+      status: string;
+    }>;
+    dockerImageDigests?: Record<string, string>;
+    appliedConfigSha256?: string | null;
+    intelligenceSources?: string[];
+    scaDataVersion?: string | null;
+    scaDataUpdatedAt?: string | null;
+    scaFreshnessStatus?: string | null;
+    outputReportSha256?: string | null;
+    executionStatus?: string;
+    limitations?: string[];
+    cryptographicScopeDisclaimer: string;
+  };
   verificationState: ManifestVerificationState;
   verified: boolean;
 }
@@ -2289,6 +2310,8 @@ export interface SbomComponentRecord {
   license: string;
   licenseProvenance?: SbomLicenseProvenance;
   dependencyScope: 'DIRECT' | 'TRANSITIVE' | 'DEV' | 'OPTIONAL' | 'UNKNOWN';
+  dependencyPath?: string;
+  versionResolutionState?: 'RESOLVED_LOCKED' | 'DECLARED_RANGE' | 'UNRESOLVED';
   manifestFile: string;
   sha256?: string | null;
 }
@@ -2315,6 +2338,8 @@ export interface SbomDocumentBundle {
   transitiveCount: number;
   devCount?: number;
   optionalCount?: number;
+  unresolvedDependenciesCount?: number;
+  unknownLicenseCount?: number;
   transitiveCoverageComplete?: boolean;
   lockfilesDetected?: string[];
   supportedFormats?: Array<'cyclonedx-1.5' | 'cyclonedx-1.7' | 'spdx-2.3' | 'spdx-3.0'>;

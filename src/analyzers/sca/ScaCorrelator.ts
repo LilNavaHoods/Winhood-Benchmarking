@@ -29,16 +29,245 @@ interface VulnerabilityAdvisorySeed {
   summary: string;
 }
 
-function compareSemverTuple(a: string, b: string): number {
-  const pa = a.replace(/[^0-9.]/g, '').split('.').map((n) => Number.parseInt(n || '0', 10));
-  const pb = b.replace(/[^0-9.]/g, '').split('.').map((n) => Number.parseInt(n || '0', 10));
-  for (let i = 0; i < 3; i++) {
-    const va = pa[i] || 0;
-    const vb = pb[i] || 0;
-    if (va < vb) return -1;
-    if (va > vb) return 1;
+export type ScaFreshnessStatus =
+  | 'LIVE_FEED_FRESH'
+  | 'VALID_CACHE'
+  | 'OFFLINE_LIMITED_BASELINE'
+  | 'STALE_DATA'
+  | 'SOURCE_UNAVAILABLE';
+
+/**
+ * Spec-compliant SemVer 2.0.0 comparator:
+ * - Correctly orders prereleases below stable releases (`1.0.0-alpha.1 < 1.0.0`).
+ * - Compares numeric prerelease identifiers numerically and alphanumeric identifiers lexically.
+ * - Ignores `+build` metadata for precedence per SemVer §10.
+ */
+export function compareSemver(a: string, b: string): number {
+  const parse = (raw: string) => {
+    const clean = raw.trim().replace(/^[v=]+/i, '').split('+')[0] || '';
+    const dashIdx = clean.indexOf('-');
+    const core = dashIdx >= 0 ? clean.slice(0, dashIdx) : clean;
+    const pre = dashIdx >= 0 ? clean.slice(dashIdx + 1) : '';
+    const nums = core.split('.').map((n) => Number.parseInt(n || '0', 10));
+    return {
+      major: Number.isFinite(nums[0]) ? nums[0]! : 0,
+      minor: Number.isFinite(nums[1]) ? nums[1]! : 0,
+      patch: Number.isFinite(nums[2]) ? nums[2]! : 0,
+      prerelease: pre ? pre.split('.') : [],
+    };
+  };
+  const pa = parse(a);
+  const pb = parse(b);
+  if (pa.major !== pb.major) return pa.major < pb.major ? -1 : 1;
+  if (pa.minor !== pb.minor) return pa.minor < pb.minor ? -1 : 1;
+  if (pa.patch !== pb.patch) return pa.patch < pb.patch ? -1 : 1;
+
+  const aPre = pa.prerelease;
+  const bPre = pb.prerelease;
+  if (aPre.length === 0 && bPre.length === 0) return 0;
+  if (aPre.length === 0) return 1; // stable > prerelease
+  if (bPre.length === 0) return -1;
+
+  const len = Math.max(aPre.length, bPre.length);
+  for (let i = 0; i < len; i++) {
+    const ai = aPre[i];
+    const bi = bPre[i];
+    if (ai === undefined) return -1;
+    if (bi === undefined) return 1;
+    const aNum = /^\d+$/.test(ai);
+    const bNum = /^\d+$/.test(bi);
+    if (aNum && bNum) {
+      const diff = Number(ai) - Number(bi);
+      if (diff !== 0) return diff < 0 ? -1 : 1;
+    } else if (aNum !== bNum) {
+      return aNum ? -1 : 1; // SemVer §11.4.3: numeric < non-numeric
+    } else if (ai !== bi) {
+      return ai < bi ? -1 : 1;
+    }
   }
   return 0;
+}
+
+/**
+ * PEP 440 version comparator for PyPI packages:
+ * Handles epoch (`1!2.0`), release segments (`2.3.1`), `.devN`, `aN`/`bN`/`rcN`, `.postN`.
+ * Precedence: dev < a < b < rc < final < post.
+ */
+export function comparePep440(a: string, b: string): number {
+  const parse = (raw: string) => {
+    const clean = raw.trim().toLowerCase().replace(/^v/, '').split('+')[0] || '';
+    const m = clean.match(
+      /^(?:(\d+)!)?(\d+(?:\.\d+)*)(?:(a|alpha|b|beta|rc|c|pre|preview)(\d*))?(?:\.?(post)(\d*))?(?:\.?(dev)(\d*))?$/
+    );
+    if (!m) {
+      return { epoch: 0, release: [0], phaseRank: 0, preNum: 0, postNum: 0, devNum: 0, raw: clean };
+    }
+    const epoch = m[1] ? Number(m[1]) : 0;
+    const release = m[2]!.split('.').map((n) => Number(n));
+    const preTag = m[3] || '';
+    const preNum = m[4] ? Number(m[4]) : 0;
+    const hasPost = Boolean(m[5]);
+    const postNum = m[6] ? Number(m[6]) : 0;
+    const hasDev = Boolean(m[7]);
+    const devNum = m[8] ? Number(m[8]) : 0;
+
+    let phaseRank = 4; // final
+    if (hasDev && !preTag && !hasPost) phaseRank = 0;
+    else if (preTag === 'a' || preTag === 'alpha') phaseRank = 1;
+    else if (preTag === 'b' || preTag === 'beta') phaseRank = 2;
+    else if (preTag === 'rc' || preTag === 'c' || preTag === 'pre' || preTag === 'preview') phaseRank = 3;
+    else if (hasPost) phaseRank = 5;
+
+    return { epoch, release, phaseRank, preNum, postNum, devNum, raw: clean };
+  };
+
+  const pa = parse(a);
+  const pb = parse(b);
+  if (pa.epoch !== pb.epoch) return pa.epoch < pb.epoch ? -1 : 1;
+  const maxLen = Math.max(pa.release.length, pb.release.length);
+  for (let i = 0; i < maxLen; i++) {
+    const va = pa.release[i] ?? 0;
+    const vb = pb.release[i] ?? 0;
+    if (va !== vb) return va < vb ? -1 : 1;
+  }
+  if (pa.phaseRank !== pb.phaseRank) return pa.phaseRank < pb.phaseRank ? -1 : 1;
+  if (pa.preNum !== pb.preNum) return pa.preNum < pb.preNum ? -1 : 1;
+  if (pa.postNum !== pb.postNum) return pa.postNum < pb.postNum ? -1 : 1;
+  if (pa.devNum !== pb.devNum) return pa.devNum < pb.devNum ? -1 : 1;
+  return 0;
+}
+
+/**
+ * Maven ComparableVersion semantics:
+ * alpha < beta < milestone < rc/cr < snapshot < (empty/final/ga/release) < sp.
+ */
+export function compareMavenVersion(a: string, b: string): number {
+  const qualifierRank = (q: string): number => {
+    const lower = q.toLowerCase();
+    if (lower === 'a' || lower === 'alpha') return 1;
+    if (lower === 'b' || lower === 'beta') return 2;
+    if (lower === 'm' || lower === 'milestone') return 3;
+    if (lower === 'rc' || lower === 'cr') return 4;
+    if (lower === 'snapshot') return 5;
+    if (lower === '' || lower === 'ga' || lower === 'final' || lower === 'release') return 6;
+    if (lower === 'sp') return 7;
+    return 6;
+  };
+  const parse = (raw: string) => {
+    const clean = raw.trim();
+    const dashIdx = clean.indexOf('-');
+    const core = dashIdx >= 0 ? clean.slice(0, dashIdx) : clean;
+    const qualRaw = dashIdx >= 0 ? clean.slice(dashIdx + 1) : '';
+    const qualParts = qualRaw ? qualRaw.split(/[-.]/) : [];
+    const nums = core.split('.').map((n) => Number.parseInt(n || '0', 10));
+    return {
+      nums,
+      qualRank: qualifierRank(qualParts[0] || ''),
+      qualNum: qualParts[1] && /^\d+$/.test(qualParts[1]) ? Number(qualParts[1]) : 0,
+      qualRaw: qualRaw.toLowerCase(),
+    };
+  };
+  const pa = parse(a);
+  const pb = parse(b);
+  const len = Math.max(pa.nums.length, pb.nums.length);
+  for (let i = 0; i < len; i++) {
+    const va = Number.isFinite(pa.nums[i]) ? pa.nums[i]! : 0;
+    const vb = Number.isFinite(pb.nums[i]) ? pb.nums[i]! : 0;
+    if (va !== vb) return va < vb ? -1 : 1;
+  }
+  if (pa.qualRank !== pb.qualRank) return pa.qualRank < pb.qualRank ? -1 : 1;
+  if (pa.qualNum !== pb.qualNum) return pa.qualNum < pb.qualNum ? -1 : 1;
+  return pa.qualRaw.localeCompare(pb.qualRaw);
+}
+
+/**
+ * NuGet version comparator (supports 4-part Revision `major.minor.patch.revision` + SemVer 2 prerelease).
+ */
+export function compareNugetVersion(a: string, b: string): number {
+  const parse = (raw: string) => {
+    const clean = raw.trim().split('+')[0] || '';
+    const dashIdx = clean.indexOf('-');
+    const core = dashIdx >= 0 ? clean.slice(0, dashIdx) : clean;
+    const pre = dashIdx >= 0 ? clean.slice(dashIdx + 1).toLowerCase() : '';
+    const nums = core.split('.').map((n) => Number.parseInt(n || '0', 10));
+    return {
+      nums: [nums[0] || 0, nums[1] || 0, nums[2] || 0, nums[3] || 0],
+      pre,
+    };
+  };
+  const pa = parse(a);
+  const pb = parse(b);
+  for (let i = 0; i < 4; i++) {
+    if (pa.nums[i]! !== pb.nums[i]!) return pa.nums[i]! < pb.nums[i]! ? -1 : 1;
+  }
+  if (!pa.pre && !pb.pre) return 0;
+  if (!pa.pre) return 1;
+  if (!pb.pre) return -1;
+  return pa.pre.localeCompare(pb.pre);
+}
+
+export function compareEcosystemVersion(
+  ecosystem: SbomComponentRecord['ecosystem'],
+  a: string,
+  b: string
+): number {
+  switch (ecosystem) {
+    case 'pypi':
+      return comparePep440(a, b);
+    case 'maven':
+      return compareMavenVersion(a, b);
+    case 'nuget':
+      return compareNugetVersion(a, b);
+    case 'npm':
+    case 'golang':
+    case 'cargo':
+    default:
+      return compareSemver(a, b);
+  }
+}
+
+export function satisfiesVersionRange(
+  ecosystem: SbomComponentRecord['ecosystem'],
+  version: string,
+  rangeExpr: string
+): boolean {
+  const cleanVer = version.trim();
+  if (!cleanVer || cleanVer === 'UNPINNED' || cleanVer === 'MANAGED') return false;
+  const rawRange = rangeExpr.trim();
+  if (!rawRange || rawRange === '*') return true;
+  const orBranches = rawRange.split('||').map((s) => s.trim()).filter(Boolean);
+  return orBranches.some((branch) => {
+    const clauses = branch
+      .split(/\s*,\s*|\s+(?=[<>=!])/)
+      .map((c) => c.trim())
+      .filter(Boolean);
+    return clauses.every((clause) => {
+      const m = clause.match(/^(<=|>=|==|!=|<|>|=)\s*(.+)$/);
+      if (!m) {
+        return compareEcosystemVersion(ecosystem, cleanVer, clause) === 0;
+      }
+      const op = m[1]!;
+      const target = m[2]!.trim();
+      const cmp = compareEcosystemVersion(ecosystem, cleanVer, target);
+      switch (op) {
+        case '==':
+        case '=':
+          return cmp === 0;
+        case '!=':
+          return cmp !== 0;
+        case '<':
+          return cmp < 0;
+        case '<=':
+          return cmp <= 0;
+        case '>':
+          return cmp > 0;
+        case '>=':
+          return cmp >= 0;
+        default:
+          return false;
+      }
+    });
+  });
 }
 
 const ADVISORY_INTELLIGENCE_DB: VulnerabilityAdvisorySeed[] = [
@@ -54,7 +283,7 @@ const ADVISORY_INTELLIGENCE_DB: VulnerabilityAdvisorySeed[] = [
     cisaKev: false,
     affectedVersionRange: '< 9.0.0',
     fixedVersion: '9.0.0',
-    isVulnerable: (v) => compareSemverTuple(v, '9.0.0') < 0,
+    isVulnerable: (v) => satisfiesVersionRange('npm', v, '< 9.0.0'),
     severity: 'HIGH',
     licenseHint: 'MIT',
     summary: 'Improper signature/key validation allowing arbitrary code or token bypass in jsonwebtoken < 9.0.0.',
@@ -71,7 +300,7 @@ const ADVISORY_INTELLIGENCE_DB: VulnerabilityAdvisorySeed[] = [
     cisaKev: false,
     affectedVersionRange: '< 4.2.0',
     fixedVersion: '4.2.0',
-    isVulnerable: (v) => compareSemverTuple(v, '4.2.0') < 0,
+    isVulnerable: (v) => satisfiesVersionRange('npm', v, '< 4.2.0'),
     severity: 'CRITICAL',
     licenseHint: 'MIT',
     summary: 'PBKDF2 default SHA-1 with 1 iteration in crypto-js < 4.2.0 enables fast offline cracking.',
@@ -88,7 +317,7 @@ const ADVISORY_INTELLIGENCE_DB: VulnerabilityAdvisorySeed[] = [
     cisaKev: false,
     affectedVersionRange: '< 4.17.21',
     fixedVersion: '4.17.21',
-    isVulnerable: (v) => compareSemverTuple(v, '4.17.21') < 0,
+    isVulnerable: (v) => satisfiesVersionRange('npm', v, '< 4.17.21'),
     severity: 'HIGH',
     licenseHint: 'MIT',
     summary: 'Command Injection via template function in lodash < 4.17.21.',
@@ -103,9 +332,9 @@ const ADVISORY_INTELLIGENCE_DB: VulnerabilityAdvisorySeed[] = [
     epssScore: 0.975,
     epssPercentile: 0.999,
     cisaKev: true,
-    affectedVersionRange: '< 2.17.1',
+    affectedVersionRange: '>= 2.0-beta9, < 2.17.1',
     fixedVersion: '2.17.1',
-    isVulnerable: (v) => compareSemverTuple(v, '2.17.1') < 0,
+    isVulnerable: (v) => satisfiesVersionRange('maven', v, '>= 2.0-beta9, < 2.17.1'),
     severity: 'BLOCKER',
     licenseHint: 'Apache-2.0',
     summary: 'Log4Shell JNDI remote code execution vulnerability (CISA KEV actively exploited).',
@@ -122,7 +351,7 @@ const ADVISORY_INTELLIGENCE_DB: VulnerabilityAdvisorySeed[] = [
     cisaKev: false,
     affectedVersionRange: '< 5.4',
     fixedVersion: '5.4',
-    isVulnerable: (v) => compareSemverTuple(v, '5.4.0') < 0,
+    isVulnerable: (v) => satisfiesVersionRange('pypi', v, '< 5.4'),
     severity: 'CRITICAL',
     licenseHint: 'MIT',
     summary: 'Arbitrary code execution via FullLoader in PyYAML < 5.4.',
@@ -166,8 +395,13 @@ export class ScaCorrelator {
     advisoryFeedMetadata: {
       dbVersion: string;
       cacheMode: 'LIVE_SYNCED_CACHE' | 'OFFLINE_VERIFIED_SNAPSHOT';
+      freshnessStatus: ScaFreshnessStatus;
       lastSyncedAt: string;
       isStale: boolean;
+      retentionPolicyDays: number;
+      snapshotSha256: string;
+      isComprehensiveDatabase: boolean;
+      limitations: string[];
       feeds: Array<{
         source: string;
         snapshotVersion: string;
@@ -288,12 +522,13 @@ export class ScaCorrelator {
 
     // Correlate against live-synced OSV cache + curated baseline
     for (const comp of sbom.components) {
-      // 1. Live-synced OSV entries for exact package + version
+      // 1. Live-synced OSV entries matched via ecosystem-aware version range comparator
       for (const adv of syncedBundle.advisories) {
-        if (
-          adv.packageName?.toLowerCase() === comp.name.toLowerCase() &&
-          adv.affectedVersionRange === `== ${comp.version}`
-        ) {
+        const rangeExpr = String(adv.affectedVersionRange || '').trim();
+        const matchesRange =
+          rangeExpr === `== ${comp.version}` ||
+          (rangeExpr.length > 0 && satisfiesVersionRange(comp.ecosystem, comp.version, rangeExpr));
+        if (adv.packageName?.toLowerCase() === comp.name.toLowerCase() && matchesRange) {
           const idKey = `${comp.name}@${comp.version}:${adv.cveId || adv.ghsaId}`;
           if (seenKeys.has(idKey)) continue;
           seenKeys.add(idKey);
@@ -473,12 +708,60 @@ export class ScaCorrelator {
     const hasLiveSync = Boolean(syncedBundle.updatedAt && syncedBundle.advisories.length > 0);
     const snapshotTimestamp = syncedBundle.updatedAt || '2026-11-14T00:00:00Z';
     const ageMs = Math.max(0, Date.parse(nowIso) - Date.parse(snapshotTimestamp));
-    const isStale = ageMs > 30 * 24 * 60 * 60 * 1000; // > 30 days
+    const retentionPolicyDays = 30;
+    const isStale = ageMs > retentionPolicyDays * 24 * 60 * 60 * 1000;
+    const isFreshLive = hasLiveSync && ageMs <= 24 * 60 * 60 * 1000;
+    const freshnessStatus: ScaFreshnessStatus = hasLiveSync
+      ? isStale
+        ? 'STALE_DATA'
+        : isFreshLive
+          ? 'LIVE_FEED_FRESH'
+          : 'VALID_CACHE'
+      : isStale
+        ? 'STALE_DATA'
+        : 'OFFLINE_LIMITED_BASELINE';
+
+    const snapshotSha256 = crypto
+      .createHash('sha256')
+      .update(
+        JSON.stringify({
+          dbVersion,
+          hasLiveSync,
+          snapshotTimestamp,
+          syncedAdvisoriesCount: syncedBundle.advisories.length,
+          baselineAdvisoriesCount: ADVISORY_INTELLIGENCE_DB.length,
+        }),
+        'utf8'
+      )
+      .digest('hex');
+
+    const limitations: string[] = [];
+    if (!hasLiveSync) {
+      limitations.push(
+        `Operando com baseline offline limitada (${ADVISORY_INTELLIGENCE_DB.length} advisories curados) sem sincronização ativa OSV/NVD/EPSS/KEV. Este modo NÃO representa varredura SCA abrangente.`
+      );
+    }
+    if (isStale) {
+      limitations.push(
+        `Snapshot SCA ultrapassou a política de retenção de ${retentionPolicyDays} dias (última atualização: ${snapshotTimestamp}).`
+      );
+    }
+    if (!osvInstalled) {
+      limitations.push(
+        'Binário osv-scanner não detectado neste ambiente; execute via winhood-scanner-worker isolado ou sincronize o cache OSV/NVD.'
+      );
+    }
+
     const advisoryFeedMetadata = {
       dbVersion,
       cacheMode: hasLiveSync ? ('LIVE_SYNCED_CACHE' as const) : ('OFFLINE_VERIFIED_SNAPSHOT' as const),
+      freshnessStatus,
       lastSyncedAt: snapshotTimestamp,
       isStale,
+      retentionPolicyDays,
+      snapshotSha256,
+      isComprehensiveDatabase: Boolean(hasLiveSync || osvInstalled),
+      limitations,
       feeds: [
         {
           source: 'OSV.dev',

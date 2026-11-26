@@ -153,6 +153,13 @@ import {
   type RuntimeEnv,
 } from './src/server/securityMiddleware';
 import { registerGracefulShutdown } from './src/server/gracefulShutdown';
+import { EncryptedArtifactStore } from './src/storage/EncryptedArtifactStore';
+import { EphemeralWorkspaceManager } from './src/execution/EphemeralWorkspaceManager';
+import {
+  ScannerJobOrchestrator,
+  SCANNER_TOOL_CATALOG,
+  type ScannerToolId,
+} from './src/worker/ScannerJobOrchestrator';
 import type http from 'node:http';
 
 export { resolveDeploymentMode, resolveRuntimeEnv, resolveTrustProxyConfig };
@@ -516,42 +523,11 @@ function writeIsolatedArtifactsToDisk(
   artifactsDir = ISOLATED_ARTIFACTS_DIR
 ): string {
   ensureDirectories(path.dirname(artifactsDir), artifactsDir);
-  const safeSlug = softwareSlug.replace(/[^a-zA-Z0-9_-]/g, '_');
-  const targetDir = path.resolve(artifactsDir, safeSlug);
-  const rootCanonical = path.resolve(artifactsDir);
-  if (!targetDir.startsWith(rootCanonical + path.sep) && targetDir !== rootCanonical) {
-    throw new Error('Tentativa de Directory Traversal no softwareSlug bloqueada.');
-  }
-  if (!fs.existsSync(targetDir)) {
-    fs.mkdirSync(targetDir, { recursive: true });
-  }
-  for (const [relPath, content] of Object.entries(filesMap)) {
-    // Canonical resolution and boundary validation (P0 / P1)
-    const normalizedRel = relPath.replace(/\\/g, '/').replace(/^\/+/, '');
-    if (!normalizedRel) continue;
-    const canonicalTarget = path.resolve(targetDir, normalizedRel);
-    if (!canonicalTarget.startsWith(targetDir + path.sep)) {
-      throw new Error(`Tentativa de Path Traversal bloqueada no arquivo: ${relPath}`);
-    }
-    try {
-      const parent = path.dirname(canonicalTarget);
-      if (!fs.existsSync(parent)) {
-        fs.mkdirSync(parent, { recursive: true });
-      }
-      fs.writeFileSync(canonicalTarget, content, 'utf8');
-    } catch (writeErr: any) {
-      if (writeErr?.code !== 'EBUSY' && writeErr?.code !== 'EPERM') {
-        throw writeErr;
-      }
-    }
-  }
-  try {
-    const encryptedEnvelope = PersistentDatabaseManager.encryptSourceFilesMap(filesMap);
-    const bundlePath = path.resolve(targetDir, 'vault_bundle.whenc');
-    fs.writeFileSync(bundlePath, encryptedEnvelope, { encoding: 'utf8', mode: 0o600 });
-  } catch {
-    // Best-effort encrypted bundle snapshot
-  }
+  const { targetDir } = EncryptedArtifactStore.writeEncryptedBundle({
+    softwareSlug,
+    filesMap,
+    artifactsRoot: artifactsDir,
+  });
   return targetDir;
 }
 
@@ -1194,6 +1170,16 @@ export async function createWinHoodApp(options?: {
   const storeFile = path.join(dataDir, 'winhood_persistent_db.json');
   const dbManager = new PersistentDatabaseManager();
   const totpService = new OptionalTotpService(dataDir);
+  const scannerJobOrchestrator = new ScannerJobOrchestrator({ dataDir });
+  let startupMigrationReport = null as ReturnType<
+    typeof EncryptedArtifactStore.migrateLegacyPlaintextArtifacts
+  > | null;
+  try {
+    startupMigrationReport =
+      EncryptedArtifactStore.migrateLegacyPlaintextArtifacts(isolatedArtifactsDir);
+  } catch (migrationErr) {
+    console.error('[WinHood EncryptedStorage] Erro na migração automática de legado:', migrationErr);
+  }
 
   const app = express();
   const trustProxyConfig = resolveTrustProxyConfig(
@@ -1238,6 +1224,16 @@ export async function createWinHoodApp(options?: {
       'STORAGE',
       storeFile,
       'Banco principal apresentou falha de integridade/checksum e foi restaurado automaticamente a partir de .bak.'
+    );
+    dbManager.writeAtomicChecksummed(storeFile, db);
+  }
+  if (startupMigrationReport && startupMigrationReport.migratedSlugs > 0) {
+    appendAuditLog(
+      db,
+      'LEGACY_PLAINTEXT_ARTIFACTS_MIGRATED',
+      'STORAGE_SECURITY',
+      isolatedArtifactsDir,
+      `Migração idempotente concluída: ${startupMigrationReport.migratedSlugs} repositório(s) criptografado(s) e ${startupMigrationReport.plaintextFilesRemovedTotal} arquivo(s) em texto plano removido(s) após verificação de descriptografia.`
     );
     dbManager.writeAtomicChecksummed(storeFile, db);
   }
@@ -9027,12 +9023,18 @@ export async function createWinHoodApp(options?: {
       reencryptedCount += totpService.reencryptTotpSecrets(ctx);
     });
 
+    let reencryptedArtifactBundlesCount = 0;
+    if (mappedPurpose === 'TOKEN_VAULT_AES256') {
+      const reencResult = EncryptedArtifactStore.reencryptAllBundles(isolatedArtifactsDir);
+      reencryptedArtifactBundlesCount = reencResult.reencryptedCount;
+    }
+
     appendAuditLog(
       db,
       'CRYPTO_KEY_ROTATED',
       'KEY_MANAGEMENT',
       newRecord.keyId,
-      `Chave criptográfica para ${mappedPurpose} rotacionada com sucesso (novo keyId: ${newRecord.keyId}; re-criptografados=${reencryptedCount}; chaves anteriores mantidas para verificação histórica).`,
+      `Chave criptográfica para ${mappedPurpose} rotacionada com sucesso (novo keyId: ${newRecord.keyId}; re-criptografados=${reencryptedCount}; bundles=${reencryptedArtifactBundlesCount}; chaves anteriores mantidas para verificação histórica).`,
       actor
     );
     saveDatabase(db, true);
@@ -9042,6 +9044,7 @@ export async function createWinHoodApp(options?: {
       purpose: newRecord.purpose,
       algorithm: newRecord.algorithm,
       reencryptedTokensCount: reencryptedCount,
+      reencryptedArtifactBundlesCount,
       createdAt: newRecord.createdAt,
       keys: KeyManagementService.getStatus(),
     });
@@ -9443,6 +9446,109 @@ export async function createWinHoodApp(options?: {
     });
   });
 
+  // Storage plaintext audit & atomic legacy migration endpoints
+  app.get('/api/storage/plaintext-audit', (_req, res) => {
+    const scan = EncryptedArtifactStore.auditNoPlaintextOnDisk(isolatedArtifactsDir);
+    return res.json(scan);
+  });
+
+  app.post('/api/storage/migrate-legacy-plaintext', (req, res) => {
+    if (!requireWritePermission(res, req, 'storage:migrate')) return;
+    const report = EncryptedArtifactStore.migrateLegacyPlaintextArtifacts(isolatedArtifactsDir);
+    if (report.migratedSlugs > 0) {
+      appendAuditLog(
+        db,
+        'LEGACY_PLAINTEXT_ARTIFACTS_MIGRATED',
+        'STORAGE_SECURITY',
+        isolatedArtifactsDir,
+        `Migração manual executada: ${report.migratedSlugs} slug(s) migrado(s), ${report.plaintextFilesRemovedTotal} arquivo(s) em texto plano removido(s).`,
+        getRequestActor(req, res)
+      );
+      saveDatabase(db, true);
+    }
+    return res.json(report);
+  });
+
+  // Dedicated Scanner Worker capabilities & async job orchestration endpoints
+  const allowedScannerTools = new Set<string>(SCANNER_TOOL_CATALOG.map((c) => c.toolId));
+
+  app.get('/api/scanner-worker/capabilities', async (_req, res) => {
+    const snapshot = await scannerJobOrchestrator.getCapabilities();
+    return res.json(snapshot);
+  });
+
+  app.get('/api/scanner-worker/jobs', (_req, res) => {
+    return res.json({ jobs: scannerJobOrchestrator.listJobs() });
+  });
+
+  app.post('/api/scanner-worker/jobs', analysisRateLimiter, (req, res) => {
+    if (!requireWritePermission(res, req, 'scanner-worker:enqueue')) return;
+    const body = (req.body || {}) as {
+      projectId?: string;
+      softwareId?: string;
+      toolIds?: string[];
+      filesMap?: Record<string, string>;
+      timeoutMs?: number;
+      maxRetries?: number;
+    };
+    const requestedTools = Array.isArray(body.toolIds)
+      ? body.toolIds.filter((t): t is ScannerToolId => typeof t === 'string' && allowedScannerTools.has(t))
+      : [];
+    if (requestedTools.length === 0) {
+      return res.status(400).json({
+        error: 'INVALID_SCANNER_TOOLS',
+        message: 'Informe ao menos uma ferramenta suportada em toolIds.',
+        supportedTools: Array.from(allowedScannerTools),
+      });
+    }
+    let resolvedFilesMap: Record<string, string> | null =
+      body.filesMap && typeof body.filesMap === 'object' ? body.filesMap : null;
+    if (!resolvedFilesMap && body.softwareId) {
+      const sw = db.softwares.find((s) => s.id === body.softwareId);
+      if (sw && sw.sourceFilesContent && Object.keys(sw.sourceFilesContent).length > 0) {
+        resolvedFilesMap = sw.sourceFilesContent;
+      } else if (sw?.inventory?.isolatedStoragePath) {
+        try {
+          resolvedFilesMap = EncryptedArtifactStore.readEncryptedBundle(sw.inventory.isolatedStoragePath);
+        } catch {
+          resolvedFilesMap = null;
+        }
+      }
+    }
+    if (!resolvedFilesMap || Object.keys(resolvedFilesMap).length === 0) {
+      return res.status(400).json({
+        error: 'EMPTY_SOURCE_FILES',
+        message: 'Informe filesMap não vazio ou um softwareId existente com arquivos fonte.',
+      });
+    }
+    const job = scannerJobOrchestrator.enqueueJob({
+      projectId: body.projectId,
+      softwareId: body.softwareId,
+      toolIds: requestedTools,
+      filesMap: resolvedFilesMap,
+      timeoutMs: body.timeoutMs,
+      maxRetries: body.maxRetries,
+    });
+    return res.status(202).json({ job });
+  });
+
+  app.get('/api/scanner-worker/jobs/:jobId', (req, res) => {
+    const job = scannerJobOrchestrator.getJob(req.params.jobId);
+    if (!job) {
+      return res.status(404).json({ error: 'SCANNER_JOB_NOT_FOUND' });
+    }
+    return res.json({ job });
+  });
+
+  app.post('/api/scanner-worker/jobs/:jobId/cancel', (req, res) => {
+    if (!requireWritePermission(res, req, 'scanner-worker:cancel')) return;
+    const job = scannerJobOrchestrator.cancelJob(req.params.jobId);
+    if (!job) {
+      return res.status(404).json({ error: 'SCANNER_JOB_NOT_FOUND' });
+    }
+    return res.json({ job });
+  });
+
   // Safe API JSON fallback & error handler
   app.use('/api', (_req, res) => {
     res.status(404).json({ error: 'ENDPOINT_NOT_FOUND' });
@@ -9473,6 +9579,7 @@ export async function createWinHoodApp(options?: {
     app,
     dbManager,
     totpService,
+    scannerJobOrchestrator,
     deploymentMode,
     runtimeEnv,
     trustProxyConfig,
@@ -9480,8 +9587,10 @@ export async function createWinHoodApp(options?: {
     getDb: () => db,
     flushPendingSave: flushPendingDatabaseSave,
     dispose: () => {
+      scannerJobOrchestrator.cancelAllPendingAndRunning();
       flushPendingDatabaseSave();
       remoteAuthFailureTracker.dispose();
+      EphemeralWorkspaceManager.cleanupAllActiveWorkspaces();
     },
   };
 }
@@ -9605,8 +9714,12 @@ export async function startServer(
     onBeforeClose: () => {
       dispose();
     },
+    onAfterClose: () => {
+      EphemeralWorkspaceManager.cleanupAllActiveWorkspaces();
+    },
     signals: isEntrypoint ? ['SIGINT', 'SIGTERM'] : [],
     exitProcess: isEntrypoint,
+    enableIpcShutdown: isEntrypoint,
   });
 
   console.log(`WinHood Benchmark Server listening on http://${bindHost}:${effectivePort}`);

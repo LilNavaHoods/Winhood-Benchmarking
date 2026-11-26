@@ -1,5 +1,6 @@
+import path from 'node:path';
 import type { CodeExecutionFlowStep } from '../types/benchmark';
-import type { AstFunctionNode, AstIssueCandidate, AstParseResult } from './types';
+import type { AstCallSite, AstFunctionNode, AstIssueCandidate, AstParseResult } from './types';
 
 export type TaintSinkType =
   | 'SQL_INJECTION'
@@ -18,6 +19,69 @@ export type TaintSinkType =
   | 'PROTOTYPE_POLLUTION'
   | 'LOG_INJECTION';
 
+export interface TaintAnalysisOptions {
+  /** Maximum interprocedural call depth (default: 6, replaces old hardcoded 2-hop limit). */
+  maxCallDepth?: number;
+  /** Maximum graph nodes visited per traversal (resource & cycle guard, default: 500). */
+  maxVisitedNodes?: number;
+  /** Maximum total analysis budget in milliseconds (default: 2000ms). */
+  maxTimeMs?: number;
+}
+
+export interface TaintCallGraphNode {
+  id: string;
+  filePath: string;
+  functionName: string;
+  params: string[];
+  isExported: boolean;
+  startLine: number;
+  endLine: number;
+  returnsTaintedParamIndices: number[];
+}
+
+export interface TaintCallGraphEdge {
+  fromNodeId: string;
+  toNodeId: string;
+  callLine: number;
+  calleeText: string;
+  argIndicesPropagated: number[];
+  isCrossFile: boolean;
+}
+
+export interface TaintIncompletePath {
+  reason: 'DYNAMIC_CALL_DISPATCH' | 'MAX_DEPTH_REACHED' | 'CYCLE_DETECTED' | 'RESOURCE_BUDGET_EXCEEDED';
+  filePath: string;
+  lineNumber: number;
+  functionName: string;
+  calleeText: string;
+  confidenceImpact: 'INCONCLUSIVE' | 'LOW';
+  explanation: string;
+}
+
+export interface TaintCallGraph {
+  nodes: TaintCallGraphNode[];
+  edges: TaintCallGraphEdge[];
+  dynamicCallSites: number;
+  cyclesDetected: number;
+  truncatedPaths: number;
+}
+
+export interface TaintAnalysisDiagnosticsResult {
+  issues: AstIssueCandidate[];
+  callGraph: TaintCallGraph;
+  incompletePaths: TaintIncompletePath[];
+  stats: {
+    maxDepthConfigured: number;
+    maxDepthObserved: number;
+    nodesCount: number;
+    edgesCount: number;
+    cyclesDetected: number;
+    truncatedPaths: number;
+    dynamicCallSites: number;
+    elapsedMs: number;
+  };
+}
+
 interface TaintedVarState {
   originFile: string;
   originLine: number;
@@ -29,7 +93,10 @@ interface TaintedVarState {
 }
 
 const SOURCE_PARAM_HINT =
-  /(input|query|filter|path|target|cmd|command|url|uri|webhook|endpoint|req|request|body|param|user|title|name|payload|raw|sql|expr|file|html|tpl|data)/i;
+  /(input|query|filter|path|target|cmd|command|url|uri|webhook|endpoint|req|request|body|param|user|title|name|payload|raw|sql|expr|file|html|tpl|data|id|arg|value)/i;
+
+const DYNAMIC_DISPATCH_PATTERN =
+  /\[[^\]]+\]|\.(?:apply|call|bind)$|^(?:Reflect\.apply|window\[|globalThis\[|handlers\[)/;
 
 export const SINK_RULES: Array<{
   calleePattern: RegExp;
@@ -218,33 +285,95 @@ function getSanitizedSinksForContext(
   }
 }
 
+function makeNodeId(fn: AstFunctionNode): string {
+  return `${fn.filePath}:${fn.name}:${fn.startLine}`;
+}
+
+function resolveImportCandidates(
+  fromFile: string,
+  importPath: string,
+  availableFiles: Set<string>
+): string[] {
+  if (!importPath.startsWith('.')) return [];
+  const baseDir = path.posix.dirname(fromFile.replace(/\\/g, '/'));
+  const resolvedBase = path.posix.normalize(path.posix.join(baseDir, importPath));
+  const exts = ['', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.py', '/index.ts', '/index.js'];
+  const matches: string[] = [];
+  for (const ext of exts) {
+    const candidate = `${resolvedBase}${ext}`;
+    if (availableFiles.has(candidate)) {
+      matches.push(candidate);
+    }
+  }
+  return matches;
+}
+
 /**
- * TaintAnalyzer (P1/P2 + Cross-Language/SSRF)
- * Rastreamento intraprocedural e interprocedural (até 2 saltos + retorno de helper)
- * com sanitização sensível ao contexto de sink:
- * - encodeURIComponent não neutraliza SQLi / Command Injection / SSRF.
- * - Number/parseInt neutralizam numericamente SQL/Shell/Path/SSRF.
- * - escapeHtml neutraliza apenas XSS.
- * - basename neutraliza apenas Path Traversal.
+ * TaintAnalyzer (Call-Graph + Multi-Hop Data-Flow Engine)
+ *
+ * Replaces the previous 2-hop depth cap with a structured Call-Graph + bounded interprocedural
+ * data-flow engine:
+ * - Configurable maxCallDepth (default 6), maxVisitedNodes (default 500), and maxTimeMs (default 2000).
+ * - Import-aware cross-file function resolution with deterministic ordering.
+ * - Intermediate sanitizer propagation (tracks sanitizers applied inside callee functions as well as callers).
+ * - Cycle detection for mutual/direct recursion without infinite loops.
+ * - Explicit tracking of dynamic/indirect dispatch and truncated paths (emits INCONCLUSIVE / LOW diagnostics).
+ * - Context-sensitive sanitization: encodeURIComponent never neutralizes SQLi/Command Injection/SSRF.
  */
 export class TaintAnalyzer {
   public static analyzeFlows(
     parseResults: AstParseResult[],
-    filesMap: Record<string, string>
+    filesMap: Record<string, string>,
+    options?: TaintAnalysisOptions
   ): AstIssueCandidate[] {
+    return TaintAnalyzer.analyzeFlowsWithDiagnostics(parseResults, filesMap, options).issues;
+  }
+
+  public static analyzeFlowsWithDiagnostics(
+    parseResults: AstParseResult[],
+    filesMap: Record<string, string>,
+    options?: TaintAnalysisOptions
+  ): TaintAnalysisDiagnosticsResult {
+    const startedMs = performance.now();
+    const maxCallDepth = Math.max(1, Math.min(20, options?.maxCallDepth ?? 6));
+    const maxVisitedNodes = Math.max(20, Math.min(5000, options?.maxVisitedNodes ?? 500));
+    const maxTimeMs = Math.max(100, Math.min(30_000, options?.maxTimeMs ?? 2000));
+
     const taintIssues: AstIssueCandidate[] = [];
+    const incompletePaths: TaintIncompletePath[] = [];
     const fnByName = new Map<string, AstFunctionNode[]>();
+    const fnByFileAndName = new Map<string, AstFunctionNode[]>();
     const astIssuesByFile = new Map<string, AstIssueCandidate[]>();
+    const importsByFile = new Map<string, Map<string, string[]>>();
+    const availableFiles = new Set<string>(parseResults.map((p) => p.filePath.replace(/\\/g, '/')));
 
     const sortedParseResults = [...parseResults].sort((a, b) => a.filePath.localeCompare(b.filePath));
     for (const parsed of sortedParseResults) {
       astIssuesByFile.set(parsed.filePath, parsed.issues);
-      const sortedFns = [...parsed.functions].sort((a, b) => a.startLine - b.startLine || a.name.localeCompare(b.name));
+      const sortedFns = [...parsed.functions].sort(
+        (a, b) => a.startLine - b.startLine || a.name.localeCompare(b.name)
+      );
       for (const fn of sortedFns) {
         const list = fnByName.get(fn.name) || [];
         list.push(fn);
         fnByName.set(fn.name, list);
+
+        const fKey = `${fn.filePath.replace(/\\/g, '/')}::${fn.name}`;
+        const flist = fnByFileAndName.get(fKey) || [];
+        flist.push(fn);
+        fnByFileAndName.set(fKey, flist);
       }
+
+      const symbolToTargetFiles = new Map<string, string[]>();
+      for (const imp of parsed.imports || []) {
+        const resolvedFiles = resolveImportCandidates(parsed.filePath, imp.sourcePath, availableFiles);
+        if (resolvedFiles.length === 0) continue;
+        for (const sym of imp.importedSymbols || []) {
+          const prev = symbolToTargetFiles.get(sym.name) || [];
+          symbolToTargetFiles.set(sym.name, Array.from(new Set([...prev, ...resolvedFiles])));
+        }
+      }
+      importsByFile.set(parsed.filePath, symbolToTargetFiles);
     }
 
     const getLineSnippet = (filePath: string, lineNo: number): string => {
@@ -257,7 +386,10 @@ export class TaintAnalyzer {
       const lines = fileContent.split(/\r?\n/).slice(Math.max(0, fn.startLine - 1), fn.endLine);
       const body = lines.join('\n');
       const usesParamPlaceholder =
-        (body.includes('VALUES (?') || body.includes('= ?') || body.includes('= %s') || /\$\d+/.test(body)) &&
+        (body.includes('VALUES (?') ||
+          body.includes('= ?') ||
+          body.includes('= %s') ||
+          /\$\d+/.test(body)) &&
         !body.includes('+') &&
         !body.includes('f"') &&
         !body.includes("f'");
@@ -270,70 +402,302 @@ export class TaintAnalyzer {
       return /SsrfGuard|validateUrl|assertSafeExternalUrl|isAllowedHost/i.test(body);
     };
 
-    // Precompute functions whose return values propagate tainted parameters (for helper return propagation)
+    // Compute per-function return taint summaries (which parameter indices propagate to return value)
     const fnReturnsTaint = new Map<string, boolean>();
+    const fnReturnTaintedParamIndices = new Map<string, number[]>();
+    const graphNodes: TaintCallGraphNode[] = [];
+    const graphEdges: TaintCallGraphEdge[] = [];
+    const edgeDedup = new Set<string>();
+
     for (const parsed of sortedParseResults) {
       for (const fn of parsed.functions) {
-        if (fn.returnValues.length === 0) continue;
+        const nodeId = makeNodeId(fn);
         const paramSet = new Set(fn.params);
-        const taintedLocal = new Set<string>(fn.params);
+        const taintedLocal = new Map<string, Set<number>>();
+        fn.params.forEach((p, idx) => taintedLocal.set(p, new Set([idx])));
+
         for (const b of fn.variableBindings) {
           if (b.isSanitized && getSanitizedSinksForContext(b.sanitizerContext).length >= 3) {
             taintedLocal.delete(b.varName);
-          } else if (b.dependencies.some((d) => taintedLocal.has(d) || paramSet.has(d))) {
-            taintedLocal.add(b.varName);
+          } else {
+            const combined = new Set<number>();
+            for (const dep of b.dependencies) {
+              const depIndices = taintedLocal.get(dep);
+              if (depIndices) {
+                for (const i of depIndices) combined.add(i);
+              } else if (paramSet.has(dep)) {
+                combined.add(fn.params.indexOf(dep));
+              }
+            }
+            if (combined.size > 0) {
+              taintedLocal.set(b.varName, combined);
+            }
           }
         }
-        if (fn.returnValues.some((rv) => taintedLocal.has(rv))) {
+
+        const returnedIndices = new Set<number>();
+        for (const rv of fn.returnValues) {
+          const idxs = taintedLocal.get(rv);
+          if (idxs) {
+            for (const i of idxs) returnedIndices.add(i);
+          }
+        }
+        const sortedIndices = Array.from(returnedIndices).sort((a, b) => a - b);
+        fnReturnTaintedParamIndices.set(nodeId, sortedIndices);
+        if (sortedIndices.length > 0) {
           fnReturnsTaint.set(fn.name, true);
+        }
+
+        graphNodes.push({
+          id: nodeId,
+          filePath: fn.filePath,
+          functionName: fn.name,
+          params: [...fn.params],
+          isExported: fn.isExported,
+          startLine: fn.startLine,
+          endLine: fn.endLine,
+          returnsTaintedParamIndices: sortedIndices,
+        });
+      }
+    }
+
+    const resolveTargetFunctions = (caller: AstFunctionNode, call: AstCallSite): AstFunctionNode[] => {
+      const calleeName = call.calleeBase || call.callee;
+      const fileImports = importsByFile.get(caller.filePath);
+      const importedFiles = fileImports?.get(calleeName);
+      const prioritized: AstFunctionNode[] = [];
+      const seenIds = new Set<string>();
+
+      // 1. Prefer explicitly imported target files
+      if (importedFiles && importedFiles.length > 0) {
+        for (const tf of importedFiles) {
+          const matches = fnByFileAndName.get(`${tf}::${calleeName}`) || [];
+          for (const m of matches) {
+            const id = makeNodeId(m);
+            if (!seenIds.has(id)) {
+              seenIds.add(id);
+              prioritized.push(m);
+            }
+          }
+        }
+      }
+      // 2. Same-file helper functions
+      const localMatches = fnByFileAndName.get(`${caller.filePath.replace(/\\/g, '/')}::${calleeName}`) || [];
+      for (const m of localMatches) {
+        const id = makeNodeId(m);
+        if (!seenIds.has(id)) {
+          seenIds.add(id);
+          prioritized.push(m);
+        }
+      }
+      // 3. Global name match fallback (for languages/patterns without explicit import edges)
+      if (prioritized.length === 0) {
+        for (const m of fnByName.get(calleeName) || []) {
+          const id = makeNodeId(m);
+          if (!seenIds.has(id)) {
+            seenIds.add(id);
+            prioritized.push(m);
+          }
+        }
+      }
+      return prioritized;
+    };
+
+    // Build explicit Call-Graph edges
+    let dynamicCallSites = 0;
+    for (const parsed of sortedParseResults) {
+      for (const fn of parsed.functions) {
+        const fromId = makeNodeId(fn);
+        for (const call of fn.callsMade) {
+          if (DYNAMIC_DISPATCH_PATTERN.test(call.callee)) {
+            dynamicCallSites += 1;
+            continue;
+          }
+          const targets = resolveTargetFunctions(fn, call);
+          for (const target of targets) {
+            const toId = makeNodeId(target);
+            const eKey = `${fromId}->${toId}@${call.lineNumber}`;
+            if (edgeDedup.has(eKey)) continue;
+            edgeDedup.add(eKey);
+            const argIndices: number[] = [];
+            call.argsText.forEach((argTxt, idx) => {
+              if (fn.params.some((p) => argTxt.includes(p)) || call.argIdentifiers.length > 0) {
+                argIndices.push(idx);
+              }
+            });
+            graphEdges.push({
+              fromNodeId: fromId,
+              toNodeId: toId,
+              callLine: call.lineNumber,
+              calleeText: call.callee,
+              argIndicesPropagated: argIndices,
+              isCrossFile: fn.filePath !== target.filePath,
+            });
+          }
         }
       }
     }
 
     const dedup = new Set<string>();
+    const incompleteDedup = new Set<string>();
+    let cyclesDetected = 0;
+    let truncatedPaths = 0;
+    let maxDepthObserved = 0;
 
-    const resolveDeepSink = (
-      fn: AstFunctionNode,
-      depth: number,
-      visited: Set<string>
-    ): {
+    const recordIncompletePath = (entry: TaintIncompletePath): void => {
+      const key = `${entry.reason}|${entry.filePath}|${entry.lineNumber}|${entry.calleeText}`;
+      if (incompleteDedup.has(key)) return;
+      incompleteDedup.add(key);
+      incompletePaths.push(entry);
+    };
+
+    /**
+     * Computes which sinks are neutralized inside `fn` for incoming parameter(s) before passing downstream.
+     */
+    const computeSanitizersAppliedInFunction = (fn: AstFunctionNode): Set<TaintSinkType> => {
+      const neutralized = new Set<TaintSinkType>();
+      for (const b of fn.variableBindings) {
+        if (b.isSanitized) {
+          for (const sink of getSanitizedSinksForContext(b.sanitizerContext)) {
+            neutralized.add(sink);
+          }
+        }
+      }
+      return neutralized;
+    };
+
+    interface DeepSinkResolution {
       targetFn: AstFunctionNode;
       sinkLine: number;
       sinkSnippet: string;
       sinkCwe: string;
       sinkType: TaintSinkType;
       sinkCallee: string;
+      hopDepth: number;
+      sanitizersEncountered: Set<TaintSinkType>;
       hopChain: Array<{ caller: AstFunctionNode; callLine: number; calleeText: string; snippet: string }>;
-    } | null => {
-      if (depth > 2) return null;
-      const visitKey = `${fn.filePath}:${fn.name}`;
-      if (visited.has(visitKey)) return null;
-      visited.add(visitKey);
+    }
+
+    const resolveDeepSink = (
+      fn: AstFunctionNode,
+      depth: number,
+      activeStack: Set<string>,
+      sanitizedSoFar: Set<TaintSinkType>,
+      budget: { visited: number }
+    ): DeepSinkResolution | null => {
+      if (depth > maxDepthObserved) maxDepthObserved = depth;
+
+      if (performance.now() - startedMs > maxTimeMs) {
+        truncatedPaths += 1;
+        recordIncompletePath({
+          reason: 'RESOURCE_BUDGET_EXCEEDED',
+          filePath: fn.filePath,
+          lineNumber: fn.startLine,
+          functionName: fn.name,
+          calleeText: fn.name,
+          confidenceImpact: 'INCONCLUSIVE',
+          explanation: `Orçamento de tempo (${maxTimeMs}ms) atingido durante rastreamento interprocedural em "${fn.name}".`,
+        });
+        return null;
+      }
+
+      if (budget.visited >= maxVisitedNodes) {
+        truncatedPaths += 1;
+        recordIncompletePath({
+          reason: 'RESOURCE_BUDGET_EXCEEDED',
+          filePath: fn.filePath,
+          lineNumber: fn.startLine,
+          functionName: fn.name,
+          calleeText: fn.name,
+          confidenceImpact: 'INCONCLUSIVE',
+          explanation: `Limite de nós visitados (${maxVisitedNodes}) atingido ao rastrear "${fn.name}".`,
+        });
+        return null;
+      }
+      budget.visited += 1;
+
+      const nodeId = makeNodeId(fn);
+      if (activeStack.has(nodeId)) {
+        cyclesDetected += 1;
+        recordIncompletePath({
+          reason: 'CYCLE_DETECTED',
+          filePath: fn.filePath,
+          lineNumber: fn.startLine,
+          functionName: fn.name,
+          calleeText: fn.name,
+          confidenceImpact: 'LOW',
+          explanation: `Ciclo recursivo detectado no grafo de chamadas ao revisitar "${fn.name}" (${fn.filePath}:${fn.startLine}); recursão encerrada com segurança.`,
+        });
+        return null;
+      }
+
+      if (depth > maxCallDepth) {
+        truncatedPaths += 1;
+        recordIncompletePath({
+          reason: 'MAX_DEPTH_REACHED',
+          filePath: fn.filePath,
+          lineNumber: fn.startLine,
+          functionName: fn.name,
+          calleeText: fn.name,
+          confidenceImpact: 'INCONCLUSIVE',
+          explanation: `Profundidade máxima configurada (${maxCallDepth} saltos) atingida em "${fn.name}". Fluxo truncado como INCONCLUSIVE.`,
+        });
+        return null;
+      }
+
+      const nextStack = new Set(activeStack);
+      nextStack.add(nodeId);
 
       const fileContent = filesMap[fn.filePath] || '';
       const safeSql = functionHasSafeSqlHandling(fn, fileContent);
       const safeSsrf = functionHasSafeSsrfGuard(fn, fileContent);
 
-      const directSinkCall = fn.callsMade.find((c) => {
+      // Accumulate sanitizers applied to variables inside this intermediate function
+      const combinedSanitized = new Set<TaintSinkType>(sanitizedSoFar);
+      const localSanitizers = computeSanitizersAppliedInFunction(fn);
+      // Only treat local sanitizer as neutralizing if variables actually bind params through it
+      const paramSet = new Set(fn.params);
+      const sanitizedVarNames = new Set<string>();
+      for (const b of fn.variableBindings) {
+        if (b.isSanitized && b.dependencies.some((d) => paramSet.has(d) || sanitizedVarNames.has(d))) {
+          sanitizedVarNames.add(b.varName);
+          for (const s of getSanitizedSinksForContext(b.sanitizerContext)) {
+            combinedSanitized.add(s);
+          }
+        }
+      }
+
+      // 1. Direct sink call inside `fn`
+      for (const c of fn.callsMade) {
         const rule = SINK_RULES.find((r) => matchesSinkRule(r, c.callee, c.calleeBase));
-        if (!rule) return false;
-        if (rule.sinkType === 'SQL_INJECTION' && safeSql) return false;
-        if (rule.sinkType === 'SSRF' && safeSsrf) return false;
-        return true;
-      });
-      if (directSinkCall) {
-        const rule = SINK_RULES.find((r) => matchesSinkRule(r, directSinkCall.callee, directSinkCall.calleeBase))!;
+        if (!rule) continue;
+        if (rule.sinkType === 'SQL_INJECTION' && safeSql) continue;
+        if (rule.sinkType === 'SSRF' && safeSsrf) continue;
+        if (combinedSanitized.has(rule.sinkType)) continue;
+        // Ensure a parameter or variable derived from parameters flows to the sink (if params exist)
+        const sinkUsesLocalOrParam =
+          fn.params.length === 0 ||
+          c.argIdentifiers.some(
+            (id) =>
+              paramSet.has(id) ||
+              fn.variableBindings.some((vb) => vb.varName === id)
+          );
+        if (!sinkUsesLocalOrParam) continue;
+
         return {
           targetFn: fn,
-          sinkLine: directSinkCall.lineNumber,
-          sinkSnippet: directSinkCall.snippet,
+          sinkLine: c.lineNumber,
+          sinkSnippet: c.snippet,
           sinkCwe: rule.cwe,
           sinkType: rule.sinkType,
-          sinkCallee: directSinkCall.callee,
+          sinkCallee: c.callee,
+          hopDepth: depth,
+          sanitizersEncountered: combinedSanitized,
           hopChain: [],
         };
       }
 
+      // 2. AST-detected SAST sink inside `fn`
       const astSastIssue = (astIssuesByFile.get(fn.filePath) || []).find(
         (iss) =>
           iss.category === 'SAST' &&
@@ -361,37 +725,55 @@ export class TaintAnalyzer {
                   : astSastIssue.cwe === 'CWE-918'
                     ? 'SSRF'
                     : 'SQL_INJECTION';
-        return {
-          targetFn: fn,
-          sinkLine: astSastIssue.lineNumber,
-          sinkSnippet: getLineSnippet(fn.filePath, astSastIssue.lineNumber),
-          sinkCwe: astSastIssue.cwe || 'CWE-89',
-          sinkType,
-          sinkCallee: astSastIssue.ruleId,
-          hopChain: [],
-        };
+        if (!combinedSanitized.has(sinkType)) {
+          return {
+            targetFn: fn,
+            sinkLine: astSastIssue.lineNumber,
+            sinkSnippet: getLineSnippet(fn.filePath, astSastIssue.lineNumber),
+            sinkCwe: astSastIssue.cwe || 'CWE-89',
+            sinkType,
+            sinkCallee: astSastIssue.ruleId,
+            hopDepth: depth,
+            sanitizersEncountered: combinedSanitized,
+            hopChain: [],
+          };
+        }
       }
 
-      if (depth < 2) {
-        for (const call of fn.callsMade) {
-          const nextName = call.calleeBase || call.callee;
-          const nextTargets = fnByName.get(nextName) || [];
-          for (const nextFn of nextTargets) {
-            const sub = resolveDeepSink(nextFn, depth + 1, new Set(visited));
-            if (sub) {
-              return {
-                ...sub,
-                hopChain: [
-                  {
-                    caller: fn,
-                    callLine: call.lineNumber,
-                    calleeText: call.callee,
-                    snippet: call.snippet,
-                  },
-                  ...sub.hopChain,
-                ],
-              };
+      // 3. Follow outgoing call-graph edges up to maxCallDepth
+      for (const call of fn.callsMade) {
+        if (DYNAMIC_DISPATCH_PATTERN.test(call.callee)) {
+          recordIncompletePath({
+            reason: 'DYNAMIC_CALL_DISPATCH',
+            filePath: call.filePath,
+            lineNumber: call.lineNumber,
+            functionName: fn.name,
+            calleeText: call.callee,
+            confidenceImpact: 'INCONCLUSIVE',
+            explanation: `Chamada dinâmica/indireta "${call.callee}" impede resolução estática exata do destino.`,
+          });
+          continue;
+        }
+        const nextTargets = resolveTargetFunctions(fn, call);
+        for (const nextFn of nextTargets) {
+          const sub = resolveDeepSink(nextFn, depth + 1, nextStack, combinedSanitized, budget);
+          if (sub) {
+            // Merge any sanitizers discovered locally
+            for (const s of localSanitizers) {
+              if (sanitizedVarNames.size > 0) sub.sanitizersEncountered.add(s);
             }
+            return {
+              ...sub,
+              hopChain: [
+                {
+                  caller: fn,
+                  callLine: call.lineNumber,
+                  calleeText: call.callee,
+                  snippet: call.snippet,
+                },
+                ...sub.hopChain,
+              ],
+            };
           }
         }
       }
@@ -402,7 +784,9 @@ export class TaintAnalyzer {
     for (const parsed of sortedParseResults) {
       const fileContent = filesMap[parsed.filePath] || '';
       const fileAstIssues = parsed.issues;
-      const sortedFns = [...parsed.functions].sort((a, b) => a.startLine - b.startLine || a.name.localeCompare(b.name));
+      const sortedFns = [...parsed.functions].sort(
+        (a, b) => a.startLine - b.startLine || a.name.localeCompare(b.name)
+      );
 
       for (const fn of sortedFns) {
         if (parsed.filePath.toLowerCase().includes('test')) continue;
@@ -482,6 +866,20 @@ export class TaintAnalyzer {
           if (!matchedArg) continue;
           const taint = taintedVars.get(matchedArg)!;
 
+          // Dynamic / indirect dispatch with tainted argument -> record INCONCLUSIVE incomplete path
+          if (DYNAMIC_DISPATCH_PATTERN.test(call.callee)) {
+            recordIncompletePath({
+              reason: 'DYNAMIC_CALL_DISPATCH',
+              filePath: call.filePath,
+              lineNumber: call.lineNumber,
+              functionName: fn.name,
+              calleeText: call.callee,
+              confidenceImpact: 'INCONCLUSIVE',
+              explanation: `Argumento contaminado "${matchedArg}" passado para despacho dinâmico "${call.callee}" — destino não resolúvel estaticamente.`,
+            });
+            continue;
+          }
+
           // Case A: Direct sink inside same function
           const sinkRule = SINK_RULES.find((r) => matchesSinkRule(r, call.callee, call.calleeBase));
           if (sinkRule) {
@@ -540,15 +938,37 @@ export class TaintAnalyzer {
             continue;
           }
 
-          // Case B: Interprocedural / Cross-file propagation (1 or 2 hops)
-          const calleeName = call.calleeBase || call.callee;
-          const targetFns = fnByName.get(calleeName) || [];
+          // Case B: Interprocedural / Cross-file call-graph propagation (up to maxCallDepth hops)
+          const targetFns = resolveTargetFunctions(fn, call);
           for (const targetFn of targetFns) {
-            if (targetFn.filePath === fn.filePath && targetFn.name === fn.name) continue;
+            if (targetFn.filePath === fn.filePath && targetFn.name === fn.name) {
+              cyclesDetected += 1;
+              recordIncompletePath({
+                reason: 'CYCLE_DETECTED',
+                filePath: call.filePath,
+                lineNumber: call.lineNumber,
+                functionName: fn.name,
+                calleeText: call.callee,
+                confidenceImpact: 'LOW',
+                explanation: `Auto-recursão direta detectada em "${fn.name}" (${call.filePath}:${call.lineNumber}).`,
+              });
+              continue;
+            }
 
-            const resolvedSink = resolveDeepSink(targetFn, 1, new Set([`${fn.filePath}:${fn.name}`]));
+            const resolvedSink = resolveDeepSink(
+              targetFn,
+              1,
+              new Set([makeNodeId(fn)]),
+              new Set(taint.sanitizedFor),
+              { visited: 0 }
+            );
             if (!resolvedSink) continue;
-            if (taint.sanitizedFor.has(resolvedSink.sinkType)) continue;
+            if (
+              taint.sanitizedFor.has(resolvedSink.sinkType) ||
+              resolvedSink.sanitizersEncountered.has(resolvedSink.sinkType)
+            ) {
+              continue;
+            }
 
             const ruleId =
               SINK_RULES.find((r) => r.sinkType === resolvedSink.sinkType)?.ruleId || 'taint:S3649';
@@ -602,9 +1022,12 @@ export class TaintAnalyzer {
                 symbolName: resolvedSink.sinkCallee,
                 codeSnippet: resolvedSink.sinkSnippet,
                 snippet: resolvedSink.sinkSnippet,
-                explanation: `Sink vulnerável executado em ${resolvedSink.targetFn.filePath}:${resolvedSink.sinkLine} (${resolvedSink.sinkCwe}).`,
+                explanation: `Sink vulnerável executado em ${resolvedSink.targetFn.filePath}:${resolvedSink.sinkLine} (${resolvedSink.sinkCwe}, profundidade=${resolvedSink.hopDepth} saltos).`,
               }
             );
+
+            // Calibrate confidence conservatively for deep multi-hop chains (> 4 hops)
+            const confidence: 'HIGH' | 'MEDIUM' = resolvedSink.hopDepth > 4 ? 'MEDIUM' : 'HIGH';
 
             taintIssues.push({
               ruleId,
@@ -618,7 +1041,7 @@ export class TaintAnalyzer {
                       : resolvedSink.sinkType === 'SSRF'
                         ? `SSRF interprocedural (${fn.name} → ${resolvedSink.targetFn.name})`
                         : `SQL Injection interprocedural (${fn.name} → ${resolvedSink.targetFn.name})`,
-              description: `Fluxo Source-to-Sink cross-file rastreado de ${taint.originFile}:${taint.originLine} até ${resolvedSink.targetFn.filePath}:${resolvedSink.sinkLine}.`,
+              description: `Fluxo Source-to-Sink cross-file (${resolvedSink.hopDepth} salto(s)) rastreado de ${taint.originFile}:${taint.originLine} até ${resolvedSink.targetFn.filePath}:${resolvedSink.sinkLine}.`,
               category: 'SAST',
               severity: resolvedSink.sinkType === 'XSS' ? 'HIGH' : 'BLOCKER',
               cwe: resolvedSink.sinkCwe,
@@ -630,7 +1053,7 @@ export class TaintAnalyzer {
                 SINK_RULES.find((r) => r.sinkType === resolvedSink.sinkType)?.remediation ||
                 'Aplicar validação e parametrização estrita antes do sink.',
               detectionMethod: 'TAINT_ANALYSIS',
-              confidence: 'HIGH',
+              confidence,
               effortMinutes: 35,
               executionFlows: flowSteps,
             });
@@ -715,6 +1138,27 @@ export class TaintAnalyzer {
       }
     }
 
-    return taintIssues;
+    const elapsedMs = Math.max(0, Math.round(performance.now() - startedMs));
+    return {
+      issues: taintIssues,
+      callGraph: {
+        nodes: graphNodes,
+        edges: graphEdges,
+        dynamicCallSites,
+        cyclesDetected,
+        truncatedPaths,
+      },
+      incompletePaths,
+      stats: {
+        maxDepthConfigured: maxCallDepth,
+        maxDepthObserved,
+        nodesCount: graphNodes.length,
+        edgesCount: graphEdges.length,
+        cyclesDetected,
+        truncatedPaths,
+        dynamicCallSites,
+        elapsedMs,
+      },
+    };
   }
 }

@@ -1,0 +1,110 @@
+{
+  "version": 3,
+  "envelopeVersion": "WINHOOD-ENVELOPE-V2",
+  "operatingMode": "DEVELOPMENT",
+  "monotonicSequence": 3,
+  "wrappedDek": {
+    "envelopeVersion": "WINHOOD-ENVELOPE-V2",
+    "kekMechanism": "HKDF_LOCAL_KEK_FILE",
+    "hkdfSaltHex": "1d98af00e791b64459abec297ad32820",
+    "hkdfInfo": "winhood:keystore:kek-envelope:v2",
+    "aesGcmWrappedDek": {
+      "alg": "AES-256-GCM",
+      "nonceHex": "f08d5a6b0d9975de7cc28318",
+      "authTagHex": "89e4e59b3ad9e40d3436ed0aa1a04d52",
+      "ciphertextHex": "4e03f6dbf00569d419862977b6ea0d552f5f09f6dae2582efdd1e9f8b25bcd697432b09840552149f2a96afe40c4024be3be6abef3820e0d5734466677aa55d9",
+      "aadContext": "winhood:dek:wrap:v2"
+    },
+    "createdAt": "2026-11-26T18:04:51.276Z",
+    "rotatedAt": null
+  },
+  "activeEvidenceKeyId": "wh-hmac-20261126-d4c50265",
+  "activeEd25519KeyId": "wh-ed25519-20261126-bbf2b832",
+  "activeVaultKeyId": "wh-vault-20261126-3a34a756",
+  "keysHex": {
+    "wh-hmac-20261126-d4c50265": {
+      "purpose": "EVIDENCE_HMAC",
+      "envelopeCipher": {
+        "alg": "AES-256-GCM",
+        "nonceHex": "e7b6f076d9c11b56b0385ae0",
+        "authTagHex": "d4fa50681cc80cabc904e8b244f0869e",
+        "ciphertextHex": "c2905d91f1a5a021b38600477d3e37c4b9c9c9000d363d51fe6e7bc62a3405580aea4c13d4826516ff8ec28c9ea4360bd6d8a6a0082b9d5a445c22b42f209130",
+        "aadContext": "winhood:key:wh-hmac-20261126-d4c50265:EVIDENCE_HMAC"
+      },
+      "createdAt": "2026-11-26T18:04:51.276Z",
+      "status": "ACTIVE",
+      "rotatedAt": null,
+      "revokedAt": null
+    },
+    "wh-vault-20261126-2d63f0ae": {
+      "purpose": "TOKEN_VAULT_AES256",
+      "envelopeCipher": {
+        "alg": "AES-256-GCM",
+        "nonceHex": "273ee1b0facf55e999dfb005",
+        "authTagHex": "6e6b024b5b7af15488d3de1156f69fe1",
+        "ciphertextHex": "880f2a29dbbf0fd4b85a143cbdaf53f893e1ffecacdb2b778e49d3138026c65279bf9bb74f8b5c8139fc28b29aaf9756d80016406ad1f5b0ed9e84f7a56d361d",
+        "aadContext": "winhood:key:wh-vault-20261126-2d63f0ae:TOKEN_VAULT_AES256"
+      },
+      "createdAt": "2026-11-26T18:04:51.276Z",
+      "status": "RETIRED_VERIFY_ONLY",
+      "rotatedAt": "2026-11-26T18:04:51.277Z",
+      "revokedAt": null
+    },
+    "wh-vault-20261126-3a34a756": {
+      "purpose": "TOKEN_VAULT_AES256",
+      "envelopeCipher": {
+        "alg": "AES-256-GCM",
+        "nonceHex": "985c530c5561a67f9b216ca4",
+        "authTagHex": "ea5517ad191aa614b048c28e4987bac5",
+        "ciphertextHex": "9211913e6af69a319ee47596894192f9c76bff632567f30de40be7d35ae7e07c052388de9417962160ca727e920d4da889ac4806532d4a534959dc46de39ac0f",
+        "aadContext": "winhood:key:wh-vault-20261126-3a34a756:TOKEN_VAULT_AES256"
+      },
+      "createdAt": "2026-11-26T18:04:51.277Z",
+      "status": "ACTIVE",
+      "rotatedAt": null,
+      "revokedAt": null
+    }
+  },
+  "ed25519Keys": {
+    "wh-ed25519-20261126-bbf2b832": {
+      "purpose": "EVIDENCE_ED25519",
+      "privateKeyEnvelope": {
+        "alg": "AES-256-GCM",
+        "nonceHex": "d6cacfc8ce1ea7b00375d8df",
+        "authTagHex": "ffa9befe4ca24a71a18d0a52856ba048",
+        "ciphertextHex": "d9698b27017f4a2e272aa555484f0419aa9016be0f6aa13e891fb404beb0ef3b1d0c15865437b7a674ba3894875ac0df027961f13df3b0ce712f07c508703b9e61b1d8eee079de4f08fa8aea5becc23eec3d196fb05d558f2fe23d034a9d9504b2810e2f006b6c0533a696445a840a6fb986c71c2d9905",
+        "aadContext": "winhood:key:wh-ed25519-20261126-bbf2b832:EVIDENCE_ED25519"
+      },
+      "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA102Bp2NWYNB0Cg9kgifCS/9g6m6K4x/bm6O2qNqjbDA=\n-----END PUBLIC KEY-----\n",
+      "createdAt": "2026-11-26T18:04:51.276Z",
+      "validFrom": "2026-11-26T18:04:51.276Z",
+      "validUntil": null,
+      "status": "ACTIVE",
+      "rotatedAt": null,
+      "revokedAt": null
+    }
+  },
+  "trustedPublicKeys": {
+    "wh-ed25519-20261126-bbf2b832": {
+      "keyId": "wh-ed25519-20261126-bbf2b832",
+      "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA102Bp2NWYNB0Cg9kgifCS/9g6m6K4x/bm6O2qNqjbDA=\n-----END PUBLIC KEY-----\n",
+      "fingerprintSha256": "f744d604eb0405ebd9ff6b76959a252f15b67e3a161c182c1e841366eddc8f68",
+      "validFrom": "2026-11-26T18:04:51.276Z",
+      "validUntil": null,
+      "revokedAt": null,
+      "revocationReason": null,
+      "status": "ACTIVE"
+    }
+  },
+  "rotationHistory": [
+    {
+      "timestamp": "2026-11-26T18:04:51.277Z",
+      "purpose": "TOKEN_VAULT_AES256",
+      "previousKeyId": "wh-vault-20261126-2d63f0ae",
+      "newKeyId": "wh-vault-20261126-3a34a756",
+      "reason": "Rotação criptográfica de chave TOKEN_VAULT_AES256 sob DEK Envelope V2",
+      "monotonicSequence": 3
+    }
+  ],
+  "adminTokenSha256": null
+}

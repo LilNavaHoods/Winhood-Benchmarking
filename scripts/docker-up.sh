@@ -35,18 +35,20 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 if [[ ! -f "${ENV_FILE}" ]]; then
-  echo "[WinHood Docker] Gerando ${ENV_FILE} com segredo mestre criptográfico (32 bytes)..."
+  echo "[WinHood Docker] Gerando ${ENV_FILE} com segredos criptográficos de alta entropia (32 bytes)..."
   SECRET="$(generate_secret_hex32)"
+  WORKER_TOKEN="$(generate_secret_hex32)"
   umask 077
   cat > "${ENV_FILE}" <<EOF
 WINHOOD_PORT=3000
 WINHOOD_KEYSTORE_MASTER_SECRET=${SECRET}
+WINHOOD_SCANNER_WORKER_TOKEN=${WORKER_TOKEN}
 WINHOOD_SONAR_DOCKER_IMAGE=sonarqube:25.1.0.102122-community
 EOF
   chmod 600 "${ENV_FILE}"
 fi
 
-# Carrega variáveis do .env.docker sem expor o segredo no log
+# Carrega variáveis do .env.docker sem expor segredos no log
 WINHOOD_PORT_VALUE="$(grep -E '^WINHOOD_PORT=' "${ENV_FILE}" | tail -n 1 | cut -d'=' -f2- | tr -d '\r' || true)"
 WINHOOD_PORT_VALUE="${WINHOOD_PORT_VALUE:-3000}"
 
@@ -54,6 +56,15 @@ SECRET_VALUE="$(grep -E '^WINHOOD_KEYSTORE_MASTER_SECRET=' "${ENV_FILE}" | tail 
 if [[ ${#SECRET_VALUE} -lt 32 ]]; then
   echo "[WinHood Docker] Erro: WINHOOD_KEYSTORE_MASTER_SECRET em .env.docker deve ter no mínimo 32 caracteres." >&2
   exit 1
+fi
+
+WORKER_TOKEN_VALUE="$(grep -E '^WINHOOD_SCANNER_WORKER_TOKEN=' "${ENV_FILE}" | tail -n 1 | cut -d'=' -f2- | tr -d '\r' || true)"
+if [[ ${#WORKER_TOKEN_VALUE} -lt 32 ]]; then
+  echo "[WinHood Docker] Adicionando WINHOOD_SCANNER_WORKER_TOKEN (>= 32 bytes) em ${ENV_FILE}..."
+  WORKER_TOKEN_VALUE="$(generate_secret_hex32)"
+  umask 077
+  printf '\nWINHOOD_SCANNER_WORKER_TOKEN=%s\n' "${WORKER_TOKEN_VALUE}" >> "${ENV_FILE}"
+  chmod 600 "${ENV_FILE}"
 fi
 
 COMPOSE_ARGS=(--env-file "${ENV_FILE}")

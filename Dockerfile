@@ -1,9 +1,10 @@
 # syntax=docker/dockerfile:1.7
 
 # ==============================================================================
-# Stage 1 — Builder (compila frontend Vite dist/ e backend ESM dist-server/)
+# Stage 1 — Builder (compila frontend Vite dist/ e backend/worker ESM dist-server/)
+# Versão de imagem base fixada explicitamente (sem tags mutáveis)
 # ==============================================================================
-FROM node:22-bookworm-slim AS builder
+FROM node:22.14.0-bookworm-slim AS builder
 
 WORKDIR /app
 
@@ -20,12 +21,13 @@ RUN npm run check:browser-imports \
   && npm run build \
   && npm run build:server \
   && test -s dist/index.html \
-  && test -s dist-server/server.mjs
+  && test -s dist-server/server.mjs \
+  && test -s dist-server/scanner-worker.mjs
 
 # ==============================================================================
 # Stage 2 — Production Dependencies (somente runtime, sem devDependencies)
 # ==============================================================================
-FROM node:22-bookworm-slim AS deps
+FROM node:22.14.0-bookworm-slim AS deps
 
 WORKDIR /app
 
@@ -34,18 +36,18 @@ RUN npm ci --omit=dev --ignore-scripts \
   && npm cache clean --force
 
 # ==============================================================================
-# Stage 3 — Runtime Endurecido (não-root, Local-Web, persistência /data/winhood)
+# Stage 3 — Runtime Endurecido (não-root, Local-Web, volume criptografado /data/winhood)
 # ==============================================================================
-FROM node:22-bookworm-slim AS runtime
+FROM node:22.14.0-bookworm-slim AS runtime
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates git \
   && rm -rf /var/lib/apt/lists/* \
   && groupadd --gid 1001 winhood \
   && useradd --uid 1001 --gid 1001 --create-home --shell /usr/sbin/nologin winhood \
-  && mkdir -p /data/winhood/database /data/winhood/security /data/winhood/keys /data/winhood/reports /data/winhood/sonar /data/winhood/cache /data/winhood/logs /data/winhood/isolated_artifacts /data/winhood/tools \
-  && chown -R winhood:winhood /data/winhood \
-  && chmod 700 /data/winhood
+  && mkdir -p /data/winhood/database /data/winhood/security /data/winhood/keys /data/winhood/reports /data/winhood/sonar /data/winhood/cache /data/winhood/logs /data/winhood/isolated_artifacts /data/winhood/tools /data/winhood/scanner_jobs /tmp/winhood-workspaces \
+  && chown -R winhood:winhood /data/winhood /tmp/winhood-workspaces \
+  && chmod 700 /data/winhood /tmp/winhood-workspaces
 
 WORKDIR /app
 
@@ -60,7 +62,8 @@ ENV NODE_ENV=production \
     WINHOOD_RUNTIME_ENV=DOCKER_LOCAL_WEB \
     WINHOOD_ALLOW_NETWORK_BIND=true \
     WINHOOD_BIND_HOST=0.0.0.0 \
-    WINHOOD_DATA_DIR=/data/winhood
+    WINHOOD_DATA_DIR=/data/winhood \
+    WINHOOD_TEMP_WORKSPACE_DIR=/tmp/winhood-workspaces
 
 USER winhood
 

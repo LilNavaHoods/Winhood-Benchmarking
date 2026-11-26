@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import type { RuleDefinition, RulePackMetadata, SupportedAstLanguage } from './types';
 
 export const RULE_ENGINE_VERSION = '4.3.0';
+export const RULE_CATALOG_VERSION = '4.4.0';
 
 export const BUILTIN_RULES: RuleDefinition[] = [
   {
@@ -609,6 +610,17 @@ export const BUILTIN_RULES: RuleDefinition[] = [
   },
 ];
 
+export interface RuleGovernanceMetadata {
+  ruleId: string;
+  catalogVersion: string;
+  ruleVersion: string;
+  ruleOrigin: 'WINHOOD_NATIVE_AST' | 'WINHOOD_TAINT_CALLGRAPH' | 'WINHOOD_STRUCTURAL_RULE' | 'WINHOOD_IAC_RULE' | 'WINHOOD_SCA_RULE';
+  defaultConfidence: 'HIGH' | 'MEDIUM';
+  detectionConditions: string;
+  suppressionConditions: string[];
+  limitations: string[];
+}
+
 export class RuleRegistry {
   public static getAllRules(): RuleDefinition[] {
     return BUILTIN_RULES;
@@ -622,6 +634,47 @@ export class RuleRegistry {
     return BUILTIN_RULES.find((r) => r.ruleId === ruleId);
   }
 
+  public static getRuleGovernanceMetadata(ruleId: string): RuleGovernanceMetadata | null {
+    const rule = RuleRegistry.findRule(ruleId);
+    if (!rule) return null;
+    const ruleOrigin: RuleGovernanceMetadata['ruleOrigin'] =
+      rule.packId === 'winhood-taint-core'
+        ? 'WINHOOD_TAINT_CALLGRAPH'
+        : rule.packId === 'winhood-iac-core'
+          ? 'WINHOOD_IAC_RULE'
+          : rule.packId === 'winhood-sca-core'
+            ? 'WINHOOD_SCA_RULE'
+            : rule.requiresAst
+              ? 'WINHOOD_NATIVE_AST'
+              : 'WINHOOD_STRUCTURAL_RULE';
+
+    const detectionConditions =
+      ruleOrigin === 'WINHOOD_TAINT_CALLGRAPH'
+        ? `Propagação rastreada no grafo de chamadas de entrada não confiável até sink compatível (${rule.cwe}).`
+        : rule.requiresAst
+          ? `Padrão estrutural identificado diretamente na árvore AST (${rule.languages.join(', ')}).`
+          : `Regra estrutural/manifesto aplicada sobre artefatos elegíveis (${rule.languages.join(', ')}).`;
+
+    return {
+      ruleId: rule.ruleId,
+      catalogVersion: RULE_CATALOG_VERSION,
+      ruleVersion: rule.version,
+      ruleOrigin,
+      defaultConfidence: rule.requiresAst ? 'HIGH' : 'MEDIUM',
+      detectionConditions,
+      suppressionConditions: [
+        'Comentário explícito // NOSONAR ou /* NOSONAR */ na linha do achado (quando suportado pela regra).',
+        'Sanitização comprovada compatível com o contexto do sink (ex.: Prepared Statement para SQLi, escapeHtml para XSS, path.basename para Path Traversal).',
+        'Decisão de triagem auditada (FALSE_POSITIVE_REVIEWED ou ACCEPTED_RISK) registrada no ciclo de vida do achado.',
+      ],
+      limitations: rule.languages.some((l) => l !== 'TypeScript' && l !== 'JavaScript')
+        ? [
+            'Em linguagens fora de TypeScript/JavaScript, o motor embarcado usa parser estrutural por tokens (não compilador completo da linguagem).',
+          ]
+        : ['Sem resolução de tipos cross-package de dependências compiladas em node_modules.'],
+    };
+  }
+
   public static getCatalogSnapshot() {
     const packs = RulePackVersionManager.listRulePacks();
     const checksumSha256 = crypto
@@ -631,6 +684,7 @@ export class RuleRegistry {
 
     return {
       engineVersion: RULE_ENGINE_VERSION,
+      catalogVersion: RULE_CATALOG_VERSION,
       semverPolicy: 'MAJOR breaking rule removals/reclassifications | MINOR new rules | PATCH FP tuning',
       totalRules: BUILTIN_RULES.length,
       catalogSha256: checksumSha256,

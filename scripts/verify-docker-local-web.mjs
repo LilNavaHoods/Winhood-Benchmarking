@@ -173,24 +173,36 @@ function spawnProductionServer({ bundlePath, port, dataDir, masterSecret }) {
       WINHOOD_DATA_DIR: dataDir,
       WINHOOD_KEYSTORE_MASTER_SECRET: masterSecret,
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
 }
 
 async function stopProcessGracefully(child) {
-  if (!child || child.exitCode !== null) return child?.exitCode ?? 0;
+  if (!child || child.exitCode !== null) {
+    return { exitCode: child?.exitCode ?? 0, signal: child?.signalCode ?? null, timedOut: false };
+  }
   const exitPromise = new Promise((resolve) => {
-    child.once('exit', (code) => resolve(code));
+    child.once('exit', (code, signal) => resolve({ exitCode: code, signal: signal ?? null, timedOut: false }));
   });
-  child.kill('SIGTERM');
-  const code = await Promise.race([
+
+  // On Windows, SIGTERM maps to TerminateProcess (exitCode === null). Use IPC graceful shutdown
+  // channel when available on Windows so the server runs onBeforeClose/onAfterClose and exits 0.
+  if (process.platform === 'win32' && typeof child.send === 'function' && child.connected) {
+    child.send({ type: 'WINHOOD_GRACEFUL_SHUTDOWN', reason: 'VERIFY_SCRIPT_RESTART' });
+  } else {
+    child.kill('SIGTERM');
+  }
+
+  const outcome = await Promise.race([
     exitPromise,
-    new Promise((resolve) => setTimeout(() => resolve(-1), 6000)),
+    new Promise((resolve) =>
+      setTimeout(() => resolve({ exitCode: null, signal: null, timedOut: true }), 8000)
+    ),
   ]);
   if (child.exitCode === null) {
     child.kill('SIGKILL');
   }
-  return code;
+  return outcome;
 }
 
 async function runVerification() {
@@ -466,11 +478,34 @@ async function runVerification() {
       `run=${run.id} (${run.status}), jsonSha256=${jsonExportSha256.slice(0, 12)}, sarifSha256=${sarifSha256.slice(0, 12)}, sbomSha256=${String(sbomJson.documentSha256).slice(0, 12)}`
     );
 
+    // 6b. Verify encrypted-only storage at rest (zero plaintext source files under isolated_artifacts)
+    const plaintextAuditRes = await fetch(`${baseUrl}/api/storage/plaintext-audit`);
+    assert.equal(plaintextAuditRes.status, 200);
+    const plaintextAudit = await plaintextAuditRes.json();
+    assert.equal(
+      plaintextAudit.clean,
+      true,
+      `Plaintext source files detected in persistent storage: ${JSON.stringify(plaintextAudit.plaintextFilePaths)}`
+    );
+    assert.ok(
+      plaintextAudit.encryptedBundleCount >= 2,
+      'Encrypted vault_bundle.whenc bundles must exist for ingested softwares'
+    );
+    record(
+      'Encrypted-Only Persistent Storage',
+      `clean=${plaintextAudit.clean}, encryptedBundles=${plaintextAudit.encryptedBundleCount}, plaintextFiles=0`
+    );
+
     // 7. Persistence across restart
     if (opts.checkRestart) {
       if (opts.selfHosted) {
-        const exitCode = await stopProcessGracefully(selfHostedChild);
-        assert.equal(exitCode, 0, 'Self-hosted production server must exit 0 on SIGTERM');
+        const shutdownOutcome = await stopProcessGracefully(selfHostedChild);
+        assert.equal(shutdownOutcome.timedOut, false, 'Self-hosted production server shutdown must not time out');
+        assert.equal(
+          shutdownOutcome.exitCode,
+          0,
+          `Self-hosted production server must exit 0 gracefully (got code=${shutdownOutcome.exitCode}, signal=${shutdownOutcome.signal})`
+        );
         selfHostedChild = spawnProductionServer({
           bundlePath,
           port: selfHostedPort,

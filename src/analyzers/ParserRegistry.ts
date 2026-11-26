@@ -211,74 +211,131 @@ export class ParserRegistry {
     language: SupportedAstLanguage;
     parserKind: 'BABEL_AST' | 'STRUCTURAL_PARSER';
     analyticalDepth: 'FULL_AST' | 'STRUCTURAL_AST';
+    analysisModeKinds: Array<
+      | 'FULL_AST'
+      | 'STRUCTURAL_AST'
+      | 'LEXICAL'
+      | 'RULE_BASED'
+      | 'INTERPROCEDURAL'
+      | 'INTRAPROCEDURAL'
+      | 'NOT_EXECUTED'
+    >;
+    taintScope: 'INTERPROCEDURAL' | 'INTRAPROCEDURAL' | 'NONE';
     parserEngine: string;
     supportsCrossFileTaint: boolean;
     supportsFullSyntaxTree: boolean;
+    limitations: string[];
   }> {
     return [
       {
         language: 'TypeScript',
         parserKind: 'BABEL_AST',
         analyticalDepth: 'FULL_AST',
+        analysisModeKinds: ['FULL_AST', 'INTERPROCEDURAL', 'INTRAPROCEDURAL', 'RULE_BASED'],
+        taintScope: 'INTERPROCEDURAL',
         parserEngine: '@babel/parser',
         supportsCrossFileTaint: true,
         supportsFullSyntaxTree: true,
+        limitations: [
+          'Resolução de chamadas dinâmicas (bracket dispatch, Reflection, eval) é sinalizada como caminho incompleto / confiança reduzida.',
+          'Sem compilação de projeto completo (tsc type-checker cross-package); tipos inferidos de dependências externas em node_modules não são resolvidos.',
+        ],
       },
       {
         language: 'JavaScript',
         parserKind: 'BABEL_AST',
         analyticalDepth: 'FULL_AST',
+        analysisModeKinds: ['FULL_AST', 'INTERPROCEDURAL', 'INTRAPROCEDURAL', 'RULE_BASED'],
+        taintScope: 'INTERPROCEDURAL',
         parserEngine: '@babel/parser',
         supportsCrossFileTaint: true,
         supportsFullSyntaxTree: true,
+        limitations: [
+          'Despacho dinâmico em protótipos ou objetos mutados em runtime é sinalizado como caminho incompleto / confiança reduzida.',
+          'Análise sensível a caminho completo (path-sensitive symbolic execution) não é executada nativamente.',
+        ],
       },
       {
         language: 'Python',
         parserKind: 'STRUCTURAL_PARSER',
         analyticalDepth: 'STRUCTURAL_AST',
+        analysisModeKinds: ['STRUCTURAL_AST', 'LEXICAL', 'INTERPROCEDURAL', 'RULE_BASED'],
+        taintScope: 'INTERPROCEDURAL',
         parserEngine: 'winhood-python-token-ast-v1',
         supportsCrossFileTaint: true,
         supportsFullSyntaxTree: false,
+        limitations: [
+          'Parser estrutural baseado em tokens/indentação (não utiliza AST completo do interpretador CPython).',
+          'Metaprogramação, decorators complexos e atribuições dinâmicas requerem analisador externo isolado (Ruff/Bandit/Semgrep) no scanner worker.',
+        ],
       },
       {
         language: 'Java',
         parserKind: 'STRUCTURAL_PARSER',
         analyticalDepth: 'STRUCTURAL_AST',
+        analysisModeKinds: ['STRUCTURAL_AST', 'LEXICAL', 'INTERPROCEDURAL', 'RULE_BASED'],
+        taintScope: 'INTERPROCEDURAL',
         parserEngine: 'winhood-java-token-ast-v1',
         supportsCrossFileTaint: true,
         supportsFullSyntaxTree: false,
+        limitations: [
+          'Parser estrutural baseado em tokens/blocos (sem resolução de bytecode javac ou hierarquia completa de herança/DI Spring).',
+          'Para cobertura semântica completa de bytecode, utilize SpotBugs/Semgrep/CodeQL no worker isolado.',
+        ],
       },
       {
         language: 'C#',
         parserKind: 'STRUCTURAL_PARSER',
         analyticalDepth: 'STRUCTURAL_AST',
+        analysisModeKinds: ['STRUCTURAL_AST', 'LEXICAL', 'INTERPROCEDURAL', 'RULE_BASED'],
+        taintScope: 'INTERPROCEDURAL',
         parserEngine: 'winhood-csharp-token-ast-v1',
         supportsCrossFileTaint: true,
         supportsFullSyntaxTree: false,
+        limitations: [
+          'Parser estrutural baseado em tokens/blocos (sem compilação Roslyn/MSBuild nativa no motor embarcado).',
+          'Resolução semântica de LINQ/EF Core e injeção de dependência ASP.NET requer Roslyn Analyzers ou Semgrep no worker isolado.',
+        ],
       },
       {
         language: 'Go',
         parserKind: 'STRUCTURAL_PARSER',
         analyticalDepth: 'STRUCTURAL_AST',
+        analysisModeKinds: ['STRUCTURAL_AST', 'LEXICAL', 'INTERPROCEDURAL', 'RULE_BASED'],
+        taintScope: 'INTERPROCEDURAL',
         parserEngine: 'winhood-go-token-ast-v1',
         supportsCrossFileTaint: true,
         supportsFullSyntaxTree: false,
+        limitations: [
+          'Parser estrutural baseado em tokens/blocos (sem go/types ou análise de canais/goroutines em SSA).',
+        ],
       },
       {
         language: 'Rust',
         parserKind: 'STRUCTURAL_PARSER',
         analyticalDepth: 'STRUCTURAL_AST',
+        analysisModeKinds: ['STRUCTURAL_AST', 'LEXICAL', 'INTRAPROCEDURAL', 'RULE_BASED'],
+        taintScope: 'INTRAPROCEDURAL',
         parserEngine: 'winhood-rust-token-ast-v1',
-        supportsCrossFileTaint: true,
+        supportsCrossFileTaint: false,
         supportsFullSyntaxTree: false,
+        limitations: [
+          'Parser estrutural baseado em tokens/blocos (sem rustc/MIR/borrow-checker ou expansão de macros procedurais).',
+          'Foco em blocos unsafe, FFI e padrões estruturais explícitos.',
+        ],
       },
       {
         language: 'SQL',
         parserKind: 'STRUCTURAL_PARSER',
         analyticalDepth: 'STRUCTURAL_AST',
+        analysisModeKinds: ['LEXICAL', 'RULE_BASED'],
+        taintScope: 'NONE',
         parserEngine: 'winhood-sql-token-ast-v1',
         supportsCrossFileTaint: false,
         supportsFullSyntaxTree: false,
+        limitations: [
+          'Análise léxica e baseada em regras para DDL/DML e esquema (sem plano de execução ou dialeto completo de stored procedures).',
+        ],
       },
     ];
   }
@@ -471,6 +528,9 @@ export class ParserRegistry {
         const obj = getCalleeText(expr.object);
         const prop =
           expr.property?.name || expr.property?.value || getSourceText(expr.property);
+        if (expr.computed) {
+          return obj ? `${obj}[${prop}]` : `[${prop}]`;
+        }
         return obj ? `${obj}.${prop}` : String(prop || '');
       }
       return getSourceText(expr);

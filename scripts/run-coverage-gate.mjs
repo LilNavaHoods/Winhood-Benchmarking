@@ -79,6 +79,7 @@ const testFiles = [
   'src/intelligence/intelligence.test.ts',
   'src/security/security.test.ts',
   'src/security/backendHardening.test.ts',
+  'src/security/remediationP0P1.test.ts',
   'src/integrations/mqr-bridge/mqrMethodology.test.ts',
   'src/desktop/desktop.test.ts',
   'src/utils/securityFindingsFilter.test.ts',

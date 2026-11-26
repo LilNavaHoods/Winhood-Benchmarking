@@ -32,12 +32,37 @@ jobs:
       - name: Install dependencies deterministically
         run: npm ci --ignore-scripts
 
+      - name: Verify strict TypeScript, ESLint and production builds
+        run: |
+          npm run check:browser-imports
+          npm run typecheck
+          npm run lint
+          npm run build
+          npm run build:server
+          test -s dist/index.html
+          test -s dist-server/server.mjs
+          test -s dist-server/scanner-worker.mjs
+
       - name: Run coverage suite and verify non-empty LCOV artifact
         run: |
           npm run test:coverage
           test -s coverage/lcov.info
+          grep -q "^SF:" coverage/lcov.info
+
+      - name: Check SonarCloud token availability (fail-transparent, never claim pass when absent)
+        id: sonar_check
+        env:
+          SONAR_TOKEN_VALUE: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          if [ -n "$SONAR_TOKEN_VALUE" ]; then
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+            echo "SonarCloud scan skipped: SONAR_TOKEN secret is not configured for this trigger (e.g., fork PR). Quality Gate status: NOT_EXECUTED." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Run SonarCloud Scanner
+        if: steps.sonar_check.outputs.has_token == 'true'
         uses: SonarSource/sonarqube-scan-action@70bad232163b09d998ea0707ee80c0ec80798c16 # v8.5.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -50,6 +75,7 @@ jobs:
             -Dsonar.typescript.lcov.reportPaths=coverage/lcov.info
 
       - name: Enforce SonarCloud Quality Gate
+        if: steps.sonar_check.outputs.has_token == 'true'
         uses: SonarSource/sonarqube-quality-gate-action@7a5fffe8e523c40e0c740b6bc2712ab503e52efa # v1.2.1
         timeout-minutes: 5
         env:

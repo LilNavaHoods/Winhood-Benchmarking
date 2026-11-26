@@ -221,6 +221,9 @@ export function buildVerifiableEvidenceChain(params: {
   return evidenceChain;
 }
 
+export const DEFAULT_CRYPTOGRAPHIC_SCOPE_DISCLAIMER =
+  'A assinatura criptográfica (HMAC-SHA256 + Ed25519) comprova integridade contra adulteração e rastreabilidade dos insumos e saídas registrados nesta execução. Ela NÃO constitui certificação de ausência de vulnerabilidades nem equivalência a testes em ambiente produtivo real.';
+
 interface ManifestExtendedGovernance {
   engineVersion?: string;
   rulePackVersions?: Record<string, string>;
@@ -229,6 +232,7 @@ interface ManifestExtendedGovernance {
   gateDecision?: string;
   gateVersion?: string;
   gateHash?: string;
+  provenanceMetadata?: SignedEvidenceManifest['provenanceMetadata'];
 }
 
 function normalizeExtendedGovernance(ext?: ManifestExtendedGovernance): Record<string, unknown> | null {
@@ -240,7 +244,8 @@ function normalizeExtendedGovernance(ext?: ManifestExtendedGovernance): Record<s
       ext.artifactHashes ||
       ext.gateDecision ||
       ext.gateVersion ||
-      ext.gateHash
+      ext.gateHash ||
+      ext.provenanceMetadata
   );
   if (!hasAny) return null;
 
@@ -257,6 +262,7 @@ function normalizeExtendedGovernance(ext?: ManifestExtendedGovernance): Record<s
     gateDecision: ext.gateDecision || null,
     gateVersion: ext.gateVersion || null,
     gateHash: ext.gateHash || null,
+    ...(ext.provenanceMetadata ? { provenanceMetadata: ext.provenanceMetadata } : {}),
   };
 }
 
@@ -339,6 +345,10 @@ export function signEvidenceManifestHmacSha256(params: {
   gateDecision?: string;
   gateVersion?: string;
   gateHash?: string;
+  provenanceMetadata?: Omit<
+    NonNullable<SignedEvidenceManifest['provenanceMetadata']>,
+    'cryptographicScopeDisclaimer'
+  > & { cryptographicScopeDisclaimer?: string };
 }): SignedEvidenceManifest {
   const activeKey = KeyManagementService.getActiveEvidenceHmacKey();
   const {
@@ -356,7 +366,16 @@ export function signEvidenceManifestHmacSha256(params: {
     gateDecision,
     gateVersion,
     gateHash,
+    provenanceMetadata: rawProvenance,
   } = params;
+
+  const normalizedProvenance: SignedEvidenceManifest['provenanceMetadata'] = rawProvenance
+    ? {
+        ...rawProvenance,
+        cryptographicScopeDisclaimer:
+          rawProvenance.cryptographicScopeDisclaimer || DEFAULT_CRYPTOGRAPHIC_SCOPE_DISCLAIMER,
+      }
+    : undefined;
 
   const extendedGovernance: ManifestExtendedGovernance = {
     engineVersion,
@@ -366,6 +385,7 @@ export function signEvidenceManifestHmacSha256(params: {
     gateDecision,
     gateVersion,
     gateHash,
+    provenanceMetadata: normalizedProvenance,
   };
 
   const {
@@ -414,6 +434,7 @@ export function signEvidenceManifestHmacSha256(params: {
     ...(gateDecision ? { gateDecision } : {}),
     ...(gateVersion ? { gateVersion } : {}),
     ...(gateHash ? { gateHash } : {}),
+    ...(normalizedProvenance ? { provenanceMetadata: normalizedProvenance } : {}),
     digitalSignatureHmacSha256,
     hmacSignature: digitalSignatureHmacSha256,
     ed25519Signature,
@@ -536,6 +557,7 @@ export function verifyEvidenceChainAndManifest(
         gateDecision: signedManifest.gateDecision,
         gateVersion: signedManifest.gateVersion,
         gateHash: signedManifest.gateHash,
+        provenanceMetadata: signedManifest.provenanceMetadata,
       },
     });
 

@@ -84,11 +84,20 @@ jobs:
         id: lint
         run: npm run lint
 
-      - name: Build production frontend bundle (Vite + browser-safe import gate)
+      - name: Build production frontend, standalone server & isolated scanner worker bundles
         id: build
         run: |
           npm run build
-          test -f dist/index.html
+          npm run build:server
+          test -s dist/index.html
+          test -s dist-server/server.mjs
+          test -s dist-server/scanner-worker.mjs
+          node scripts/verify-docker-local-web.mjs --self-hosted
+          if command -v docker >/dev/null 2>&1; then
+            WINHOOD_KEYSTORE_MASTER_SECRET=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+            WINHOOD_SCANNER_WORKER_TOKEN=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 \
+            docker compose --env-file .env.docker.example config -q
+          fi
 
       - name: Run Benchmark Wizard & A/B full-stack E2E tests
         id: wizard_tests

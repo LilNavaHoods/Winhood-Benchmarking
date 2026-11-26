@@ -11,6 +11,14 @@ services:
       - "127.0.0.1:${WINHOOD_PORT:-3000}:3000"
     volumes:
       - winhood_data:/data/winhood
+    tmpfs:
+      - /tmp/winhood-workspaces:rw,noexec,nosuid,size=512m
+    networks:
+      - winhood_public
+      - winhood_scanner_internal
+    depends_on:
+      winhood-scanner-worker:
+        condition: service_healthy
     env_file:
       - path: .env.docker
         required: false
@@ -22,12 +30,48 @@ services:
       WINHOOD_ALLOW_NETWORK_BIND: "true"
       WINHOOD_BIND_HOST: 0.0.0.0
       WINHOOD_DATA_DIR: /data/winhood
+      WINHOOD_TEMP_WORKSPACE_DIR: /tmp/winhood-workspaces
       WINHOOD_PORT: "${WINHOOD_PORT:-3000}"
       WINHOOD_KEYSTORE_MASTER_SECRET: "${WINHOOD_KEYSTORE_MASTER_SECRET:?Defina WINHOOD_KEYSTORE_MASTER_SECRET (>= 32 bytes) em .env.docker e execute ./scripts/docker-up.sh ou docker compose --env-file .env.docker up -d --build}"
+      WINHOOD_SCANNER_WORKER_URL: "http://winhood-scanner-worker:4100"
+      WINHOOD_SCANNER_WORKER_TOKEN: "${WINHOOD_SCANNER_WORKER_TOKEN:?Defina WINHOOD_SCANNER_WORKER_TOKEN (>= 32 bytes) em .env.docker}"
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 2048m
+
+  winhood-scanner-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.scanner-worker
+    image: winhood-scanner-worker:4.4.0
+    container_name: winhood-scanner-worker
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+      - /tmp/winhood-workspaces:rw,noexec,nosuid,size=512m
+    networks:
+      - winhood_scanner_internal
+    env_file:
+      - path: .env.docker
+        required: false
+    environment:
+      NODE_ENV: production
+      WINHOOD_SCANNER_WORKER_HOST: 0.0.0.0
+      WINHOOD_SCANNER_WORKER_PORT: "4100"
+      WINHOOD_TEMP_WORKSPACE_DIR: /tmp/winhood-workspaces
+      WINHOOD_SCANNER_WORKER_TOKEN: "${WINHOOD_SCANNER_WORKER_TOKEN:?Defina WINHOOD_SCANNER_WORKER_TOKEN (>= 32 bytes) em .env.docker}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 1536m
+    cpus: "2.0"
 
   sonar-local:
     profiles:
@@ -38,6 +82,8 @@ services:
     init: true
     ports:
       - "127.0.0.1:9000:9000"
+    networks:
+      - winhood_public
     environment:
       SONAR_ES_BOOTSTRAP_CHECKS_DISABLE: "true"
     volumes:
@@ -52,6 +98,13 @@ services:
       timeout: 5s
       start_period: 60s
       retries: 6
+
+networks:
+  winhood_public:
+    driver: bridge
+  winhood_scanner_internal:
+    driver: bridge
+    internal: true
 
 volumes:
   winhood_data:
