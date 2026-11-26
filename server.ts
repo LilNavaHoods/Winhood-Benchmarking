@@ -9625,6 +9625,27 @@ export async function startServer(
   };
 }
 
+function parseServerCliArgs(argv: string[]): Pick<StartWinHoodServerOptions, 'port' | 'host'> {
+  const parsed: Pick<StartWinHoodServerOptions, 'port' | 'host'> = {};
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i];
+    if (token === '--port' && i + 1 < argv.length) {
+      const portNum = parseValidPortNumber(argv[++i]);
+      if (portNum !== null) parsed.port = portNum;
+    } else if (token.startsWith('--port=')) {
+      const portNum = parseValidPortNumber(token.slice('--port='.length));
+      if (portNum !== null) parsed.port = portNum;
+    } else if (token === '--host' && i + 1 < argv.length) {
+      const hostVal = argv[++i].trim();
+      if (hostVal && /^[a-zA-Z0-9.:-]+$/.test(hostVal)) parsed.host = hostVal;
+    } else if (token.startsWith('--host=')) {
+      const hostVal = token.slice('--host='.length).trim();
+      if (hostVal && /^[a-zA-Z0-9.:-]+$/.test(hostVal)) parsed.host = hostVal;
+    }
+  }
+  return parsed;
+}
+
 const isEntrypoint =
   typeof process !== 'undefined' &&
   Array.isArray(process.argv) &&
@@ -9632,7 +9653,9 @@ const isEntrypoint =
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (isEntrypoint) {
-  void startServer().catch((err) => {
+  const cliOptions = parseServerCliArgs(process.argv.slice(2));
+  void startServer(cliOptions).catch((err) => {
     console.error('Failed to start WinHood server:', err);
+    process.exit(1);
   });
 }
