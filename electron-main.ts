@@ -62,15 +62,14 @@ export async function waitForBackendHealth(params: {
   let lastError = 'Health check ainda não respondeu.';
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1500);
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 1500);
       const res = await fetch(healthUrl, {
         method: 'GET',
         headers: { Accept: 'application/json' },
         signal: controller.signal,
       });
-      clearTimeout(timer);
       if (res.ok) {
         const data = (await res.json()) as {
           status?: string;
@@ -94,6 +93,8 @@ export async function waitForBackendHealth(params: {
       }
     } catch (err: any) {
       lastError = err?.message || 'Falha de conexão local.';
+    } finally {
+      clearTimeout(timer);
     }
     await new Promise((r) => setTimeout(r, intervalMs));
   }

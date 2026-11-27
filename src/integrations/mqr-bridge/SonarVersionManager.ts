@@ -1,5 +1,34 @@
 import os from 'node:os';
 import type { SonarVersionMetadata } from '../../types/benchmark';
+import { SsrfGuard } from '../../execution/SsrfGuard';
+
+const SAFE_VERSION_TAG_REGEX = /^[0-9]+(?:\.[0-9]+){1,4}(?:-[A-Za-z0-9.]+)?$/;
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number
+): Promise<Response | null> {
+  const urlCheck = await SsrfGuard.validateUrl({
+    targetUrl: url,
+    allowExplicitLoopback: false,
+  });
+  if (!urlCheck.allowed) {
+    return null;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...init,
+      redirect: 'manual',
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * MqrBridgeVersionManager (Seção 2.1 e 2.2)
@@ -67,22 +96,19 @@ export class MqrBridgeVersionManager {
       'bc18bf0f9faed6d27c9668a89ab86c84b22edeccb1050fbebb9d323bd506e7dc';
 
     try {
-      const controller = new AbortController();
-      const t = setTimeout(() => controller.abort(), 3500);
-      const ghRes = await fetch(
+      const ghRes = await fetchWithTimeout(
         'https://api.github.com/repos/SonarSource/mqr-bridge/releases/latest',
-        {
-          headers: { 'User-Agent': 'WinHood-Benchmark-Analyzer' },
-          signal: controller.signal,
-        }
+        { headers: { 'User-Agent': 'WinHood-Benchmark-Analyzer' } },
+        3500
       );
-      clearTimeout(t);
-      if (ghRes.ok) {
+      if (ghRes?.ok) {
         const data = (await ghRes.json()) as {
           tag_name?: string;
           published_at?: string;
         };
-        if (data.tag_name) sqVersion = data.tag_name;
+        if (data.tag_name && SAFE_VERSION_TAG_REGEX.test(data.tag_name.trim())) {
+          sqVersion = data.tag_name.trim();
+        }
         if (data.published_at) sqReleaseDate = data.published_at;
       }
     } catch {
@@ -92,13 +118,8 @@ export class MqrBridgeVersionManager {
     const sqDownloadUrl = `https://binaries.sonarsource.com/Distribution/mqr-bridge/mqr-bridge-${sqVersion}.zip`;
 
     try {
-      const controller = new AbortController();
-      const t = setTimeout(() => controller.abort(), 3000);
-      const shaRes = await fetch(`${sqDownloadUrl}.sha256`, {
-        signal: controller.signal,
-      });
-      clearTimeout(t);
-      if (shaRes.ok) {
+      const shaRes = await fetchWithTimeout(`${sqDownloadUrl}.sha256`, {}, 3000);
+      if (shaRes?.ok) {
         const text = (await shaRes.text()).trim().split(/\s+/)[0];
         if (text && text.length === 64) {
           sqOfficialSha256 = text;
@@ -124,13 +145,8 @@ export class MqrBridgeVersionManager {
     const scannerDownloadUrl = `https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${scannerVersion}-${scannerOsSuffix}.zip`;
 
     try {
-      const controller = new AbortController();
-      const t = setTimeout(() => controller.abort(), 3000);
-      const shaRes = await fetch(`${scannerDownloadUrl}.sha256`, {
-        signal: controller.signal,
-      });
-      clearTimeout(t);
-      if (shaRes.ok) {
+      const shaRes = await fetchWithTimeout(`${scannerDownloadUrl}.sha256`, {}, 3000);
+      if (shaRes?.ok) {
         const text = (await shaRes.text()).trim().split(/\s+/)[0];
         if (text && text.length === 64) {
           scannerOfficialSha256 = text;

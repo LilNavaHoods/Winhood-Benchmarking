@@ -47,7 +47,8 @@ jobs:
         run: |
           npm run test:coverage
           test -s coverage/lcov.info
-          grep -q "^SF:" coverage/lcov.info
+          grep -q "^SF:src/" coverage/lcov.info
+          ! grep -q "^SF:/" coverage/lcov.info
 
       - name: Check SonarCloud token availability (fail-transparent, never claim pass when absent)
         id: sonar_check

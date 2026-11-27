@@ -444,11 +444,14 @@ export class ToolResourceMonitor {
       const blockBuf = Buffer.alloc(4096);
       const iopsBlocks = 200;
       const iopsStart = performance.now();
-      for (let b = 0; b < iopsBlocks; b++) {
-        const offset = (b * 4096) % Math.max(4096, payloadBuf.byteLength - 4096);
-        fs.readSync(fd, blockBuf, 0, 4096, offset);
+      try {
+        for (let b = 0; b < iopsBlocks; b++) {
+          const offset = (b * 4096) % Math.max(4096, payloadBuf.byteLength - 4096);
+          fs.readSync(fd, blockBuf, 0, 4096, offset);
+        }
+      } finally {
+        fs.closeSync(fd);
       }
-      fs.closeSync(fd);
       const iopsSec = Math.max(0.0003, (performance.now() - iopsStart) / 1000);
       random4kIops = Math.round(iopsBlocks / iopsSec);
     } catch {

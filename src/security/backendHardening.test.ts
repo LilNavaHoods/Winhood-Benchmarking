@@ -1336,4 +1336,76 @@ test('Security & Quality Gate Regression: SSRF guard ranges, path confinement, s
   }
 });
 
+test('AUD-001..AUD-007 Regression: CI bash invocation & LF shell scripts, scoped SonarCloud properties, clean SsrfGuard metadata constant, audited CrossToolBenchmarkHarness, and clean health check', async () => {
+  const rootDir = process.cwd();
+
+  // 1. AUD-002 & AUD-003: .env.docker.example exists with non-secret placeholders, CI uses bash ./scripts/... and all scripts/*.sh use LF
+  const envExample = fs.readFileSync(path.join(rootDir, '.env.docker.example'), 'utf8');
+  assert.match(envExample, /^WINHOOD_DEPLOYMENT_MODE=LOCAL_WEB$/m);
+  assert.match(envExample, /^WINHOOD_RUNTIME_ENV=DOCKER_LOCAL_WEB$/m);
+  assert.match(envExample, /^WINHOOD_KEYSTORE_MASTER_SECRET=replace-with-/m);
+  assert.match(envExample, /^WINHOOD_SCANNER_WORKER_TOKEN=replace-with-/m);
+
+  const ciWorkflow = fs.readFileSync(
+    path.join(rootDir, '.github', 'workflows', 'ci-multiplatform.yml'),
+    'utf8'
+  );
+  assert.match(ciWorkflow, /bash \.\/scripts\/docker-up\.sh/);
+  assert.match(ciWorkflow, /bash \.\/scripts\/docker-down\.sh/);
+  assert.equal(/(^|\s)\.\/scripts\/docker-(?:up|down)\.sh/.test(ciWorkflow.replace(/bash \.\/scripts\/docker-(?:up|down)\.sh/g, '')), false);
+
+  const scriptsDir = path.join(rootDir, 'scripts');
+  for (const name of fs.readdirSync(scriptsDir).filter((f) => f.endsWith('.sh'))) {
+    const raw = fs.readFileSync(path.join(scriptsDir, name), 'utf8');
+    assert.equal(raw.includes('\r\n'), false, `Shell script scripts/${name} must use LF line endings`);
+  }
+
+  // 2. AUD-004 & AUD-005: sonar-project.properties does NOT exempt executable CrossToolBenchmarkHarness.ts; build.yml verifies relative SF:src/ LCOV paths
+  const sonarProps = fs.readFileSync(path.join(rootDir, 'sonar-project.properties'), 'utf8');
+  const activeSonarConfig = sonarProps
+    .split(/\r?\n/)
+    .filter((line) => !line.trim().startsWith('#'))
+    .join('\n');
+  assert.equal(activeSonarConfig.includes('CrossToolBenchmarkHarness.ts'), false, 'CrossToolBenchmarkHarness.ts must be audited by SonarCloud without exclusions');
+  assert.equal(activeSonarConfig.includes('corpus3'), false, 'corpus3 wildcard exclusion must be removed');
+  assert.match(activeSonarConfig, /^sonar\.issue\.ignore\.multicriteria=corpus1,corpus2$/m);
+  assert.match(activeSonarConfig, /^sonar\.javascript\.lcov\.reportPaths=coverage\/lcov\.info$/m);
+
+  const buildWorkflow = fs.readFileSync(path.join(rootDir, '.github', 'workflows', 'build.yml'), 'utf8');
+  assert.match(buildWorkflow, /grep -q "\^SF:src\/" coverage\/lcov\.info/);
+
+  // 3. AUD-007: SsrfGuard uses clear CLOUD_METADATA_IPV4 constant without array.join obfuscation
+  const ssrfSrc = fs.readFileSync(path.join(rootDir, 'src', 'execution', 'SsrfGuard.ts'), 'utf8');
+  assert.match(ssrfSrc, /const CLOUD_METADATA_IPV4 = '169\.254\.169\.254';/);
+  assert.equal(ssrfSrc.includes('[169, 254, 169, 254]'), false);
+
+  // 4. CrossToolBenchmarkHarness stays executable and preserves the 20-case synthetic validation corpus re-export
+  const { CrossToolBenchmarkHarness, CONTROLLED_11_CLASS_VALIDATION_CORPUS } = await import(
+    '../validation/CrossToolBenchmarkHarness'
+  );
+  assert.equal(CONTROLLED_11_CLASS_VALIDATION_CORPUS.length, 20);
+  const harnessReport = CrossToolBenchmarkHarness.runComparison({});
+  assert.equal(harnessReport.totalCases, 20);
+  assert.ok((harnessReport.winhoodEvaluation.metrics.recall ?? 0) >= 0.8);
+
+  // 5. AUD-006: waitForBackendHealth exits cleanly on unreachable loopback port without leaking timers
+  const { waitForBackendHealth } = await import('../../electron-main');
+  const unreachablePort = await new Promise<number>((resolve, reject) => {
+    const tmpSrv = http.createServer();
+    tmpSrv.listen(0, '127.0.0.1', () => {
+      const addr = tmpSrv.address() as AddressInfo;
+      tmpSrv.close((err) => (err ? reject(err) : resolve(addr.port)));
+    });
+  });
+  const healthResult = await waitForBackendHealth({
+    baseUrl: `http://127.0.0.1:${unreachablePort}`,
+    port: unreachablePort,
+    maxAttempts: 1,
+    intervalMs: 10,
+  });
+  assert.equal(healthResult.healthy, false);
+  assert.equal(healthResult.attempts, 1);
+});
+
+
 

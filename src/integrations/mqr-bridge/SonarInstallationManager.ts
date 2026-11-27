@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { SonarInstallationRecord, SonarVersionMetadata } from '../../types/benchmark';
 import { ToolAvailabilityService } from '../../services/tools/ToolAvailabilityService';
 import { ToolResourceMonitor } from '../../services/tools/ToolResourceMonitor';
+import { SsrfGuard } from '../../execution/SsrfGuard';
 import { MqrBridgeVersionManager } from './SonarVersionManager';
 
 /**
@@ -98,14 +99,31 @@ export class MqrBridgeInstallationManager {
   }> {
     const versions = await MqrBridgeVersionManager.discoverLatestOfficialVersions();
     const sq = versions[0];
+    const urlCheck = await SsrfGuard.validateUrl({
+      targetUrl: sq.downloadUrl,
+      allowExplicitLoopback: false,
+    });
+    if (!urlCheck.allowed) {
+      return {
+        reachable: false,
+        version: sq.version,
+        downloadUrl: sq.downloadUrl,
+        httpStatus: 0,
+        contentLengthBytes: sq.sizeBytes,
+        officialSha256: sq.officialSha256,
+        checksumValidated: false,
+        message: `URL oficial bloqueada pela política SSRF: ${urlCheck.reason}`,
+      };
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000);
       const headRes = await fetch(sq.downloadUrl, {
         method: 'HEAD',
+        redirect: 'manual',
         signal: controller.signal,
       });
-      clearTimeout(timeout);
 
       const contentLength = Number.parseInt(
         headRes.headers.get('content-length') || String(sq.sizeBytes),
@@ -135,6 +153,8 @@ export class MqrBridgeInstallationManager {
         checksumValidated: false,
         message: `Falha de rede ao consultar binaries.sonarsource.com: ${err?.message || 'Timeout'}`,
       };
+    } finally {
+      clearTimeout(timeout);
     }
   }
 }

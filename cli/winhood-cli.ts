@@ -81,7 +81,8 @@ export async function runCli(argv: string[]): Promise<CliResult> {
   const flags = new Set<string>();
   const positional: string[] = [];
 
-  for (let i = 0; i < rest.length; i++) {
+  let i = 0;
+  while (i < rest.length) {
     const token = rest[i]!;
     if (token.startsWith('--')) {
       const eq = token.indexOf('=');
@@ -99,6 +100,7 @@ export async function runCli(argv: string[]): Promise<CliResult> {
     } else {
       positional.push(token);
     }
+    i += 1;
   }
 
   const useCanonicalCiCodes =

@@ -1,7 +1,11 @@
-/* winhood-benchmark-corpus: synthetic-sast-fixtures */
 import crypto from 'node:crypto';
 import { AnalyzerRegistry } from '../analyzers/AnalyzerRegistry';
 import { RULE_ENGINE_VERSION } from '../analyzers/RuleRegistry';
+import {
+  CONTROLLED_11_CLASS_VALIDATION_CORPUS,
+  type BenchmarkVulnerabilityClass,
+  type ControlledBenchmarkCase,
+} from '../intelligence/datasets/GoldenDatasetCorpus';
 import {
   computeConfusionMetrics,
   computeWilson95ConfidenceInterval,
@@ -11,28 +15,11 @@ import type {
   WilsonConfidenceInterval95,
 } from '../types/benchmark';
 
-export type BenchmarkVulnerabilityClass =
-  | 'SQL_INJECTION'
-  | 'XSS'
-  | 'COMMAND_INJECTION'
-  | 'PATH_TRAVERSAL'
-  | 'SSRF'
-  | 'INSECURE_DESERIALIZATION'
-  | 'HARDCODED_SECRETS'
-  | 'WEAK_CRYPTO'
-  | 'VULNERABLE_DEPENDENCIES'
-  | 'INSECURE_CONFIG_IAC'
-  | 'CODE_QUALITY_COMPLEXITY';
-
-export interface ControlledBenchmarkCase {
-  caseId: string;
-  title: string;
-  language: string;
-  vulnerabilityClass: BenchmarkVulnerabilityClass;
-  cwe: string;
-  expectedVulnerable: boolean;
-  filesMap: Record<string, string>;
-}
+export {
+  CONTROLLED_11_CLASS_VALIDATION_CORPUS,
+  type BenchmarkVulnerabilityClass,
+  type ControlledBenchmarkCase,
+};
 
 export interface ExternalToolBenchmarkFinding {
   caseId: string;
@@ -163,257 +150,6 @@ export function extractFindingsFromSarifForCorpus(
   }
   return findings;
 }
-
-export const CONTROLLED_11_CLASS_VALIDATION_CORPUS: ControlledBenchmarkCase[] = [
-  // 1. SQL Injection (TP + TN)
-  {
-    caseId: 'CTRL-SQLI-TP',
-    title: 'SQL Injection via string concatenation',
-    language: 'TypeScript',
-    vulnerabilityClass: 'SQL_INJECTION',
-    cwe: 'CWE-89',
-    expectedVulnerable: true,
-    filesMap: {
-      'corpus/sqli_tp.ts':
-        'export function findUser(db: any, userId: string) {\n  return db.query("SELECT id, email FROM users WHERE id = " + userId);\n}\n',
-    },
-  },
-  {
-    caseId: 'CTRL-SQLI-TN',
-    title: 'Parameterized SQL Prepared Statement',
-    language: 'TypeScript',
-    vulnerabilityClass: 'SQL_INJECTION',
-    cwe: 'CWE-89',
-    expectedVulnerable: false,
-    filesMap: {
-      'corpus/sqli_tn.ts':
-        'export function findUserSafe(db: { query: (sql: string, args: unknown[]) => unknown }, userId: string) {\n  return db.query("SELECT id, email FROM users WHERE id = $1", [userId]);\n}\n',
-    },
-  },
-  // 2. XSS (TP + TN)
-  {
-    caseId: 'CTRL-XSS-TP',
-    title: 'Unescaped HTML rendering of user input',
-    language: 'TypeScript',
-    vulnerabilityClass: 'XSS',
-    cwe: 'CWE-79',
-    expectedVulnerable: true,
-    filesMap: {
-      'corpus/xss_tp.ts':
-        'export function renderBanner(res: { sendHtml: (h: string) => void }, userTitle: string) {\n  res.sendHtml("<h1>" + userTitle + "</h1>");\n}\n',
-    },
-  },
-  {
-    caseId: 'CTRL-XSS-TN',
-    title: 'HTML-escaped rendering of user input',
-    language: 'TypeScript',
-    vulnerabilityClass: 'XSS',
-    cwe: 'CWE-79',
-    expectedVulnerable: false,
-    filesMap: {
-      'corpus/xss_tn.ts':
-        'declare function escapeHtml(s: string): string;\nexport function renderBannerSafe(res: { sendHtml: (h: string) => void }, userTitle: string) {\n  const safeTitle = escapeHtml(userTitle);\n  res.sendHtml("<h1>" + safeTitle + "</h1>");\n}\n',
-    },
-  },
-  // 3. Command Injection (TP + TN)
-  {
-    caseId: 'CTRL-CMDI-TP',
-    title: 'OS Command Injection via execSync interpolation',
-    language: 'TypeScript',
-    vulnerabilityClass: 'COMMAND_INJECTION',
-    cwe: 'CWE-78',
-    expectedVulnerable: true,
-    filesMap: {
-      'corpus/cmdi_tp.ts':
-        'import { execSync } from "node:child_process";\nexport function archiveDir(targetPath: string) {\n  return execSync(`tar -czf /tmp/out.tgz ${targetPath}`);\n}\n',
-    },
-  },
-  {
-    caseId: 'CTRL-CMDI-TN',
-    title: 'Safe static execFile with shell: false',
-    language: 'TypeScript',
-    vulnerabilityClass: 'COMMAND_INJECTION',
-    cwe: 'CWE-78',
-    expectedVulnerable: false,
-    filesMap: {
-      'corpus/cmdi_tn.ts':
-        'import { execFileSync } from "node:child_process";\nexport function listVersion() {\n  const bin = "node";\n  return execFileSync(bin, ["--version"], { shell: false });\n}\n',
-    },
-  },
-  // 4. Path Traversal (TP + TN)
-  {
-    caseId: 'CTRL-PATH-TP',
-    title: 'Unsanitized path read via readFileSync',
-    language: 'TypeScript',
-    vulnerabilityClass: 'PATH_TRAVERSAL',
-    cwe: 'CWE-22',
-    expectedVulnerable: true,
-    filesMap: {
-      'corpus/path_tp.ts':
-        'import fs from "node:fs";\nexport function loadReport(filePath: string) {\n  return fs.readFileSync(filePath, "utf8");\n}\n',
-    },
-  },
-  {
-    caseId: 'CTRL-PATH-TN',
-    title: 'Path confined via path.basename',
-    language: 'TypeScript',
-    vulnerabilityClass: 'PATH_TRAVERSAL',
-    cwe: 'CWE-22',
-    expectedVulnerable: false,
-    filesMap: {
-      'corpus/path_tn.ts':
-        'import fs from "node:fs";\nimport path from "node:path";\nexport function loadReportSafe(filePath: string) {\n  const safeName = path.basename(filePath);\n  return fs.readFileSync(safeName, "utf8");\n}\n',
-    },
-  },
-  // 5. SSRF (TP + TN)
-  {
-    caseId: 'CTRL-SSRF-TP',
-    title: 'Unvalidated outbound fetch with user URL',
-    language: 'TypeScript',
-    vulnerabilityClass: 'SSRF',
-    cwe: 'CWE-918',
-    expectedVulnerable: true,
-    filesMap: {
-      'corpus/ssrf_tp.ts':
-        'export async function callWebhook(webhookUrl: string) {\n  return fetch(webhookUrl);\n}\n',
-    },
-  },
-  {
-    caseId: 'CTRL-SSRF-TN',
-    title: 'Outbound fetch guarded by SsrfGuard',
-    language: 'TypeScript',
-    vulnerabilityClass: 'SSRF',
-    cwe: 'CWE-918',
-    expectedVulnerable: false,
-    filesMap: {
-      'corpus/ssrf_tn.ts':
-        'declare const SsrfGuard: { validateUrl: (u: string) => Promise<void> };\nexport async function callWebhookSafe(webhookUrl: string) {\n  await SsrfGuard.validateUrl(webhookUrl);\n  return fetch(webhookUrl);\n}\n',
-    },
-  },
-  // 6. Unsafe Deserialization (TP + TN)
-  {
-    caseId: 'CTRL-DESER-TP',
-    title: 'Unsafe pickle.loads deserialization in Python',
-    language: 'Python',
-    vulnerabilityClass: 'INSECURE_DESERIALIZATION',
-    cwe: 'CWE-502',
-    expectedVulnerable: true,
-    filesMap: {
-      'corpus/deser_tp.py':
-        'import pickle\ndef load_session(payload):\n    return pickle.loads(payload)\n',
-    },
-  },
-  {
-    caseId: 'CTRL-DESER-TN',
-    title: 'Safe JSON parsing in Python',
-    language: 'Python',
-    vulnerabilityClass: 'INSECURE_DESERIALIZATION',
-    cwe: 'CWE-502',
-    expectedVulnerable: false,
-    filesMap: {
-      'corpus/deser_tn.py':
-        'import json\ndef load_session_safe(payload):\n    return json.loads(payload)\n',
-    },
-  },
-  // 7. Hardcoded Secrets (TP + TN)
-  {
-    caseId: 'CTRL-SECRET-TP',
-    title: 'Hardcoded high-entropy API secret',
-    language: 'TypeScript',
-    vulnerabilityClass: 'HARDCODED_SECRETS',
-    cwe: 'CWE-798',
-    expectedVulnerable: true,
-    filesMap: {
-      'corpus/secret_tp.ts':
-        'export function initClient() {\n  const apiSecret = "wh_live_9xK8mP2qR7vL4nT6wZ1bC5fH3jD0sA";\n  return apiSecret.length;\n}\n',
-    },
-  },
-  {
-    caseId: 'CTRL-SECRET-TN',
-    title: 'Secret loaded from environment variable',
-    language: 'TypeScript',
-    vulnerabilityClass: 'HARDCODED_SECRETS',
-    cwe: 'CWE-798',
-    expectedVulnerable: false,
-    filesMap: {
-      'corpus/secret_tn.ts':
-        'export function initClientSafe() {\n  const apiSecret = process.env.SERVICE_API_SECRET || "";\n  return apiSecret.length;\n}\n',
-    },
-  },
-  // 8. Weak Crypto (TP + TN)
-  {
-    caseId: 'CTRL-CRYPTO-TP',
-    title: 'MD5 hash used for cryptographic digest',
-    language: 'TypeScript',
-    vulnerabilityClass: 'WEAK_CRYPTO',
-    cwe: 'CWE-328',
-    expectedVulnerable: true,
-    filesMap: {
-      'corpus/crypto_tp.ts':
-        'import crypto from "node:crypto";\nexport function hashPassword(pw: string) {\n  return crypto.createHash("md5").update(pw).digest("hex");\n}\n',
-    },
-  },
-  {
-    caseId: 'CTRL-CRYPTO-TN',
-    title: 'SHA-256 digest used cleanly',
-    language: 'TypeScript',
-    vulnerabilityClass: 'WEAK_CRYPTO',
-    cwe: 'CWE-328',
-    expectedVulnerable: false,
-    filesMap: {
-      'corpus/crypto_tn.ts':
-        'import crypto from "node:crypto";\nexport function hashContent(data: string) {\n  return crypto.createHash("sha256").update(data).digest("hex");\n}\n',
-    },
-  },
-  // 9. Insecure Config / IaC (TP + TN)
-  {
-    caseId: 'CTRL-IAC-TP',
-    title: 'Dockerfile running as root with :latest tag',
-    language: 'Dockerfile',
-    vulnerabilityClass: 'INSECURE_CONFIG_IAC',
-    cwe: 'CWE-250',
-    expectedVulnerable: true,
-    filesMap: {
-      'corpus/Dockerfile.vuln': 'FROM node:latest\nUSER root\nCMD ["node", "app.js"]\n',
-    },
-  },
-  {
-    caseId: 'CTRL-IAC-TN',
-    title: 'Hardened non-root Dockerfile with pinned image',
-    language: 'Dockerfile',
-    vulnerabilityClass: 'INSECURE_CONFIG_IAC',
-    cwe: 'CWE-250',
-    expectedVulnerable: false,
-    filesMap: {
-      'corpus/Dockerfile.safe': 'FROM node:22.14.0-bookworm-slim\nUSER winhood\nHEALTHCHECK CMD node -e "process.exit(0)"\nCMD ["node", "app.js"]\n',
-    },
-  },
-  // 10. Code Quality / Error Handling (TP + TN)
-  {
-    caseId: 'CTRL-QUALITY-TP',
-    title: 'Empty catch clause silencing exceptions',
-    language: 'TypeScript',
-    vulnerabilityClass: 'CODE_QUALITY_COMPLEXITY',
-    cwe: 'CWE-390',
-    expectedVulnerable: true,
-    filesMap: {
-      'corpus/quality_tp.ts':
-        'export function parseQuietly(raw: string) {\n  try {\n    return JSON.parse(raw);\n  } catch {}\n  return null;\n}\n',
-    },
-  },
-  {
-    caseId: 'CTRL-QUALITY-TN',
-    title: 'Handled catch block returning explicit error',
-    language: 'TypeScript',
-    vulnerabilityClass: 'CODE_QUALITY_COMPLEXITY',
-    cwe: 'CWE-390',
-    expectedVulnerable: false,
-    filesMap: {
-      'corpus/quality_tn.ts':
-        'export function parseSafely(raw: string): { ok: boolean; value?: unknown } {\n  try {\n    return { ok: true, value: JSON.parse(raw) };\n  } catch (err) {\n    return { ok: false, value: String(err) };\n  }\n}\n',
-    },
-  },
-];
 
 export class CrossToolBenchmarkHarness {
   public static runComparison(params: {

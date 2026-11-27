@@ -14,7 +14,8 @@ export interface SsrfValidationResult {
   pinnedIp?: string;
 }
 
-const CLOUD_METADATA_IPV4_HOST = [169, 254, 169, 254].join('.');
+// Standard cloud instance metadata link-local IPv4 address (RFC 3927 / AWS, GCP, Azure IMDS)
+const CLOUD_METADATA_IPV4 = '169.254.169.254';
 
 const BLOCKED_HOSTNAMES = new Set([
   'localhost',
@@ -22,7 +23,7 @@ const BLOCKED_HOSTNAMES = new Set([
   'metadata.google.internal',
   'metadata.goog',
   'instance-data',
-  CLOUD_METADATA_IPV4_HOST,
+  CLOUD_METADATA_IPV4,
   'metadata.azure.internal',
 ]);
 

@@ -206,9 +206,9 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Boot full Docker Compose stack via ./scripts/docker-up.sh
+      - name: Boot full Docker Compose stack via bash ./scripts/docker-up.sh
         run: |
-          ./scripts/docker-up.sh
+          bash ./scripts/docker-up.sh
           docker compose ps
 
       - name: Verify real Docker E2E (SPA, API, ZIP Bomb, SSRF, Encrypted Storage, Scanner Worker & Restart Persistence)
@@ -227,11 +227,11 @@ jobs:
             if (!data.workerReachable) process.exit(1);
           "
 
-      - name: Graceful shutdown via ./scripts/docker-down.sh
+      - name: Graceful shutdown via bash ./scripts/docker-down.sh
         if: always()
         run: |
           docker compose logs --tail=80 || true
-          ./scripts/docker-down.sh
+          bash ./scripts/docker-down.sh
 
   windows-desktop-validation:
     name: Windows Desktop Lifecycle, userData & Inno Setup E2E Verification (Optional Legacy)
