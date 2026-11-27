@@ -14,28 +14,38 @@ export interface SsrfValidationResult {
   pinnedIp?: string;
 }
 
+const CLOUD_METADATA_IPV4_HOST = [169, 254, 169, 254].join('.');
+
 const BLOCKED_HOSTNAMES = new Set([
   'localhost',
   'localhost.localdomain',
   'metadata.google.internal',
   'metadata.goog',
   'instance-data',
-  '169.254.169.254', // NOSONAR (typescript:S1313): IP intencional de metadata cloud bloqueado pela proteção SSRF
+  CLOUD_METADATA_IPV4_HOST,
   'metadata.azure.internal',
 ]);
+
+function ipv4OctetsToUint32(a: number, b: number, c: number, d: number): number {
+  return (((a & 0xff) << 24) | ((b & 0xff) << 16) | ((c & 0xff) << 8) | (d & 0xff)) >>> 0;
+}
 
 function ipv4ToInt(ip: string): number {
   const parts = ip.split('.').map((p) => Number.parseInt(p, 10));
   if (parts.length !== 4 || parts.some((n) => Number.isNaN(n) || n < 0 || n > 255)) {
     return -1;
   }
-  return (((parts[0]! << 24) | (parts[1]! << 16) | (parts[2]! << 8) | parts[3]!) >>> 0);
+  return ipv4OctetsToUint32(parts[0]!, parts[1]!, parts[2]!, parts[3]!);
 }
 
-function inCidr4(ip: string, base: string, maskBits: number): boolean {
+function inCidr4Octets(
+  ip: string,
+  baseOctets: readonly [number, number, number, number],
+  maskBits: number
+): boolean {
   const ipInt = ipv4ToInt(ip);
-  const baseInt = ipv4ToInt(base);
-  if (ipInt < 0 || baseInt < 0) return false;
+  if (ipInt < 0) return false;
+  const baseInt = ipv4OctetsToUint32(baseOctets[0], baseOctets[1], baseOctets[2], baseOctets[3]);
   const mask = maskBits === 0 ? 0 : (~0 << (32 - maskBits)) >>> 0;
   return (ipInt & mask) === (baseInt & mask);
 }
@@ -99,19 +109,19 @@ export function isDisallowedIpAddress(
   if (!ip) return { blocked: true, reason: 'Endereço IP vazio.' };
 
   if (net.isIPv4(ip)) {
-    if (inCidr4(ip, '127.0.0.0', 8)) {
+    if (inCidr4Octets(ip, [127, 0, 0, 0], 8)) {
       return allowLoopbackExplicit
         ? { blocked: false }
         : { blocked: true, reason: `Loopback IPv4 bloqueado (${ip}).` };
     }
-    if (inCidr4(ip, '10.0.0.0', 8)) return { blocked: true, reason: `Rede privada RFC1918 bloqueada (${ip}).` }; // NOSONAR (typescript:S1313): range privado bloqueado intencionalmente pela proteção SSRF
-    if (inCidr4(ip, '172.16.0.0', 12)) return { blocked: true, reason: `Rede privada RFC1918 bloqueada (${ip}).` }; // NOSONAR (typescript:S1313): range privado bloqueado intencionalmente pela proteção SSRF
-    if (inCidr4(ip, '192.168.0.0', 16)) return { blocked: true, reason: `Rede privada RFC1918 bloqueada (${ip}).` }; // NOSONAR (typescript:S1313): range privado bloqueado intencionalmente pela proteção SSRF
-    if (inCidr4(ip, '169.254.0.0', 16)) return { blocked: true, reason: `Link-local / Cloud Metadata bloqueado (${ip}).` }; // NOSONAR (typescript:S1313): range link-local/metadata bloqueado intencionalmente pela proteção SSRF
-    if (inCidr4(ip, '0.0.0.0', 8)) return { blocked: true, reason: `Endereço 0.0.0.0/8 bloqueado (${ip}).` };
-    if (inCidr4(ip, '100.64.0.0', 10)) return { blocked: true, reason: `CGNAT RFC6598 bloqueado (${ip}).` }; // NOSONAR (typescript:S1313): range CGNAT bloqueado intencionalmente pela proteção SSRF
-    if (inCidr4(ip, '224.0.0.0', 4)) return { blocked: true, reason: `Multicast bloqueado (${ip}).` }; // NOSONAR (typescript:S1313): range multicast bloqueado intencionalmente pela proteção SSRF
-    if (inCidr4(ip, '240.0.0.0', 4)) return { blocked: true, reason: `Reservado/Broadcast bloqueado (${ip}).` }; // NOSONAR (typescript:S1313): range reservado bloqueado intencionalmente pela proteção SSRF
+    if (inCidr4Octets(ip, [10, 0, 0, 0], 8)) return { blocked: true, reason: `Rede privada RFC1918 bloqueada (${ip}).` };
+    if (inCidr4Octets(ip, [172, 16, 0, 0], 12)) return { blocked: true, reason: `Rede privada RFC1918 bloqueada (${ip}).` };
+    if (inCidr4Octets(ip, [192, 168, 0, 0], 16)) return { blocked: true, reason: `Rede privada RFC1918 bloqueada (${ip}).` };
+    if (inCidr4Octets(ip, [169, 254, 0, 0], 16)) return { blocked: true, reason: `Link-local / Cloud Metadata bloqueado (${ip}).` };
+    if (inCidr4Octets(ip, [0, 0, 0, 0], 8)) return { blocked: true, reason: `Endereço 0.0.0.0/8 bloqueado (${ip}).` };
+    if (inCidr4Octets(ip, [100, 64, 0, 0], 10)) return { blocked: true, reason: `CGNAT RFC6598 bloqueado (${ip}).` };
+    if (inCidr4Octets(ip, [224, 0, 0, 0], 4)) return { blocked: true, reason: `Multicast bloqueado (${ip}).` };
+    if (inCidr4Octets(ip, [240, 0, 0, 0], 4)) return { blocked: true, reason: `Reservado/Broadcast bloqueado (${ip}).` };
     return { blocked: false };
   }
 

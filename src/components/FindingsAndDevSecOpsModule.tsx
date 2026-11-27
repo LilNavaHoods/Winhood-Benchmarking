@@ -1117,8 +1117,16 @@ export const FindingsAndDevSecOpsModule: React.FC<FindingsAndDevSecOpsModuleProp
                     return (
                       <tr
                         key={f.id}
+                        tabIndex={0}
+                        aria-selected={isSelected}
                         onClick={() => setSelectedFindingId(f.id)}
-                        className={`cursor-pointer transition-colors ${
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            setSelectedFindingId(f.id);
+                          }
+                        }}
+                        className={`cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#31d6c4] ${
                           isSelected
                             ? 'bg-[#31d6c4]/10'
                             : isExempt

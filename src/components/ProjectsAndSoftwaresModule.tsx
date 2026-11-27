@@ -911,7 +911,6 @@ export const ProjectsAndSoftwaresModule: React.FC<ProjectsAndSoftwaresModuleProp
                 <input
                   ref={swFolderInputRef}
                   type="file"
-                  // @ts-expect-error webkitdirectory supported in Chromium/Firefox
                   webkitdirectory=""
                   directory=""
                   multiple

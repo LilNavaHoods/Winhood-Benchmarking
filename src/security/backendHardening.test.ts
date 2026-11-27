@@ -1208,9 +1208,26 @@ test('Módulo 03: Docker Local-Web runtime detection, dynamic CORS, SPA fallback
   assert.equal(compose.includes(':latest'), false, 'docker-compose.yml must never pin :latest');
 
   const envExample = fs.readFileSync(path.join(rootDir, '.env.docker.example'), 'utf8');
+  assert.match(envExample, /^NODE_ENV=production$/m);
+  assert.match(envExample, /^PORT=3000$/m);
   assert.match(envExample, /^WINHOOD_PORT=3000$/m);
-  assert.match(envExample, /^WINHOOD_KEYSTORE_MASTER_SECRET=$/m);
-  assert.match(envExample, /^WINHOOD_SCANNER_WORKER_TOKEN=$/m);
+  assert.match(envExample, /^WINHOOD_DEPLOYMENT_MODE=LOCAL_WEB$/m);
+  assert.match(envExample, /^WINHOOD_RUNTIME_ENV=DOCKER_LOCAL_WEB$/m);
+  assert.match(
+    envExample,
+    /^WINHOOD_KEYSTORE_MASTER_SECRET=(?:|replace-with-[a-z0-9-]+)$/m,
+    '.env.docker.example must never ship a real master secret'
+  );
+  assert.match(
+    envExample,
+    /^WINHOOD_SCANNER_WORKER_TOKEN=(?:|replace-with-[a-z0-9-]+)$/m,
+    '.env.docker.example must never ship a real worker token'
+  );
+
+  const dockerUpSh = fs.readFileSync(path.join(rootDir, 'scripts', 'docker-up.sh'), 'utf8');
+  assert.match(dockerUpSh, /replace-with-\*/);
+  const dockerUpPs1 = fs.readFileSync(path.join(rootDir, 'scripts', 'docker-up.ps1'), 'utf8');
+  assert.match(dockerUpPs1, /StartsWith\('replace-with-'\)/);
 
   const gitignore = fs.readFileSync(path.join(rootDir, '.gitignore'), 'utf8');
   assert.match(gitignore, /^!\.env\.docker\.example$/m);
@@ -1236,6 +1253,87 @@ test('Módulo 03: Docker Local-Web runtime detection, dynamic CORS, SPA fallback
   assert.equal(fs.existsSync(path.join(rootDir, 'security', 'semgrep-offline-rules', 'winhood-core.yaml')), true);
   assert.equal(fs.existsSync(path.join(rootDir, 'scripts', 'verify-docker-local-web.mjs')), true);
   assert.equal(fs.existsSync(path.join(rootDir, 'DOCKER_LOCAL_WEB.md')), true);
+});
+
+test('Security & Quality Gate Regression: SSRF guard ranges, path confinement, safe target=_blank links, and zero NOSONAR/TS suppressions', async () => {
+  const { isDisallowedIpAddress } = await import('../execution/SsrfGuard');
+  const { ReferenceRegistry } = await import('../intelligence/reference/ReferenceRegistry');
+  const { PersistentDatabaseManager } = await import('../storage/PersistentDatabaseManager');
+
+  // 1. SSRF Guard blocks private, loopback, link-local, metadata, CGNAT, multicast, and IPv4-mapped IPv6
+  const disallowedIps = [
+    '10.0.0.1',
+    '172.16.0.1',
+    '192.168.1.1',
+    '169.254.169.254',
+    '100.64.0.1',
+    '127.0.0.1',
+    '224.0.0.1',
+    '::1',
+    '::ffff:169.254.169.254',
+    'fc00::1',
+    'fe80::1',
+  ];
+  for (const ip of disallowedIps) {
+    assert.equal(isDisallowedIpAddress(ip).blocked, true, `Expected ${ip} to be blocked by SsrfGuard`);
+  }
+  assert.equal(isDisallowedIpAddress('8.8.8.8').blocked, false);
+  assert.equal(isDisallowedIpAddress('1.1.1.1').blocked, false);
+
+  // 2. ReferenceRegistry blocks path traversal source keys
+  const tmpRefDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wh-ref-guard-'));
+  try {
+    const registry = new ReferenceRegistry(tmpRefDir);
+    assert.throws(
+      () => registry.getSnapshot('../../etc/passwd' as any),
+      /traversal|inv[aá]lid/i,
+      'ReferenceRegistry must reject path traversal source keys'
+    );
+  } finally {
+    fs.rmSync(tmpRefDir, { recursive: true, force: true });
+  }
+
+  // 3. PersistentDatabaseManager rejects NUL-byte file paths
+  const dbManager = new PersistentDatabaseManager();
+  assert.throws(
+    () => dbManager.writeAtomicChecksummed('/tmp/bad\0path.json', {}),
+    /inv[aá]lid|nulo|nul/i,
+    'PersistentDatabaseManager must reject paths containing NUL bytes'
+  );
+
+  // 4. Reverse Tabnabbing guard: every target="_blank" in SonarDockerCloudHubModule includes noopener
+  const rootDir = process.cwd();
+  const hubSrc = fs.readFileSync(path.join(rootDir, 'src', 'components', 'SonarDockerCloudHubModule.tsx'), 'utf8');
+  const blankAnchorMatches = hubSrc.match(/<a\b[^>]*target="_blank"[^>]*>/g) || [];
+  assert.ok(blankAnchorMatches.length >= 5, 'Expected external links in SonarDockerCloudHubModule.tsx');
+  for (const anchorTag of blankAnchorMatches) {
+    assert.match(anchorTag, /rel="[^"]*\bnoopener\b[^"]*"/, `External link missing rel="noopener": ${anchorTag}`);
+  }
+
+  // 5. Zero quality-fraud suppressions across production src/ files (excluding tests)
+  const walkSrc = (dir: string, out: string[] = []): string[] => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walkSrc(full, out);
+      } else if (/\.(?:ts|tsx)$/.test(entry.name) && !/\.(?:test|spec)\.(?:ts|tsx)$/.test(entry.name)) {
+        out.push(full);
+      }
+    }
+    return out;
+  };
+  const prodFiles = walkSrc(path.join(rootDir, 'src'));
+  for (const file of prodFiles) {
+    const content = fs.readFileSync(file, 'utf8');
+    const rel = path.relative(rootDir, file).replace(/\\/g, '/');
+    const hasActualNoSonarComment = content.split(/\r?\n/).some((line) => {
+      const strippedStrings = line.replace(/(["'`])(?:\\.|(?!\1).)*\1/g, '');
+      return /\/\/\s*NOSONAR\b|\/\*\s*NOSONAR\b/.test(strippedStrings);
+    });
+    assert.equal(hasActualNoSonarComment, false, `Found forbidden // NOSONAR comment in ${rel}`);
+    assert.equal(/@ts-(?:ignore|expect-error)\b/.test(content), false, `Found forbidden @ts-ignore/@ts-expect-error in ${rel}`);
+    assert.equal(/eslint-disable/.test(content), false, `Found forbidden eslint-disable in ${rel}`);
+  }
 });
 
 

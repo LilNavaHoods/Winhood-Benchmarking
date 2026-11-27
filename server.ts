@@ -5299,132 +5299,16 @@ export async function createWinHoodApp(options?: {
 
     if (format === 'sarif') {
       // Formato oficial SARIF 2.1.0 para GitHub Code Scanning, Modo MQR (Modern Quality Regime), Semgrep Taint e CodeQL
-      const rulesMap = new Map<string, any>();
-      const sarifResults = run.findings.map((f) => {
-        if (!rulesMap.has(f.originalRuleId)) {
-          rulesMap.set(f.originalRuleId, {
-            id: f.originalRuleId,
-            name: f.originalRuleId.replace(/[^a-zA-Z0-9]/g, '_'),
-            shortDescription: { text: f.title },
-            fullDescription: { text: f.whyItIsAnIssue || f.description || f.title },
-            defaultConfiguration: {
-              level:
-                f.severity === 'BLOCKER' || f.severity === 'CRITICAL' || f.severity === 'HIGH'
-                  ? 'error'
-                  : f.severity === 'MEDIUM'
-                    ? 'warning'
-                    : 'note',
-            },
-            properties: {
-              cwe: f.cwe ? [f.cwe] : [],
-              cvss: f.cvss ?? null,
-              category: f.category,
-              toolName: f.toolName,
-              cleanCodeAttribute: f.cleanCodeAttribute,
-              mqrImpacts: f.mqrImpacts || [],
-            },
-          });
-        }
-
-        const codeFlows =
-          f.executionFlows && f.executionFlows.length > 0
-            ? [
-                {
-                  threadFlows: [
-                    {
-                      locations: f.executionFlows.map((step) => ({
-                        location: {
-                          physicalLocation: {
-                            artifactLocation: {
-                              uri: step.filePath.replace(/\\/g, '/'),
-                              uriBaseId: '%SRCROOT%',
-                            },
-                            region: {
-                              startLine: step.lineNumber > 0 ? step.lineNumber : 1,
-                              snippet: { text: step.codeSnippet || '' },
-                            },
-                          },
-                          message: { text: `[${step.nodeType}] ${step.explanation}` },
-                        },
-                      })),
-                    },
-                  ],
-                },
-              ]
-            : undefined;
-
-        return {
-          ruleId: f.originalRuleId,
-          level:
-            f.severity === 'BLOCKER' || f.severity === 'CRITICAL' || f.severity === 'HIGH'
-              ? 'error'
-              : f.severity === 'MEDIUM'
-                ? 'warning'
-                : 'note',
-          message: { text: `[${f.softwareName}] ${f.title} — ${f.whyItIsAnIssue || f.description}` },
-          locations: [
-            {
-              physicalLocation: {
-                artifactLocation: {
-                  uri: f.filePath.replace(/\\/g, '/'),
-                  uriBaseId: '%SRCROOT%',
-                },
-                region: {
-                  startLine: f.lineNumber > 0 ? f.lineNumber : 1,
-                  endLine: f.endLineNumber && f.endLineNumber > 0 ? f.endLineNumber : f.lineNumber > 0 ? f.lineNumber : 1,
-                  startColumn: f.columnStart ?? 1,
-                  endColumn: f.columnEnd ?? 80,
-                  snippet: { text: f.snippet || '' },
-                },
-                contextRegion: {
-                  snippet: {
-                    text: [
-                      ...(f.contextBefore || []),
-                      `>>> ${f.snippet || ''}`,
-                      ...(f.contextAfter || []),
-                    ].join('\n'),
-                  },
-                },
-              },
-            },
-          ],
-          ...(codeFlows ? { codeFlows } : {}),
-          properties: {
-            softwareId: f.softwareId,
-            softwareName: f.softwareName,
-            softwareVersion: f.softwareVersion,
-            validationStatus: f.validationStatus,
-            evidenceSha256: f.evidenceSha256,
-            whyItIsAnIssue: f.whyItIsAnIssue,
-            remediation: f.remediation,
-            compliantCodeExample: f.compliantCodeExample,
-            remediationEffortMinutes: f.remediationEffortMinutes,
-            mqrImpacts: f.mqrImpacts,
-          },
-        };
+      const sarifPayload = SarifCodec.exportSarif210(run.findings, {
+        toolName:
+          'WinHood Static & Quality Analyzer (Modo MQR (Modern Quality Regime) / Semgrep Taint / CodeQL Engine)',
+        toolVersion: run.algorithmVersion,
+        informationUri: 'https://github.com/LilNavaHoods/Winhood-Benchmarking',
+        softwareArtifacts: run.scoreCards.map((sc) => ({
+          name: sc.softwareName,
+          version: sc.softwareVersion,
+        })),
       });
-
-      const sarifPayload = {
-        $schema:
-          'https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json',
-        version: '2.1.0',
-        runs: [
-          {
-            tool: {
-              driver: {
-                name: 'WinHood Static & Quality Analyzer (Modo MQR (Modern Quality Regime) / Semgrep Taint / CodeQL Engine)',
-                version: run.algorithmVersion,
-                informationUri: 'https://github.com/LilNavaHoods/Winhood-Benchmarking',
-                rules: Array.from(rulesMap.values()),
-              },
-            },
-            artifacts: run.scoreCards.map((sc) => ({
-              location: { uri: `package:${sc.softwareName}@${sc.softwareVersion}` },
-            })),
-            results: sarifResults,
-          },
-        ],
-      };
 
       res.setHeader('Content-Type', 'application/sarif+json; charset=utf-8');
       res.setHeader('X-Content-Type-Options', 'nosniff');

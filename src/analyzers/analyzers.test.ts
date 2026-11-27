@@ -475,4 +475,117 @@ test('Phase 6: ScaCorrelator offline snapshot vs live-synced cache provenance & 
   }
 });
 
+test('Security & Reliability regression: SbomGenerator path traversal confinement, ScaCorrelator ReDoS-safe PEP440, TaintAnalyzer RegExp.exec precision', async () => {
+  const { resolvePackageSpdxLicenseWithProvenance } = await import('./sca/SbomGenerator');
+  const { comparePep440 } = await import('./sca/ScaCorrelator');
+  const { ParserRegistry } = await import('./ParserRegistry');
+  const { TaintAnalyzer } = await import('./TaintAnalyzer');
+  const { SarifCodec } = await import('./SarifCodec');
+
+  // 1. SbomGenerator must block path traversal package names from reading outside node_modules/
+  const traversalCandidates = [
+    '..',
+    '../package.json',
+    '../../../etc',
+    '..\\..\\package',
+    '@scope/../../package',
+    'express/../../package',
+  ];
+  for (const pkg of traversalCandidates) {
+    const res = resolvePackageSpdxLicenseWithProvenance(pkg, undefined, undefined, {
+      strictProvenance: true,
+    });
+    assert.equal(res.license, 'NOASSERTION', `Expected traversal package "${pkg}" to return NOASSERTION`);
+    assert.equal(res.provenance, 'UNVERIFIED', `Expected traversal package "${pkg}" to stay UNVERIFIED`);
+  }
+
+  // 2. ScaCorrelator PEP 440 parser must execute in linear time on adversarial ReDoS input and preserve ordering
+  const adversarialVersion = `1.${'0.'.repeat(500)}a`;
+  const t0 = Date.now();
+  const cmpAdversarial = comparePep440(adversarialVersion, '1.0.0');
+  const elapsedMs = Date.now() - t0;
+  assert.equal(typeof cmpAdversarial, 'number');
+  assert.ok(elapsedMs < 50, `Expected linear-time PEP 440 comparison (<50ms), took ${elapsedMs}ms`);
+
+  assert.equal(comparePep440('1.0.0.dev1', '1.0.0a1') < 0, true);
+  assert.equal(comparePep440('1.0.0a1', '1.0.0b1') < 0, true);
+  assert.equal(comparePep440('1.0.0b1', '1.0.0rc1') < 0, true);
+  assert.equal(comparePep440('1.0.0rc1', '1.0.0') < 0, true);
+  assert.equal(comparePep440('1.0.0', '1.0.0.post1') < 0, true);
+  assert.equal(comparePep440('1!1.0', '2.0.0') > 0, true);
+
+  // 3. TaintAnalyzer must NOT flag RegExp.prototype.exec as command/SQL injection, while STILL flagging real sinks
+  const cleanRegexCode = `
+    export function parseUserHeader(req: any) {
+      const header = String(req.headers['x-custom'] || '');
+      const pattern = /^([a-z0-9-]+):([a-z0-9-]+)$/i;
+      const match = pattern.exec(header);
+      return match ? match[1] : null;
+    }
+  `;
+  const cleanParsed = ParserRegistry.parseFile('src/parser.ts', cleanRegexCode);
+  const cleanIssues = TaintAnalyzer.analyzeFlows([cleanParsed], { 'src/parser.ts': cleanRegexCode });
+  assert.equal(
+    cleanIssues.length,
+    0,
+    `Expected 0 false positives on RegExp.prototype.exec, got: ${cleanIssues.map((f) => f.ruleId).join(', ')}`
+  );
+
+  const realVulnCode = `
+    import { exec } from 'node:child_process';
+    import fs from 'node:fs';
+    export function dangerousHandler(req: any) {
+      const cmd = req.query.cmd;
+      exec('ls ' + cmd);
+      const userFile = req.query.file;
+      return fs.readFileSync(userFile, 'utf8');
+    }
+  `;
+  const vulnParsed = ParserRegistry.parseFile('src/vuln.ts', realVulnCode);
+  const vulnIssues = TaintAnalyzer.analyzeFlows([vulnParsed], { 'src/vuln.ts': realVulnCode });
+  assert.ok(
+    vulnIssues.some((f) => f.ruleId === 'taint:S2076' || /CWE-78|comando|command/i.test(f.title)),
+    `Expected TaintAnalyzer to detect real OS command injection, got: ${vulnIssues.map((f) => `${f.ruleId}:${f.title}`).join('; ')}`
+  );
+  assert.ok(
+    vulnIssues.some((f) => f.ruleId === 'taint:S2083' || /CWE-22|path traversal/i.test(f.title)),
+    `Expected TaintAnalyzer to detect real path traversal, got: ${vulnIssues.map((f) => `${f.ruleId}:${f.title}`).join('; ')}`
+  );
+
+  // 4. SarifCodec.exportSarif210 emits contextRegion when contextBefore/contextAfter are present
+  const sarif = SarifCodec.exportSarif210([
+    {
+      id: 'finding-reg-1',
+      runId: 'reg-run',
+      softwareId: 'sw-reg',
+      softwareName: 'RegTarget',
+      softwareVersion: '1.0.0',
+      toolName: 'WinHood Native SAST',
+      originType: 'NATIVE_ANALYSIS',
+      originalRuleId: 'ts:S4721',
+      category: 'SAST',
+      cwe: 'CWE-78',
+      cvss: 9.8,
+      severity: 'BLOCKER',
+      confidence: 'HIGH',
+      validationStatus: 'CONFIRMED',
+      title: 'OS Command Injection',
+      description: 'Untrusted input reaches exec()',
+      filePath: 'src/vuln.ts',
+      lineNumber: 6,
+      snippet: "exec('ls ' + cmd);",
+      contextBefore: ['const cmd = req.query.cmd;'],
+      contextAfter: ['return ok;'],
+      remediation: 'Use execFile with argument array and shell: false.',
+      remediationEffortMinutes: 30,
+      collectedAt: '2026-11-27T00:00:00.000Z',
+    } as any,
+  ]) as any;
+  assert.ok(
+    sarif.runs[0].results[0].locations[0].physicalLocation.contextRegion.snippet.text.includes('>>> '),
+    'Expected SarifCodec.exportSarif210 to emit contextRegion snippet'
+  );
+});
+
+
 

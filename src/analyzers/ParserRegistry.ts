@@ -1160,17 +1160,18 @@ export class ParserRegistry {
           let hasNestedQuantifier = false;
           let inGroup = false;
           let groupHasQuantifier = false;
-          for (let i = 0; i < pat.length; i++) {
-            const ch = pat[i];
+          let patIdx = 0;
+          while (patIdx < pat.length) {
+            const ch = pat[patIdx];
             if (ch === '\\') {
-              i++;
+              patIdx += 2;
               continue;
             }
             if (ch === '(') {
               inGroup = true;
               groupHasQuantifier = false;
             } else if (ch === ')') {
-              const next = pat[i + 1];
+              const next = pat[patIdx + 1];
               if (inGroup && groupHasQuantifier && (next === '+' || next === '*')) {
                 hasNestedQuantifier = true;
                 break;
@@ -1180,6 +1181,7 @@ export class ParserRegistry {
             } else if (inGroup && (ch === '+' || ch === '*')) {
               groupHasQuantifier = true;
             }
+            patIdx += 1;
           }
           if (hasNestedQuantifier) {
             const lineNo = getLine(node);

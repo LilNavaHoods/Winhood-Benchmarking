@@ -1,3 +1,4 @@
+/* winhood-benchmark-corpus: synthetic-sast-fixtures */
 export const VAULTCORE_INTERNAL_FILES: Record<string, string> = {
   'package.json': JSON.stringify(
     {

@@ -392,16 +392,9 @@ export class ReferenceSynchronizer {
           this.registry.saveSnapshot({ ...updatedBase, sha256 });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === 'INTERNAL_HISTORY') {
-          const updatedBase = {
-            ...existing,
-            fetchedAt: nowIso,
+          this.persistFreshSnapshot(existing, nowIso, {
             recordsCount: params?.internalRunsCount ?? existing.recordsCount,
-            freshnessStatus: 'FRESH' as const,
-            isOfflineFallback: false,
-            lastError: null,
-          };
-          const sha256 = crypto.createHash('sha256').update(JSON.stringify(updatedBase), 'utf8').digest('hex');
-          this.registry.saveSnapshot({ ...updatedBase, sha256 });
+          });
           liveFetchedSources.push(sourceKey);
         } else if (sourceKey === 'OWASP_BENCHMARK') {
           try {
@@ -410,33 +403,18 @@ export class ReferenceSynchronizer {
               { headers: { 'User-Agent': 'WinHood-Reference-Synchronizer/3.0', Accept: 'application/vnd.github+json' } },
               3500
             );
-            const updatedBase = {
-              ...existing,
+            this.persistFreshSnapshot(existing, nowIso, {
               version: String(owaspData?.tag_name || existing.version),
-              fetchedAt: nowIso,
               etag: etag || existing.etag || null,
-              freshnessStatus: 'FRESH' as const,
-              isOfflineFallback: false,
-              lastError: null,
               payloadSummary: {
                 ...existing.payloadSummary,
                 latestReleaseTag: owaspData?.tag_name || existing.version,
                 publishedAt: owaspData?.published_at || nowIso,
               },
-            };
-            const sha256 = crypto.createHash('sha256').update(JSON.stringify(updatedBase), 'utf8').digest('hex');
-            this.registry.saveSnapshot({ ...updatedBase, sha256 });
+            });
             liveFetchedSources.push(sourceKey);
           } catch {
-            const updatedBase = {
-              ...existing,
-              fetchedAt: nowIso,
-              freshnessStatus: 'CACHED_VALID' as const,
-              isOfflineFallback: true,
-              lastError: null,
-            };
-            const sha256 = crypto.createHash('sha256').update(JSON.stringify(updatedBase), 'utf8').digest('hex');
-            this.registry.saveSnapshot({ ...updatedBase, sha256 });
+            this.persistCachedSnapshotFallback(existing, nowIso);
             cachedFallbackSources.push(sourceKey);
           }
         } else if (sourceKey === 'MITRE_CWE') {
@@ -446,33 +424,18 @@ export class ReferenceSynchronizer {
               { headers: { 'User-Agent': 'WinHood-Reference-Synchronizer/3.0', Accept: 'application/json' } },
               3500
             );
-            const updatedBase = {
-              ...existing,
+            this.persistFreshSnapshot(existing, nowIso, {
               version: String(cweData?.cwe_version || existing.version),
-              fetchedAt: nowIso,
               etag: etag || existing.etag || null,
-              freshnessStatus: 'FRESH' as const,
-              isOfflineFallback: false,
-              lastError: null,
               payloadSummary: {
                 ...existing.payloadSummary,
                 cweReleaseDate: cweData?.cwe_release_date || nowIso.slice(0, 10),
                 totalWeaknesses: cweData?.total_weaknesses || existing.recordsCount,
               },
-            };
-            const sha256 = crypto.createHash('sha256').update(JSON.stringify(updatedBase), 'utf8').digest('hex');
-            this.registry.saveSnapshot({ ...updatedBase, sha256 });
+            });
             liveFetchedSources.push(sourceKey);
           } catch {
-            const updatedBase = {
-              ...existing,
-              fetchedAt: nowIso,
-              freshnessStatus: 'CACHED_VALID' as const,
-              isOfflineFallback: true,
-              lastError: null,
-            };
-            const sha256 = crypto.createHash('sha256').update(JSON.stringify(updatedBase), 'utf8').digest('hex');
-            this.registry.saveSnapshot({ ...updatedBase, sha256 });
+            this.persistCachedSnapshotFallback(existing, nowIso);
             cachedFallbackSources.push(sourceKey);
           }
         } else if (sourceKey === 'PUBLIC_REPOS_VERSIONED') {
@@ -482,45 +445,22 @@ export class ReferenceSynchronizer {
               { headers: { 'User-Agent': 'WinHood-Reference-Synchronizer/3.0', Accept: 'application/vnd.github+json' } },
               3500
             );
-            const updatedBase = {
-              ...existing,
-              fetchedAt: nowIso,
+            this.persistFreshSnapshot(existing, nowIso, {
               etag: etag || existing.etag || null,
-              freshnessStatus: 'FRESH' as const,
-              isOfflineFallback: false,
-              lastError: null,
               payloadSummary: {
                 ...existing.payloadSummary,
                 verifiedDefaultBranch: repoData?.default_branch || 'master',
                 lastPushedAt: repoData?.pushed_at || nowIso,
                 starsCount: repoData?.stargazers_count ?? null,
               },
-            };
-            const sha256 = crypto.createHash('sha256').update(JSON.stringify(updatedBase), 'utf8').digest('hex');
-            this.registry.saveSnapshot({ ...updatedBase, sha256 });
+            });
             liveFetchedSources.push(sourceKey);
           } catch {
-            const updatedBase = {
-              ...existing,
-              fetchedAt: nowIso,
-              freshnessStatus: 'CACHED_VALID' as const,
-              isOfflineFallback: true,
-              lastError: null,
-            };
-            const sha256 = crypto.createHash('sha256').update(JSON.stringify(updatedBase), 'utf8').digest('hex');
-            this.registry.saveSnapshot({ ...updatedBase, sha256 });
+            this.persistCachedSnapshotFallback(existing, nowIso);
             cachedFallbackSources.push(sourceKey);
           }
         } else {
-          const updatedBase = {
-            ...existing,
-            fetchedAt: nowIso,
-            freshnessStatus: 'CACHED_VALID' as const,
-            isOfflineFallback: true,
-            lastError: null,
-          };
-          const sha256 = crypto.createHash('sha256').update(JSON.stringify(updatedBase), 'utf8').digest('hex');
-          this.registry.saveSnapshot({ ...updatedBase, sha256 });
+          this.persistCachedSnapshotFallback(existing, nowIso);
           cachedFallbackSources.push(sourceKey);
         }
       } catch (err: any) {
@@ -538,5 +478,34 @@ export class ReferenceSynchronizer {
       liveFetchedSources,
       cachedFallbackSources,
     };
+  }
+
+  private persistFreshSnapshot(
+    existing: ReferenceSnapshotRecord,
+    nowIso: string,
+    patch: Partial<ReferenceSnapshotRecord>
+  ): void {
+    const updatedBase: ReferenceSnapshotRecord = {
+      ...existing,
+      ...patch,
+      fetchedAt: nowIso,
+      freshnessStatus: 'FRESH',
+      isOfflineFallback: false,
+      lastError: null,
+    };
+    const sha256 = crypto.createHash('sha256').update(JSON.stringify(updatedBase), 'utf8').digest('hex');
+    this.registry.saveSnapshot({ ...updatedBase, sha256 });
+  }
+
+  private persistCachedSnapshotFallback(existing: ReferenceSnapshotRecord, nowIso: string): void {
+    const updatedBase: ReferenceSnapshotRecord = {
+      ...existing,
+      fetchedAt: nowIso,
+      freshnessStatus: 'CACHED_VALID',
+      isOfflineFallback: true,
+      lastError: null,
+    };
+    const sha256 = crypto.createHash('sha256').update(JSON.stringify(updatedBase), 'utf8').digest('hex');
+    this.registry.saveSnapshot({ ...updatedBase, sha256 });
   }
 }

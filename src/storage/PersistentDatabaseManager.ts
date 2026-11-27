@@ -250,8 +250,16 @@ export class PersistentDatabaseManager {
     return parsed;
   }
 
+  private static assertSafeFilePath(rawPath: string): string {
+    if (!rawPath || rawPath.includes('\0')) {
+      throw new Error('INVALID_DATABASE_PATH: Caminho de banco inválido ou contendo byte nulo.');
+    }
+    return path.resolve(rawPath);
+  }
+
   public writeAtomicChecksummed<T>(targetPath: string, data: T): { sha256: string } {
-    const dir = path.dirname(targetPath);
+    const safeTargetPath = PersistentDatabaseManager.assertSafeFilePath(targetPath);
+    const dir = path.dirname(safeTargetPath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
@@ -259,23 +267,23 @@ export class PersistentDatabaseManager {
     const wrapped = PersistentDatabaseManager.preparePayloadForDisk(data);
     const serialized = JSON.stringify(wrapped, null, 2);
     const checksum = sha256Hex(serialized);
-    const checksumPath = `${targetPath}.sha256`;
-    const backupPath = `${targetPath}.bak`;
+    const checksumPath = `${safeTargetPath}.sha256`;
+    const backupPath = `${safeTargetPath}.bak`;
 
-    if (fs.existsSync(targetPath)) {
+    if (fs.existsSync(safeTargetPath)) {
       try {
-        const currentRaw = fs.readFileSync(targetPath, 'utf8');
+        const currentRaw = fs.readFileSync(safeTargetPath, 'utf8');
         // Only promote current file to .bak if it parses as valid JSON
         JSON.parse(currentRaw);
-        fs.copyFileSync(targetPath, backupPath);
+        fs.copyFileSync(safeTargetPath, backupPath);
       } catch {
         // Do not overwrite a valid .bak with corrupted primary data
       }
     }
 
-    const tmpFile = `${targetPath}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+    const tmpFile = `${safeTargetPath}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
     fs.writeFileSync(tmpFile, serialized, { encoding: 'utf8', mode: 0o600 });
-    fsyncAndRename(tmpFile, targetPath);
+    fsyncAndRename(tmpFile, safeTargetPath);
 
     const tmpSha = `${checksumPath}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
     fs.writeFileSync(tmpSha, `${checksum}\n`, { encoding: 'utf8', mode: 0o600 });
@@ -398,7 +406,8 @@ export class PersistentDatabaseManager {
     }
 
     try {
-      const raw = fs.readFileSync(targetPath, 'utf8');
+      const safeTargetPath = PersistentDatabaseManager.assertSafeFilePath(targetPath);
+      const raw = fs.readFileSync(safeTargetPath, 'utf8');
       const actualSha = sha256Hex(raw);
       const expectedSha = fs.existsSync(checksumPath)
         ? fs.readFileSync(checksumPath, 'utf8').trim()

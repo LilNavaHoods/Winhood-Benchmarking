@@ -257,13 +257,21 @@ const threeWay = computeThreeWaySeparatedCoverage({
   },
 });
 
-// Verify c8 generated non-empty LCOV & HTML artifacts on disk (never mask missing LCOV as 100%)
+// Verify c8 generated non-empty LCOV & HTML artifacts on disk with repo-relative SF: paths
 const lcovPath = path.join(covDir, 'lcov.info');
 const htmlPath = path.join(covDir, 'index.html');
 const lcovExists = fs.existsSync(lcovPath) && fs.statSync(lcovPath).size > 0;
 const htmlExists = fs.existsSync(htmlPath) && fs.statSync(htmlPath).size > 0;
 if (!lcovExists || !htmlExists) {
   failures.push('c8 failed to emit non-empty coverage/lcov.info or coverage/index.html');
+} else {
+  const lcovLines = fs.readFileSync(lcovPath, 'utf8').split(/\r?\n/);
+  const sfLines = lcovLines.filter((l) => l.startsWith('SF:')).map((l) => l.slice(3));
+  if (sfLines.length === 0) {
+    failures.push('coverage/lcov.info contains 0 SF: source file records');
+  } else if (sfLines.some((sf) => sf.startsWith('/') || /^[A-Za-z]:[\\/]/.test(sf))) {
+    failures.push('coverage/lcov.info contains absolute SF: paths instead of repo-relative paths');
+  }
 }
 
 const passed = failures.length === 0;

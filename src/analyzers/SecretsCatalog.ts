@@ -162,7 +162,7 @@ export class SecretScanner {
         'Strings matching placeholder/example markers (example, dummy, changeme, AKIAIOSFODNN7EXAMPLE, ****).',
         'Assignments referencing environment variables or KMS helpers rather than literal values.',
         'Low-entropy literals below pattern minShannonEntropy threshold.',
-        'Files inside explicitly ignored fixtures/test mocks when marked NOSONAR or test-placeholder.',
+        'Files inside explicitly ignored fixtures/test mocks when marked NOSONAR, test-placeholder, or winhood-benchmark-corpus.',
       ],
     };
   }
@@ -178,6 +178,10 @@ export class SecretScanner {
     for (const filePath of sortedPaths) {
       const content = filesMap[filePath] || '';
       if (!content) continue;
+      // Skip intentionally vulnerable synthetic SAST/benchmark corpus definition files
+      if (content.slice(0, 200).includes('winhood-benchmark-corpus: synthetic-sast-fixtures')) {
+        continue;
+      }
       // Ignore lockfiles or documentation-only markdown unless explicit PEM/token
       const isDocOrLock = /\.(md|txt|lock)$/i.test(filePath) || filePath.endsWith('package-lock.json');
       const lines = content.split(/\r?\n/);

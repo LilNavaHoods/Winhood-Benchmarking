@@ -173,7 +173,7 @@ export const BUILTIN_RULES: RuleDefinition[] = [
     effortMinutes: 25,
     remediation: 'Remover credenciais literais e usar KMS/Cofre/Variáveis de ambiente.',
     packId: 'winhood-mqr-core',
-    positiveExamples: ['const apiKey = "sk_live_982341234abcdef998877"'],
+    positiveExamples: ['const apiKey = "example_sk_live_placeholder_998877"'],
     negativeExamples: ['const apiKey = process.env.API_KEY'],
   },
   {

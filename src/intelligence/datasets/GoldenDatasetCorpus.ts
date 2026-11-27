@@ -1,3 +1,4 @@
+/* winhood-benchmark-corpus: synthetic-sast-fixtures */
 import crypto from 'node:crypto';
 import type { GoldenDatasetOriginLabel, GoldenDatasetRole } from '../../types/benchmark';
 

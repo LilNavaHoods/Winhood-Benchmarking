@@ -357,6 +357,24 @@ export async function executeC8V8CoverageRun({
     for (const repName of ['lcovonly', 'html', 'json']) {
       istanbulReports.create(repName, { skipEmpty: false }).execute(context);
     }
+
+    // Normalize LCOV SF: records to repo-root-relative POSIX paths so SonarCloud matches sonar.sources reliably
+    const lcovFile = path.join(covDir, 'lcov.info');
+    if (fs.existsSync(lcovFile)) {
+      const rawLcov = fs.readFileSync(lcovFile, 'utf8');
+      const normalizedLcov = rawLcov
+        .split(/\r?\n/)
+        .map((line) => {
+          if (!line.startsWith('SF:')) return line;
+          const sfPath = line.slice(3).trim();
+          const relPath = path.isAbsolute(sfPath)
+            ? path.relative(rootDir, sfPath)
+            : sfPath;
+          return `SF:${relPath.replace(/\\/g, '/')}`;
+        })
+        .join('\n');
+      fs.writeFileSync(lcovFile, normalizedLcov, 'utf8');
+    }
   }
 
   fs.rmSync(v8Dir, { recursive: true, force: true });

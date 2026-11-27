@@ -1,3 +1,4 @@
+/* winhood-benchmark-corpus: synthetic-sast-fixtures */
 import crypto from 'node:crypto';
 import { AnalyzerRegistry } from '../analyzers/AnalyzerRegistry';
 import { RULE_ENGINE_VERSION } from '../analyzers/RuleRegistry';
@@ -541,7 +542,7 @@ export class CrossToolBenchmarkHarness {
           recall: computeWilson95ConfidenceInterval(tp, tp + fn),
         },
         byClass,
-        detectedRuleIds: Array.from(allRules).sort(),
+        detectedRuleIds: Array.from(allRules).sort((a, b) => a.localeCompare(b)),
       };
     };
 

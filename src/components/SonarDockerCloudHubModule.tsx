@@ -808,7 +808,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
             <a
               href="http://localhost:9000"
               target="_blank"
-              rel="noreferrer"
+              rel="noopener noreferrer"
               className="inline-flex items-center gap-2 px-4 py-2 text-xs font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] rounded-lg transition-colors"
             >
               <ExternalLink className="w-4 h-4" />
@@ -932,7 +932,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
                   <span>1. Bearer Token</span>
                 </div>
                 <p className="text-slate-400 leading-relaxed text-[11px]">
-                  No Nuvem MQR (<a href="https://sonarcloud.io" target="_blank" rel="noreferrer" className="text-[#31d6c4] hover:underline">sonarcloud.io</a>), clique no seu <strong>avatar no canto superior direito</strong> → <strong>My Account</strong> → aba <strong>Security</strong> → em <em>Generate Tokens</em>, insira um nome (ex.: <code className="text-white">winhood-cli</code>) e clique em <strong>Generate</strong>.
+                  No Nuvem MQR (<a href="https://sonarcloud.io" target="_blank" rel="noopener noreferrer" className="text-[#31d6c4] hover:underline">sonarcloud.io</a>), clique no seu <strong>avatar no canto superior direito</strong> → <strong>My Account</strong> → aba <strong>Security</strong> → em <em>Generate Tokens</em>, insira um nome (ex.: <code className="text-white">winhood-cli</code>) e clique em <strong>Generate</strong>.
                 </p>
               </div>
 
@@ -1755,7 +1755,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
                 <a
                   href="http://localhost:9000"
                   target="_blank"
-                  rel="noreferrer"
+                  rel="noopener noreferrer"
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold bg-[#31d6c4] text-slate-950 hover:bg-[#28bfb0] rounded-lg transition-colors"
                 >
                   <ExternalLink className="w-3.5 h-3.5" />
@@ -1815,7 +1815,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
                 <a
                   href="http://localhost:9000"
                   target="_blank"
-                  rel="noreferrer"
+                  rel="noopener noreferrer"
                   className="text-[#31d6c4] underline hover:text-[#28bfb0]"
                 >
                   http://localhost:9000
@@ -1873,7 +1873,7 @@ export const SonarDockerCloudHubModule: React.FC<Props> = ({ onNotify, onRefresh
                   Login com seu Git
                 </div>
                 <p className="text-xs text-slate-400">
-                  Acesse <a href="https://sonarcloud.io" target="_blank" rel="noreferrer" className="text-[#31d6c4] underline">sonarcloud.io</a> e entre com sua conta do GitHub, GitLab ou Bitbucket.
+                  Acesse <a href="https://sonarcloud.io" target="_blank" rel="noopener noreferrer" className="text-[#31d6c4] underline">sonarcloud.io</a> e entre com sua conta do GitHub, GitLab ou Bitbucket.
                 </p>
               </div>
 

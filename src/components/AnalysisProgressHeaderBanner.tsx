@@ -37,13 +37,23 @@ export const AnalysisProgressHeaderBanner: React.FC<AnalysisProgressHeaderBanner
     const safeRunId = activeRun.id;
     if (!/^[a-zA-Z0-9_-]+$/.test(safeRunId)) return;
 
-    const interval = setInterval(async () => {
+    let cancelled = false;
+    let inFlight = false;
+    let activeController: AbortController | null = null;
+
+    const pollProgress = async () => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
+      const controller = new AbortController();
+      activeController = controller;
       try {
         const res = await fetch(
-          `/api/benchmark-runs/${encodeURIComponent(safeRunId)}/progress`
+          `/api/benchmark-runs/${encodeURIComponent(safeRunId)}/progress`,
+          { signal: controller.signal }
         );
-        if (res.ok) {
+        if (!cancelled && res.ok) {
           const data = await res.json();
+          if (cancelled) return;
           if (data.progress) {
             setLocalProgress(data.progress);
           }
@@ -52,11 +62,24 @@ export const AnalysisProgressHeaderBanner: React.FC<AnalysisProgressHeaderBanner
           }
         }
       } catch {
-        // Ignora erros de polling momentâneos
+        // Ignora erros de polling momentâneos ou abort no unmount
+      } finally {
+        if (activeController === controller) {
+          activeController = null;
+        }
+        inFlight = false;
       }
+    };
+
+    const interval = setInterval(() => {
+      void pollProgress();
     }, 700);
 
-    return () => clearInterval(interval);
+    return () => {
+      cancelled = true;
+      activeController?.abort();
+      clearInterval(interval);
+    };
   }, [activeRun?.id, activeRun?.status, onRefresh]);
 
   if (!activeRun || activeRun.status !== 'RUNNING') {

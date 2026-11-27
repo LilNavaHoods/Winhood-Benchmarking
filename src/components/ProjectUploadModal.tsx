@@ -385,24 +385,16 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
             >
               Arquivos de Código-Fonte, Pacote .ZIP ou Diretório do Projeto
             </label>
-            <div
-              role="button"
-              tabIndex={0}
+            <section
+              aria-label="Área de upload e arrastar arquivos"
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
               onDrop={handleDrop}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  fileInputRef.current?.click();
-                }
-              }}
-              className={`border-2 border-dashed rounded-xl p-6 text-center transition-all cursor-pointer ${
+              className={`border-2 border-dashed rounded-xl p-6 text-center transition-all ${
                 isDragging
                   ? 'border-[#31d6c4] bg-[#31d6c4]/5'
                   : 'border-slate-300 dark:border-slate-700 hover:border-[#31d6c4]/60 bg-slate-50 dark:bg-[#080b10]'
               }`}
-              onClick={() => fileInputRef.current?.click()}
             >
               <input
                 id="upload-project-files-input"
@@ -416,7 +408,6 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
                 id="upload-project-folder-input"
                 ref={folderInputRef}
                 type="file"
-                // @ts-expect-error webkitdirectory supported in Chromium/Firefox
                 webkitdirectory=""
                 directory=""
                 multiple
@@ -464,7 +455,7 @@ export const ProjectUploadModal: React.FC<ProjectUploadModalProps> = ({
                   <Plus className="w-3 h-3" /> Adicionar Arquivo Manual
                 </button>
               </div>
-            </div>
+            </section>
           </div>
 
           {/* Files Inventory Preview */}

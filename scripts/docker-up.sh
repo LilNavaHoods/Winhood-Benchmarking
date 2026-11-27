@@ -111,8 +111,8 @@ if ! [[ "${WINHOOD_PORT_VALUE}" =~ ^[0-9]+$ ]] || (( WINHOOD_PORT_VALUE < 1024 |
 fi
 
 SECRET_VALUE="$(read_env_value 'WINHOOD_KEYSTORE_MASTER_SECRET')"
-if [[ -z "${SECRET_VALUE}" ]]; then
-  echo "[WinHood Docker] Preenchendo WINHOOD_KEYSTORE_MASTER_SECRET ausente em ${ENV_FILE}..."
+if [[ -z "${SECRET_VALUE}" || "${SECRET_VALUE}" == replace-with-* ]]; then
+  echo "[WinHood Docker] Preenchendo WINHOOD_KEYSTORE_MASTER_SECRET em ${ENV_FILE} com segredo criptográfico aleatório..."
   upsert_env_key 'WINHOOD_KEYSTORE_MASTER_SECRET' "$(generate_secret_hex32)"
   SECRET_VALUE="$(read_env_value 'WINHOOD_KEYSTORE_MASTER_SECRET')"
 fi
@@ -122,8 +122,8 @@ if [[ ${#SECRET_VALUE} -lt 32 ]]; then
 fi
 
 WORKER_TOKEN_VALUE="$(read_env_value 'WINHOOD_SCANNER_WORKER_TOKEN')"
-if [[ -z "${WORKER_TOKEN_VALUE}" ]]; then
-  echo "[WinHood Docker] Preenchendo WINHOOD_SCANNER_WORKER_TOKEN ausente em ${ENV_FILE}..."
+if [[ -z "${WORKER_TOKEN_VALUE}" || "${WORKER_TOKEN_VALUE}" == replace-with-* ]]; then
+  echo "[WinHood Docker] Preenchendo WINHOOD_SCANNER_WORKER_TOKEN em ${ENV_FILE} com token criptográfico aleatório..."
   upsert_env_key 'WINHOOD_SCANNER_WORKER_TOKEN' "$(generate_secret_hex32)"
   WORKER_TOKEN_VALUE="$(read_env_value 'WINHOOD_SCANNER_WORKER_TOKEN')"
 fi

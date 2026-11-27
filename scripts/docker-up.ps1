@@ -100,8 +100,8 @@ if (-not [int]::TryParse($portRaw, [ref]$portInt) -or $portInt -lt 1024 -or $por
 }
 
 $masterSecret = if ($envMap.ContainsKey('WINHOOD_KEYSTORE_MASTER_SECRET')) { $envMap['WINHOOD_KEYSTORE_MASTER_SECRET'] } else { '' }
-if ([string]::IsNullOrWhiteSpace($masterSecret)) {
-    Write-Host '[WinHood Docker] Preenchendo WINHOOD_KEYSTORE_MASTER_SECRET ausente em .env.docker...' -ForegroundColor Cyan
+if ([string]::IsNullOrWhiteSpace($masterSecret) -or $masterSecret.StartsWith('replace-with-')) {
+    Write-Host '[WinHood Docker] Preenchendo WINHOOD_KEYSTORE_MASTER_SECRET em .env.docker com segredo criptografico aleatorio...' -ForegroundColor Cyan
     $masterSecret = New-CryptographicHexSecret
     Set-EnvKeyInFile -Path $EnvFile -Key 'WINHOOD_KEYSTORE_MASTER_SECRET' -Value $masterSecret
 }
@@ -111,8 +111,8 @@ if ($masterSecret.Length -lt 32) {
 }
 
 $workerTokenVal = if ($envMap.ContainsKey('WINHOOD_SCANNER_WORKER_TOKEN')) { $envMap['WINHOOD_SCANNER_WORKER_TOKEN'] } else { '' }
-if ([string]::IsNullOrWhiteSpace($workerTokenVal)) {
-    Write-Host '[WinHood Docker] Preenchendo WINHOOD_SCANNER_WORKER_TOKEN ausente em .env.docker...' -ForegroundColor Cyan
+if ([string]::IsNullOrWhiteSpace($workerTokenVal) -or $workerTokenVal.StartsWith('replace-with-')) {
+    Write-Host '[WinHood Docker] Preenchendo WINHOOD_SCANNER_WORKER_TOKEN em .env.docker com token criptografico aleatorio...' -ForegroundColor Cyan
     $workerTokenVal = New-CryptographicHexSecret
     Set-EnvKeyInFile -Path $EnvFile -Key 'WINHOOD_SCANNER_WORKER_TOKEN' -Value $workerTokenVal
 }

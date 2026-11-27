@@ -396,6 +396,7 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
   const [reflexHistoryMs, setReflexHistoryMs] = useState<number[]>([]);
   const reflexStartRef = useRef<number>(0);
   const reflexTimerRef = useRef<number | null>(null);
+  const initialMeasureDoneRef = useRef<boolean>(false);
 
   // Attach to BenchmarkRun state
   const [targetRunId, setTargetRunId] = useState<string>(selectedRunId || runs[0]?.id || '');
@@ -540,12 +541,13 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
 
   // Run initial frame pacing measurement automatically once
   useEffect(() => {
+    if (initialMeasureDoneRef.current) return;
+    initialMeasureDoneRef.current = true;
     const timer = globalThis.setTimeout(() => {
       handleMeasureFramePacing();
     }, 250);
     return () => globalThis.clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [handleMeasureFramePacing]);
 
   // Client GPU / Canvas2D & Shader Trigonometric Stress Benchmark
   const handleRunClientGpuStress = () => {
@@ -722,8 +724,11 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
     }
     setReflexState('WAITING');
     setReflexLastMs(null);
-    // NOSONAR (typescript:S2245): jitter visual não-sensível apenas para aleatorizar estímulo do teste de reflexo UI
-    const delayMs = 1100 + Math.floor(Math.random() * 1600); // NOSONAR
+    const randomOffsetMs =
+      typeof globalThis.crypto?.getRandomValues === 'function'
+        ? (globalThis.crypto.getRandomValues(new Uint32Array(1))[0] ?? 0) % 1600
+        : Math.floor(performance.now()) % 1600;
+    const delayMs = 1100 + randomOffsetMs;
     reflexTimerRef.current = globalThis.setTimeout(() => {
       reflexStartRef.current = performance.now();
       setReflexState('READY');
@@ -1656,18 +1661,7 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
             {/* Interactive preview surface */}
             <div
               ref={deadPixelContainerRef}
-              onClick={() =>
-                setDeadPixelColorIdx((prev) => (prev + 1) % DEAD_PIXEL_COLORS.length)
-              }
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  setDeadPixelColorIdx((prev) => (prev + 1) % DEAD_PIXEL_COLORS.length);
-                }
-              }}
-              className={`w-full rounded-xl border border-slate-700 flex flex-col items-center justify-center cursor-pointer select-none transition-colors ${
+              className={`relative w-full rounded-xl border border-slate-700 flex flex-col items-center justify-center select-none transition-colors ${
                 deadPixelFullscreen ? 'fixed inset-0 z-50 rounded-none border-0' : 'h-56'
               }`}
               style={{
@@ -1675,7 +1669,15 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
                 color: DEAD_PIXEL_COLORS[deadPixelColorIdx].text,
               }}
             >
-              <div className="px-4 py-2 rounded-lg bg-black/45 backdrop-blur-sm text-white text-center space-y-1">
+              <button
+                type="button"
+                aria-label="Avançar cor do teste de dead pixel"
+                onClick={() =>
+                  setDeadPixelColorIdx((prev) => (prev + 1) % DEAD_PIXEL_COLORS.length)
+                }
+                className="absolute inset-0 w-full h-full cursor-pointer bg-transparent border-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-400"
+              />
+              <div className="relative z-10 pointer-events-none px-4 py-2 rounded-lg bg-black/45 backdrop-blur-sm text-white text-center space-y-1">
                 <div className="text-xs font-mono uppercase tracking-wider">
                   Padrão {deadPixelColorIdx + 1}/{DEAD_PIXEL_COLORS.length}:{' '}
                   {DEAD_PIXEL_COLORS[deadPixelColorIdx].name}
@@ -1687,14 +1689,13 @@ export const HardwareAndDisplayBenchmarkModule: React.FC<Props> = ({
                 {deadPixelFullscreen && (
                   <button
                     type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
+                    onClick={() => {
                       setDeadPixelFullscreen(false);
                       if (document.fullscreenElement) {
                         void document.exitFullscreen().catch(() => undefined);
                       }
                     }}
-                    className="mt-2 px-3 py-1 rounded bg-white text-slate-900 text-xs font-semibold inline-flex items-center gap-1"
+                    className="pointer-events-auto mt-2 px-3 py-1 rounded bg-white text-slate-900 text-xs font-semibold inline-flex items-center gap-1 cursor-pointer"
                   >
                     <Minimize2 className="w-3 h-3" />
                     Sair da Tela Cheia

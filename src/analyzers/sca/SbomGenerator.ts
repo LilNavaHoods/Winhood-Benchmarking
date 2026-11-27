@@ -82,18 +82,25 @@ export function resolvePackageSpdxLicenseWithProvenance(
     return { license: cached, provenance: 'NODE_MODULES_DECLARED' };
   }
   try {
-    const nmPkgPath = path.resolve(process.cwd(), 'node_modules', normalizedName, 'package.json');
-    if (fs.existsSync(nmPkgPath)) {
-      const parsed = JSON.parse(fs.readFileSync(nmPkgPath, 'utf8'));
-      const lic =
-        typeof parsed?.license === 'string'
-          ? parsed.license.trim()
-          : typeof parsed?.license?.type === 'string'
-            ? parsed.license.type.trim()
-            : '';
-      if (lic) {
-        nodeModulesLicenseCache.set(normalizedName, lic);
-        return { license: lic, provenance: 'NODE_MODULES_DECLARED' };
+    const isSafeNpmPkgName =
+      /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i.test(normalizedName) &&
+      !normalizedName.includes('..') &&
+      !normalizedName.includes('\\');
+    if (isSafeNpmPkgName) {
+      const nodeModulesRoot = path.resolve(process.cwd(), 'node_modules');
+      const nmPkgPath = path.resolve(nodeModulesRoot, normalizedName, 'package.json');
+      if (nmPkgPath.startsWith(`${nodeModulesRoot}${path.sep}`) && fs.existsSync(nmPkgPath)) {
+        const parsed = JSON.parse(fs.readFileSync(nmPkgPath, 'utf8'));
+        const lic =
+          typeof parsed?.license === 'string'
+            ? parsed.license.trim()
+            : typeof parsed?.license?.type === 'string'
+              ? parsed.license.type.trim()
+              : '';
+        if (lic) {
+          nodeModulesLicenseCache.set(normalizedName, lic);
+          return { license: lic, provenance: 'NODE_MODULES_DECLARED' };
+        }
       }
     }
   } catch {
@@ -967,6 +974,29 @@ export class SbomGenerator {
         }
       }
 
+      const addNpmLockfileComponent = (
+        name: string,
+        ver: string,
+        manifestDigest: string,
+        integrity?: string
+      ) => {
+        const licInfo = resolvePackageSpdxLicenseWithProvenance(name, undefined, undefined, {
+          strictProvenance,
+        });
+        addComponent({
+          bomRef: `pkg:npm/${name}@${ver}`,
+          name,
+          version: ver,
+          purl: `pkg:npm/${name.replace('@', '%40')}@${ver}`,
+          ecosystem: 'npm',
+          license: licInfo.license,
+          licenseProvenance: licInfo.provenance,
+          dependencyScope: directNpmScopes.has(name) ? 'DIRECT' : 'TRANSITIVE',
+          manifestFile: filePath,
+          sha256: computeComponentDigest('npm', name, ver, manifestDigest, integrity),
+        });
+      };
+
       // 3. yarn.lock (Classic v1 & Berry v2+)
       if (filePath.endsWith('yarn.lock')) {
         lockfilesDetected.push(filePath);
@@ -987,21 +1017,7 @@ export class SbomGenerator {
           const ver = verMatch[1]!;
           const intLine = lines.find((l) => /^(integrity|checksum)[:\s]/i.test(l));
           const integrity = intLine ? intLine.split(/[:\s]+/).slice(1).join('').replace(/["']/g, '') : undefined;
-          const licInfo = resolvePackageSpdxLicenseWithProvenance(name, undefined, undefined, {
-            strictProvenance,
-          });
-          addComponent({
-            bomRef: `pkg:npm/${name}@${ver}`,
-            name,
-            version: ver,
-            purl: `pkg:npm/${name.replace('@', '%40')}@${ver}`,
-            ecosystem: 'npm',
-            license: licInfo.license,
-            licenseProvenance: licInfo.provenance,
-            dependencyScope: directNpmScopes.has(name) ? 'DIRECT' : 'TRANSITIVE',
-            manifestFile: filePath,
-            sha256: computeComponentDigest('npm', name, ver, manifestDigest, integrity),
-          });
+          addNpmLockfileComponent(name, ver, manifestDigest, integrity);
         }
       }
 
@@ -1014,23 +1030,7 @@ export class SbomGenerator {
           // Matches '/lodash@4.17.21:' or 'lodash@4.17.21:' or "'@babel/parser@7.26.0':"
           const m = trimmed.match(/^['"]?\/?(@?[a-zA-Z0-9._/-]+)@([0-9]+\.[0-9]+\.[0-9]+[^('":\s]*)/);
           if (m && m[1] && m[2]) {
-            const name = m[1];
-            const ver = m[2];
-            const licInfo = resolvePackageSpdxLicenseWithProvenance(name, undefined, undefined, {
-              strictProvenance,
-            });
-            addComponent({
-              bomRef: `pkg:npm/${name}@${ver}`,
-              name,
-              version: ver,
-              purl: `pkg:npm/${name.replace('@', '%40')}@${ver}`,
-              ecosystem: 'npm',
-              license: licInfo.license,
-              licenseProvenance: licInfo.provenance,
-              dependencyScope: directNpmScopes.has(name) ? 'DIRECT' : 'TRANSITIVE',
-              manifestFile: filePath,
-              sha256: computeComponentDigest('npm', name, ver, manifestDigest),
-            });
+            addNpmLockfileComponent(m[1], m[2], manifestDigest);
           }
         }
       }
@@ -1049,21 +1049,7 @@ export class SbomGenerator {
               const name = atIdx > 0 ? firstTuple.slice(0, atIdx) : pkgKey;
               const ver = atIdx > 0 ? firstTuple.slice(atIdx + 1) : '0.0.0';
               const integrity = Array.isArray(arr) && typeof arr[3] === 'string' ? arr[3] : undefined;
-              const licInfo = resolvePackageSpdxLicenseWithProvenance(name, undefined, undefined, {
-                strictProvenance,
-              });
-              addComponent({
-                bomRef: `pkg:npm/${name}@${ver}`,
-                name,
-                version: ver,
-                purl: `pkg:npm/${name.replace('@', '%40')}@${ver}`,
-                ecosystem: 'npm',
-                license: licInfo.license,
-                licenseProvenance: licInfo.provenance,
-                dependencyScope: directNpmScopes.has(name) ? 'DIRECT' : 'TRANSITIVE',
-                manifestFile: filePath,
-                sha256: computeComponentDigest('npm', name, ver, manifestDigest, integrity),
-              });
+              addNpmLockfileComponent(name, ver, manifestDigest, integrity);
             }
           }
         } catch {
@@ -1075,6 +1061,20 @@ export class SbomGenerator {
     // 6. Python, Go, Rust, Maven, NuGet
     for (const [filePath, content] of sortedEntries) {
       const manifestDigest = crypto.createHash('sha256').update(content, 'utf8').digest('hex').slice(0, 16);
+      const addPypiManifestComponent = (name: string, ver: string) => {
+        addComponent({
+          bomRef: `pkg:pypi/${name}@${ver}`,
+          name,
+          version: ver,
+          purl: `pkg:pypi/${name}@${ver}`,
+          ecosystem: 'pypi',
+          license: 'NOASSERTION',
+          licenseProvenance: 'UNVERIFIED',
+          dependencyScope: 'DIRECT',
+          manifestFile: filePath,
+          sha256: computeComponentDigest('pypi', name, ver, manifestDigest),
+        });
+      };
 
       if (filePath.endsWith('requirements.txt')) {
         lockfilesDetected.push(filePath);
@@ -1083,20 +1083,7 @@ export class SbomGenerator {
           if (!line || line.startsWith('#') || line.startsWith('-')) continue;
           const m = line.match(/^([a-zA-Z0-9._-]+)\s*(?:==|>=|~=)?\s*([a-zA-Z0-9._-]+)?/);
           if (m) {
-            const name = m[1]!;
-            const ver = m[2] || 'UNPINNED';
-            addComponent({
-              bomRef: `pkg:pypi/${name}@${ver}`,
-              name,
-              version: ver,
-              purl: `pkg:pypi/${name}@${ver}`,
-              ecosystem: 'pypi',
-              license: 'NOASSERTION',
-              licenseProvenance: 'UNVERIFIED',
-              dependencyScope: 'DIRECT',
-              manifestFile: filePath,
-              sha256: computeComponentDigest('pypi', name, ver, manifestDigest),
-            });
+            addPypiManifestComponent(m[1]!, m[2] || 'UNPINNED');
           }
         }
       }
@@ -1109,20 +1096,7 @@ export class SbomGenerator {
             const item = rawItem.replace(/['"\s]/g, '');
             const m = item.match(/^([a-zA-Z0-9._-]+)(?:==|>=|~=)?([a-zA-Z0-9._-]+)?/);
             if (m && m[1]) {
-              const name = m[1];
-              const ver = m[2] || 'UNPINNED';
-              addComponent({
-                bomRef: `pkg:pypi/${name}@${ver}`,
-                name,
-                version: ver,
-                purl: `pkg:pypi/${name}@${ver}`,
-                ecosystem: 'pypi',
-                license: 'NOASSERTION',
-                licenseProvenance: 'UNVERIFIED',
-                dependencyScope: 'DIRECT',
-                manifestFile: filePath,
-                sha256: computeComponentDigest('pypi', name, ver, manifestDigest),
-              });
+              addPypiManifestComponent(m[1], m[2] || 'UNPINNED');
             }
           }
         }

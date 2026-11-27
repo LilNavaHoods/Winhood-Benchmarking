@@ -20,16 +20,33 @@ const SUPPORTED_EXTS = new Set([
   '.json', '.toml', '.xml', '.csproj', '.txt',
 ]);
 
-function collectFilesRecursively(rootDir: string, currentDir = rootDir, acc: Record<string, string> = {}): Record<string, string> {
+const TEST_FILE_PATTERN = /\.(?:test|spec)\.[a-z0-9]+$/i;
+
+function collectFilesRecursively(
+  rootDir: string,
+  currentDir = rootDir,
+  acc: Record<string, string> = {},
+  options?: { includeTests?: boolean }
+): Record<string, string> {
   const entries = fs.readdirSync(currentDir, { withFileTypes: true });
   for (const entry of entries) {
-    if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === 'dist' || entry.name === 'dist-desktop') {
+    if (
+      entry.name === 'node_modules' ||
+      entry.name === '.git' ||
+      entry.name === 'dist' ||
+      entry.name === 'dist-desktop' ||
+      entry.name === 'dist-server' ||
+      entry.name === 'coverage'
+    ) {
       continue;
     }
     const full = path.join(currentDir, entry.name);
     if (entry.isDirectory()) {
-      collectFilesRecursively(rootDir, full, acc);
+      collectFilesRecursively(rootDir, full, acc, options);
     } else if (entry.isFile()) {
+      if (!options?.includeTests && TEST_FILE_PATTERN.test(entry.name)) {
+        continue;
+      }
       const ext = path.extname(entry.name).toLowerCase();
       const base = entry.name.toLowerCase();
       if (SUPPORTED_EXTS.has(ext) || base === 'dockerfile' || base === 'requirements.txt' || base === 'go.mod') {
@@ -133,7 +150,9 @@ export async function runCli(argv: string[]): Promise<CliResult> {
           stderr: `Target path does not exist: ${targetDir}`,
         };
       }
-      const filesMap = collectFilesRecursively(targetDir);
+      const filesMap = collectFilesRecursively(targetDir, targetDir, {}, {
+        includeTests: flags.has('include-tests'),
+      });
       const deterministicTs =
         argsMap.get('deterministic-ts') ||
         (flags.has('deterministic') || command === 'report' ? '2026-11-14T00:00:00.000Z' : undefined);

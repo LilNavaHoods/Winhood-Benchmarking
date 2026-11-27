@@ -183,6 +183,19 @@ export class SarifCodec {
                 endColumn: f.columnEnd ?? 80,
                 snippet: { text: f.snippet || '' },
               },
+              ...((f.contextBefore && f.contextBefore.length > 0) || (f.contextAfter && f.contextAfter.length > 0)
+                ? {
+                    contextRegion: {
+                      snippet: {
+                        text: [
+                          ...(f.contextBefore || []),
+                          `>>> ${f.snippet || ''}`,
+                          ...(f.contextAfter || []),
+                        ].join('\n'),
+                      },
+                    },
+                  }
+                : {}),
             },
           },
         ],
@@ -191,11 +204,15 @@ export class SarifCodec {
           softwareId: f.softwareId,
           softwareName: f.softwareName,
           softwareVersion: f.softwareVersion,
+          validationStatus: f.validationStatus,
           cwe: f.cwe,
           cvss: f.cvss,
           evidenceSha256: f.evidenceSha256,
+          whyItIsAnIssue: f.whyItIsAnIssue,
           remediation: f.remediation,
+          compliantCodeExample: f.compliantCodeExample,
           remediationEffortMinutes: f.remediationEffortMinutes,
+          mqrImpacts: f.mqrImpacts,
         },
       };
     });

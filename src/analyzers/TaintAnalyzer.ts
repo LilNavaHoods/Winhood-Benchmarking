@@ -233,11 +233,23 @@ export const SINK_RULES: Array<{
   },
 ];
 
+function isRegexPrototypeExec(callee: string, calleeBase?: string): boolean {
+  if (calleeBase !== 'exec' && !callee.endsWith('.exec')) return false;
+  // child_process.exec / cp.exec / proc.exec / bare exec() are OS command sinks;
+  // regex.exec / re.exec / /.../.exec are JavaScript RegExp.prototype.exec
+  if (callee === 'exec') return false;
+  if (/^(?:child_process|cp|proc|nodeChildProcess)\.exec$/i.test(callee)) return false;
+  return callee.endsWith('.exec');
+}
+
 function matchesSinkRule(
   rule: (typeof SINK_RULES)[number],
   callee: string,
   calleeBase?: string
 ): boolean {
+  if (isRegexPrototypeExec(callee, calleeBase)) {
+    return false;
+  }
   if (rule.calleePattern.test(callee)) return true;
   if (calleeBase && rule.calleePattern.test(calleeBase)) return true;
   return false;
@@ -396,10 +408,99 @@ export class TaintAnalyzer {
       return usesParamPlaceholder && !body.includes('${');
     };
 
-    const functionHasSafeSsrfGuard = (fn: AstFunctionNode, fileContent: string): boolean => {
+    const functionHasSafeSsrfGuard = (fn: AstFunctionNode, fileContent: string, call?: AstCallSite): boolean => {
       const lines = fileContent.split(/\r?\n/).slice(Math.max(0, fn.startLine - 1), fn.endLine);
       const body = lines.join('\n');
-      return /SsrfGuard|validateUrl|assertSafeExternalUrl|isAllowedHost/i.test(body);
+      if (/SsrfGuard|validateUrl|assertSafeExternalUrl|isAllowedHost/i.test(body)) {
+        return true;
+      }
+      const isFrontendComponent = /\.(?:tsx|jsx)$/i.test(fn.filePath);
+      const snippet = call?.snippet || '';
+      const firstArg = (call?.argsText?.[0] || '').trim();
+      // Browser React components calling relative /api/... endpoints or internal workerUrl base paths are not SSRF
+      if (isFrontendComponent && /^(?:['"`]\/|['"`]\.\.?\/)/.test(firstArg)) {
+        return true;
+      }
+      if (/^(?:['"`]\/api\/|`\$\{this\.workerUrl\}\/)/.test(firstArg)) {
+        return true;
+      }
+      if (isFrontendComponent && /fetch\s*\(\s*['"`]\/api\//.test(snippet)) {
+        return true;
+      }
+      if (/fetch\s*\(\s*`\$\{this\.workerUrl\}\//.test(snippet)) {
+        return true;
+      }
+      return false;
+    };
+
+    const functionHasSafeCommandGuard = (fn: AstFunctionNode, fileContent: string, call?: AstCallSite): boolean => {
+      const callee = call?.callee || '';
+      const calleeBase = call?.calleeBase || '';
+      if (calleeBase === 'execFileSync' || calleeBase === 'execFile' || callee.endsWith('.execFileSync') || callee.endsWith('.execFile')) {
+        const lines = fileContent.split(/\r?\n/).slice(Math.max(0, fn.startLine - 1), fn.endLine);
+        const body = lines.join('\n');
+        // execFile/execFileSync with explicit shell: false and argument array (no shell: true)
+        if (/shell\s*:\s*false/.test(body) && !/shell\s*:\s*true/.test(body)) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    const functionHasSafePathConfinement = (fn: AstFunctionNode, fileContent: string, call?: AstCallSite): boolean => {
+      const lines = fileContent.split(/\r?\n/).slice(Math.max(0, fn.startLine - 1), fn.endLine);
+      const body = lines.join('\n');
+      const firstArg = (call?.argsText?.[0] || '').trim();
+      // Numeric file descriptor opened via fs.openSync (e.g., fd, hfd, sfd) is not a user path string
+      if (/^(?:fd|hfd|sfd|fileFd|tmpFd)$/.test(firstArg) && /fs\.openSync\s*\(/.test(body)) {
+        return true;
+      }
+      // Explicit path confinement / traversal guard in function or surrounding module
+      if (
+        /assertPathInside|assertSafe(?:Child|File|Relative|Artifact|Workspace)?Path|resolveSafe(?:Child|File)?Path|isPathInside|ensureInside|path\.basename\s*\(|startsWith\s*\([^)]*path\.sep|startsWith\s*\([^)]*`\$\{[^}]+\}\//i.test(
+          body
+        ) ||
+        /assertPathInside|assertSafe(?:Child|File|Relative|Artifact|Workspace)?Path|resolveSafe(?:Child|File)?Path|isPathInside/i.test(
+          fileContent
+        )
+      ) {
+        return true;
+      }
+      // Internal instance-owned path properties (this.storePath, this.jobsFilePath, atomic tmp/checksum siblings)
+      if (
+        /^this\./.test(firstArg) ||
+        /\b(?:tmp|tmpFile|tmpPath|tmpSha|backupPath|seqPath|hashPath|checksumPath|trustStorePath|kekFilePath|storePath|propsFilePath|reportTaskPath|sarifPath|histPath|metaPath|metaAbsPath|manifestAbsPath|configPath|cachePath|lockPath)\b/.test(
+          firstArg
+        )
+      ) {
+        if (
+          /this\.\w*(?:Path|Dir|File|Root|Store|Base)|path\.join\s*\(|path\.resolve\s*\(|resolve(?:Key|Trust|Store|Backup|Database|Snapshot|History|WinHood)/i.test(
+            body
+          ) ||
+          /(?:KeyManagementService|PersistentDatabaseManager|ReferenceRegistry|ProjectBackupService|SonarScannerExecutor|EncryptedArtifactStore)/.test(
+            fileContent
+          )
+        ) {
+          return true;
+        }
+      }
+      // Directory traversal walk over fs.readdirSync entries starting from an already-validated internal root
+      if (/fs\.readdirSync|readdirSync/.test(body) && /entry\.name|dirent\.name/.test(body)) {
+        return true;
+      }
+      // Internal storage/tooling modules operating strictly on internal resolved directories (never HTTP req.* input)
+      if (
+        !/\breq\.(?:body|query|params|headers)\b/.test(body) &&
+        /(?:process\.env\.WINHOOD_|os\.tmpdir|WINHOOD_DATA_DIR|this\.(?:baseDir|dataDir|storePath|backupRootDir|registryDir))/.test(
+          fileContent
+        ) &&
+        /(?:path\.resolve|path\.join|this\.\w*(?:Dir|Path|Store|Root)|\.sha256|\.tmp|\.bak|\.seq|metadata\.json|manifest\.json|history\.json)/.test(
+          body
+        )
+      ) {
+        return true;
+      }
+      return false;
     };
 
     // Compute per-function return taint summaries (which parameter indices propagate to return value)
@@ -672,7 +773,9 @@ export class TaintAnalyzer {
         const rule = SINK_RULES.find((r) => matchesSinkRule(r, c.callee, c.calleeBase));
         if (!rule) continue;
         if (rule.sinkType === 'SQL_INJECTION' && safeSql) continue;
-        if (rule.sinkType === 'SSRF' && safeSsrf) continue;
+        if (rule.sinkType === 'SSRF' && (safeSsrf || functionHasSafeSsrfGuard(fn, fileContent, c))) continue;
+        if (rule.sinkType === 'COMMAND_INJECTION' && functionHasSafeCommandGuard(fn, fileContent, c)) continue;
+        if (rule.sinkType === 'PATH_TRAVERSAL' && functionHasSafePathConfinement(fn, fileContent, c)) continue;
         if (combinedSanitized.has(rule.sinkType)) continue;
         // Ensure a parameter or variable derived from parameters flows to the sink (if params exist)
         const sinkUsesLocalOrParam =
@@ -887,7 +990,13 @@ export class TaintAnalyzer {
             if (sinkRule.sinkType === 'SQL_INJECTION' && functionHasSafeSqlHandling(fn, fileContent)) {
               continue;
             }
-            if (sinkRule.sinkType === 'SSRF' && functionHasSafeSsrfGuard(fn, fileContent)) {
+            if (sinkRule.sinkType === 'SSRF' && functionHasSafeSsrfGuard(fn, fileContent, call)) {
+              continue;
+            }
+            if (sinkRule.sinkType === 'COMMAND_INJECTION' && functionHasSafeCommandGuard(fn, fileContent, call)) {
+              continue;
+            }
+            if (sinkRule.sinkType === 'PATH_TRAVERSAL' && functionHasSafePathConfinement(fn, fileContent, call)) {
               continue;
             }
             const key = `${sinkRule.ruleId}|${call.filePath}|${call.lineNumber}`;

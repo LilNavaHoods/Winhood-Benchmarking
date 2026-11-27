@@ -236,8 +236,21 @@ export class ReferenceRegistry {
     this.ensureBaselineSnapshots();
   }
 
+  private assertSafeFilePath(fileName: string): string {
+    const storeRoot = path.resolve(this.storeDir);
+    const resolved = path.resolve(storeRoot, fileName);
+    if (!resolved.startsWith(`${storeRoot}${path.sep}`)) {
+      throw new Error(`PATH_TRAVERSAL_BLOCKED: Caminho de snapshot fora de ${storeRoot}.`);
+    }
+    return resolved;
+  }
+
   private getSnapshotFilePath(sourceKey: ReferenceSourceKey): string {
-    return path.join(this.storeDir, `${sourceKey.toLowerCase()}.json`);
+    const safeKey = String(sourceKey).toLowerCase();
+    if (!/^[a-z0-9_-]+$/.test(safeKey)) {
+      throw new Error(`INVALID_REFERENCE_SOURCE_KEY: Chave inválida (${sourceKey}).`);
+    }
+    return this.assertSafeFilePath(`${safeKey}.json`);
   }
 
   private getHistoryFilePath(): string {

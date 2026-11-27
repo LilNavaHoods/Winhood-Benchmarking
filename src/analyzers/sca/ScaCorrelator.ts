@@ -96,20 +96,83 @@ export function compareSemver(a: string, b: string): number {
 export function comparePep440(a: string, b: string): number {
   const parse = (raw: string) => {
     const clean = raw.trim().toLowerCase().replace(/^v/, '').split('+')[0] || '';
-    const m = clean.match(
-      /^(?:(\d+)!)?(\d+(?:\.\d+)*)(?:(a|alpha|b|beta|rc|c|pre|preview)(\d*))?(?:\.?(post)(\d*))?(?:\.?(dev)(\d*))?$/
-    );
-    if (!m) {
-      return { epoch: 0, release: [0], phaseRank: 0, preNum: 0, postNum: 0, devNum: 0, raw: clean };
+    const emptyResult = { epoch: 0, release: [0], phaseRank: 4, preNum: 0, postNum: 0, devNum: 0, raw: clean };
+    if (!clean || clean.length > 128) {
+      return { ...emptyResult, phaseRank: 0 };
     }
-    const epoch = m[1] ? Number(m[1]) : 0;
-    const release = m[2]!.split('.').map((n) => Number(n));
-    const preTag = m[3] || '';
-    const preNum = m[4] ? Number(m[4]) : 0;
-    const hasPost = Boolean(m[5]);
-    const postNum = m[6] ? Number(m[6]) : 0;
-    const hasDev = Boolean(m[7]);
-    const devNum = m[8] ? Number(m[8]) : 0;
+
+    let rest = clean;
+    let epoch = 0;
+    const bangIdx = rest.indexOf('!');
+    if (bangIdx > 0) {
+      const epochPart = rest.slice(0, bangIdx);
+      if (!/^\d+$/.test(epochPart)) return { ...emptyResult, phaseRank: 0 };
+      epoch = Number(epochPart);
+      rest = rest.slice(bangIdx + 1);
+    }
+
+    // Extract leading dotted numeric release segments linearly (e.g., "2.3.1")
+    let relEnd = 0;
+    while (relEnd < rest.length) {
+      const code = rest.charCodeAt(relEnd);
+      const isDigit = code >= 48 && code <= 57;
+      const isDot = code === 46;
+      if (!isDigit && !isDot) break;
+      relEnd += 1;
+    }
+    const relRaw = rest.slice(0, relEnd).replace(/\.+$/, '');
+    if (!relRaw) return { ...emptyResult, phaseRank: 0 };
+    const relParts = relRaw.split('.');
+    if (relParts.some((seg) => !/^\d+$/.test(seg))) {
+      return { ...emptyResult, phaseRank: 0 };
+    }
+    const release = relParts.map((seg) => Number(seg));
+    let tail = rest.slice(relRaw.length);
+
+    let preTag = '';
+    let preNum = 0;
+    let hasPost = false;
+    let postNum = 0;
+    let hasDev = false;
+    let devNum = 0;
+
+    // Optional pre-release tag: alpha|preview|beta|pre|rc|a|b|c + digits
+    const preMatch = /^(?:alpha|preview|beta|pre|rc|a|b|c)/.exec(tail);
+    if (preMatch) {
+      preTag = preMatch[0];
+      tail = tail.slice(preTag.length);
+      const numMatch = /^\d+/.exec(tail);
+      if (numMatch) {
+        preNum = Number(numMatch[0]);
+        tail = tail.slice(numMatch[0].length);
+      }
+    }
+
+    // Optional .postN / postN
+    if (tail.startsWith('.post') || tail.startsWith('post')) {
+      hasPost = true;
+      tail = tail.startsWith('.post') ? tail.slice(5) : tail.slice(4);
+      const numMatch = /^\d+/.exec(tail);
+      if (numMatch) {
+        postNum = Number(numMatch[0]);
+        tail = tail.slice(numMatch[0].length);
+      }
+    }
+
+    // Optional .devN / devN
+    if (tail.startsWith('.dev') || tail.startsWith('dev')) {
+      hasDev = true;
+      tail = tail.startsWith('.dev') ? tail.slice(4) : tail.slice(3);
+      const numMatch = /^\d+/.exec(tail);
+      if (numMatch) {
+        devNum = Number(numMatch[0]);
+        tail = tail.slice(numMatch[0].length);
+      }
+    }
+
+    if (tail.length > 0) {
+      return { ...emptyResult, phaseRank: 0 };
+    }
 
     let phaseRank = 4; // final
     if (hasDev && !preTag && !hasPost) phaseRank = 0;
