@@ -39,12 +39,12 @@ O WinHood Benchmarking executa integralmente na sua máquina por meio de **Docke
 | Pilar | Capacidade Real Entregue Fora da Caixa |
 | :--- | :--- |
 | **SAST & Taint Interprocedural** | Motor nativo em Modo MQR (`src/analyzers/`) com AST completa (`@babel/parser`) para JS/TS, rastreamento *Source → Sink → Sanitizer*, detecção de segredos com entropia de Shannon e regras IaC (Dockerfile, Terraform, Kubernetes, CI). |
-| **Scanners Isolados em Container** | Worker dedicado (`winhood-scanner-worker`) em rede interna **sem acesso à internet**, com **Ruff**, **Bandit**, **Semgrep** (regras offline), **Gitleaks**, **Syft**, **Grype**\* e **OSV-Scanner**\* em versões fixadas. |
+| **Scanners Isolados em Container** | Worker dedicado (`winhood-scanner-worker`) em rede interna **sem acesso à internet**, com **Ruff**, **Bandit**, **Semgrep** (regras offline), **Gitleaks**, **ESLint** (config offline), **Syft**, **Grype**\* e **OSV-Scanner**\* em versões fixadas com verificação SHA-256. |
 | **SBOM & SCA Determinísticos** | Geração assinada em **CycloneDX 1.5/1.7** e **SPDX 2.3/3.0.1** para npm, Yarn, pnpm, Bun, Python, Go, Rust, Maven e NuGet, com comparadores SemVer 2.0, PEP 440, Maven e NuGet e proveniência estrita de licenças. |
 | **Quality Gates Versionados** | Avaliação determinística (`APPROVED`, `APPROVED_WITH_RESERVATIONS`, `BLOCKED`, `INCONCLUSIVE`, `REJECTED`), digest `SHA-256` da política aplicada e códigos de saída padronizados para CI/CD. |
 | **Evidências Criptográficas & A/B** | Cadeia encadeada `SHA-256` + manifesto assinado (`HMAC-SHA256` / `Ed25519`), cofre de código cifrado em repouso (`AES-256-GCM`), comparação A/B lado a lado e exportação em **JSON**, **SARIF 2.1.0**, **HTML5** e **PDF**. |
 
-*\*Grype e OSV-Scanner vêm instalados no worker e requerem população prévia do cache offline (`winhood_scanner_cache`). Sem base local, retornam explicitamente `DATABASE_UNAVAILABLE` — nunca simulam "0 vulnerabilidades".*
+*\*Grype e OSV-Scanner vêm instalados no worker e requerem população prévia do cache offline (`winhood_scanner_cache`, montado em somente leitura `:ro`) via `scripts/docker-update-scanner-dbs.sh` / `.ps1` (com verificação de integridade SHA-256 e TTL via `manifest.json`). Sem base local íntegra e válida, retornam explicitamente `DATABASE_UNAVAILABLE` — nunca simulam "0 vulnerabilidades".*
 
 ---
 
@@ -78,7 +78,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\docker-up.ps1
 ./scripts/docker-up.sh
 ```
 
-> **Tempo esperado no primeiro build:** 2 a 6 minutos (instalação de Python + Ruff + Bandit + Semgrep + binários fixados de Gitleaks, Syft, Grype e OSV-Scanner no worker). Inicializações seguintes com cache levam poucos segundos.
+> **Tempo esperado no primeiro build:** 2 a 6 minutos (instalação de Python + Ruff + Bandit + Semgrep + ESLint + binários fixados e verificados por SHA-256 de Gitleaks, Syft, Grype e OSV-Scanner no worker). Inicializações seguintes com cache levam poucos segundos.
 
 ### Passo 3 — Acessar a plataforma
 
@@ -174,7 +174,7 @@ Se você ainda não possui o Docker instalado, expanda o guia do seu sistema ope
 | :--- | :--- | :--- |
 | **Iniciar rápido (sem rebuild)** | `./scripts/docker-up.sh --no-build` | `.\scripts\docker-up.ps1 -NoBuild` |
 | **Subir com SonarQube local (`:9000`)** | `./scripts/docker-up.sh --with-sonar` | `.\scripts\docker-up.ps1 -WithSonar` |
-| **Atualizar base offline do Grype** | `./scripts/docker-update-scanner-dbs.sh` | `.\scripts\docker-update-scanner-dbs.ps1` |
+| **Atualizar bases offline (Grype + OSV-Scanner)** | `./scripts/docker-update-scanner-dbs.sh` | `.\scripts\docker-update-scanner-dbs.ps1` |
 | **Status e healthchecks** | `docker compose ps` | `docker compose ps` |
 | **Logs em tempo real** | `docker compose logs -f` | `docker compose logs -f` |
 | **Encerrar preservando dados** | `./scripts/docker-down.sh` | `.\scripts\docker-down.ps1` |
@@ -223,13 +223,13 @@ flowchart LR
     end
 
     subgraph InternalNet["Rede: winhood_scanner_internal (internal: true · SEM INTERNET)"]
-        Worker["Container: winhood-scanner-worker<br/>Ruff · Bandit · Semgrep · Gitleaks · Syft · Grype · OSV<br/>read_only · uid 1001 · cap_drop ALL"]
+        Worker["Container: winhood-scanner-worker<br/>Ruff · Bandit · Semgrep · Gitleaks · ESLint · Syft · Grype · OSV<br/>read_only · uid 1001 · cap_drop ALL"]
     end
 
     VolData[("Volume: winhood_data<br/>/data/winhood<br/>Cofre AES-256-GCM + DB + Evidências")]
     TmpApi[("tmpfs: /tmp/winhood-workspaces<br/>noexec · nosuid · efêmero")]
-    TmpWorker[("tmpfs: /tmp + /tmp/winhood-workspaces<br/>noexec · nosuid · limpo por job")]
-    VolCache[("Volume: winhood_scanner_cache<br/>/data/scanner-cache<br/>Bases offline Grype / OSV")]
+    TmpWorker[("tmpfs: /tmp + /tmp/winhood-workspaces + ~/.semgrep + ~/.cache<br/>noexec · nosuid · limpo por job")]
+    VolCache[("Volume: winhood_scanner_cache (:ro)<br/>/data/scanner-cache<br/>Bases offline Grype + OSV (manifest.json SHA-256)")]
 
     Browser --> Port3000 --> WinHood
     Browser -. perfil sonar .-> Port9000 -.-> Sonar
@@ -241,11 +241,11 @@ flowchart LR
 ```
 
 ### Garantias de Isolamento e Hardening
-- **Imagens e versões pinadas:** `node:22.14.0-bookworm-slim` e versões explícitas de todos os binários (zero tags `:latest`).
+- **Imagens e versões pinadas:** `node:22.21.1-bookworm-slim` e versões explícitas de todos os binários com download HTTPS/TLS 1.2 + verificação `sha256sum -c` (zero tags `:latest`).
 - **Sem exposição em rede externa por padrão:** portas publicadas exclusivamente em `127.0.0.1`.
 - **Sem `docker.sock`:** nenhum container acessa o daemon Docker do host.
 - **Privilégio mínimo:** usuário não-root `winhood` (`1001:1001`), `cap_drop: [ALL]`, `no-new-privileges:true`, `init: true`, `stop_grace_period: 20s`, limites de CPU, memória e PIDs.
-- **Worker sem internet (`internal: true`):** `winhood-scanner-worker` opera com filesystem raiz somente leitura (`read_only: true`) e workspaces efêmeros em `tmpfs` (`noexec,nosuid`).
+- **Worker sem internet (`internal: true`):** `winhood-scanner-worker` opera com filesystem raiz somente leitura (`read_only: true`), cache offline montado em `:ro` (`winhood_scanner_cache`), e workspaces/cache efêmeros em `tmpfs` (`noexec,nosuid`, incluindo `/home/winhood/.semgrep` e `/home/winhood/.cache`).
 
 ---
 
@@ -255,7 +255,7 @@ flowchart LR
 
 | Linguagem | Motor Nativo | Profundidade Nativa | Cobertura Adicional no Worker Docker | Limitações Principais |
 | :--- | :--- | :--- | :--- | :--- |
-| **TypeScript / JavaScript** | `FULL_AST` (`@babel/parser`) | AST completa, métricas estruturais, taint interprocedural, SAST e segredos | Semgrep (regras offline), Gitleaks, Syft, Grype\*, OSV-Scanner\* | Não executa *type-checking* completo do `tsc` durante a análise. |
+| **TypeScript / JavaScript** | `FULL_AST` (`@babel/parser`) | AST completa, métricas estruturais, taint interprocedural, SAST e segredos | **ESLint** (config offline), Semgrep (regras offline), Gitleaks, Syft, Grype\*, OSV-Scanner\* | Não executa *type-checking* completo do `tsc` durante a análise. |
 | **Python** | `STRUCTURAL_AST` | Parser estrutural, SAST/taint básicos e segredos | **Ruff**, **Bandit**, **Semgrep**, Gitleaks, Syft, Grype\*, OSV-Scanner\* | Sem resolução semântica de imports dinâmicos no motor nativo. |
 | **Java** | `STRUCTURAL_AST` | Parser estrutural, SAST/taint básicos e segredos | Semgrep (offline), Gitleaks, Syft, Grype\*, OSV-Scanner\* | SpotBugs e Checkstyle não empacotados na imagem padrão. |
 | **Go** | `STRUCTURAL_AST` | Parser estrutural, SAST básicos e segredos | Semgrep (offline), Gitleaks, Syft, Grype\*, OSV-Scanner\* | Sem análise de pacotes compilados (`go vet`/`staticcheck`). |
@@ -273,11 +273,12 @@ flowchart LR
 | **Ruff** | Qualidade e lint Python | `0.9.6` | Incluído (`winhood-scanner-worker`) | `OPERATIONAL` |
 | **Bandit** | SAST Python | `1.8.3` | Incluído (`winhood-scanner-worker`) | `OPERATIONAL` |
 | **Semgrep** | SAST multi-linguagem offline | `1.109.0` | Incluído (`winhood-scanner-worker`) | `OPERATIONAL` (regras `winhood-core.yaml`) |
-| **Gitleaks** | Detecção de segredos | `8.24.0` | Incluído (`winhood-scanner-worker`) | `OPERATIONAL` |
+| **Gitleaks** | Detecção de segredos (`--redact`) | `8.24.0` | Incluído (`winhood-scanner-worker`) | `OPERATIONAL` |
+| **ESLint** | Qualidade e segurança JS/TS offline | `9.21.0` | Incluído (`winhood-scanner-worker`) | `OPERATIONAL` (`eslint.config.mjs` embarcado) |
 | **Syft** | Geração de SBOM CycloneDX | `1.20.0` | Incluído (`winhood-scanner-worker`) | `OPERATIONAL` |
 | **Grype** | Correlação SCA offline | `0.89.0` | Incluído (`winhood-scanner-worker`) | `DATABASE_UNAVAILABLE` até rodar `docker-update-scanner-dbs` |
-| **OSV-Scanner** | SCA em lockfiles offline | `1.9.2` | Incluído (`winhood-scanner-worker`) | `DATABASE_UNAVAILABLE` até popular `/data/scanner-cache/osv` |
-| **CodeQL / Roslyn / SpotBugs / Checkstyle / ESLint CLI / Trivy** | Scanners externos opcionais | — | Não incluídos na imagem padrão | `NOT_INSTALLED` (importação via SARIF 2.1.0) |
+| **OSV-Scanner** | SCA em lockfiles offline | `1.9.2` | Incluído (`winhood-scanner-worker`) | `DATABASE_UNAVAILABLE` até rodar `docker-update-scanner-dbs` |
+| **CodeQL / Roslyn / SpotBugs / Checkstyle / Trivy** | Scanners externos opcionais | — | Não incluídos na imagem padrão | `NOT_INSTALLED` (importação via SARIF 2.1.0) |
 
 > **Regra de honestidade operacional:** Ferramentas em `NOT_INSTALLED`, `DATABASE_UNAVAILABLE`, `RULES_UNAVAILABLE` ou `BLOCKED` produzem `analysisVerdict: "INCONCLUSIVE"` (ou `"PARTIAL"` / `"BLOCKED"`) e **nunca** são convertidas em "0 vulnerabilidades".
 
@@ -313,9 +314,9 @@ Consulte [`SECURITY.md`](./SECURITY.md), [`SECURITY_ARCHITECTURE.md`](./SECURITY
 ## 7. Limitações Conhecidas e Escopo
 
 - **Profundidade por linguagem:** TypeScript/JavaScript possuem análise `FULL_AST`; Python, Java, Go, C#, Rust e SQL usam parser estrutural nativo (combine com Ruff, Bandit e Semgrep no worker Docker).
-- **Scanners externos não embutidos:** CodeQL, Roslyn, SpotBugs, Checkstyle, ESLint CLI e Trivy não são empacotados na imagem padrão e reportam `NOT_INSTALLED`; seus achados externos podem ser importados via **SARIF 2.1.0**.
-- **Bases offline SCA:** Grype e OSV-Scanner retornam `DATABASE_UNAVAILABLE` até que o cache offline seja populado em `winhood_scanner_cache`.
-- **Regras Semgrep offline:** a imagem embarca o pacote curado `security/semgrep-offline-rules/winhood-core.yaml`; regras corporativas adicionais podem ser montadas em `/opt/winhood-scanner-rules`.
+- **Scanners externos não embutidos:** CodeQL, Roslyn, SpotBugs, Checkstyle e Trivy não são empacotados na imagem padrão e reportam `NOT_INSTALLED`; seus achados externos podem ser importados via **SARIF 2.1.0**.
+- **Bases offline SCA:** Grype e OSV-Scanner retornam `DATABASE_UNAVAILABLE` até que o cache offline seja populado atomicamente via `scripts/docker-update-scanner-dbs.sh` / `.ps1` (com `manifest.json` verificado por SHA-256 e TTL).
+- **Regras Semgrep e ESLint offline:** a imagem embarca `security/semgrep-offline-rules/winhood-core.yaml` e `security/semgrep-offline-rules/eslint.config.mjs`; regras corporativas adicionais podem ser montadas em `/opt/winhood-scanner-rules`.
 - **Estados inconclusivos explícitos:** falhas de scanner, timeouts ou despacho dinâmico são reportados como `INCONCLUSIVE`, `DATABASE_UNAVAILABLE`, `RULES_UNAVAILABLE`, `TIMED_OUT` ou `BLOCKED` sem inflar pontuações.
 - **Empacotamento Desktop Windows:** mantido como legado opcional no repositório; o fluxo principal recomendado é **Docker Local-Web**.
 
@@ -328,6 +329,10 @@ Detalhes completos em [`LIMITATIONS_AND_BIAS.md`](./LIMITATIONS_AND_BIAS.md) e [
 | Documento | Conteúdo |
 | :--- | :--- |
 | [`DOCKER_LOCAL_WEB.md`](./DOCKER_LOCAL_WEB.md) | Topologia Docker, volumes, healthchecks e validação E2E |
+| [`SCANNER_CAPABILITIES_REPORT.md`](./SCANNER_CAPABILITIES_REPORT.md) | Matriz de scanners empacotados vs opcionais, offline DBs e self-tests |
+| [`AUDIT_REMEDIATION_REPORT.md`](./AUDIT_REMEDIATION_REPORT.md) | Relatório consolidado de remediação técnica, segurança e confiabilidade |
+| [`SONARCLOUD_REMEDIATION_REPORT.md`](./SONARCLOUD_REMEDIATION_REPORT.md) | Remediação dos apontamentos SonarCloud, cobertura LCOV e duplicação |
+| [`CI_VALIDATION_REPORT.md`](./CI_VALIDATION_REPORT.md) | Diagnóstico e validação dos workflows de CI/CD |
 | [`ARCHITECTURE.md`](./ARCHITECTURE.md) | Arquitetura de backend, analisadores, storage e worker |
 | [`API_REFERENCE.md`](./API_REFERENCE.md) | Contratos de endpoints REST |
 | [`MQR_METHODOLOGY.md`](./MQR_METHODOLOGY.md) | Metodologia de impacto, severidade e ratings |

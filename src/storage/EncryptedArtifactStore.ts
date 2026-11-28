@@ -521,6 +521,10 @@ export class EncryptedArtifactStore {
     const targetDirs = [
       'isolated_artifacts',
       'database',
+      'security',
+      'keys',
+      'sonar',
+      'backups',
       'logs',
       'reports',
       'cache',
@@ -542,6 +546,7 @@ export class EncryptedArtifactStore {
       { label: 'AWS Access Key ID', regex: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/ },
       { label: 'GitHub Personal Access Token', regex: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b/ },
       { label: 'GitHub Fine-Grained Token', regex: /\bgithub_pat_[A-Za-z0-9_]{20,}\b/ },
+      { label: 'Live API / Canary Secret Token', regex: /\b(?:sk_live|wh_live|wh_canary)_[A-Za-z0-9_-]{12,}\b/ },
     ];
 
     const artifactsAudit = EncryptedArtifactStore.auditNoPlaintextOnDisk(

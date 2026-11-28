@@ -23,6 +23,22 @@ interface PinnedScannerRunnerSpec {
   readsFromFile?: boolean;
   validateParsedOutput: (parsed: unknown) => { valid: boolean; findingsCount: number };
   selfTestFiles: Record<string, string>;
+  positiveTestFiles?: Record<string, string>;
+  minPositiveFindings?: number;
+}
+
+interface OfflineDbManifestArtifact {
+  relativePath: string;
+  sizeBytes?: number;
+  sha256: string;
+}
+
+interface OfflineDbManifest {
+  schemaVersion?: string;
+  tool?: string;
+  updatedAt?: string;
+  expiresAt?: string;
+  artifacts?: OfflineDbManifestArtifact[];
 }
 
 export interface OfflinePrerequisiteResult {
@@ -130,10 +146,75 @@ function directoryHasMatchingFile(
   return false;
 }
 
+export function validateOfflineDbManifest(
+  dbDir: string,
+  expectedTool: 'grype' | 'osv-scanner'
+): { valid: boolean; reason?: string } {
+  const manifestPath = path.join(dbDir, 'manifest.json');
+  if (!fs.existsSync(manifestPath)) {
+    return { valid: true };
+  }
+  try {
+    const raw = fs.readFileSync(manifestPath, 'utf8');
+    const parsed = JSON.parse(raw) as OfflineDbManifest;
+    if (parsed.tool && parsed.tool !== expectedTool) {
+      return {
+        valid: false,
+        reason: `Manifesto offline inválido para ${expectedTool}: ferramenta declarada "${parsed.tool}".`,
+      };
+    }
+    if (parsed.expiresAt) {
+      const expiresMs = Date.parse(parsed.expiresAt);
+      if (Number.isNaN(expiresMs) || Date.now() > expiresMs) {
+        return {
+          valid: false,
+          reason: `Base offline do ${expectedTool} vencida (${parsed.expiresAt}). Execute scripts/docker-update-scanner-dbs.sh para atualizar.`,
+        };
+      }
+    }
+    if (Array.isArray(parsed.artifacts)) {
+      if (parsed.artifacts.length === 0) {
+        return {
+          valid: false,
+          reason: `Manifesto offline do ${expectedTool} não lista artefatos válidos.`,
+        };
+      }
+      for (const art of parsed.artifacts) {
+        if (!art?.relativePath || !art?.sha256 || art.relativePath.includes('..')) {
+          return {
+            valid: false,
+            reason: `Entrada inválida no manifesto offline do ${expectedTool}.`,
+          };
+        }
+        const targetPath = path.resolve(dbDir, art.relativePath);
+        if (!targetPath.startsWith(path.resolve(dbDir) + path.sep) || !fs.existsSync(targetPath)) {
+          return {
+            valid: false,
+            reason: `Artefato ausente na base offline do ${expectedTool}: ${art.relativePath}.`,
+          };
+        }
+        const actualSha = crypto.createHash('sha256').update(fs.readFileSync(targetPath)).digest('hex');
+        if (actualSha !== art.sha256.toLowerCase()) {
+          return {
+            valid: false,
+            reason: `Corrupção detectada (SHA-256 divergente) na base offline do ${expectedTool}: ${art.relativePath}.`,
+          };
+        }
+      }
+    }
+    return { valid: true };
+  } catch {
+    return {
+      valid: false,
+      reason: `Manifesto offline corrompido (JSON inválido) em ${dbDir}.`,
+    };
+  }
+}
+
 /**
  * Verifies offline rule packs or vulnerability databases required for air-gapped execution.
  * Tools requiring offline rules/databases NEVER report `OPERATIONAL` or "0 vulnerabilities"
- * when their local ruleset or vulnerability DB cache is missing.
+ * when their local ruleset or vulnerability DB cache is missing, corrupted, or expired.
  */
 export function checkToolOfflinePrerequisites(toolId: ScannerToolId): OfflinePrerequisiteResult {
   if (toolId === 'semgrep') {
@@ -166,6 +247,26 @@ export function checkToolOfflinePrerequisites(toolId: ScannerToolId): OfflinePre
     };
   }
 
+  if (toolId === 'eslint') {
+    const configCandidates = [
+      process.env.WINHOOD_ESLINT_CONFIG_PATH,
+      '/opt/winhood-scanner-rules/eslint.config.mjs',
+      path.join(process.cwd(), 'security', 'semgrep-offline-rules', 'eslint.config.mjs'),
+    ].filter((p): p is string => Boolean(p && p.trim()));
+
+    for (const cfg of configCandidates) {
+      const resolved = path.resolve(cfg);
+      if (fs.existsSync(resolved)) {
+        return { ready: true, resolvedPath: resolved };
+      }
+    }
+    return {
+      ready: false,
+      state: 'RULES_UNAVAILABLE',
+      reason: 'Configuração offline do ESLint ausente em WINHOOD_ESLINT_CONFIG_PATH.',
+    };
+  }
+
   if (toolId === 'grype') {
     const grypeDir = path.resolve(process.env.GRYPE_DB_CACHE_DIR || '/data/scanner-cache/grype');
     const hasDb = directoryHasMatchingFile(grypeDir, (name, full) => {
@@ -184,13 +285,21 @@ export function checkToolOfflinePrerequisites(toolId: ScannerToolId): OfflinePre
           'Base offline de vulnerabilidades do Grype ausente em GRYPE_DB_CACHE_DIR (/data/scanner-cache/grype). Execute ./scripts/docker-update-scanner-dbs.sh (ou .\\scripts\\docker-update-scanner-dbs.ps1) para popular o cache offline.',
       };
     }
+    const manifestCheck = validateOfflineDbManifest(grypeDir, 'grype');
+    if (!manifestCheck.valid) {
+      return {
+        ready: false,
+        state: 'DATABASE_UNAVAILABLE',
+        reason: manifestCheck.reason,
+      };
+    }
     return { ready: true, resolvedPath: grypeDir };
   }
 
   if (toolId === 'osv-scanner') {
     const osvDir = path.resolve(process.env.WINHOOD_OSV_DB_DIR || '/data/scanner-cache/osv');
     const hasDb = directoryHasMatchingFile(osvDir, (name, full) => {
-      if (!/\.(zip|json|db|sqlite)$/i.test(name)) return false;
+      if (!/\.(zip|json|db|sqlite)$/i.test(name) || name.toLowerCase() === 'manifest.json') return false;
       try {
         return fs.statSync(full).size > 32;
       } catch {
@@ -202,7 +311,15 @@ export function checkToolOfflinePrerequisites(toolId: ScannerToolId): OfflinePre
         ready: false,
         state: 'DATABASE_UNAVAILABLE',
         reason:
-          'Base offline do OSV-Scanner ausente em WINHOOD_OSV_DB_DIR (/data/scanner-cache/osv). Como o container worker opera em rede interna sem internet, a varredura SCA offline exige cache local pré-populado.',
+          'Base offline do OSV-Scanner ausente em WINHOOD_OSV_DB_DIR (/data/scanner-cache/osv). Execute ./scripts/docker-update-scanner-dbs.sh para popular o cache local.',
+      };
+    }
+    const manifestCheck = validateOfflineDbManifest(osvDir, 'osv-scanner');
+    if (!manifestCheck.valid) {
+      return {
+        ready: false,
+        state: 'DATABASE_UNAVAILABLE',
+        reason: manifestCheck.reason,
       };
     }
     return { ready: true, resolvedPath: osvDir };
@@ -232,7 +349,7 @@ export function checkToolOfflinePrerequisites(toolId: ScannerToolId): OfflinePre
   return { ready: true };
 }
 
-function buildSanitizedScannerEnv(workspaceDir: string): NodeJS.ProcessEnv {
+export function buildSanitizedScannerEnv(workspaceDir: string): NodeJS.ProcessEnv {
   const grypeCacheDir = process.env.GRYPE_DB_CACHE_DIR || '/data/scanner-cache/grype';
   const osvDbDir = process.env.WINHOOD_OSV_DB_DIR || '/data/scanner-cache/osv';
   return {
@@ -241,6 +358,11 @@ function buildSanitizedScannerEnv(workspaceDir: string): NodeJS.ProcessEnv {
     TMPDIR: workspaceDir,
     TMP: workspaceDir,
     TEMP: workspaceDir,
+    XDG_CACHE_HOME: path.join(workspaceDir, '.cache'),
+    XDG_CONFIG_HOME: path.join(workspaceDir, '.config'),
+    SEMGREP_SETTINGS_FILE: path.join(workspaceDir, '.semgrep-settings.yml'),
+    SEMGREP_VERSION_CACHE_PATH: path.join(workspaceDir, '.semgrep-version-cache'),
+    PYTHONDONTWRITEBYTECODE: '1',
     LANG: 'C.UTF-8',
     LC_ALL: 'C.UTF-8',
     NO_COLOR: '1',
@@ -251,8 +373,76 @@ function buildSanitizedScannerEnv(workspaceDir: string): NodeJS.ProcessEnv {
     GRYPE_CHECK_FOR_APP_UPDATE: 'false',
     SYFT_CHECK_FOR_APP_UPDATE: 'false',
     WINHOOD_OSV_DB_DIR: osvDbDir,
+    OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY: osvDbDir,
     DO_NOT_TRACK: '1',
   };
+}
+
+export function redactScannerPayloadSecrets(toolId: ScannerToolId, payload: unknown): unknown {
+  const redactPemBlocks = (input: string): string => {
+    let out = input;
+    let cursor = 0;
+    while (cursor < out.length) {
+      const start = out.indexOf('-----BEGIN ', cursor);
+      if (start < 0) break;
+      const headerEnd = out.indexOf('PRIVATE KEY-----', start);
+      if (headerEnd < 0 || headerEnd - start > 64) {
+        cursor = start + 11;
+        continue;
+      }
+      const endMarker = out.indexOf('-----END ', headerEnd);
+      if (endMarker < 0) {
+        return `${out.slice(0, start)}[REDACTED_PRIVATE_KEY]`;
+      }
+      const tailEnd = out.indexOf('-----', endMarker + 9);
+      const cutEnd = tailEnd >= 0 ? tailEnd + 5 : out.length;
+      out = `${out.slice(0, start)}[REDACTED_PRIVATE_KEY]${out.slice(cutEnd)}`;
+      cursor = start + '[REDACTED_PRIVATE_KEY]'.length;
+    }
+    return out;
+  };
+  const redactString = (value: string): string =>
+    redactPemBlocks(value)
+      .replace(/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, '[REDACTED_AWS_KEY]')
+      .replace(/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b/g, '[REDACTED_GITHUB_TOKEN]')
+      .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, '[REDACTED_GITHUB_TOKEN]')
+      .replace(/\b(?:sk_live|wh_live|wh_canary)_[A-Za-z0-9_-]{12,}\b/g, '[REDACTED_SECRET_TOKEN]');
+
+  if (toolId === 'gitleaks' && Array.isArray(payload)) {
+    return payload.map((item) => {
+      if (!item || typeof item !== 'object') return item;
+      const rec = { ...(item as Record<string, unknown>) };
+      if (typeof rec.Secret === 'string' && rec.Secret.length > 0) {
+        rec.Secret = '[REDACTED]';
+      }
+      if (typeof rec.Match === 'string' && rec.Match.length > 0) {
+        rec.Match = redactString(rec.Match);
+      }
+      if (typeof rec.Line === 'string' && rec.Line.length > 0) {
+        rec.Line = redactString(rec.Line);
+      }
+      return rec;
+    });
+  }
+
+  const walk = (node: unknown, depth = 0): unknown => {
+    if (depth > 10 || node === null || node === undefined) return node;
+    if (typeof node === 'string') return redactString(node);
+    if (Array.isArray(node)) return node.map((v) => walk(v, depth + 1));
+    if (typeof node === 'object') {
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+        if (/^(?:secret|rawSecret|token|password|privateKey)$/i.test(k) && typeof v === 'string' && v.length > 0) {
+          out[k] = '[REDACTED]';
+        } else {
+          out[k] = walk(v, depth + 1);
+        }
+      }
+      return out;
+    }
+    return node;
+  };
+  return walk(payload);
 }
 
 const PINNED_SCANNER_SPECS: Record<ScannerToolId, PinnedScannerRunnerSpec> = {
@@ -265,6 +455,7 @@ const PINNED_SCANNER_SPECS: Record<ScannerToolId, PinnedScannerRunnerSpec> = {
       '--config',
       rulesDir || '/opt/winhood-scanner-rules',
       '--offline',
+      '--disable-version-check',
       '--json',
       '--quiet',
       '--metrics=off',
@@ -277,6 +468,8 @@ const PINNED_SCANNER_SPECS: Record<ScannerToolId, PinnedScannerRunnerSpec> = {
       return { valid: Boolean(obj && Array.isArray(obj.results)), findingsCount: obj?.results?.length ?? 0 };
     },
     selfTestFiles: { 'sample.js': 'const x = 1;\nexport default x;\n' },
+    positiveTestFiles: { 'vuln.js': 'export function run(input) { return eval(input); }\n' },
+    minPositiveFindings: 1,
   },
   codeql: {
     toolId: 'codeql',
@@ -302,6 +495,7 @@ const PINNED_SCANNER_SPECS: Record<ScannerToolId, PinnedScannerRunnerSpec> = {
     buildArgs: (ws, outFile) => [
       'detect',
       '--no-git',
+      '--redact',
       '--source',
       ws,
       '--report-format',
@@ -318,12 +512,23 @@ const PINNED_SCANNER_SPECS: Record<ScannerToolId, PinnedScannerRunnerSpec> = {
       findingsCount: Array.isArray(p) ? p.length : 0,
     }),
     selfTestFiles: { 'sample.txt': 'clean_config=true\n' },
+    positiveTestFiles: {
+      'leak.env': `AWS_ACCESS_KEY_ID=${['AKIA', 'IOSFODNN7EXAMPLE'].join('')}\n`,
+    },
+    minPositiveFindings: 1,
   },
   eslint: {
     toolId: 'eslint',
     binaryNames: ['eslint'],
     versionArgs: ['--version'],
-    buildArgs: (ws) => ['--format', 'json', '--no-error-on-unmatched-pattern', ws],
+    buildArgs: (ws, _outFile, configPath) => [
+      '--no-config-lookup',
+      ...(configPath ? ['--config', configPath] : []),
+      '--format',
+      'json',
+      '--no-error-on-unmatched-pattern',
+      ws,
+    ],
     outputFormat: 'JSON',
     validateParsedOutput: (p) => {
       if (!Array.isArray(p)) return { valid: false, findingsCount: 0 };
@@ -334,6 +539,8 @@ const PINNED_SCANNER_SPECS: Record<ScannerToolId, PinnedScannerRunnerSpec> = {
       return { valid: true, findingsCount: count };
     },
     selfTestFiles: { 'sample.js': 'export const ok = 1;\n' },
+    positiveTestFiles: { 'vuln.js': 'export function bad(x) { return eval(x); }\n' },
+    minPositiveFindings: 1,
   },
   ruff: {
     toolId: 'ruff',
@@ -346,6 +553,8 @@ const PINNED_SCANNER_SPECS: Record<ScannerToolId, PinnedScannerRunnerSpec> = {
       findingsCount: Array.isArray(p) ? p.length : 0,
     }),
     selfTestFiles: { 'sample.py': 'def ok() -> int:\n    return 1\n' },
+    positiveTestFiles: { 'vuln.py': 'import os\n\ndef unused() -> int:\n    return 1\n' },
+    minPositiveFindings: 1,
   },
   bandit: {
     toolId: 'bandit',
@@ -358,6 +567,10 @@ const PINNED_SCANNER_SPECS: Record<ScannerToolId, PinnedScannerRunnerSpec> = {
       return { valid: Boolean(obj && Array.isArray(obj.results)), findingsCount: obj?.results?.length ?? 0 };
     },
     selfTestFiles: { 'sample.py': 'def ok():\n    return 1\n' },
+    positiveTestFiles: {
+      'vuln.py': 'import subprocess\n\ndef run(cmd):\n    return subprocess.Popen(cmd, shell=True)\n',
+    },
+    minPositiveFindings: 1,
   },
   roslyn: {
     toolId: 'roslyn',
@@ -871,6 +1084,9 @@ export async function runIsolatedScannerTool(params: {
       try {
         const parsed = JSON.parse(rawOutput);
         const validation = spec.validateParsedOutput(parsed);
+        const redactedPayload = validation.valid
+          ? redactScannerPayloadSecrets(params.toolId, parsed)
+          : undefined;
         return {
           toolId: params.toolId,
           state: validation.valid ? ('COMPLETED' as const) : ('FAILED' as const),
@@ -881,7 +1097,7 @@ export async function runIsolatedScannerTool(params: {
           outputValidated: validation.valid,
           findingsCount: validation.findingsCount,
           rawOutputSha256,
-          normalizedPayload: validation.valid ? parsed : undefined,
+          normalizedPayload: redactedPayload,
           limitations: validation.valid
             ? []
             : ['Saída JSON/SARIF produzida pelo analisador não atendeu ao esquema esperado.'],
@@ -986,14 +1202,43 @@ export async function probeVerifiedWorkerCapabilities(
     }
 
     const probeRun = await runIsolatedScannerTool({
-      jobId: `selftest-${catalogEntry.toolId}`,
+      jobId: `selftest-neg-${catalogEntry.toolId}`,
       toolId: catalogEntry.toolId,
       filesMap: spec.selfTestFiles,
       timeoutMs: 12_000,
       baseWorkspaceDir,
     });
 
-    const operational = probeRun.state === 'COMPLETED' && probeRun.outputValidated;
+    let operational = probeRun.state === 'COMPLETED' && probeRun.outputValidated;
+    const probeLimitations = [...probeRun.limitations];
+
+    // Positive detection & secret-redaction check for offline-verifiable tools
+    if (operational && spec.positiveTestFiles && (spec.minPositiveFindings ?? 0) > 0) {
+      const posRun = await runIsolatedScannerTool({
+        jobId: `selftest-pos-${catalogEntry.toolId}`,
+        toolId: catalogEntry.toolId,
+        filesMap: spec.positiveTestFiles,
+        timeoutMs: 12_000,
+        baseWorkspaceDir,
+      });
+      if (
+        posRun.state !== 'COMPLETED' ||
+        !posRun.outputValidated ||
+        posRun.findingsCount < (spec.minPositiveFindings ?? 1)
+      ) {
+        operational = false;
+        probeLimitations.push(
+          `Autoteste positivo falhou para ${catalogEntry.toolId} (esperado >= ${spec.minPositiveFindings ?? 1} achado(s), obtido ${posRun.findingsCount}).`
+        );
+      } else if (catalogEntry.toolId === 'gitleaks' && posRun.normalizedPayload) {
+        const serializedPos = JSON.stringify(posRun.normalizedPayload);
+        if (serializedPos.includes(['AKIA', 'IOSFODNN7EXAMPLE'].join(''))) {
+          operational = false;
+          probeLimitations.push('Falha de redação de segredo no autoteste positivo do Gitleaks.');
+        }
+      }
+    }
+
     const mappedState = operational
       ? 'OPERATIONAL'
       : probeRun.state === 'DATABASE_UNAVAILABLE' ||
@@ -1014,8 +1259,8 @@ export async function probeVerifiedWorkerCapabilities(
       executionEnvironment: isContainerizedWorker ? 'DOCKER_SCANNER_WORKER' : 'OS_SANDBOX_SUBPROCESS',
       isolationAvailable: isContainerizedWorker,
       executionPerformed: true,
-      outputValidated: probeRun.outputValidated,
-      limitations: probeRun.limitations,
+      outputValidated: operational,
+      limitations: probeLimitations,
       finalState: mappedState,
       checkedAt,
     });

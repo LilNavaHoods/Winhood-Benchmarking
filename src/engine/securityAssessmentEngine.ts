@@ -857,163 +857,99 @@ export function executeSecurityAssessmentSuite(params: {
   const staticCoveragePct = hasSoftwares ? 100 : null;
   const staticExecState = hasSoftwares ? 'EXECUTED_STATIC' as const : 'NOT_EXECUTED' as const;
 
+  type SuiteModuleEntry = SecurityAssessmentSuiteBundle['modulesCatalog'][number];
+  const makeOperationalModule = (
+    key: SecurityAssessmentModuleKey,
+    title: string,
+    executionState: SuiteModuleEntry['executionState'] = staticExecState
+  ): SuiteModuleEntry => ({
+    key,
+    title,
+    status: 'OPERATIONAL',
+    availabilityState: 'AVAILABLE',
+    configurationState: 'CONFIGURED',
+    readinessState: 'READY',
+    executionState,
+    coveragePercent: staticCoveragePct,
+  });
+
+  const makeExternalModule = (
+    key: SecurityAssessmentModuleKey,
+    title: string,
+    cfg: {
+      ready: boolean;
+      partialWhenReady?: boolean;
+      coveragePercent?: number | null;
+      executionState?: SuiteModuleEntry['executionState'];
+      limitations?: string[];
+      availabilityOverride?: SuiteModuleEntry['availabilityState'];
+      configurationOverride?: SuiteModuleEntry['configurationState'];
+      readinessOverride?: SuiteModuleEntry['readinessState'];
+    }
+  ): SuiteModuleEntry => ({
+    key,
+    title,
+    status: cfg.ready ? (cfg.partialWhenReady ? 'PARTIAL_COVERAGE' : 'OPERATIONAL') : 'EXTERNAL_TOOL_REQUIRED',
+    availabilityState: cfg.availabilityOverride ?? (cfg.ready ? 'AVAILABLE' : 'UNAVAILABLE'),
+    configurationState: cfg.configurationOverride ?? (cfg.ready ? 'CONFIGURED' : 'UNCONFIGURED'),
+    readinessState: cfg.readinessOverride ?? (cfg.ready ? (cfg.partialWhenReady ? 'PARTIAL' : 'READY') : 'NOT_READY'),
+    executionState: cfg.executionState ?? 'NOT_EXECUTED',
+    coveragePercent: cfg.coveragePercent ?? null,
+    ...(cfg.limitations ? { limitations: cfg.limitations } : {}),
+  });
+
   const modulesCatalog: SecurityAssessmentSuiteBundle['modulesCatalog'] = [
-    {
-      key: 'SECURITY_ASSESSMENT',
-      title: '01. Security Assessment',
-      status: 'OPERATIONAL',
-      availabilityState: 'AVAILABLE',
-      configurationState: 'CONFIGURED',
-      readinessState: 'READY',
-      executionState: staticExecState,
-      coveragePercent: staticCoveragePct,
-    },
-    {
-      key: 'AUTOMATED_PENTEST',
-      title: '02. Automated Pentest (DAST Externo)',
-      status: zapReady ? 'OPERATIONAL' : 'EXTERNAL_TOOL_REQUIRED',
-      availabilityState: zapReady ? 'AVAILABLE' : 'UNAVAILABLE',
-      configurationState: zapReady ? 'CONFIGURED' : 'UNCONFIGURED',
-      readinessState: zapReady ? 'READY' : 'NOT_READY',
-      executionState: 'NOT_EXECUTED',
+    makeOperationalModule('SECURITY_ASSESSMENT', '01. Security Assessment'),
+    makeExternalModule('AUTOMATED_PENTEST', '02. Automated Pentest (DAST Externo)', {
+      ready: zapReady,
       coveragePercent: zapReady ? 0 : null,
       limitations: zapReady ? undefined : ['Binário OWASP ZAP não instalado ou DAST não executado.'],
-    },
-    {
-      key: 'RED_TEAM_SIMULATION',
-      title: '03. Red Team Simulation',
-      status: 'EXTERNAL_TOOL_REQUIRED',
-      availabilityState: 'UNAVAILABLE',
-      configurationState: 'UNCONFIGURED',
-      readinessState: 'NOT_READY',
-      executionState: 'NOT_EXECUTED',
-      coveragePercent: null,
+    }),
+    makeExternalModule('RED_TEAM_SIMULATION', '03. Red Team Simulation', {
+      ready: false,
       limitations: ['Simulação adversarial controlada requer ambiente dedicado autorizado e ferramentas externas.'],
-    },
-    {
-      key: 'ATTACK_SURFACE_ANALYSIS',
-      title: '04. Attack Surface Analysis',
-      status: 'OPERATIONAL',
-      availabilityState: 'AVAILABLE',
-      configurationState: 'CONFIGURED',
-      readinessState: 'READY',
-      executionState: staticExecState,
-      coveragePercent: staticCoveragePct,
-    },
-    {
-      key: 'VULNERABILITY_VALIDATION',
-      title: '05. Vulnerability Validation (6 States)',
-      status: 'OPERATIONAL',
-      availabilityState: 'AVAILABLE',
-      configurationState: 'CONFIGURED',
-      readinessState: 'READY',
-      executionState: staticExecState,
-      coveragePercent: staticCoveragePct,
-    },
-    {
-      key: 'ATTACK_PATH_ANALYSIS',
-      title: '06. Attack Path Analysis (AST Taint)',
-      status: 'OPERATIONAL',
-      availabilityState: 'AVAILABLE',
-      configurationState: 'CONFIGURED',
-      readinessState: 'READY',
-      executionState: staticExecState,
-      coveragePercent: staticCoveragePct,
-    },
-    {
-      key: 'API_SECURITY_TESTING',
-      title: '07. API Security Testing (Newman/ZAP)',
-      status: newmanReady ? 'OPERATIONAL' : 'EXTERNAL_TOOL_REQUIRED',
-      availabilityState: newmanReady ? 'AVAILABLE' : 'UNAVAILABLE',
-      configurationState: newmanReady ? 'CONFIGURED' : 'UNCONFIGURED',
-      readinessState: newmanReady ? 'READY' : 'NOT_READY',
-      executionState: 'NOT_EXECUTED',
-      coveragePercent: null,
-      limitations: newmanReady ? ['Aguardando coleção Postman/Newman executada contra alvo autorizado.'] : ['Binário newman ausente no host.'],
-    },
-    {
-      key: 'AUTH_AUTHZ_TESTING',
-      title: '08. Authentication & Authorization Testing',
-      status: pwReady ? 'PARTIAL_COVERAGE' : 'EXTERNAL_TOOL_REQUIRED',
-      availabilityState: pwReady ? 'AVAILABLE' : 'UNAVAILABLE',
-      configurationState: pwReady ? 'CONFIGURED' : 'UNCONFIGURED',
-      readinessState: pwReady ? 'PARTIAL' : 'NOT_READY',
-      executionState: 'NOT_EXECUTED',
-      coveragePercent: null,
+    }),
+    makeOperationalModule('ATTACK_SURFACE_ANALYSIS', '04. Attack Surface Analysis'),
+    makeOperationalModule('VULNERABILITY_VALIDATION', '05. Vulnerability Validation (6 States)'),
+    makeOperationalModule('ATTACK_PATH_ANALYSIS', '06. Attack Path Analysis (AST Taint)'),
+    makeExternalModule('API_SECURITY_TESTING', '07. API Security Testing (Newman/ZAP)', {
+      ready: newmanReady,
+      limitations: newmanReady
+        ? ['Aguardando coleção Postman/Newman executada contra alvo autorizado.']
+        : ['Binário newman ausente no host.'],
+    }),
+    makeExternalModule('AUTH_AUTHZ_TESTING', '08. Authentication & Authorization Testing', {
+      ready: pwReady,
+      partialWhenReady: true,
       limitations: ['Testes dinâmicos de AuthN/AuthZ E2E requerem execução Playwright contra aplicação ativa.'],
-    },
-    {
-      key: 'DATABASE_SECURITY_ASSESSMENT',
-      title: '09. Database Security Assessment',
-      status: 'OPERATIONAL',
-      availabilityState: 'AVAILABLE',
-      configurationState: 'CONFIGURED',
-      readinessState: 'READY',
-      executionState: staticExecState,
-      coveragePercent: staticCoveragePct,
-    },
-    {
-      key: 'CRYPTOGRAPHY_ASSESSMENT',
-      title: '10. Cryptography Assessment',
-      status: 'OPERATIONAL',
-      availabilityState: 'AVAILABLE',
-      configurationState: 'CONFIGURED',
-      readinessState: 'READY',
-      executionState: staticExecState,
-      coveragePercent: staticCoveragePct,
-    },
-    {
-      key: 'DEPENDENCY_SUPPLY_CHAIN',
-      title: '11. Dependency & Supply Chain Security (SBOM/SCA)',
-      status: 'OPERATIONAL',
-      availabilityState: 'AVAILABLE',
-      configurationState: 'CONFIGURED',
-      readinessState: 'READY',
-      executionState: staticExecState,
-      coveragePercent: staticCoveragePct,
-    },
-    {
-      key: 'STRESS_RESILIENCE_TESTING',
-      title: '12. Stress & Resilience Testing',
-      status: 'EXTERNAL_TOOL_REQUIRED',
-      availabilityState: 'AVAILABLE',
-      configurationState: 'PARTIAL',
-      readinessState: 'PARTIAL',
-      executionState: 'NOT_EXECUTED',
-      coveragePercent: null,
+    }),
+    makeOperationalModule('DATABASE_SECURITY_ASSESSMENT', '09. Database Security Assessment'),
+    makeOperationalModule('CRYPTOGRAPHY_ASSESSMENT', '10. Cryptography Assessment'),
+    makeOperationalModule('DEPENDENCY_SUPPLY_CHAIN', '11. Dependency & Supply Chain Security (SBOM/SCA)'),
+    makeExternalModule('STRESS_RESILIENCE_TESTING', '12. Stress & Resilience Testing', {
+      ready: false,
+      availabilityOverride: 'AVAILABLE',
+      configurationOverride: 'PARTIAL',
+      readinessOverride: 'PARTIAL',
       limitations: ['Requer execução controlada via ControlledTestAndPerfRunner contra destino autorizado.'],
-    },
-    {
-      key: 'WINDOWS_SECURITY_ASSESSMENT',
-      title: '13. Windows Security Assessment (T0/T1/T2)',
-      status: isWindowsHost ? 'PARTIAL_COVERAGE' : 'EXTERNAL_TOOL_REQUIRED',
-      availabilityState: isWindowsHost ? 'AVAILABLE' : 'UNAVAILABLE',
-      configurationState: isWindowsHost ? 'PARTIAL' : 'UNCONFIGURED',
-      readinessState: isWindowsHost ? 'PARTIAL' : 'NOT_READY',
+    }),
+    makeExternalModule('WINDOWS_SECURITY_ASSESSMENT', '13. Windows Security Assessment (T0/T1/T2)', {
+      ready: isWindowsHost,
+      partialWhenReady: true,
+      configurationOverride: isWindowsHost ? 'PARTIAL' : 'UNCONFIGURED',
       executionState: hasSoftwares ? 'EXECUTED_STATIC' : 'NOT_EXECUTED',
-      coveragePercent: null,
-      limitations: [isWindowsHost ? 'Sysinternals ProcMon requer execução elevada em Windows Sandbox.' : 'Host Linux: apenas inspeção estática de manifestos.'],
-    },
-    {
-      key: 'EVIDENCE_COLLECTION',
-      title: '14. Evidence Collection (SHA-256 Chain)',
-      status: 'OPERATIONAL',
-      availabilityState: 'AVAILABLE',
-      configurationState: 'CONFIGURED',
-      readinessState: 'READY',
-      executionState: hasSoftwares ? 'EXECUTED_DYNAMIC' : 'NOT_EXECUTED',
-      coveragePercent: staticCoveragePct,
-    },
-    {
-      key: 'SECURITY_BENCHMARK_COMPARISON',
-      title: '15. Security Benchmark Comparison',
-      status: 'OPERATIONAL',
-      availabilityState: 'AVAILABLE',
-      configurationState: 'CONFIGURED',
-      readinessState: 'READY',
-      executionState: staticExecState,
-      coveragePercent: staticCoveragePct,
-    },
+      limitations: [
+        isWindowsHost
+          ? 'Sysinternals ProcMon requer execução elevada em Windows Sandbox.'
+          : 'Host Linux: apenas inspeção estática de manifestos.',
+      ],
+    }),
+    makeOperationalModule(
+      'EVIDENCE_COLLECTION',
+      '14. Evidence Collection (SHA-256 Chain)',
+      hasSoftwares ? 'EXECUTED_DYNAMIC' : 'NOT_EXECUTED'
+    ),
+    makeOperationalModule('SECURITY_BENCHMARK_COMPARISON', '15. Security Benchmark Comparison'),
   ];
 
   // Keep reference to suiteStart to ensure measurement consistency

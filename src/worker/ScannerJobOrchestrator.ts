@@ -393,7 +393,11 @@ export class ScannerJobOrchestrator {
     this.maxConcurrency = Math.max(1, Math.min(8, options?.maxConcurrency ?? 2));
     this.defaultTimeoutMs = Math.max(2_000, Math.min(300_000, options?.defaultTimeoutMs ?? 45_000));
     const configuredUrl = (options?.workerUrl ?? process.env.WINHOOD_SCANNER_WORKER_URL ?? '').trim();
-    this.workerUrl = configuredUrl ? configuredUrl.replace(/\/+$/, '') : null;
+    let trimmedWorkerUrl = configuredUrl;
+    while (trimmedWorkerUrl.endsWith('/')) {
+      trimmedWorkerUrl = trimmedWorkerUrl.slice(0, -1);
+    }
+    this.workerUrl = trimmedWorkerUrl || null;
     this.workerToken = (options?.workerToken ?? process.env.WINHOOD_SCANNER_WORKER_TOKEN ?? '').trim();
     this.remoteExecutor = options?.remoteExecutor;
 

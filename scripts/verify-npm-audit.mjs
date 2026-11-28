@@ -171,9 +171,15 @@ function dependencyPathMatches(exceptionPath, vulnNodes, pkgName) {
     .map((s) => s.trim())
     .filter(Boolean);
 
+  const stripTrailingSlashes = (value) => {
+    let end = value.length;
+    while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
+    return value.slice(0, end);
+  };
+
   return vulnNodes.every((nodePath) => {
     const cleanNode = String(nodePath || '').replace(/\\/g, '/').toLowerCase();
-    const parts = cleanNode.split('node_modules/').filter(Boolean).map((p) => p.replace(/\/+$/, ''));
+    const parts = cleanNode.split('node_modules/').filter(Boolean).map(stripTrailingSlashes);
     if (parts.length === 0) return true;
     const leaf = parts[parts.length - 1];
     if (leaf !== pkgName.toLowerCase()) return false;

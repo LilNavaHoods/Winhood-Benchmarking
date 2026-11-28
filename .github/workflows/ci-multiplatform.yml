@@ -217,14 +217,23 @@ jobs:
 
       - name: Inspect verified scanner availability inside winhood-scanner-worker
         run: |
-          curl -fsS http://127.0.0.1:3000/api/scanner-worker/capabilities | node -e "
-            const fs = require('fs');
-            const data = JSON.parse(fs.readFileSync(0, 'utf8'));
-            console.log('workerReachable:', data.workerReachable);
-            for (const c of data.capabilities || []) {
-              console.log('-', c.toolId, '| installed:', c.installed, '| state:', c.finalState, '| version:', c.version || 'N/A');
-            }
-            if (!data.workerReachable) process.exit(1);
+          node -e "
+            (async () => {
+              const res = await fetch('http://127.0.0.1:3000/api/scanner-worker/capabilities');
+              if (!res.ok) {
+                console.error('Capabilities request failed with HTTP', res.status);
+                process.exit(1);
+              }
+              const data = await res.json();
+              console.log('workerReachable:', data.workerReachable);
+              for (const c of data.capabilities || []) {
+                console.log('-', c.toolId, '| installed:', c.installed, '| state:', c.finalState, '| version:', c.version || 'N/A');
+              }
+              if (!data.workerReachable) process.exit(1);
+            })().catch((err) => {
+              console.error(err);
+              process.exit(1);
+            });
           "
 
       - name: Graceful shutdown via bash ./scripts/docker-down.sh

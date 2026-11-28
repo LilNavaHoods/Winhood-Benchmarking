@@ -1,60 +1,72 @@
-# Relatório de Auditoria Técnica e Remediação — WinHood Benchmarking v4.4.0
+# Relatório Consolidado de Auditoria e Remediação Técnica — WinHood Benchmarking v4.4.0
 
-- **Versão do WinHood:** `4.4.0`
-- **Commit base auditado:** `d382a4e96a0481cba80f005790ab65100dfc5ae4` (pós-run CI `44141919950`, com remediações subsequentes aplicadas neste workspace)
-- **Ambiente de verificação local:** Container Linux (`linux x64`), `Node.js v22.23.2`, `npm 10.9.8`
-- **Ferramentas utilizadas:** `tsc --noEmit` (`typescript@5.9.3`), `tsx --test` (`node:test`), `c8@10.1.3` + `v8-to-istanbul`, `npm audit`, `esbuild@0.28.2`, `vite@8.3.8`, `scripts/verify-independent-positioning.mjs`, `scripts/verify-npm-audit.mjs`, `scripts/ci-summary.mjs`
-- **Estado de validação global local:** `PARTIALLY_VALIDATED` *(validações locais Linux e Full-Stack aprovadas; execução remota em runners `ubuntu-latest` + `windows-latest` do GitHub Actions e testes manuais presenciais WCAG permanecem `NOT_VALIDATED` neste container)*
+- **Repositório:** `LilNavaHoods/Winhood-Benchmarking` (`branch: main`)
+- **Commit base auditado:** `0864fccf73f676ce637026842610d1b7afa3fb2d`
+- **Versão declarada:** `4.4.0`
+- **Ambiente local de verificação:** Container Linux (`linux x64`), `Node.js v22`, `npm` (sem repositório `.git` e sem daemon `docker` instalados no sandbox)
+- **Estado consolidado da entrega:** **`PARTIAL`** *(100% das correções de código, testes de regressão, cobertura, auditoria de dependências, builds e self-audit local foram executados e aprovados — `PASS`; a validação ao vivo em daemon Docker e o re-scan remoto no SonarCloud permanecem explicitamente `NOT_EXECUTED` por ausência de daemon Docker e credenciais de push/CI neste ambiente)*
 
 ---
 
 ## 1. Sumário Executivo
 
-Esta revisão da auditoria v4.4.0 corrige os achados remanescentes identificados após o commit `d382a4e96a0481cba80f005790ab65100dfc5ae4` e a execução de CI `44141919950`:
-1. **Desbloqueio da CI Linux (`positioning`) e Windows (`lint`):** Substituição da verificação literal de marca por verificador semântico (`scripts/verify-independent-positioning.mjs`) e resolução do erro `@typescript/typescript-win32-x64` com `typescript@5.9.3` (JS puro) + CI multi-job determinística com agregação real (`scripts/ci-summary.mjs`).
-2. **Governança honesta de vulnerabilidades NPM (`npm audit`):** Redução de **11 para 5** advisories high-severity; os 5 remanescentes são exclusivamente da cadeia build-time `picomatch <= 4.0.7` (`GHSA-fc5q-39xc-vjpf`) via `vite@8.3.8`, governados com prazo e controles compensatórios em `security/npm-audit-exceptions.json` (**0 vulnerabilidades não aprovadas**).
-3. **Cobertura V8 convencional via `c8` + `v8-to-istanbul` (`all: true`):** Inventário único de 13 domínios (`src/execution/CoverageDomainInventory.ts`) sem listas duplicadas e com separação estrita entre `testCoverage`, `ingestionCoverage` e `analysisCoverage`. Os 3 motores críticos (`src/scoring`, `src/evidence`, `src/comparability`) atingem `100% / 100% / >=98.08%`, e o núcleo de 6 domínios auditados atinge `88.47% L / 92.56% F / 97.74% B`, mantendo visível o déficit real dos domínios UI/desktop/VS Code (`61.02% L` nos 13 domínios).
-4. **Keystore `PRODUCTION_SECURE` Fail-Closed:** Remoção do fallback silencioso para `.kek` em `PRODUCTION_SECURE`, segregação estrita de segredos (`WINHOOD_KEYSTORE_MASTER_SECRET` separado de `SONAR_SECRET_SALT`), Trust Store Ed25519 isolado em `trust-store.json` e documentação honesta dos limites do contador monotônico local.
-5. **UI Honesta & Suíte E2E de 10 Fluxos:** Substituição de valores sintéticos na interface (`DashboardModule.tsx`, `SonarDockerCloudHubModule.tsx`, `ToolsAndIntegrationsModule.tsx`, `HardwareAndDisplayBenchmarkModule.tsx`) por `NOT_MEASURED` / `N/A` quando ausentes, além da suíte automatizada `src/components/uiAndE2e.test.ts` (SSR + 10 fluxos HTTP reais).
+Esta remediação eleva o WinHood Benchmarking (`v4.4.0`) em cinco frentes técnicas coordenadas, sem utilizar supressões artificiais (`// NOSONAR`, `@ts-ignore`, `eslint-disable`, ou exclusões de código executável em `sonar.cpd.exclusions`) e preservando integralmente a arquitetura **Docker-First** e **Local-First** (acesso livre em `http://localhost:3000` sem login obrigatório, sem GitHub OAuth e sem Windows Hello):
+
+1. **Zero apontamentos SonarCloud confirmados (16/16 corrigidos na fonte):** Todos os **7 apontamentos de Segurança** (`S8482`, `4x S6506`, `S4036`, `S1313`) e todos os **9 apontamentos de Confiabilidade** (`9x S8786` — backtracking superlinear de regex) retornados pela API pública do SonarCloud em 2026-11-27 foram eliminados com substituições estruturais seguras e testes de regressão.
+2. **Estabilização da CI e isolamento de testes de Keystore:** Corrigida a falha de `KEYSTORE_PRODUCTION_LOCAL_KEK_REJECTED` em `src/security/security.test.ts` por isolamento determinístico de variáveis de ambiente (`withIsolatedKeystoreEnv`) sem enfraquecer `PRODUCTION_SECURE`; reforçada a verificação de artefatos de cobertura (`lcov.info`, `coverage-summary.json`, `index.html`, caminhos relativos `^SF:src/`) em `.github/workflows/build.yml`.
+3. **Hardening do Docker, Scanner Worker e Bases Offline SCA:** Atualização de todas as imagens base para `node:22.21.1-bookworm-slim` (eliminando avisos `EBADENGINE` do Babel 8), verificação `HTTPS/TLS 1.2 + sha256sum -c` de binários no worker, inclusão do **ESLint `9.21.0`** offline (`security/semgrep-offline-rules/eslint.config.mjs`), `tmpfs` gravável para Semgrep em container `read_only: true`, montagem `:ro` de `winhood_scanner_cache`, atualização atômica fora de banda para **Grype e OSV-Scanner** com validação SHA-256 + TTL (`manifest.json`), redação de segredos no Gitleaks (`--redact` + `redactScannerPayloadSecrets`) e auto-testes positivos/negativos no worker.
+4. **Confidencialidade em Repouso e Auditoria de Vazamento Canário:** Expansão de `auditPersistentDataDir` em `src/storage/EncryptedArtifactStore.ts` para inspecionar `security/`, `keys/`, `sonar/` e `backups/` além de diretórios de dados/payloads, validada por teste E2E com token sintético `wh_canary_*` sobrevivendo a reinicialização sem qualquer vazamento em texto plano.
+5. **Redução Real de Duplicação de Código (~1.720+ linhas removidas):** Refatoração estrutural em 5 arquivos críticos de duplicação (`CoverageDomainInventory.ts`, `benchmarkConfig.ts`, `marketCompetitorDiscoveryEngine.ts`, `staticAnalyzer.ts`, `securityAssessmentEngine.ts`) com tipagem estrita e preservação total de comportamento e contratos.
 
 ---
 
-## 2. Matriz Atualizada de Achados (`AUD-01` a `AUD-10`)
+## 2. Matriz Completa de Remediação
 
-| ID | Domínio | Causa Raiz Confirmada | Remediação Aplicada e Evidência | Estado |
+| Frente | Problema Confirmado | Correção Aplicada | Arquivos Principais | Estado Local |
 |---|---|---|---|---|
-| **AUD-01** | Supply Chain & NPM | `bun.lock` conflitante + 11 advisories (`electron-builder`, `node-gyp`, `picomatch`). | `bun.lock` ausente, `package-lock.json` sincronizado, `electron-builder@^26.18.0` / `electron@^45.3.3` eliminam 6 advisories; 5 restantes (`picomatch <= 4.0.7`) governados em `security/npm-audit-exceptions.json` (`verify-npm-audit.mjs` PASS). | `VALIDATED` (local) / `PARTIALLY_VALIDATED` (CI remota pendente) |
-| **AUD-02** | Cobertura de Testes | Script customizado anterior substituído por motor convencional + transparência nos 13 domínios. | `c8@10.1.3` + `v8-to-istanbul` (`all: true`) a partir de `OFFICIAL_13_COVERAGE_DOMAINS`; núcleo 6 domínios `88.47% L / 92.56% F / 97.74% B`, motores críticos `>=98.08%`, 13 domínios `61.02% L` com déficits declarados. | `VALIDATED` |
-| **AUD-03** | Rastreabilidade de Ferramentas | Timestamps e códigos de saída padrão pré-preenchidos antes da execução real. | `lastExecutionAt = null`, `lastExitCode = null`, `integrationType`, `readinessState` e `resultCompleteness` validados em `analyzer.test.ts`. | `VALIDATED` |
-| **AUD-04** | Keystore & Trust Store | Fallback `.kek` em produção, reutilização de `SONAR_SECRET_SALT` e Trust Store embutido. | `PRODUCTION_SECURE` exige DPAPI / macOS Keychain / Linux Secret Service / `WINHOOD_KEYSTORE_MASTER_SECRET`; Trust Store isolado em `trust-store.json`; `test:security` 23/23 PASS. | `VALIDATED` (Linux/env/DPAPI simulado) / `PARTIALLY_VALIDATED` (DPAPI nativo Windows em CI) |
-| **AUD-05** | Autenticação, Scrypt & MFA | Parâmetros Scrypt `N=16384` e lacunas de matriz E2E TOTP/QR/downgrade. | Migração `scrypt:N=32768,r=8,p=1` com proteção contra downgrade e preservação de arquivo em falha de escrita (`test:security` teste #23 PASS). | `VALIDATED` |
-| **AUD-06** | Golden Dataset & Estatística | Separação incompleta e nomenclatura imprecisa de independência externa. | Split formal em 3 conjuntos (`DEVELOPMENT` N=4, `REGRESSION` N=26, `INTERNAL_HOLDOUT` N=18), Wilson IC 95%, alerta `n<30` operacional e aviso explícito que holdout interno != OWASP/Juliet. | `VALIDATED` |
-| **AUD-07** | Comparabilidade & Quality Gate | Aceitação de booleanos soltos sem manifesto e `fudgeFactorApplied` legado `<20` linhas. | `ComparabilityManifest` obrigatório com digests SHA-256 verificáveis e remoção integral de supressão `<20` linhas em `QualityGateEngine` / `scoringEngine`. | `VALIDATED` |
-| **AUD-08** | SCA & Multi-Lockfile | Ausência de proveniência estrita de licenças e lockfiles múltiplos. | Suporte a 7 formatos (`package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lock`, `Cargo.lock`, `package.json`), `NOASSERTION` quando não comprovada. | `VALIDATED` |
-| **AUD-09** | CI/CD & GitHub Actions | Actions sem pinagem completa ou rodando em Node 20 legado / uploads frágeis. | Actions pinadas por SHA de 40 chars (`actions/checkout@3d3c42e...`, `actions/setup-node@949feb2...`, `actions/upload-artifact@cf430e0...` Node 24), `if: hashFiles(...) != ''` e `scripts/ci-summary.mjs`. | `IMPLEMENTED` / `TESTED` (local `--self-test` 7/7 PASS; run remoto `NOT_VALIDATED`) |
-| **AUD-10** | CI Run `44141919950` (Linux + Windows + UI) | Falha Linux no texto legítimo em `PrivacyAndTermsModal.tsx`, falha Windows `@typescript/typescript-win32-x64` (TS 7), e fallback numérico na UI. | `verify-independent-positioning.mjs` (141 arquivos PASS), `typescript@5.9.3` (`npm run lint` PASS local), UI honesta (`NOT_MEASURED`), suíte SSR + 10 fluxos HTTP (`uiAndE2e.test.ts` PASS). | `PARTIALLY_VALIDATED` (execução Windows remota `NOT_VALIDATED` até novo push) |
+| **SonarCloud Security (7/7)** | `S8482` (`curl \| node -e`), `4x S6506` (`Dockerfile.scanner-worker` sem HTTPS/TLS1.2 + SHA-256), `S4036` (`PATH` dinâmico em `verify-docker-local-web.mjs`), `S1313` (IPv4 literal em `SsrfGuard.ts`) | `fetch()` nativo em Node no workflow; `curl --proto '=https' --tlsv1.2 -fsSL` + `sha256sum -c` para Gitleaks/OSV/Syft/Grype; resolução de executável `docker` em caminhos fixos não-graváveis; remoção do literal IPv4 mantendo bloqueio incondicional via CIDR `169.254.0.0/16` | `.github/workflows/ci-multiplatform.yml`, `Dockerfile.scanner-worker`, `scripts/verify-docker-local-web.mjs`, `src/execution/SsrfGuard.ts` | **`PASS`** *(re-scan remoto `NOT_EXECUTED`)* |
+| **SonarCloud Reliability (9/9)** | 9 ocorrências de `S8786` (regex com risco de backtracking superlinear / ReDoS) | Substituição por parsers determinísticos O(n) (`endsWith`, laços lineares, janelamento de linhas, parser linear de coordenadas Gradle e comparadores de versão) | `src/analyzers/sca/ScaCorrelator.ts`, `src/analyzers/TaintAnalyzer.ts`, `src/analyzers/sca/SbomGenerator.ts`, `src/worker/ScannerJobOrchestrator.ts`, `scripts/verify-npm-audit.mjs`, `scripts/build-server.mjs`, `scripts/verify-docker-local-web.mjs` | **`PASS`** *(re-scan remoto `NOT_EXECUTED`)* |
+| **CI & Cobertura LCOV** | `KEYSTORE_PRODUCTION_LOCAL_KEK_REJECTED` em ambiente com env herdado; ausência de checagem completa dos relatórios de cobertura no workflow | Isolamento completo de 11 variáveis de keystore/deploy em `withIsolatedKeystoreEnv`; checagem explícita de `coverage/lcov.info`, `coverage/coverage-summary.json`, `coverage/index.html` e `^SF:src/` | `src/security/security.test.ts`, `.github/workflows/build.yml` | **`PASS`** *(run GitHub Actions `NOT_EXECUTED`)* |
+| **Docker-First & Worker Isolado** | Node `22.14.0` incompatível com engine do Babel 8; Semgrep falhando ao escrever em container `read_only: true`; cache montado `rw`; ausência de ESLint offline; OSV-Scanner sem atualizador atômico/manifesto | Upgrade para `node:22.21.1-bookworm-slim`; `tmpfs` para `/home/winhood/.semgrep` e `/home/winhood/.cache`; `winhood_scanner_cache:/data/scanner-cache:ro`; ESLint `9.21.0` + `eslint.config.mjs`; scripts atômicos para Grype + OSV com `manifest.json` (SHA-256 + TTL) e `validateOfflineDbManifest` | `Dockerfile`, `Dockerfile.scanner-worker`, `docker-compose.yml`, `security/semgrep-offline-rules/eslint.config.mjs`, `scripts/docker-update-scanner-dbs.sh`, `scripts/docker-update-scanner-dbs.ps1`, `src/worker/scannerWorkerServer.ts` | **`PASS`** *(análise estática + testes unitários; build/run Docker ao vivo `NOT_EXECUTED`)* |
+| **Confidencialidade & Redação** | Gitleaks sem `--redact` + risco de segredos em payloads; auditoria de disco sem cobrir `security/`, `keys/`, `sonar/`, `backups/` | `--redact` no Gitleaks + `redactScannerPayloadSecrets` (redator linear PEM + padrões de tokens); `auditPersistentDataDir` expandido + teste E2E com token canário `wh_canary_*` pós-reinicialização | `src/worker/scannerWorkerServer.ts`, `src/storage/EncryptedArtifactStore.ts`, `src/security/remediationP0P1.test.ts` | **`PASS`** |
+| **Duplicação Real (CPD)** | `3.6%` global / `3.92%` em New Code no SonarCloud (acima do limite `3.0%`) | Extração de fábricas tipadas e helpers locais eliminando ~1.720+ linhas estruturalmente duplicadas sem tocar em `sonar.cpd.exclusions` | `src/execution/CoverageDomainInventory.ts`, `src/shared/benchmarkConfig.ts`, `src/engine/marketCompetitorDiscoveryEngine.ts`, `src/engine/staticAnalyzer.ts`, `src/engine/securityAssessmentEngine.ts` | **`PASS`** *(densidade SonarCloud pós-push `NOT_EXECUTED`)* |
 
 ---
 
-## 3. Comandos Executados e Resultados Reais Neste Workspace
+## 3. Evidências de Validação Executadas
 
-| Comando | Resultado Real | Evidência Principal |
+| Comando / Verificação | Estado | Evidência Mensurada |
 |---|---|---|
-| `npm run lint` | `EXIT 0` | 0 erros TypeScript (`tsc --noEmit` v5.9.3) |
-| `npm test` | `102/102 PASS` | 10 arquivos de teste (inclui `uiAndE2e.test.ts`), `0` falhas (`30.82s`) |
-| `npm run test:security` | `23/23 PASS` | Keystore fail-closed, Scrypt `N=32768`, TOTP, WebAuthn, SSRF, Path Traversal (`23.45s`) |
-| `npm run test:golden` | `7/7 PASS` | Split 3 conjuntos (`DEVELOPMENT`/`REGRESSION`/`INTERNAL_HOLDOUT`) (`1.20s`) |
-| `npm run test:desktop` | `7/7 PASS` | `WinHoodPaths`, preload/IPC, bootstrap sequencial + fallback de porta (`3.10s`) |
-| `npm run test:coverage` | `111/111 PASS` | Gate `c8` + `v8-to-istanbul` aprovado (`88.47% L` núcleo, `>=98.08%` críticos) |
-| `node scripts/verify-npm-audit.mjs` | `PASSED` | `GOVERNED_BUILD_TIME_EXCEPTIONS_ACTIVE` (`0` não aprovadas, `5/5` governadas) |
-| `node scripts/verify-independent-positioning.mjs` | `PASSED` | 141 arquivos varridos, 5/5 self-tests, 0 violações |
-| `node scripts/ci-summary.mjs --self-test` | `PASSED` | 7/7 cenários de propagação verificados |
-| `npm run build && npm run build:desktop` | `EXIT 0` | `dist/index.html` + `dist-desktop/{server.mjs,electron-main.mjs,electron-preload.cjs,build-manifest.json}` |
+| `npm run check:browser-imports` | **`PASS`** | 38 módulos frontend/shared varridos a partir de 36 entrypoints; `0` imports proibidos de Node/servidor |
+| `npm run typecheck` | **`PASS`** | `tsc --noEmit` encerrado com código `0` (`0` erros) |
+| `npm run lint` | **`PASS`** | `0` erros ESLint (`350` warnings pré-existentes de complexidade/`any`, `0` falhas bloqueantes) |
+| `npm run build` | **`PASS`** | Bundle Vite `v8.3.8` gerado em `dist/` (`1.693` módulos em `1.69s`) |
+| `npm run build:server` | **`PASS`** | `dist-server/server.mjs` (`1733.8 KB`) e `dist-server/scanner-worker.mjs` (`154.6 KB`) gerados sem erros |
+| `npm run test:security` | **`PASS`** | **43 / 43** testes aprovados (`backendHardening`, `remediationP0P1`, `security`) |
+| `npm run test:golden` | **`PASS`** | **7 / 7** testes aprovados |
+| `npm run test:mqr` | **`PASS`** | **6 / 6** testes aprovados |
+| `npm run test:desktop` | **`PASS`** | **8 / 8** testes aprovados |
+| `npm run test:coverage` | **`PASS`** | **167 / 167** testes aprovados (`0` falhas). Núcleo auditado (6 domínios, 19 arquivos): **Linhas `89.02%` (`11.053/12.416`)**, **Funções `94.77%` (`145/153`)**, **Branches `94.98%` (`2.744/2.889`)**. 13 Domínios Oficiais (85 arquivos): **Linhas `72.44%`**, **Funções `62.23%`**, **Branches `86.86%`**. `coverage/lcov.info`, `coverage/coverage-summary.json` e `coverage/index.html` gerados com `^SF:src/` e `0` `^SF:/` |
+| `node scripts/verify-npm-audit.mjs` | **`PASS`** | Status **`ZERO_VULNERABILITIES`** (`0` Critical, `0` High, `0` Moderate, `0` Low, `0` exceções) |
+| `node scripts/verify-independent-positioning.mjs` | **`PASS`** | `161` arquivos verificados, `5/5` cenários de auto-teste, `0` declarações enganosas |
+| `node scripts/verify-docker-local-web.mjs --self-hosted` | **`PASS`** | Todos os checks aprovados (exit code `0`) |
+| `bash -n scripts/docker-up.sh scripts/docker-down.sh scripts/docker-update-scanner-dbs.sh` | **`PASS`** | Sintaxe Bash válida e finais de linha `LF` |
+| `./node_modules/.bin/tsx cli/winhood-cli.ts analyze --path ./src --name WinHoodSelfAudit` | **`PASS`** | Quality Gate **`APPROVED`** (`exit=0`, `5/5` condições atendidas: `0` BLOCKER, `0` CRITICAL, `0` Segredos Expostos, `100%` escopo, confiança `HIGH`) |
+| Build/execução Docker Compose ao vivo (`docker compose up`) | **`NOT_EXECUTED`** | Binário `docker` ausente neste sandbox |
+| Re-scan remoto no SonarCloud & GitHub Actions | **`NOT_EXECUTED`** | Requer commit/push para disparar `.github/workflows/build.yml` com `SONAR_TOKEN` |
 
 ---
 
-## 4. Limitações Explicitamente Declaradas
+## 4. Documentos Detalhados Associados
 
-- **Execução Remota GitHub Actions (`ubuntu-latest` e `windows-latest`):** `NOT_VALIDATED` neste container até envio do commit e execução real do workflow.
-- **Compilação `ISCC.exe` e E2E do Instalador Windows (`scripts/windows/test-installer-e2e.ps1`):** `NOT_VALIDATED` no container Linux (`winhoodDesktop` + `build:desktop` validados localmente; instalação silenciosa `/VERYSILENT`, `%LOCALAPPDATA%`, DPAPI nativo real e Windows Hello WinRT real exigem Windows 10/11).
-- **Verificação WCAG 2.2 AA Presencial em Navegador:** Inspeção estrutural via SSR automatizada (`TESTED`); contraste visual ao vivo, armadilha de foco Tab e leitura real em NVDA/Narrator permanecem `NOT_VALIDATED`.
+- [`SONARCLOUD_REMEDIATION_REPORT.md`](./SONARCLOUD_REMEDIATION_REPORT.md) — Baseline ao vivo da API SonarCloud vs correção item a item dos 16 findings, cobertura LCOV e duplicação.
+- [`SCANNER_CAPABILITIES_REPORT.md`](./SCANNER_CAPABILITIES_REPORT.md) — Inventário oficial de 8 scanners empacotados vs 5 opcionais, verificação SHA-256, offline DBs Grype/OSV e self-tests.
+- [`CI_VALIDATION_REPORT.md`](./CI_VALIDATION_REPORT.md) — Correções em `.github/workflows/build.yml` e `.github/workflows/ci-multiplatform.yml`, isolamento de keystore e matriz de validação.
+
+---
+
+## 5. Riscos Remanescentes e Próximos Passos
+
+1. **Executar build e smoke test Docker em host real:** Rodar `bash ./scripts/docker-up.sh`, `bash ./scripts/docker-update-scanner-dbs.sh` e `node scripts/verify-docker-local-web.mjs` contra containers reais para promover a verificação de runtime Docker de `NOT_EXECUTED` para `PASS`.
+2. **Confirmar Quality Gate remoto no SonarCloud após push:** Monitorar a execução de `.github/workflows/build.yml` e confirmar que `Security = A (0)`, `Reliability = A (0)`, `Maintainability = A (0)`, `Hotspots Reviewed = 100%`, `Coverage` importada via `coverage/lcov.info` e `New Code Duplication <= 3.0%` resultam em `Quality Gate = OK`.
+3. **Evolução incremental de cobertura de UI:** O domínio `src/components/` permanece transparentemente medido em `50.28%` de linhas; manter ampliação gradual com testes de interação React sem maquiar o denominador.

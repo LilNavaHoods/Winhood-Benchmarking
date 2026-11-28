@@ -152,10 +152,30 @@ function parseCliArgs(argv) {
     } else if (arg === '--keep-project') {
       opts.keepProject = true;
     } else if (arg === '--base-url' && argv[i + 1]) {
-      opts.baseUrl = argv[++i].replace(/\/+$/, '');
+      let rawBase = argv[++i];
+      while (rawBase.endsWith('/')) {
+        rawBase = rawBase.slice(0, -1);
+      }
+      opts.baseUrl = rawBase;
     }
   }
   return opts;
+}
+
+function resolveFixedDockerExecutable() {
+  const candidates =
+    process.platform === 'win32'
+      ? [
+          'C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe',
+          'C:\\ProgramData\\DockerDesktop\\version-bin\\docker.exe',
+        ]
+      : ['/usr/bin/docker', '/usr/local/bin/docker', '/opt/homebrew/bin/docker'];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  throw new Error(`Docker executable not found in fixed system directories: ${candidates.join(', ')}`);
 }
 
 function spawnProductionWorker({ workerBundlePath, port, workerToken, tempWorkspaceDir }) {
@@ -620,9 +640,18 @@ async function runVerification() {
         });
         await waitForHealth(baseUrl, 20_000);
       } else {
-        execFileSync('docker', ['compose', 'restart', 'winhood'], {
+        const dockerBin = resolveFixedDockerExecutable();
+        const fixedPath =
+          process.platform === 'win32'
+            ? 'C:\\Program Files\\Docker\\Docker\\resources\\bin;C:\\Windows\\System32;C:\\Windows'
+            : '/usr/local/bin:/usr/bin:/bin';
+        execFileSync(dockerBin, ['compose', 'restart', 'winhood'], {
           cwd: process.cwd(),
           stdio: 'inherit',
+          env: {
+            ...process.env,
+            PATH: fixedPath,
+          },
         });
         await waitForHealth(baseUrl, 45_000);
       }

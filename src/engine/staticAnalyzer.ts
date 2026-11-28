@@ -623,6 +623,48 @@ export function executeRealStaticAnalysisOnSource(
 
       if (isNoSonar) return;
 
+      type PushFindingArg = Parameters<typeof pushFinding>[0];
+      const pushLineFinding = (
+        overrides: Omit<
+          PushFindingArg,
+          | 'runId'
+          | 'softwareId'
+          | 'softwareName'
+          | 'softwareVersion'
+          | 'confidence'
+          | 'isNewCode'
+          | 'filePath'
+          | 'lineNumber'
+          | 'endLineNumber'
+          | 'columnStart'
+          | 'columnEnd'
+          | 'component'
+          | 'snippet'
+          | 'contextBefore'
+          | 'contextAfter'
+          | 'validationStatus'
+        >
+      ) =>
+        pushFinding({
+          runId,
+          softwareId,
+          softwareName,
+          softwareVersion,
+          confidence: 'HIGH',
+          isNewCode: true,
+          filePath,
+          lineNumber,
+          endLineNumber: lineNumber,
+          columnStart: ctx.columnStart,
+          columnEnd: ctx.columnEnd,
+          component: path.basename(filePath),
+          snippet: trimmed,
+          contextBefore: ctx.contextBefore,
+          contextAfter: ctx.contextAfter,
+          validationStatus: 'VALIDATED',
+          ...overrides,
+        });
+
       // 1. SAST Rules (Opengrep Engine - AST-backed for JS/TS, guarded patterns for other languages)
       const upperTrimmed = trimmed.toUpperCase();
       const hasSqliHit = isBabelAst
@@ -700,11 +742,7 @@ export function executeRealStaticAnalysisOnSource(
           },
         ];
 
-        pushFinding({
-          runId,
-          softwareId,
-          softwareName,
-          softwareVersion,
+        pushLineFinding({
           toolId: 'opengrep-sast',
           toolName: 'Opengrep SAST Engine',
           toolVersion: '1.9.2',
@@ -714,19 +752,8 @@ export function executeRealStaticAnalysisOnSource(
           description:
             'Consulta SQL construída dinamicamente via interpolação/concatenação de string sem prepared statements.',
           severity: 'CRITICAL',
-          confidence: 'HIGH',
           cleanCodeAttribute: 'RESPONSIBLE',
           mqrImpacts,
-          isNewCode: true,
-          filePath,
-          lineNumber,
-          endLineNumber: lineNumber,
-          columnStart: ctx.columnStart,
-          columnEnd: ctx.columnEnd,
-          component: path.basename(filePath),
-          snippet: trimmed,
-          contextBefore: ctx.contextBefore,
-          contextAfter: ctx.contextAfter,
           whyItIsAnIssue: `No arquivo ${filePath} (linha ${lineNumber}, colunas ${ctx.columnStart}-${ctx.columnEnd}), a instrução SQL concatena diretamente os parâmetros \`searchTerm\` e \`callerHash\` na string da consulta sem utilizar Prepared Statements. Um atacante pode fornecer \`' OR '1'='1' --\` para alterar a árvore lógica do comando SQL e extrair todos os registros da tabela \`vault_entries\`.`,
           evaluationImpactSummary:
             'Segurança: -1.45 pts (BLOCKER) | Banco de Dados: -0.55 pts (HIGH) | Confiabilidade: -0.40 pts (CRITICAL) + Aciona Trava CAP-SEC-001 (teto 2.00)',
@@ -736,7 +763,6 @@ export function executeRealStaticAnalysisOnSource(
           cwe: 'CWE-89',
           cvss: 9.8,
           remediation: 'Utilizar queries parametrizadas (Prepared Statements) com placeholders (?, $1).',
-          validationStatus: 'VALIDATED',
         });
       }
 
@@ -800,11 +826,7 @@ export function executeRealStaticAnalysisOnSource(
           },
         ];
 
-        pushFinding({
-          runId,
-          softwareId,
-          softwareName,
-          softwareVersion,
+        pushLineFinding({
           toolId: 'opengrep-sast',
           toolName: 'Opengrep SAST Engine',
           toolVersion: '1.9.2',
@@ -814,19 +836,8 @@ export function executeRealStaticAnalysisOnSource(
           description:
             'Uso de primitiva de execução dinâmica (eval / Function / execSync interpolado) expõe o processo a RCE.',
           severity: 'CRITICAL',
-          confidence: 'HIGH',
           cleanCodeAttribute: 'RESPONSIBLE',
           mqrImpacts,
-          isNewCode: true,
-          filePath,
-          lineNumber,
-          endLineNumber: lineNumber,
-          columnStart: ctx.columnStart,
-          columnEnd: ctx.columnEnd,
-          component: path.basename(filePath),
-          snippet: trimmed,
-          contextBefore: ctx.contextBefore,
-          contextAfter: ctx.contextAfter,
           whyItIsAnIssue: `No arquivo ${filePath} (linha ${lineNumber}, colunas ${ctx.columnStart}-${ctx.columnEnd}), a função invoca \`execSync\` interpolando \`\${targetFile}\` diretamente em um comando de shell. Qualquer valor contendo \`; rm -rf /\` ou \`$(whoami)\` será interpretado e executado com os privilégios do processo Node.js (CWE-94 / CWE-78), além de deixar resíduos temporários em \`/tmp/backup_*\`.`,
           evaluationImpactSummary:
             'Segurança: -1.45 pts (BLOCKER) | Confiabilidade: -0.40 pts (CRITICAL) + Aciona Trava CAP-SEC-001',
@@ -836,7 +847,6 @@ export function executeRealStaticAnalysisOnSource(
           cwe: 'CWE-94',
           cvss: 9.4,
           remediation: 'Substituir por parser seguro ou lista branca estrita de argumentos sem shell.',
-          validationStatus: 'VALIDATED',
         });
       }
 
@@ -890,11 +900,7 @@ export function executeRealStaticAnalysisOnSource(
           },
         ];
 
-        pushFinding({
-          runId,
-          softwareId,
-          softwareName,
-          softwareVersion,
+        pushLineFinding({
           toolId: 'opengrep-sast',
           toolName: 'Opengrep SAST Engine',
           toolVersion: '1.9.2',
@@ -904,19 +910,8 @@ export function executeRealStaticAnalysisOnSource(
           description:
             'Uso de primitiva criptográfica fraca para derivação de chave ou verificação de integridade de senhas.',
           severity: 'HIGH',
-          confidence: 'HIGH',
           cleanCodeAttribute: 'RESPONSIBLE',
           mqrImpacts,
-          isNewCode: true,
-          filePath,
-          lineNumber,
-          endLineNumber: lineNumber,
-          columnStart: ctx.columnStart,
-          columnEnd: ctx.columnEnd,
-          component: path.basename(filePath),
-          snippet: trimmed,
-          contextBefore: ctx.contextBefore,
-          contextAfter: ctx.contextAfter,
           whyItIsAnIssue: `No arquivo ${filePath} (linha ${lineNumber}, colunas ${ctx.columnStart}-${ctx.columnEnd}), a função utiliza \`crypto.createHash('md5')\` concatenado a uma chave fixa para derivar o hash da senha mestra. O algoritmo MD5 é criptograficamente quebrado (CWE-327) e permite bilhões de tentativas por segundo em hardware comum.`,
           evaluationImpactSummary: 'Segurança: -0.65 pts (HIGH)',
           executionFlows,
@@ -925,7 +920,6 @@ export function executeRealStaticAnalysisOnSource(
           cwe: 'CWE-327',
           cvss: 7.5,
           remediation: 'Adotar Argon2id, PBKDF2-HMAC-SHA512 ou AES-256-GCM autenticado.',
-          validationStatus: 'VALIDATED',
         });
       }
 
@@ -971,11 +965,7 @@ export function executeRealStaticAnalysisOnSource(
           },
         ];
 
-        pushFinding({
-          runId,
-          softwareId,
-          softwareName,
-          softwareVersion,
+        pushLineFinding({
           toolId: 'opengrep-sast',
           toolName: 'Opengrep SAST Engine',
           toolVersion: '1.9.2',
@@ -985,19 +975,8 @@ export function executeRealStaticAnalysisOnSource(
           description:
             'Math.random() não possui entropia criptograficamente segura (CSPRNG) para geração de sal, IV ou token.',
           severity: 'MEDIUM',
-          confidence: 'HIGH',
           cleanCodeAttribute: 'RESPONSIBLE',
           mqrImpacts,
-          isNewCode: true,
-          filePath,
-          lineNumber,
-          endLineNumber: lineNumber,
-          columnStart: ctx.columnStart,
-          columnEnd: ctx.columnEnd,
-          component: path.basename(filePath),
-          snippet: trimmed,
-          contextBefore: ctx.contextBefore,
-          contextAfter: ctx.contextAfter,
           whyItIsAnIssue: `No arquivo ${filePath} (linha ${lineNumber}), \`Math.random()\` é empregado para gerar o \`nonce\` de desbloqueio de sessão. Como o PRNG padrão da engine V8 não coleta entropia do sistema operacional, um invasor que observe poucos tokens consegue reconstruir a semente interna e prever tokens futuros (CWE-338).`,
           evaluationImpactSummary: 'Segurança: -0.25 pts (MEDIUM)',
           executionFlows,
@@ -1006,7 +985,6 @@ export function executeRealStaticAnalysisOnSource(
           cwe: 'CWE-338',
           cvss: 5.9,
           remediation: 'Utilizar crypto.randomBytes() ou Web Crypto API crypto.getRandomValues().',
-          validationStatus: 'VALIDATED',
         });
       }
 
@@ -1069,11 +1047,7 @@ export function executeRealStaticAnalysisOnSource(
           },
         ];
 
-        pushFinding({
-          runId,
-          softwareId,
-          softwareName,
-          softwareVersion,
+        pushLineFinding({
           toolId: 'gitleaks-secrets',
           toolName: 'Gitleaks Secret Scanner',
           toolVersion: '8.21.2',
@@ -1083,19 +1057,8 @@ export function executeRealStaticAnalysisOnSource(
           description:
             'Segredo de produção ou chave mestra detectado diretamente no artefato de código-fonte.',
           severity: 'CRITICAL',
-          confidence: 'HIGH',
           cleanCodeAttribute: 'RESPONSIBLE',
           mqrImpacts,
-          isNewCode: true,
-          filePath,
-          lineNumber,
-          endLineNumber: lineNumber,
-          columnStart: ctx.columnStart,
-          columnEnd: ctx.columnEnd,
-          component: path.basename(filePath),
-          snippet: trimmed,
-          contextBefore: ctx.contextBefore,
-          contextAfter: ctx.contextAfter,
           whyItIsAnIssue: `No arquivo ${filePath} (linha ${lineNumber}, colunas ${ctx.columnStart}-${ctx.columnEnd}), uma chave mestra de produção (\`masterKey\`) está gravada em texto claro no código-fonte. Qualquer desenvolvedor, pipeline CI ou engenharia reversa do pacote obtém acesso imediato à chave global (CWE-798).`,
           evaluationImpactSummary:
             'Segurança: -2.65 pts (BLOCKER) | Privacidade: -0.90 pts (CRITICAL) | Confiabilidade: -0.40 pts (CRITICAL) + Aciona Trava CAP-SEC-001',
@@ -1105,7 +1068,6 @@ export function executeRealStaticAnalysisOnSource(
           cwe: 'CWE-798',
           cvss: 9.1,
           remediation: 'Remover credencial do código, rotacionar o segredo e injetar via cofre/variável de ambiente segura.',
-          validationStatus: 'VALIDATED',
         });
       }
 
@@ -1132,11 +1094,7 @@ export function executeRealStaticAnalysisOnSource(
           },
         ];
 
-        pushFinding({
-          runId,
-          softwareId,
-          softwareName,
-          softwareVersion,
+        pushLineFinding({
           toolId: 'mqr-bridge-quality',
           toolName: 'MqrBridge Static Analyzer',
           toolVersion: '10.7.0',
@@ -1146,26 +1104,14 @@ export function executeRealStaticAnalysisOnSource(
           description:
             'Exceções capturadas e ignoradas sem log estruturado ou propagação ocultam erros em tempo de execução.',
           severity: 'HIGH',
-          confidence: 'HIGH',
           cleanCodeAttribute: 'INTENTIONAL',
           mqrImpacts,
-          isNewCode: true,
-          filePath,
-          lineNumber,
-          endLineNumber: lineNumber,
-          columnStart: ctx.columnStart,
-          columnEnd: ctx.columnEnd,
-          component: path.basename(filePath),
-          snippet: trimmed,
-          contextBefore: ctx.contextBefore,
-          contextAfter: ctx.contextAfter,
           whyItIsAnIssue: `No arquivo ${filePath} (linha ${lineNumber}), o bloco \`catch (err) {}\` captura qualquer exceção lançada durante a sincronização de sessão e a descarta silenciosamente (CWE-390 / Sonar S2486). O chamador assume que a operação foi concluída com sucesso mesmo quando ocorre falha crítica.`,
           evaluationImpactSummary: 'Qualidade de Código: -0.35 pts (HIGH) | Confiabilidade: -0.20 pts (HIGH)',
           compliantCodeExample: `// Correção Recomendada:\ncatch (err) {\n  logger.error({ err, context: 'syncSessionState' }, 'Falha ao sincronizar estado da sessão');\n  throw new SessionSyncError('Não foi possível validar a sessão ativa.', { cause: err });\n}`,
           remediationEffortMinutes: 45,
           cwe: 'CWE-390',
           remediation: 'Registrar a falha no sistema de auditoria/telemetria ou tratar explicitamente o erro.',
-          validationStatus: 'VALIDATED',
         });
       }
 
@@ -1184,11 +1130,7 @@ export function executeRealStaticAnalysisOnSource(
           },
         ];
 
-        pushFinding({
-          runId,
-          softwareId,
-          softwareName,
-          softwareVersion,
+        pushLineFinding({
           toolId: 'mqr-bridge-quality',
           toolName: 'MqrBridge Static Analyzer',
           toolVersion: '10.7.0',
@@ -1197,25 +1139,13 @@ export function executeRealStaticAnalysisOnSource(
           title: 'Supressão de verificação estática de tipos com tipo explícito any',
           description: 'Reduz a segurança de tipos em tempo de compilação e aumenta risco de TypeError.',
           severity: 'LOW',
-          confidence: 'HIGH',
           cleanCodeAttribute: 'INTENTIONAL',
           mqrImpacts,
-          isNewCode: true,
-          filePath,
-          lineNumber,
-          endLineNumber: lineNumber,
-          columnStart: ctx.columnStart,
-          columnEnd: ctx.columnEnd,
-          component: path.basename(filePath),
-          snippet: trimmed,
-          contextBefore: ctx.contextBefore,
-          contextAfter: ctx.contextAfter,
           whyItIsAnIssue: `No arquivo ${filePath} (linha ${lineNumber}), a assinatura declara explicitamente \`: any\`, anulando garantias de contrato entre camadas e permitindo que propriedades inexistentes causem \`TypeError\` em tempo de execução.`,
           evaluationImpactSummary: 'Qualidade de Código: -0.08 pts (LOW)',
           compliantCodeExample: `// Correção Recomendada (Tipagem Estrita):\nexport interface SessionState {\n  active: boolean;\n  token: string;\n}\nexport function syncSessionState(token: string): SessionState | null`,
           remediationEffortMinutes: 15,
           remediation: 'Definir interface estrita ou tipo genérico com narrowing seguro.',
-          validationStatus: 'VALIDATED',
         });
       }
 
@@ -1234,11 +1164,7 @@ export function executeRealStaticAnalysisOnSource(
           },
         ];
 
-        pushFinding({
-          runId,
-          softwareId,
-          softwareName,
-          softwareVersion,
+        pushLineFinding({
           toolId: 'mqr-bridge-quality',
           toolName: 'MqrBridge Static Analyzer',
           toolVersion: '10.7.0',
@@ -1247,25 +1173,13 @@ export function executeRealStaticAnalysisOnSource(
           title: 'Marcador de dívida técnica pendente (TODO/FIXME/HACK)',
           description: 'Trecho documentado como incompleto ou improvisado no código-fonte.',
           severity: 'INFO',
-          confidence: 'HIGH',
           cleanCodeAttribute: 'CONSISTENT',
           mqrImpacts,
-          isNewCode: true,
-          filePath,
-          lineNumber,
-          endLineNumber: lineNumber,
-          columnStart: ctx.columnStart,
-          columnEnd: ctx.columnEnd,
-          component: path.basename(filePath),
-          snippet: trimmed,
-          contextBefore: ctx.contextBefore,
-          contextAfter: ctx.contextAfter,
           whyItIsAnIssue: `No arquivo ${filePath} (linha ${lineNumber}), o comentário \`${trimmed}\` reconhece explicitamente uma fragilidade técnica ainda não resolvida no artefato promovido para avaliação.`,
           evaluationImpactSummary: 'Qualidade de Código: -0.08 pts (INFO)',
           compliantCodeExample: `// Correção Recomendada:\n// Concluir a refatoração pendente e vincular ao teste de regressão antes do merge.`,
           remediationEffortMinutes: 15,
           remediation: 'Resolver a pendência técnica antes da promoção para release.',
-          validationStatus: 'VALIDATED',
         });
       }
 
@@ -1295,11 +1209,7 @@ export function executeRealStaticAnalysisOnSource(
             },
           ];
 
-          pushFinding({
-            runId,
-            softwareId,
-            softwareName,
-            softwareVersion,
+          pushLineFinding({
             toolId: 'sqlfluff-db',
             toolName: 'SQLFluff & Schema Auditor',
             toolVersion: '3.2.0',
@@ -1308,25 +1218,13 @@ export function executeRealStaticAnalysisOnSource(
             title: 'Consulta utilizando projeção irrestrita SELECT *',
             description: 'Aumenta I/O de página e acopla consumidores à ordem física das colunas da tabela.',
             severity: 'LOW',
-            confidence: 'HIGH',
             cleanCodeAttribute: 'INTENTIONAL',
             mqrImpacts,
-            isNewCode: true,
-            filePath,
-            lineNumber,
-            endLineNumber: lineNumber,
-            columnStart: ctx.columnStart,
-            columnEnd: ctx.columnEnd,
-            component: path.basename(filePath),
-            snippet: trimmed,
-            contextBefore: ctx.contextBefore,
-            contextAfter: ctx.contextAfter,
             whyItIsAnIssue: `No arquivo ${filePath} (linha ${lineNumber}), a consulta \`${trimmed}\` seleciona todas as colunas (\`*\`) da tabela \`vault_entries\`, trafegando inclusive colunas de segredos para a memória da aplicação e degradando o uso de índices cobertos.`,
             evaluationImpactSummary: 'Banco de Dados: -0.55 pts (LOW) | Segurança: -0.08 pts (LOW)',
             compliantCodeExample: `SELECT id, folder_id, title, username, created_at\nFROM vault_entries\nWHERE folder_id = $1;`,
             remediationEffortMinutes: 15,
             remediation: 'Explicitar apenas as colunas necessárias na projeção SQL.',
-            validationStatus: 'VALIDATED',
           });
         }
         if (/password_plain|raw_secret|unencrypted_pin/i.test(trimmed)) {
@@ -1349,11 +1247,7 @@ export function executeRealStaticAnalysisOnSource(
             },
           ];
 
-          pushFinding({
-            runId,
-            softwareId,
-            softwareName,
-            softwareVersion,
+          pushLineFinding({
             toolId: 'sqlfluff-db',
             toolName: 'SQLFluff & Schema Auditor',
             toolVersion: '3.2.0',
@@ -1362,19 +1256,8 @@ export function executeRealStaticAnalysisOnSource(
             title: 'Coluna de banco de dados armazena credencial sem hash/criptografia',
             description: 'Schema define coluna para armazenamento direto de senha/PIN sem proteção criptográfica.',
             severity: 'HIGH',
-            confidence: 'HIGH',
             cleanCodeAttribute: 'RESPONSIBLE',
             mqrImpacts,
-            isNewCode: true,
-            filePath,
-            lineNumber,
-            endLineNumber: lineNumber,
-            columnStart: ctx.columnStart,
-            columnEnd: ctx.columnEnd,
-            component: path.basename(filePath),
-            snippet: trimmed,
-            contextBefore: ctx.contextBefore,
-            contextAfter: ctx.contextAfter,
             whyItIsAnIssue: `No arquivo ${filePath} (linha ${lineNumber}), o DDL cria a coluna \`password_plain TEXT NOT NULL\` sem qualquer camada de criptografia autenticada (AES-256-GCM) ou hash. Qualquer leitura de disco, backup ou injeção SQL expõe instantaneamente todas as senhas armazenadas (CWE-256).`,
             evaluationImpactSummary: 'Segurança: -0.65 pts (HIGH) | Banco de Dados: -0.55 pts (HIGH)',
             compliantCodeExample: `cipher_envelope_aes256gcm TEXT NOT NULL,\niv_hex CHAR(24) NOT NULL,\nauth_tag_hex CHAR(32) NOT NULL,\nkdf_salt_hex CHAR(64) NOT NULL`,
@@ -1382,7 +1265,6 @@ export function executeRealStaticAnalysisOnSource(
             cwe: 'CWE-256',
             cvss: 8.1,
             remediation: 'Armazenar exclusivamente hash Argon2id com salt único ou envelope AES-256-GCM.',
-            validationStatus: 'VALIDATED',
           });
         }
       }

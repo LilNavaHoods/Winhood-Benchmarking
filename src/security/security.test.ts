@@ -73,34 +73,43 @@ function extractSetCookieValues(res: Response): Record<string, string> {
 
 async function withIsolatedKeystoreEnv(fn: (tmpDir: string) => Promise<void>): Promise<void> {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'winhood-sec-test-'));
-  const prevKeystore = process.env.WINHOOD_KEYSTORE_PATH;
-  const prevHmac = process.env.WINHOOD_EVIDENCE_HMAC_SECRET;
-  const prevVault = process.env.WINHOOD_VAULT_SECRET;
-  const prevSalt = process.env.SONAR_SECRET_SALT;
-  const prevNodeEnv = process.env.NODE_ENV;
-  const prevTestMode = process.env.WINHOOD_TEST_MODE;
+  const trackedKeys = [
+    'WINHOOD_KEYSTORE_PATH',
+    'WINHOOD_KEYSTORE_MODE',
+    'WINHOOD_KEYSTORE_MASTER_SECRET',
+    'WINHOOD_EVIDENCE_HMAC_SECRET',
+    'WINHOOD_VAULT_SECRET',
+    'SONAR_SECRET_SALT',
+    'WINHOOD_DEPLOYMENT_MODE',
+    'WINHOOD_RUNTIME_ENV',
+    'WINHOOD_REMOTE_API_TOKEN',
+    'NODE_ENV',
+    'WINHOOD_TEST_MODE',
+  ] as const;
+  const savedEnv = new Map<string, string | undefined>();
+  for (const key of trackedKeys) {
+    savedEnv.set(key, process.env[key]);
+  }
 
   process.env.WINHOOD_KEYSTORE_PATH = path.join(tmpDir, 'keys', 'keystore.json');
+  process.env.WINHOOD_KEYSTORE_MODE = 'LOCAL_DEV';
+  process.env.WINHOOD_KEYSTORE_MASTER_SECRET = crypto.randomBytes(32).toString('hex');
+  process.env.WINHOOD_DEPLOYMENT_MODE = 'LOCAL_WEB';
+  process.env.NODE_ENV = 'test';
+  process.env.WINHOOD_TEST_MODE = 'true';
   delete process.env.WINHOOD_EVIDENCE_HMAC_SECRET;
   delete process.env.WINHOOD_VAULT_SECRET;
   delete process.env.SONAR_SECRET_SALT;
+  delete process.env.WINHOOD_RUNTIME_ENV;
+  delete process.env.WINHOOD_REMOTE_API_TOKEN;
 
   try {
     await fn(tmpDir);
   } finally {
-    if (prevKeystore === undefined) delete process.env.WINHOOD_KEYSTORE_PATH;
-    else process.env.WINHOOD_KEYSTORE_PATH = prevKeystore;
-    if (prevHmac === undefined) delete process.env.WINHOOD_EVIDENCE_HMAC_SECRET;
-    else process.env.WINHOOD_EVIDENCE_HMAC_SECRET = prevHmac;
-    if (prevVault === undefined) delete process.env.WINHOOD_VAULT_SECRET;
-    else process.env.WINHOOD_VAULT_SECRET = prevVault;
-    if (prevSalt === undefined) delete process.env.SONAR_SECRET_SALT;
-    else process.env.SONAR_SECRET_SALT = prevSalt;
-    if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
-    else process.env.NODE_ENV = prevNodeEnv;
-    if (prevTestMode === undefined) delete process.env.WINHOOD_TEST_MODE;
-    else process.env.WINHOOD_TEST_MODE = prevTestMode;
-
+    for (const [key, value] of savedEnv.entries()) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 }

@@ -1327,12 +1327,34 @@ export class SbomGenerator {
           }
         } else {
           hasManifestWithoutLockfile = true;
-          const gradleDepRegex =
-            /(?:implementation|api|compileOnly|runtimeOnly|testImplementation)\s*\(?\s*['"]([^:'"]+):([^:'"]+):([^'"]+)['"]\s*\)?/g;
-          for (const m of content.matchAll(gradleDepRegex)) {
-            const group = m[1]!.trim();
-            const artifact = m[2]!.trim();
-            const ver = m[3]!.trim();
+          const gradleKeywords = [
+            'implementation',
+            'api',
+            'compileOnly',
+            'runtimeOnly',
+            'testImplementation',
+          ];
+          for (const rawLine of content.split(/\r?\n/)) {
+            const trimmed = rawLine.trim();
+            const matchedKw = gradleKeywords.find(
+              (kw) =>
+                trimmed.startsWith(kw) &&
+                trimmed.length > kw.length &&
+                (trimmed[kw.length] === ' ' || trimmed[kw.length] === '\t' || trimmed[kw.length] === '(')
+            );
+            if (!matchedKw) continue;
+            const quoteIdx = trimmed.search(/['"]/);
+            if (quoteIdx < 0) continue;
+            const quoteChar = trimmed[quoteIdx]!;
+            const closeQuoteIdx = trimmed.indexOf(quoteChar, quoteIdx + 1);
+            if (closeQuoteIdx <= quoteIdx + 1) continue;
+            const coord = trimmed.slice(quoteIdx + 1, closeQuoteIdx);
+            const parts = coord.split(':');
+            if (parts.length !== 3) continue;
+            const group = parts[0]!.trim();
+            const artifact = parts[1]!.trim();
+            const ver = parts[2]!.trim();
+            if (!group || !artifact || !ver) continue;
             const name = `${group}:${artifact}`;
             addComponent({
               bomRef: `pkg:maven/${group}/${artifact}@${ver}`,

@@ -95,8 +95,22 @@ interface TaintedVarState {
 const SOURCE_PARAM_HINT =
   /(input|query|filter|path|target|cmd|command|url|uri|webhook|endpoint|req|request|body|param|user|title|name|payload|raw|sql|expr|file|html|tpl|data|id|arg|value)/i;
 
-const DYNAMIC_DISPATCH_PATTERN =
-  /\[[^\]]+\]|\.(?:apply|call|bind)$|^(?:Reflect\.apply|window\[|globalThis\[|handlers\[)/;
+function isDynamicDispatchCall(callee: string): boolean {
+  const openBracket = callee.indexOf('[');
+  if (openBracket >= 0) {
+    const closeBracket = callee.indexOf(']', openBracket + 1);
+    if (closeBracket > openBracket + 1) return true;
+  }
+  return (
+    callee.endsWith('.apply') ||
+    callee.endsWith('.call') ||
+    callee.endsWith('.bind') ||
+    callee.startsWith('Reflect.apply') ||
+    callee.startsWith('window[') ||
+    callee.startsWith('globalThis[') ||
+    callee.startsWith('handlers[')
+  );
+}
 
 export const SINK_RULES: Array<{
   calleePattern: RegExp;
@@ -610,7 +624,7 @@ export class TaintAnalyzer {
       for (const fn of parsed.functions) {
         const fromId = makeNodeId(fn);
         for (const call of fn.callsMade) {
-          if (DYNAMIC_DISPATCH_PATTERN.test(call.callee)) {
+          if (isDynamicDispatchCall(call.callee)) {
             dynamicCallSites += 1;
             continue;
           }
@@ -845,7 +859,7 @@ export class TaintAnalyzer {
 
       // 3. Follow outgoing call-graph edges up to maxCallDepth
       for (const call of fn.callsMade) {
-        if (DYNAMIC_DISPATCH_PATTERN.test(call.callee)) {
+        if (isDynamicDispatchCall(call.callee)) {
           recordIncompletePath({
             reason: 'DYNAMIC_CALL_DISPATCH',
             filePath: call.filePath,
@@ -970,7 +984,7 @@ export class TaintAnalyzer {
           const taint = taintedVars.get(matchedArg)!;
 
           // Dynamic / indirect dispatch with tainted argument -> record INCONCLUSIVE incomplete path
-          if (DYNAMIC_DISPATCH_PATTERN.test(call.callee)) {
+          if (isDynamicDispatchCall(call.callee)) {
             recordIncompletePath({
               reason: 'DYNAMIC_CALL_DISPATCH',
               filePath: call.filePath,

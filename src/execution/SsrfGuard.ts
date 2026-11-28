@@ -14,16 +14,14 @@ export interface SsrfValidationResult {
   pinnedIp?: string;
 }
 
-// Standard cloud instance metadata link-local IPv4 address (RFC 3927 / AWS, GCP, Azure IMDS)
-const CLOUD_METADATA_IPV4 = '169.254.169.254';
-
+// DNS hostnames blocked unconditionally (literal IPv4/IPv6 addresses including RFC 3927
+// cloud instance metadata 169.254.0.0/16 are blocked authoritatively via CIDR checks in isDisallowedIpAddress)
 const BLOCKED_HOSTNAMES = new Set([
   'localhost',
   'localhost.localdomain',
   'metadata.google.internal',
   'metadata.goog',
   'instance-data',
-  CLOUD_METADATA_IPV4,
   'metadata.azure.internal',
 ]);
 

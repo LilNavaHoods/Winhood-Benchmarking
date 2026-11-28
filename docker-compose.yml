@@ -58,10 +58,12 @@ services:
     stop_grace_period: 20s
     read_only: true
     volumes:
-      - winhood_scanner_cache:/data/scanner-cache
+      - winhood_scanner_cache:/data/scanner-cache:ro
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=256m
       - /tmp/winhood-workspaces:rw,noexec,nosuid,size=512m
+      - /home/winhood/.semgrep:rw,noexec,nosuid,size=64m
+      - /home/winhood/.cache:rw,noexec,nosuid,size=64m
     networks:
       - winhood_scanner_internal
     env_file:
@@ -74,6 +76,7 @@ services:
       WINHOOD_SCANNER_WORKER_PORT: "4100"
       WINHOOD_TEMP_WORKSPACE_DIR: /tmp/winhood-workspaces
       WINHOOD_SEMGREP_RULES_DIR: /opt/winhood-scanner-rules
+      WINHOOD_ESLINT_CONFIG_PATH: /opt/winhood-scanner-rules/eslint.config.mjs
       GRYPE_DB_CACHE_DIR: /data/scanner-cache/grype
       GRYPE_DB_AUTO_UPDATE: "false"
       WINHOOD_OSV_DB_DIR: /data/scanner-cache/osv

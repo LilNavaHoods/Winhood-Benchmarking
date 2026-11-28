@@ -4,7 +4,7 @@
 # Stage 1 — Builder (compila frontend Vite dist/ e backend/worker ESM dist-server/)
 # Versão de imagem base fixada explicitamente (sem tags mutáveis)
 # ==============================================================================
-FROM node:22.14.0-bookworm-slim AS builder
+FROM node:22.21.1-bookworm-slim AS builder
 
 WORKDIR /app
 
@@ -27,7 +27,7 @@ RUN npm run check:browser-imports \
 # ==============================================================================
 # Stage 2 — Production Dependencies (somente runtime, sem devDependencies)
 # ==============================================================================
-FROM node:22.14.0-bookworm-slim AS deps
+FROM node:22.21.1-bookworm-slim AS deps
 
 WORKDIR /app
 
@@ -38,7 +38,7 @@ RUN npm ci --omit=dev --ignore-scripts \
 # ==============================================================================
 # Stage 3 — Runtime Endurecido (não-root, Local-Web, volume criptografado /data/winhood)
 # ==============================================================================
-FROM node:22.14.0-bookworm-slim AS runtime
+FROM node:22.21.1-bookworm-slim AS runtime
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates git \

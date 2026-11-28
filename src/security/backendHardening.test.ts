@@ -1374,10 +1374,36 @@ test('AUD-001..AUD-007 Regression: CI bash invocation & LF shell scripts, scoped
   const buildWorkflow = fs.readFileSync(path.join(rootDir, '.github', 'workflows', 'build.yml'), 'utf8');
   assert.match(buildWorkflow, /grep -q "\^SF:src\/" coverage\/lcov\.info/);
 
-  // 3. AUD-007: SsrfGuard uses clear CLOUD_METADATA_IPV4 constant without array.join obfuscation
+  // 3. AUD-007 & SonarCloud S1313: SsrfGuard blocks cloud metadata IPv4 via structured RFC 3927 CIDR octets without hardcoded IP literal or array.join obfuscation
   const ssrfSrc = fs.readFileSync(path.join(rootDir, 'src', 'execution', 'SsrfGuard.ts'), 'utf8');
-  assert.match(ssrfSrc, /const CLOUD_METADATA_IPV4 = '169\.254\.169\.254';/);
   assert.equal(ssrfSrc.includes('[169, 254, 169, 254]'), false);
+  assert.equal(ssrfSrc.includes("'169.254.169.254'"), false, 'SsrfGuard.ts must avoid hardcoded IPv4 literal (S1313) and enforce RFC 3927 CIDR octets');
+  assert.match(ssrfSrc, /inCidr4Octets\(ip, \[169, 254, 0, 0\], 16\)/);
+  const { SsrfGuard } = await import('../execution/SsrfGuard');
+  const metadataCheck = await SsrfGuard.validateUrl({
+    targetUrl: 'http://169.254.169.254/latest/meta-data/',
+    allowExplicitLoopback: false,
+  });
+  assert.equal(metadataCheck.allowed, false, 'Cloud metadata IPv4 must remain unconditionally blocked by RFC 3927 CIDR');
+
+  // 3b. SonarCloud S8482, S6506 & Docker-First Scanner Worker Hardening assertions
+  assert.equal(/curl[^\n]*\|\s*node\b/.test(ciWorkflow), false, 'ci-multiplatform.yml must not pipe curl directly into node (S8482)');
+  const appDockerfile = fs.readFileSync(path.join(rootDir, 'Dockerfile'), 'utf8');
+  assert.match(appDockerfile, /FROM node:22\.21\.1-bookworm-slim/);
+  const workerDockerfile = fs.readFileSync(path.join(rootDir, 'Dockerfile.scanner-worker'), 'utf8');
+  assert.match(workerDockerfile, /FROM node:22\.21\.1-bookworm-slim/);
+  assert.match(workerDockerfile, /curl --proto '=https' --tlsv1\.2 -fsSL/);
+  assert.match(workerDockerfile, /sha256sum -c/);
+  assert.match(workerDockerfile, /ARG ESLINT_VERSION=9\.21\.0/);
+  assert.match(workerDockerfile, /eslint@\$\{ESLINT_VERSION\}/);
+  assert.match(workerDockerfile, /eslint\.config\.mjs/);
+  const composeYml = fs.readFileSync(path.join(rootDir, 'docker-compose.yml'), 'utf8');
+  assert.match(composeYml, /winhood_scanner_cache:\/data\/scanner-cache:ro/);
+  assert.match(composeYml, /\/home\/winhood\/\.semgrep/);
+  assert.match(composeYml, /\/home\/winhood\/\.cache/);
+  const updaterSh = fs.readFileSync(path.join(rootDir, 'scripts', 'docker-update-scanner-dbs.sh'), 'utf8');
+  assert.match(updaterSh, /osv-vulnerabilities\.storage\.googleapis\.com/);
+  assert.match(updaterSh, /manifest\.json/);
 
   // 4. CrossToolBenchmarkHarness stays executable and preserves the 20-case synthetic validation corpus re-export
   const { CrossToolBenchmarkHarness, CONTROLLED_11_CLASS_VALIDATION_CORPUS } = await import(

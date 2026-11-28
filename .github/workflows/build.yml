@@ -47,6 +47,8 @@ jobs:
         run: |
           npm run test:coverage
           test -s coverage/lcov.info
+          test -s coverage/coverage-summary.json
+          test -s coverage/index.html
           grep -q "^SF:src/" coverage/lcov.info
           ! grep -q "^SF:/" coverage/lcov.info
 

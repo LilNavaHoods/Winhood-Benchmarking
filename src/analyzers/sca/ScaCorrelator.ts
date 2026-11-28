@@ -120,7 +120,11 @@ export function comparePep440(a: string, b: string): number {
       if (!isDigit && !isDot) break;
       relEnd += 1;
     }
-    const relRaw = rest.slice(0, relEnd).replace(/\.+$/, '');
+    let trimEnd = relEnd;
+    while (trimEnd > 0 && rest.charCodeAt(trimEnd - 1) === 46) {
+      trimEnd -= 1;
+    }
+    const relRaw = rest.slice(0, trimEnd);
     if (!relRaw) return { ...emptyResult, phaseRank: 0 };
     const relParts = relRaw.split('.');
     if (relParts.some((seg) => !/^\d+$/.test(seg))) {
@@ -299,18 +303,44 @@ export function satisfiesVersionRange(
   const rawRange = rangeExpr.trim();
   if (!rawRange || rawRange === '*') return true;
   const orBranches = rawRange.split('||').map((s) => s.trim()).filter(Boolean);
+  const splitVersionClauses = (branch: string): string[] => {
+    const out: string[] = [];
+    for (const commaPart of branch.split(',')) {
+      const trimmed = commaPart.trim();
+      if (!trimmed) continue;
+      let start = 0;
+      for (let i = 1; i < trimmed.length; i++) {
+        const ch = trimmed[i]!;
+        const prev = trimmed[i - 1]!;
+        if ((prev === ' ' || prev === '\t') && (ch === '<' || ch === '>' || ch === '=' || ch === '!')) {
+          const piece = trimmed.slice(start, i).trim();
+          if (piece) out.push(piece);
+          start = i;
+        }
+      }
+      const tailPiece = trimmed.slice(start).trim();
+      if (tailPiece) out.push(tailPiece);
+    }
+    return out;
+  };
+  const parseComparatorClause = (clause: string): { op: string; target: string } | null => {
+    for (const op of ['<=', '>=', '==', '!=', '<', '>', '=']) {
+      if (clause.startsWith(op)) {
+        const target = clause.slice(op.length).trim();
+        return target ? { op, target } : null;
+      }
+    }
+    return null;
+  };
   return orBranches.some((branch) => {
-    const clauses = branch
-      .split(/\s*,\s*|\s+(?=[<>=!])/)
-      .map((c) => c.trim())
-      .filter(Boolean);
+    const clauses = splitVersionClauses(branch);
     return clauses.every((clause) => {
-      const m = clause.match(/^(<=|>=|==|!=|<|>|=)\s*(.+)$/);
-      if (!m) {
+      const parsedClause = parseComparatorClause(clause);
+      if (!parsedClause) {
         return compareEcosystemVersion(ecosystem, cleanVer, clause) === 0;
       }
-      const op = m[1]!;
-      const target = m[2]!.trim();
+      const op = parsedClause.op;
+      const target = parsedClause.target;
       const cmp = compareEcosystemVersion(ecosystem, cleanVer, target);
       switch (op) {
         case '==':

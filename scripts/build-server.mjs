@@ -26,7 +26,24 @@ async function bundleEntry(label, entryPath, outFile) {
   }
 
   const bundleContent = fs.readFileSync(outFile, 'utf8');
-  if (/^\s*import\s+[\s\S]*?\s+from\s+["']vite["']/m.test(bundleContent)) {
+  const hasStaticViteImport = (() => {
+    const lines = bundleContent.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      const trimmed = lines[i].trimStart();
+      if (!trimmed.startsWith('import ') && !trimmed.startsWith('import{') && !trimmed.startsWith('import*')) {
+        continue;
+      }
+      // Inspect up to 8 lines for a multi-line static import statement ending in from "vite" / 'vite'
+      const windowText = lines.slice(i, i + 8).join(' ');
+      const semiIdx = windowText.indexOf(';');
+      const stmt = semiIdx >= 0 ? windowText.slice(0, semiIdx) : windowText;
+      if (stmt.includes('from "vite"') || stmt.includes("from 'vite'")) {
+        return true;
+      }
+    }
+    return false;
+  })();
+  if (hasStaticViteImport) {
     throw new Error(
       `Standalone bundle ${outFile} must not contain a static top-level import from "vite". Use dynamic await import("vite") only in dev middleware mode.`
     );

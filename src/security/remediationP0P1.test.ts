@@ -25,6 +25,9 @@ import {
   startScannerWorkerServer,
   probeVerifiedWorkerCapabilities,
   checkToolOfflinePrerequisites,
+  validateOfflineDbManifest,
+  buildSanitizedScannerEnv,
+  redactScannerPayloadSecrets,
   getAllowedBinarySearchDirs,
   resolveWorkerBindHost,
   resolveWorkerPort,
@@ -1263,3 +1266,193 @@ test('DockerFirst-RealCancellation: POST /worker/jobs/:jobId/cancel terminates r
     fs.rmSync(tmpWs, { recursive: true, force: true });
   }
 });
+
+// ============================================================================
+// 13. Scanner Worker Hardening — Read-Only Semgrep Env, Offline DB Manifest SHA-256/TTL, ESLint Offline Config & Secret Redaction
+// ============================================================================
+test('ScannerWorker-Hardening: sanitized Semgrep env, Grype/OSV manifest SHA-256 & expiry validation, ESLint offline config, and Gitleaks payload redaction', () => {
+  const prevGrype = process.env.GRYPE_DB_CACHE_DIR;
+  const prevOsv = process.env.WINHOOD_OSV_DB_DIR;
+  const prevEslint = process.env.WINHOOD_ESLINT_CONFIG_PATH;
+  const dbDir = createTempDir('wh-offline-db-');
+  const wsDir = createTempDir('wh-ws-env-');
+
+  try {
+    // 1. Read-only container safe environment for Semgrep / Python / OSV
+    const env = buildSanitizedScannerEnv(wsDir);
+    assert.equal(env.PYTHONDONTWRITEBYTECODE, '1');
+    assert.ok(env.SEMGREP_SETTINGS_FILE?.startsWith(wsDir));
+    assert.ok(env.SEMGREP_VERSION_CACHE_PATH?.startsWith(wsDir));
+    assert.ok(env.XDG_CACHE_HOME?.startsWith(wsDir));
+    assert.ok(env.XDG_CONFIG_HOME?.startsWith(wsDir));
+    assert.equal(env.SEMGREP_SEND_METRICS, 'off');
+
+    // 2. ESLint bundled offline config prerequisite
+    delete process.env.WINHOOD_ESLINT_CONFIG_PATH;
+    const eslintPrereq = checkToolOfflinePrerequisites('eslint');
+    assert.equal(eslintPrereq.ready, true, 'Bundled offline ESLint flat config must be detected');
+    assert.ok(eslintPrereq.resolvedPath?.endsWith('eslint.config.mjs'));
+
+    // 3. Offline DB manifest integrity: valid SHA-256 passes, tampered file fails, expired TTL fails
+    const dbFile = path.join(dbDir, 'vulnerability.db');
+    const dbContent = Buffer.from('SQLite format 3 synthetic offline database bytes for integrity test 1234567890');
+    fs.writeFileSync(dbFile, dbContent);
+    const validSha = crypto.createHash('sha256').update(dbContent).digest('hex');
+
+    const futureIso = new Date(Date.now() + 86_400_000).toISOString();
+    fs.writeFileSync(
+      path.join(dbDir, 'manifest.json'),
+      JSON.stringify({
+        schemaVersion: '1.0.0',
+        tool: 'grype',
+        updatedAt: new Date().toISOString(),
+        expiresAt: futureIso,
+        artifacts: [{ relativePath: 'vulnerability.db', sizeBytes: dbContent.length, sha256: validSha }],
+      }),
+      'utf8'
+    );
+
+    process.env.GRYPE_DB_CACHE_DIR = dbDir;
+    assert.equal(validateOfflineDbManifest(dbDir, 'grype').valid, true);
+    assert.equal(checkToolOfflinePrerequisites('grype').ready, true);
+
+    // Wrong tool declared in manifest -> rejected
+    assert.equal(validateOfflineDbManifest(dbDir, 'osv-scanner').valid, false);
+
+    // Tampered DB content -> SHA-256 mismatch -> DATABASE_UNAVAILABLE
+    fs.writeFileSync(dbFile, Buffer.from('TAMPERED SQLite format 3 bytes that break sha256 verification!'));
+    const tampered = checkToolOfflinePrerequisites('grype');
+    assert.equal(tampered.ready, false);
+    assert.equal(tampered.state, 'DATABASE_UNAVAILABLE');
+    assert.match(tampered.reason || '', /SHA-256/);
+
+    // Restore valid DB, expire manifest -> DATABASE_UNAVAILABLE
+    fs.writeFileSync(dbFile, dbContent);
+    fs.writeFileSync(
+      path.join(dbDir, 'manifest.json'),
+      JSON.stringify({
+        schemaVersion: '1.0.0',
+        tool: 'grype',
+        updatedAt: '2020-01-01T00:00:00Z',
+        expiresAt: '2020-01-08T00:00:00Z',
+        artifacts: [{ relativePath: 'vulnerability.db', sizeBytes: dbContent.length, sha256: validSha }],
+      }),
+      'utf8'
+    );
+    const expired = checkToolOfflinePrerequisites('grype');
+    assert.equal(expired.ready, false);
+    assert.equal(expired.state, 'DATABASE_UNAVAILABLE');
+    assert.match(expired.reason || '', /vencida/);
+
+    // 4. Gitleaks secret redaction strips raw Secret/Match/Line, PEM keys, AWS/GitHub/canary tokens
+    const syntheticCanary = `wh_canary_${crypto.randomBytes(12).toString('hex')}`;
+    const syntheticPem = ['-----BEGIN PRIVATE KEY-----', 'MIIBVQIBADANBgkqhkiG9w0BAQEFAASC', '-----END PRIVATE KEY-----'].join('\n');
+    const redacted = redactScannerPayloadSecrets('gitleaks', [
+      {
+        RuleID: 'generic-api-key',
+        File: 'src/secrets.ts',
+        StartLine: 4,
+        Secret: syntheticCanary,
+        Match: `apiKey = "${syntheticCanary}"`,
+        Line: `export const pem = \`${syntheticPem}\`;`,
+      },
+    ]) as Array<Record<string, unknown>>;
+    const serialized = JSON.stringify(redacted);
+    assert.equal(serialized.includes(syntheticCanary), false, 'Raw canary secret must be redacted from Gitleaks payload');
+    assert.equal(serialized.includes('MIIBVQIBADANBg'), false, 'PEM key material must be redacted from Gitleaks payload');
+    assert.equal(redacted[0]?.Secret, '[REDACTED]');
+    assert.equal(redacted[0]?.File, 'src/secrets.ts');
+  } finally {
+    if (prevGrype === undefined) delete process.env.GRYPE_DB_CACHE_DIR;
+    else process.env.GRYPE_DB_CACHE_DIR = prevGrype;
+    if (prevOsv === undefined) delete process.env.WINHOOD_OSV_DB_DIR;
+    else process.env.WINHOOD_OSV_DB_DIR = prevOsv;
+    if (prevEslint === undefined) delete process.env.WINHOOD_ESLINT_CONFIG_PATH;
+    else process.env.WINHOOD_ESLINT_CONFIG_PATH = prevEslint;
+    fs.rmSync(dbDir, { recursive: true, force: true });
+    fs.rmSync(wsDir, { recursive: true, force: true });
+  }
+});
+
+// ============================================================================
+// 14. End-to-End Canary Secret Confidentiality Across All Persistent Directories & Process Restart
+// ============================================================================
+test('E2E-CanaryConfidentiality: synthetic canary never leaks in plaintext anywhere under WINHOOD_DATA_DIR across restart and full volume audit', async () => {
+  const prevDataDir = process.env.WINHOOD_DATA_DIR;
+  const tmpData = createTempDir('wh-e2e-canary-');
+  process.env.WINHOOD_DATA_DIR = tmpData;
+
+  try {
+    const canaryToken = `wh_canary_${crypto.randomBytes(14).toString('hex')}`;
+    const canaryPayload = redactScannerPayloadSecrets('gitleaks', [
+      { RuleID: 'canary-rule', File: 'src/env.ts', StartLine: 1, Secret: canaryToken, Match: `TOKEN=${canaryToken}` },
+    ]);
+
+    const orch1 = new ScannerJobOrchestrator({
+      dataDir: tmpData,
+      remoteExecutor: {
+        fetchCapabilities: async () => [],
+        executeJob: async () => [
+          {
+            toolId: 'gitleaks',
+            state: 'COMPLETED',
+            version: '8.24.0',
+            exitCode: 0,
+            durationMs: 9,
+            outputFormat: 'JSON',
+            outputValidated: true,
+            findingsCount: 1,
+            rawOutputSha256: crypto.createHash('sha256').update(JSON.stringify(canaryPayload)).digest('hex'),
+            normalizedPayload: canaryPayload,
+            limitations: [],
+          },
+        ],
+      },
+    });
+
+    const job = orch1.enqueueJob({
+      toolIds: ['gitleaks'],
+      filesMap: { 'src/env.ts': `export const SECRET = "${canaryToken}";\n` },
+    });
+    const completed = await orch1.waitForJob(job.jobId, 5_000);
+    assert.equal(completed?.state, 'COMPLETED');
+
+    // Recursively inspect EVERY persisted file under tmpData to verify ZERO plaintext canary exposure
+    const persistedFiles = walkAllFiles(tmpData);
+    assert.ok(persistedFiles.length >= 2, 'Expected persisted database and encrypted vault files');
+    for (const filePath of persistedFiles) {
+      const content = fs.readFileSync(filePath, 'utf8');
+      assert.equal(
+        content.includes(canaryToken),
+        false,
+        `Plaintext canary secret leaked on disk in ${path.relative(tmpData, filePath)}`
+      );
+    }
+
+    // Confirm auditPersistentDataDir reports clean across all audited subdirectories (including security/keys/sonar/backups)
+    const auditBefore = EncryptedArtifactStore.auditPersistentDataDir(tmpData);
+    assert.equal(auditBefore.clean, true, `Expected clean volume audit, got: ${JSON.stringify(auditBefore.findings)}`);
+
+    // Simulate process restart via fresh ScannerJobOrchestrator instance and confirm authorized payload decryption
+    const orch2 = new ScannerJobOrchestrator({ dataDir: tmpData });
+    const reloaded = orch2.getJob(job.jobId);
+    assert.equal(reloaded?.state, 'COMPLETED');
+    const decrypted = orch2.getDecryptedJobPayloads(job.jobId);
+    assert.ok(decrypted && decrypted['gitleaks']);
+    assert.equal(JSON.stringify(decrypted['gitleaks']).includes(canaryToken), false);
+    assert.equal(JSON.stringify(decrypted['gitleaks']).includes('[REDACTED]'), true);
+
+    // Injecting a canary token into security/ must be detected immediately by auditPersistentDataDir
+    const secDir = path.join(tmpData, 'security');
+    fs.mkdirSync(secDir, { recursive: true });
+    fs.writeFileSync(path.join(secDir, 'leaked.txt'), `token=${canaryToken}\n`, 'utf8');
+    const auditAfter = EncryptedArtifactStore.auditPersistentDataDir(tmpData);
+    assert.equal(auditAfter.clean, false);
+    assert.ok(auditAfter.findings.some((f) => f.category === 'SENSITIVE_SECRET_PATTERN'));
+  } finally {
+    if (prevDataDir === undefined) delete process.env.WINHOOD_DATA_DIR;
+    else process.env.WINHOOD_DATA_DIR = prevDataDir;
+    fs.rmSync(tmpData, { recursive: true, force: true });
+  }
+});
+

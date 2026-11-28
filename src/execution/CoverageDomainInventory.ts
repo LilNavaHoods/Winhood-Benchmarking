@@ -85,257 +85,174 @@ export interface ThreeWaySeparatedCoverageBundle {
   analysisCoverage: SeparatedAnalysisCoverageMetric;
 }
 
+const DEFAULT_TEST_EXCLUSION = {
+  pattern: '**/*.test.ts',
+  justification: 'Suítes de teste automatizado.',
+} as const;
+
+function createCoverageDomain(
+  id: CoverageDomainId,
+  name: string,
+  responsibility: string,
+  testingStrategy: string,
+  tier: CoverageDomainDescriptor['acceptanceCriteria']['tier'],
+  overrides?: {
+    directories?: string[];
+    eligibleExtensions?: string[];
+    excludedPatterns?: Array<{ pattern: string; justification: string }>;
+    thresholds?: [number, number, number, number];
+  }
+): CoverageDomainDescriptor {
+  const defaultThresholds: Record<
+    CoverageDomainDescriptor['acceptanceCriteria']['tier'],
+    [number, number, number, number]
+  > = {
+    CRITICAL_MOTOR: [95, 95, 95, 95],
+    CORE_SECURITY_ENGINE: [80, 80, 75, 80],
+    INTEGRATION_AND_UI: [80, 80, 75, 80],
+  };
+  const [minLinesPct, minFunctionsPct, minBranchesPct, minStatementsPct] =
+    overrides?.thresholds ?? defaultThresholds[tier];
+  const defaultDir = id.endsWith('/') ? id.slice(0, -1) : id;
+  return {
+    id,
+    name,
+    responsibility,
+    directories: overrides?.directories ?? [defaultDir],
+    eligibleExtensions: overrides?.eligibleExtensions ?? ['.ts'],
+    excludedPatterns: overrides?.excludedPatterns ?? [{ ...DEFAULT_TEST_EXCLUSION }],
+    testingStrategy,
+    acceptanceCriteria: {
+      minLinesPct,
+      minFunctionsPct,
+      minBranchesPct,
+      minStatementsPct,
+      tier,
+    },
+  };
+}
+
 export const OFFICIAL_13_COVERAGE_DOMAINS: readonly CoverageDomainDescriptor[] = [
-  {
-    id: 'src/analyzers/',
-    name: 'Analisadores Estáticos, AST, Taint, Segredos e SCA/SBOM',
-    responsibility:
-      'Parsing AST/estrutural multi-linguagem, análise de fluxo de dados (Taint), catálogo de regras SAST/MQR, detecção de segredos, correlação SCA e geração de SBOM.',
-    directories: ['src/analyzers'],
-    eligibleExtensions: ['.ts'],
-    excludedPatterns: [
-      { pattern: '**/*.test.ts', justification: 'Arquivos de suíte de teste automatizado (não compõem o denominador de produção).' },
-      { pattern: '**/types.ts', justification: 'Declarações puras de tipos TypeScript sem instruções executáveis em runtime.' },
-    ],
-    testingStrategy: 'Testes unitários e de integração com casos positivos/negativos por linguagem, sanitizadores contextuais e SBOM.',
-    acceptanceCriteria: {
-      minLinesPct: 80,
-      minFunctionsPct: 80,
-      minBranchesPct: 75,
-      minStatementsPct: 80,
-      tier: 'CORE_SECURITY_ENGINE',
-    },
-  },
-  {
-    id: 'src/engine/',
-    name: 'Orquestrador de Benchmark, Scoring Multidimensional e Proveniência',
-    responsibility:
-      'Orquestração de execuções, cálculo determinístico das 12 dimensões, cadeia de evidências SHA-256 e catálogo metodológico.',
-    directories: ['src/engine'],
-    eligibleExtensions: ['.ts'],
-    excludedPatterns: [
-      { pattern: '**/*.test.ts', justification: 'Suítes de teste automatizado.' },
-    ],
-    testingStrategy: 'Testes determinísticos bit-a-bit, autoauditoria e validação de proveniência.',
-    acceptanceCriteria: {
-      minLinesPct: 80,
-      minFunctionsPct: 80,
-      minBranchesPct: 75,
-      minStatementsPct: 80,
-      tier: 'CORE_SECURITY_ENGINE',
-    },
-  },
-  {
-    id: 'src/scoring/',
-    name: 'Motor Crítico de Pontuação e Penalidades',
-    responsibility:
-      'Agregação matemática ponderada, aplicação de Penalty Caps e classificação em escala 0.00–5.00.',
-    directories: ['src/scoring'],
-    eligibleExtensions: ['.ts'],
-    excludedPatterns: [
-      { pattern: '**/*.test.ts', justification: 'Suítes de teste automatizado.' },
-    ],
-    testingStrategy: 'Testes unitários exaustivos de fronteira, pesos nulos, caps críticos e métricas ausentes.',
-    acceptanceCriteria: {
-      minLinesPct: 95,
-      minFunctionsPct: 95,
-      minBranchesPct: 95,
-      minStatementsPct: 95,
-      tier: 'CRITICAL_MOTOR',
-    },
-  },
-  {
-    id: 'src/evidence/',
-    name: 'Motor Crítico de Cadeia de Evidências e Assinaturas',
-    responsibility:
-      'Geração e verificação de manifestos assinados (HMAC-SHA256 e Ed25519) e encadeamento criptográfico.',
-    directories: ['src/evidence'],
-    eligibleExtensions: ['.ts'],
-    excludedPatterns: [
-      { pattern: '**/*.test.ts', justification: 'Suítes de teste automatizado.' },
-    ],
-    testingStrategy: 'Testes de integridade, detecção de adulteração, rotação de chaves e Trust Store Ed25519.',
-    acceptanceCriteria: {
-      minLinesPct: 95,
-      minFunctionsPct: 95,
-      minBranchesPct: 95,
-      minStatementsPct: 95,
-      tier: 'CRITICAL_MOTOR',
-    },
-  },
-  {
-    id: 'src/comparability/',
-    name: 'Motor Crítico de Comparabilidade A/B Bimodal',
-    responsibility:
-      'Validação de equivalência intraclasse (mesmo motor) e interferramentas (ferramentas distintas) nos estados STRICTLY_COMPARABLE, QUALIFIED_COMPARISON e NOT_COMPARABLE.',
-    directories: ['src/comparability'],
-    eligibleExtensions: ['.ts'],
-    excludedPatterns: [
-      { pattern: '**/*.test.ts', justification: 'Suítes de teste automatizado.' },
-    ],
-    testingStrategy: 'Testes unitários cobrindo todas as permutações de equivalência e bloqueio de vencedor.',
-    acceptanceCriteria: {
-      minLinesPct: 95,
-      minFunctionsPct: 95,
-      minBranchesPct: 95,
-      minStatementsPct: 95,
-      tier: 'CRITICAL_MOTOR',
-    },
-  },
-  {
-    id: 'src/gate/',
-    name: 'Motor Determinístico de Quality Gates',
-    responsibility:
-      'Avaliação de Quality Gates com condições obrigatórias, opcionais e informativas, códigos de saída CLI e webhooks assinados.',
-    directories: ['src/gate'],
-    eligibleExtensions: ['.ts'],
-    excludedPatterns: [
-      { pattern: '**/*.test.ts', justification: 'Suítes de teste automatizado.' },
-    ],
-    testingStrategy: 'Testes de decisão determinística, tratamento de NOT_MEASURED e proteção SSRF em webhooks.',
-    acceptanceCriteria: {
-      minLinesPct: 85,
-      minFunctionsPct: 85,
-      minBranchesPct: 80,
-      minStatementsPct: 85,
-      tier: 'CORE_SECURITY_ENGINE',
-    },
-  },
-  {
-    id: 'src/security/',
-    name: 'Segurança da Plataforma, Keystore Envelope e Autenticação',
-    responsibility:
-      'Gerenciamento de chaves por envelope (DEK AES-256-GCM + KEK DPAPI/OS/HKDF), autenticação (Argon2id/Scrypt), TOTP anti-replay, WebAuthn/FIDO2, RBAC e CSRF.',
-    directories: ['src/security'],
-    eligibleExtensions: ['.ts'],
-    excludedPatterns: [
-      { pattern: '**/*.test.ts', justification: 'Suítes de teste automatizado.' },
-    ],
-    testingStrategy: 'Testes de segurança de cofre, migração de senhas, bloqueio de replay TOTP, CSRF e RBAC.',
-    acceptanceCriteria: {
-      minLinesPct: 80,
-      minFunctionsPct: 80,
-      minBranchesPct: 75,
-      minStatementsPct: 80,
-      tier: 'CORE_SECURITY_ENGINE',
-    },
-  },
-  {
-    id: 'src/execution/',
-    name: 'Execução Isolada (Sandbox), Proteção SSRF e Cobertura',
-    responsibility:
-      'Execução controlada em sandbox, guarda anti-SSRF com revalidação de redirecionamentos, runner de testes/performance e parser de cobertura.',
-    directories: ['src/execution'],
-    eligibleExtensions: ['.ts'],
-    excludedPatterns: [
-      { pattern: '**/*.test.ts', justification: 'Suítes de teste automatizado.' },
-    ],
-    testingStrategy: 'Testes de bloqueio de IPs privados/loopback/metadata, isolamento de subprocessos e parsers LCOV/JaCoCo/Cobertura/Istanbul.',
-    acceptanceCriteria: {
-      minLinesPct: 80,
-      minFunctionsPct: 80,
-      minBranchesPct: 75,
-      minStatementsPct: 80,
-      tier: 'CORE_SECURITY_ENGINE',
-    },
-  },
-  {
-    id: 'src/integrations/',
-    name: 'Integrações MqrBridge, Scanners e Conectores Externos',
-    responsibility:
-      'Mapeamento de métricas externas, Quality Gates remotos, paginação de issues e gerenciador de scanners.',
-    directories: ['src/integrations'],
-    eligibleExtensions: ['.ts'],
-    excludedPatterns: [
-      { pattern: '**/*.test.ts', justification: 'Suítes de teste automatizado.' },
-      { pattern: '**/types.ts', justification: 'Declarações puras de interfaces TypeScript.' },
-    ],
-    testingStrategy: 'Testes de integração com servidores HTTP locais simulando paginação, falhas parciais e mapeamento sem inflação de nota.',
-    acceptanceCriteria: {
-      minLinesPct: 80,
-      minFunctionsPct: 80,
-      minBranchesPct: 75,
-      minStatementsPct: 80,
-      tier: 'INTEGRATION_AND_UI',
-    },
-  },
-  {
-    id: 'src/reports/',
-    name: 'Exportador de Relatórios e Gerador PDF/HTML/JSON/SARIF',
-    responsibility:
-      'Geração de laudos técnicos preservando proveniência de métricas, limitações de escopo e cadeia de assinatura.',
-    directories: ['src/reports'],
-    eligibleExtensions: ['.ts'],
-    excludedPatterns: [
-      { pattern: '**/*.test.ts', justification: 'Suítes de teste automatizado.' },
-    ],
-    testingStrategy: 'Testes de integridade de relatórios exportados, cabeçalhos PDF e conformidade SARIF 2.1.0.',
-    acceptanceCriteria: {
-      minLinesPct: 85,
-      minFunctionsPct: 85,
-      minBranchesPct: 80,
-      minStatementsPct: 85,
-      tier: 'CORE_SECURITY_ENGINE',
-    },
-  },
-  {
-    id: 'src/components/',
-    name: 'Interface Técnica React/TSX e Componentes de Visualização',
-    responsibility:
-      'Módulos visuais do console de auditoria, filtros avançados, modais de autenticação, barra de jornada e painéis de governança.',
-    directories: ['src/components'],
-    eligibleExtensions: ['.ts', '.tsx'],
-    excludedPatterns: [
-      { pattern: '**/*.test.ts', justification: 'Suítes de teste automatizado.' },
-      { pattern: '**/*.test.tsx', justification: 'Suítes de teste automatizado de interface.' },
-    ],
-    testingStrategy: 'Testes automatizados de renderização SSR/estrutural, ciclo de vida de componentes e verificação E2E Playwright.',
-    acceptanceCriteria: {
-      minLinesPct: 70,
-      minFunctionsPct: 70,
-      minBranchesPct: 65,
-      minStatementsPct: 70,
-      tier: 'INTEGRATION_AND_UI',
-    },
-  },
-  {
-    id: 'src/desktop/',
-    name: 'Arquitetura Desktop Electron e Ciclo de Vida Windows/Linux',
-    responsibility:
-      'Inicialização sequencial do servidor embarcado, isolamento de diretórios do usuário e validação de canais IPC.',
-    directories: ['src/desktop', 'src/storage'],
-    eligibleExtensions: ['.ts'],
-    excludedPatterns: [
-      { pattern: '**/*.test.ts', justification: 'Suítes de teste automatizado.' },
-    ],
-    testingStrategy: 'Testes de inicialização headless, fallback de porta ocupada, bloqueio de Program Files e preload bridge.',
-    acceptanceCriteria: {
-      minLinesPct: 80,
-      minFunctionsPct: 80,
-      minBranchesPct: 75,
-      minStatementsPct: 80,
-      tier: 'INTEGRATION_AND_UI',
-    },
-  },
-  {
-    id: 'packages/vscode-extension/',
-    name: 'Extensão Oficial WinHood para VS Code',
-    responsibility:
-      'Auditoria inline na IDE, diagnósticos SARIF e verificação de Quality Gate local.',
-    directories: ['packages/vscode-extension/src'],
-    eligibleExtensions: ['.ts'],
-    excludedPatterns: [
-      { pattern: '**/*.test.ts', justification: 'Suítes de teste de integração da extensão.' },
-    ],
-    testingStrategy: 'Testes de integração exercitando comandos de auditoria, diagnósticos e status bar.',
-    acceptanceCriteria: {
-      minLinesPct: 80,
-      minFunctionsPct: 80,
-      minBranchesPct: 75,
-      minStatementsPct: 80,
-      tier: 'INTEGRATION_AND_UI',
-    },
-  },
+  createCoverageDomain(
+    'src/analyzers/',
+    'Analisadores Estáticos, AST, Taint, Segredos e SCA/SBOM',
+    'Parsing AST/estrutural multi-linguagem, análise de fluxo de dados (Taint), catálogo de regras SAST/MQR, detecção de segredos, correlação SCA e geração de SBOM.',
+    'Testes unitários e de integração com casos positivos/negativos por linguagem, sanitizadores contextuais e SBOM.',
+    'CORE_SECURITY_ENGINE',
+    {
+      excludedPatterns: [
+        { pattern: '**/*.test.ts', justification: 'Arquivos de suíte de teste automatizado (não compõem o denominador de produção).' },
+        { pattern: '**/types.ts', justification: 'Declarações puras de tipos TypeScript sem instruções executáveis em runtime.' },
+      ],
+    }
+  ),
+  createCoverageDomain(
+    'src/engine/',
+    'Orquestrador de Benchmark, Scoring Multidimensional e Proveniência',
+    'Orquestração de execuções, cálculo determinístico das 12 dimensões, cadeia de evidências SHA-256 e catálogo metodológico.',
+    'Testes determinísticos bit-a-bit, autoauditoria e validação de proveniência.',
+    'CORE_SECURITY_ENGINE'
+  ),
+  createCoverageDomain(
+    'src/scoring/',
+    'Motor Crítico de Pontuação e Penalidades',
+    'Agregação matemática ponderada, aplicação de Penalty Caps e classificação em escala 0.00–5.00.',
+    'Testes unitários exaustivos de fronteira, pesos nulos, caps críticos e métricas ausentes.',
+    'CRITICAL_MOTOR'
+  ),
+  createCoverageDomain(
+    'src/evidence/',
+    'Motor Crítico de Cadeia de Evidências e Assinaturas',
+    'Geração e verificação de manifestos assinados (HMAC-SHA256 e Ed25519) e encadeamento criptográfico.',
+    'Testes de integridade, detecção de adulteração, rotação de chaves e Trust Store Ed25519.',
+    'CRITICAL_MOTOR'
+  ),
+  createCoverageDomain(
+    'src/comparability/',
+    'Motor Crítico de Comparabilidade A/B Bimodal',
+    'Validação de equivalência intraclasse (mesmo motor) e interferramentas (ferramentas distintas) nos estados STRICTLY_COMPARABLE, QUALIFIED_COMPARISON e NOT_COMPARABLE.',
+    'Testes unitários cobrindo todas as permutações de equivalência e bloqueio de vencedor.',
+    'CRITICAL_MOTOR'
+  ),
+  createCoverageDomain(
+    'src/gate/',
+    'Motor Determinístico de Quality Gates',
+    'Avaliação de Quality Gates com condições obrigatórias, opcionais e informativas, códigos de saída CLI e webhooks assinados.',
+    'Testes de decisão determinística, tratamento de NOT_MEASURED e proteção SSRF em webhooks.',
+    'CORE_SECURITY_ENGINE',
+    { thresholds: [85, 85, 80, 85] }
+  ),
+  createCoverageDomain(
+    'src/security/',
+    'Segurança da Plataforma, Keystore Envelope e Autenticação',
+    'Gerenciamento de chaves por envelope (DEK AES-256-GCM + KEK DPAPI/OS/HKDF), autenticação (Argon2id/Scrypt), TOTP anti-replay, WebAuthn/FIDO2, RBAC e CSRF.',
+    'Testes de segurança de cofre, migração de senhas, bloqueio de replay TOTP, CSRF e RBAC.',
+    'CORE_SECURITY_ENGINE'
+  ),
+  createCoverageDomain(
+    'src/execution/',
+    'Execução Isolada (Sandbox), Proteção SSRF e Cobertura',
+    'Execução controlada em sandbox, guarda anti-SSRF com revalidação de redirecionamentos, runner de testes/performance e parser de cobertura.',
+    'Testes de bloqueio de IPs privados/loopback/metadata, isolamento de subprocessos e parsers LCOV/JaCoCo/Cobertura/Istanbul.',
+    'CORE_SECURITY_ENGINE'
+  ),
+  createCoverageDomain(
+    'src/integrations/',
+    'Integrações MqrBridge, Scanners e Conectores Externos',
+    'Mapeamento de métricas externas, Quality Gates remotos, paginação de issues e gerenciador de scanners.',
+    'Testes de integração com servidores HTTP locais simulando paginação, falhas parciais e mapeamento sem inflação de nota.',
+    'INTEGRATION_AND_UI',
+    {
+      excludedPatterns: [
+        { ...DEFAULT_TEST_EXCLUSION },
+        { pattern: '**/types.ts', justification: 'Declarações puras de interfaces TypeScript.' },
+      ],
+    }
+  ),
+  createCoverageDomain(
+    'src/reports/',
+    'Exportador de Relatórios e Gerador PDF/HTML/JSON/SARIF',
+    'Geração de laudos técnicos preservando proveniência de métricas, limitações de escopo e cadeia de assinatura.',
+    'Testes de integridade de relatórios exportados, cabeçalhos PDF e conformidade SARIF 2.1.0.',
+    'CORE_SECURITY_ENGINE',
+    { thresholds: [85, 85, 80, 85] }
+  ),
+  createCoverageDomain(
+    'src/components/',
+    'Interface Técnica React/TSX e Componentes de Visualização',
+    'Módulos visuais do console de auditoria, filtros avançados, modais de autenticação, barra de jornada e painéis de governança.',
+    'Testes automatizados de renderização SSR/estrutural, ciclo de vida de componentes e verificação E2E Playwright.',
+    'INTEGRATION_AND_UI',
+    {
+      eligibleExtensions: ['.ts', '.tsx'],
+      excludedPatterns: [
+        { ...DEFAULT_TEST_EXCLUSION },
+        { pattern: '**/*.test.tsx', justification: 'Suítes de teste automatizado de interface.' },
+      ],
+      thresholds: [70, 70, 65, 70],
+    }
+  ),
+  createCoverageDomain(
+    'src/desktop/',
+    'Arquitetura Desktop Electron e Ciclo de Vida Windows/Linux',
+    'Inicialização sequencial do servidor embarcado, isolamento de diretórios do usuário e validação de canais IPC.',
+    'Testes de inicialização headless, fallback de porta ocupada, bloqueio de Program Files e preload bridge.',
+    'INTEGRATION_AND_UI',
+    { directories: ['src/desktop', 'src/storage'] }
+  ),
+  createCoverageDomain(
+    'packages/vscode-extension/',
+    'Extensão Oficial WinHood para VS Code',
+    'Auditoria inline na IDE, diagnósticos SARIF e verificação de Quality Gate local.',
+    'Testes de integração exercitando comandos de auditoria, diagnósticos e status bar.',
+    'INTEGRATION_AND_UI',
+    {
+      directories: ['packages/vscode-extension/src'],
+      excludedPatterns: [
+        { pattern: '**/*.test.ts', justification: 'Suítes de teste de integração da extensão.' },
+      ],
+    }
+  ),
 ];
 
 export function scanOfficial13DomainsInventory(rootDir = process.cwd()): DomainInventoryFileScan[] {
